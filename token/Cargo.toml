@@ -8,7 +8,6 @@ edition = "2018"
 thiserror = "1"
 byteorder = "1"
 merlin = "2"
-postgres = "0.15"
 rand = "0.7"
 subtle = "2"
 curve25519-dalek = { version = "3", features = ["serde"] }
