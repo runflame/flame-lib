@@ -14,6 +14,9 @@ git = "https://github.com/dalek-cryptography/bulletproofs"
 branch = "develop"
 features = ["yoloproofs"]
 
+[dependencies.spacesuit]
+path = "../spacesuit"
+
 [dependencies.starsig]
 path = "../starsig"
 
