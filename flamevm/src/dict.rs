@@ -2,5 +2,5 @@ use crate::Integer;
 use crate::Value;
 
 pub struct Dict {
-    inner: Vec<(Integer, Value)>
+    inner: Vec<(Integer, Value)>,
 }

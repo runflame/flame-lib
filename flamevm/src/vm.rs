@@ -1,4 +1,3 @@
-
 /*
 
 external tx:
@@ -8,7 +7,4 @@ internal tx:
   call { run { call { run {...} } } }
 
 */
-pub struct VM {
-
-}
-
+pub struct VM {}

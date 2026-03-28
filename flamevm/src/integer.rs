@@ -71,7 +71,7 @@ impl Integer {
             abs
         }
     }
-    
+
     /// Decodes from 32 bytes where bit 255 is the sign bit
     /// and the lower 255 bits are a canonical scalar.
     /// Returns `None` if the absolute value is not a canonical scalar

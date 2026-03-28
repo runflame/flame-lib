@@ -1,11 +1,10 @@
-
-use crate::Integer;
 use crate::Dict;
-use crate::String;
-use crate::{Token,WideToken,ClearToken};
-use crate::Object;
+use crate::Integer;
 use crate::Merlin;
+use crate::Object;
 use crate::Point;
+use crate::String;
+use crate::{ClearToken, Token, WideToken};
 
 /// Possible values on the stack machine
 pub enum Value {

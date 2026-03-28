@@ -1,5 +1,5 @@
-use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::ristretto::CompressedRistretto;
+use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 
@@ -13,6 +13,5 @@ pub struct MultiscalarMul {
 }
 
 pub struct Merlin {
-    transcript: Transcript
+    transcript: Transcript,
 }
-

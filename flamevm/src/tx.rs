@@ -1,13 +1,5 @@
+pub struct ExternalTx {}
 
+pub struct InternalTx {}
 
-pub struct ExternalTx {
-
-}
-
-pub struct InternalTx {
-
-}
-
-pub struct TxLog {
-
-}
+pub struct TxLog {}
