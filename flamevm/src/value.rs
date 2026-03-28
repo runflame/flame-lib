@@ -23,16 +23,16 @@ pub enum Value {
     //MultiscalarMul(MultiscalarMul),
 }
 
-const IntTypecode: u8 = 0;
-const StringTypecode: u8 = 66;
-const StructTypecode: u8 = 126;
-const PointTypecode: u8 = 246;
-const TokenTypecode: u8 = 247;
-const ClearTokenTypecode: u8 = 248;
-const WideTokenTypecode: u8 = 249;
-const ObjectTypecode: u8 = 250;
-const MerlinTypecode: u8 = 251;
-const VariableTypecode: u8 = 252;
-const ExpressionTypecode: u8 = 253;
-const ConstraintTypecode: u8 = 254;
+const INT_TYPECODE: u8 = 0;
+const STRING_TYPECODE: u8 = 66;
+const STRUCT_TYPECODE: u8 = 126;
+const POINT_TYPECODE: u8 = 246;
+const TOKEN_TYPECODE: u8 = 247;
+const CLEAR_TOKEN_TYPECODE: u8 = 248;
+const WIDE_TOKEN_TYPECODE: u8 = 249;
+const OBJECT_TYPECODE: u8 = 250;
+const MERLIN_TYPECODE: u8 = 251;
+const VARIABLE_TYPECODE: u8 = 252;
+const EXPRESSION_TYPECODE: u8 = 253;
+const CONSTRAINT_TYPECODE: u8 = 254;
 const MultiscalarMulTypecode: u8 = 255;

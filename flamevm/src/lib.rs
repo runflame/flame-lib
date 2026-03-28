@@ -1,4 +1,5 @@
 mod constraints;
+mod encoding;
 mod crypto;
 mod dict;
 mod errors;
