@@ -8,6 +8,15 @@ description = "Flame virtual machine"
 
 [dependencies]
 curve25519-dalek = { version = "3", features = ["serde"] }
+merlin = "2"
+thiserror = "2.0.18"
+
+[dependencies.readerwriter]
+path = "../readerwriter"
+features = ["merlin"]
+
+[dependencies.merkle]
+path = "../merkle"
 
 [dependencies.bulletproofs]
 git = "https://github.com/dalek-cryptography/bulletproofs"
@@ -17,8 +26,8 @@ features = ["yoloproofs"]
 [dependencies.spacesuit]
 path = "../spacesuit"
 
-[dependencies.starsig]
-path = "../starsig"
+[dependencies.musig]
+path = "../musig"
 
 [features]
 default = []

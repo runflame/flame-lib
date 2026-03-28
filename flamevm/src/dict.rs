@@ -1,6 +1,6 @@
 use crate::Integer;
+use crate::Value;
 
-#[derive(Clone)]
 pub struct Dict {
-
+    inner: Vec<(Integer, Value)>
 }
