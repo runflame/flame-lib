@@ -4,7 +4,17 @@ use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 
 pub struct Point {
-    inner: CompressedRistretto,
+    pub(crate) inner: CompressedRistretto,
+}
+
+impl Point {
+    pub fn from_compressed(p: CompressedRistretto) -> Self {
+        Point { inner: p }
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        self.inner.as_bytes()
+    }
 }
 
 pub struct MultiscalarMul {
