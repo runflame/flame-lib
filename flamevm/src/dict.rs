@@ -21,4 +21,23 @@ impl Dict {
     pub fn push(&mut self, key: Integer, value: Value) {
         self.entries.push((key, value));
     }
+
+    /// Creates a Dict from a list of values with implicit keys 0, 1, 2, ...
+    pub fn from_values(values: Vec<Value>) -> Self {
+        let entries = values
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| (Integer::from(i as u64), v))
+            .collect();
+        Dict { entries }
+    }
+
+    /// Returns true if all keys are sequential integers 0, 1, 2, ..., len-1.
+    /// Such a dict can be encoded with the compact list encoding (no keys).
+    pub fn has_sequential_keys(&self) -> bool {
+        self.entries
+            .iter()
+            .enumerate()
+            .all(|(i, (k, _))| *k == Integer::from(i as u64))
+    }
 }

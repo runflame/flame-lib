@@ -10,7 +10,6 @@ use crate::{ClearToken, Token, WideToken};
 pub enum Value {
     Int(Integer),
     String(String),
-    List(Vec<Value>),
     Dict(Dict),
     Point(Point),
     Token(Token),

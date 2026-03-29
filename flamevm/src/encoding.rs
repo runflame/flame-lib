@@ -340,20 +340,20 @@ pub fn read_value(r: &mut impl Reader) -> Result<Option<Value>, ReadError> {
             Ok(Some(Value::String(s)))
         }
 
-        // Lists
+        // List-style dict (sequential keys 0, 1, 2, ...)
         LIST_IMM_MIN..=LIST_VAR => {
             let count = read_list_count_with_tag(r, tag)?;
-            let mut items = Vec::with_capacity(count);
+            let mut values = Vec::with_capacity(count);
             for _ in 0..count {
                 match read_value(r)? {
-                    Some(v) => items.push(v),
+                    Some(v) => values.push(v),
                     None => return Ok(None),
                 }
             }
-            Ok(Some(Value::List(items)))
+            Ok(Some(Value::Dict(Dict::from_values(values))))
         }
 
-        // Dicts
+        // Dict-style (explicit keys)
         DICT_IMM_MIN..=DICT_VAR => {
             let count = read_dict_count_with_tag(r, tag)?;
             let mut dict = Dict::new();
@@ -379,6 +379,41 @@ pub fn read_value(r: &mut impl Reader) -> Result<Option<Value>, ReadError> {
         TOKEN_TAG | CLEAR_TOKEN_TAG | WIDE_TOKEN_TAG | OBJECT_TAG | MERLIN_TAG => Ok(None),
 
         _ => Ok(None),
+    }
+}
+
+/// Writes a `Dict`. Uses the compact list encoding (no keys) when
+/// all keys are sequential 0, 1, 2, ...; otherwise uses the dict
+/// encoding with explicit keys.
+pub fn write_dict(w: &mut impl Writer, dict: &Dict) -> Result<(), WriteError> {
+    if dict.has_sequential_keys() {
+        write_list_prefix(w, dict.len())?;
+        for (_, v) in dict.entries() {
+            write_value(w, v)?;
+        }
+    } else {
+        write_dict_prefix(w, dict.len())?;
+        for (k, v) in dict.entries() {
+            write_integer(w, k)?;
+            write_value(w, v)?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes a `Value`.
+/// Returns `Err(WriteError)` for unimplemented types.
+pub fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), WriteError> {
+    match val {
+        Value::Int(i) => write_integer(w, i),
+        Value::String(s) => write_string(w, s),
+        Value::Dict(d) => write_dict(w, d),
+        Value::Point(p) => {
+            w.write_u8(b"point.tag", POINT_TAG)?;
+            w.write(b"point.data", p.as_bytes())
+        }
+        // Unimplemented types — cannot encode.
+        _ => Err(WriteError::InsufficientCapacity),
     }
 }
 
@@ -779,48 +814,88 @@ mod tests {
     }
 
     #[test]
-    fn read_value_list() {
+    fn read_value_list_style_dict() {
+        // List encoding → Dict with keys 0, 1, 2, ...
         let mut buf = Vec::new();
-        // List of 2 items: int 5, int 10
         write_list_prefix(&mut buf, 2).unwrap();
         write_integer(&mut buf, &Integer::from(5u64)).unwrap();
         write_integer(&mut buf, &Integer::from(10u64)).unwrap();
         let mut r = buf.as_slice();
         match read_value(&mut r).unwrap() {
-            Some(Value::List(items)) => {
-                assert_eq!(items.len(), 2);
-                match &items[0] {
-                    Value::Int(i) => assert_eq!(*i, Integer::from(5u64)),
-                    _ => panic!("expected Int"),
-                }
-                match &items[1] {
-                    Value::Int(i) => assert_eq!(*i, Integer::from(10u64)),
-                    _ => panic!("expected Int"),
-                }
+            Some(Value::Dict(d)) => {
+                assert_eq!(d.len(), 2);
+                assert!(d.has_sequential_keys());
+                let (k0, v0) = &d.entries()[0];
+                assert_eq!(*k0, Integer::from(0u64));
+                match v0 { Value::Int(i) => assert_eq!(*i, Integer::from(5u64)), _ => panic!("expected Int") }
+                let (k1, v1) = &d.entries()[1];
+                assert_eq!(*k1, Integer::from(1u64));
+                match v1 { Value::Int(i) => assert_eq!(*i, Integer::from(10u64)), _ => panic!("expected Int") }
             }
-            other => panic!("expected List, got {:?}", other.is_some()),
+            _ => panic!("expected Dict"),
         }
     }
 
     #[test]
-    fn read_value_dict() {
+    fn read_value_dict_style() {
         let mut buf = Vec::new();
-        // Dict with 1 entry: key=1, value=string "hi"
         write_dict_prefix(&mut buf, 1).unwrap();
-        write_integer(&mut buf, &Integer::from(1u64)).unwrap();
+        write_integer(&mut buf, &Integer::from(99u64)).unwrap();
         write_string(&mut buf, &String::from(b"hi".to_vec())).unwrap();
         let mut r = buf.as_slice();
         match read_value(&mut r).unwrap() {
             Some(Value::Dict(d)) => {
                 assert_eq!(d.len(), 1);
+                assert!(!d.has_sequential_keys()); // key 99 != 0
                 let (k, v) = &d.entries()[0];
-                assert_eq!(*k, Integer::from(1u64));
-                match v {
-                    Value::String(s) => assert_eq!(s.as_bytes(), b"hi"),
-                    _ => panic!("expected String value"),
-                }
+                assert_eq!(*k, Integer::from(99u64));
+                match v { Value::String(s) => assert_eq!(s.as_bytes(), b"hi"), _ => panic!("expected String") }
             }
-            other => panic!("expected Dict, got {:?}", other.is_some()),
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn write_dict_sequential_uses_list_encoding() {
+        let d = Dict::from_values(vec![
+            Value::Int(Integer::from(10u64)),
+            Value::Int(Integer::from(20u64)),
+        ]);
+        assert!(d.has_sequential_keys());
+        let mut buf = Vec::new();
+        write_dict(&mut buf, &d).unwrap();
+        // Should use list prefix, not dict prefix.
+        assert!(buf[0] >= LIST_IMM_MIN && buf[0] <= LIST_IMM_MAX);
+        // Roundtrip.
+        let mut r = buf.as_slice();
+        match read_value(&mut r).unwrap() {
+            Some(Value::Dict(d2)) => {
+                assert_eq!(d2.len(), 2);
+                assert!(d2.has_sequential_keys());
+            }
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn write_dict_non_sequential_uses_dict_encoding() {
+        let mut d = Dict::new();
+        d.push(Integer::from(10u64), Value::Int(Integer::from(1u64)));
+        d.push(Integer::from(20u64), Value::Int(Integer::from(2u64)));
+        assert!(!d.has_sequential_keys());
+        let mut buf = Vec::new();
+        write_dict(&mut buf, &d).unwrap();
+        // Should use dict prefix.
+        assert!(buf[0] >= DICT_IMM_MIN && buf[0] <= DICT_IMM_MAX);
+        // Roundtrip.
+        let mut r = buf.as_slice();
+        match read_value(&mut r).unwrap() {
+            Some(Value::Dict(d2)) => {
+                assert_eq!(d2.len(), 2);
+                let (k, _) = &d2.entries()[0];
+                assert_eq!(*k, Integer::from(10u64));
+            }
+            _ => panic!("expected Dict"),
         }
     }
 
@@ -830,6 +905,18 @@ mod tests {
             let buf = vec![tag];
             let mut r = buf.as_slice();
             assert!(read_value(&mut r).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn read_value_all_two_byte_combinations_no_panic() {
+        for b0 in 0u16..=255 {
+            for b1 in 0u16..=255 {
+                let buf = [b0 as u8, b1 as u8];
+                let mut r: &[u8] = &buf;
+                // Must not panic — Ok or Err are both fine.
+                let _ = read_value(&mut r);
+            }
         }
     }
 }
