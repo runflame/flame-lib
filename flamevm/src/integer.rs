@@ -2,11 +2,8 @@ use curve25519_dalek::scalar::Scalar;
 use spacesuit::SignedInteger;
 
 /// Integer type backed by `[u8; 32]` with the sign bit in bit 255
-/// (the highest bit of `bytes[31]`).
-///
-/// Since a canonical Ristretto `Scalar` always has bit 255 clear,
-/// a non-negative `Integer` is bit-for-bit identical to a `Scalar`.
-/// This lets us hand out `&Scalar` by reference for non-negative values.
+/// (the highest bit of `bytes[31]`). The lower 255 bits are a
+/// canonical Ristretto scalar (strictly less than the group order ℓ).
 #[derive(Copy, Clone)]
 pub struct Integer {
     bytes: [u8; 32],
@@ -28,37 +25,19 @@ impl Integer {
         self.bytes[31] & 0x80 != 0
     }
 
-    /// Borrows the value as a `&Scalar` if it is non-negative.
-    /// This is a zero-copy reinterpretation — the bytes are already
-    /// a valid canonical scalar when the sign bit is clear.
-    pub fn as_scalar(&self) -> Option<&Scalar> {
-        if self.is_negative() {
-            None
-        } else {
-            // SAFETY: Scalar is a wrapper around
-            // `[u8; 32]` with the invariant that bit 255 is zero.
-            // We have just verified that the sign bit is clear,
-            // so the bytes satisfy that invariant.
-            Some(unsafe { &*(self.bytes.as_ptr() as *const Scalar) })
-        }
-    }
-
     /// Returns the sign bit and the magnitude as a `Scalar`.
     pub fn to_parts(self) -> (bool, Scalar) {
-        let sign = self.bytes[31] & 0x80 != 0;
-        let mut bytes = self.bytes;
-        bytes[31] &= 0x7f;
-        // SAFETY: clearing the high bit yields a valid Scalar layout.
-        let scalar = unsafe { *(bytes.as_ptr() as *const Scalar) };
-        (sign, scalar)
+        (self.is_negative(), self.abs_scalar())
     }
 
     /// Returns the absolute value as a `Scalar`.
     pub fn abs_scalar(&self) -> Scalar {
         let mut abs_bytes = self.bytes;
         abs_bytes[31] &= 0x7f;
-        // SAFETY: clearing the high bit yields a valid Scalar layout.
-        unsafe { *(abs_bytes.as_ptr() as *const Scalar) }
+        // The lower 255 bits are canonical by the `Integer` invariant
+        // (established in `from_bytes` and preserved everywhere else).
+        Scalar::from_canonical_bytes(abs_bytes)
+            .expect("Integer invariant: lower 255 bits are a canonical scalar")
     }
 
     /// Converts to a Ristretto scalar.
@@ -96,6 +75,13 @@ impl Integer {
             bytes[31] |= 0x80;
         }
         Integer { bytes }
+    }
+
+    /// Returns the absolute value as an `Integer` (always non-negative).
+    pub fn abs(&self) -> Integer {
+        let mut abs_bytes = self.bytes;
+        abs_bytes[31] &= 0x7f;
+        Integer { bytes: abs_bytes }
     }
 }
 
@@ -251,16 +237,18 @@ mod tests {
     }
 
     #[test]
-    fn as_scalar_non_negative() {
-        let i = Integer::from(77u64);
-        let s = i.as_scalar().expect("non-negative should return Some");
-        assert_eq!(*s, Scalar::from(77u64));
-    }
+    fn abs_returns_non_negative() {
+        let i = Integer::from(-77i64).abs();
+        assert!(!i.is_negative());
+        assert_eq!(i.to_scalar(), Scalar::from(77u64));
 
-    #[test]
-    fn as_scalar_negative() {
-        let i = Integer::from(-77i64);
-        assert!(i.as_scalar().is_none());
+        let i = Integer::from(77u64).abs();
+        assert!(!i.is_negative());
+        assert_eq!(i.to_scalar(), Scalar::from(77u64));
+
+        // abs(0) is 0.
+        let i = Integer::from(0u64).abs();
+        assert_eq!(i.to_scalar(), Scalar::zero());
     }
 
     #[test]

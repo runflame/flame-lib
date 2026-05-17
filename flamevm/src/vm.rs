@@ -1,3 +1,5 @@
+use crate::Value;
+
 /*
 
 external tx:
@@ -7,4 +9,21 @@ internal tx:
   call { run { call { run {...} } } }
 
 */
-pub struct VM {}
+
+// TODO: change this into a trait for prover-side execution.
+struct VMRun {
+    program: Vec<u8>
+}
+
+struct VMCall {
+    stack: Vec<Value>,
+    runstack: Vec<VMRun>,
+    run: VMRun,
+}
+
+pub struct VM {
+    call_stack: Vec<VMCall>,
+    current_call: VMCall,
+}
+
+

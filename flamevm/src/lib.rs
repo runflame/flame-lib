@@ -20,5 +20,5 @@ pub use string::String;
 pub use token::{ClearToken, Token, WideToken};
 pub use value::Value;
 
-pub use tx::{ExternalTx, InternalTx, TxLog};
+pub use tx::{ExternalTx, InternalTx};
 pub use vm::VM;

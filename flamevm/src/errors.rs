@@ -1,11 +1,16 @@
 //! Errors related to proving and verifying proofs.
 use bulletproofs::r1cs::R1CSError;
+use readerwriter::ReadError;
 
 use thiserror::Error;
 
 /// Represents an error in proof creation, verification, or parsing.
-#[derive(Error, Clone, Debug, Eq, PartialEq)]
+#[derive(Error, Debug)]
 pub enum VMError {
+    /// Failure decoding a value from its compact wire format.
+    #[error("encoding error: {0}")]
+    Encoding(#[from] ReadError),
+
     // /// This error occurs when an individual point operation failed.
     // #[error("Point operation failed.")]
     // PointOperationFailed,
