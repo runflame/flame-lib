@@ -1,16 +1,5 @@
-use core::cmp::Ordering;
-
 use crate::Integer;
 use crate::Value;
-
-/// Errors from `Dict` operations.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DictError {
-    /// Attempted to insert a key that already exists.
-    DuplicateKey,
-    /// A bulk constructor received entries that were not strictly ascending by key.
-    KeysOutOfOrder,
-}
 
 /// Ordered map from `Integer` keys to `Value`s.
 ///
@@ -36,34 +25,14 @@ impl Dict {
     /// Returns the entries in ascending key order.
     pub fn entries(&self) -> &[(Integer, Value)] { &self.entries }
 
-    /// Iterates over entries in ascending key order.
-    pub fn iter(&self) -> core::slice::Iter<'_, (Integer, Value)> {
-        self.entries.iter()
-    }
-
     /// Looks up a value by key. O(log n).
     pub fn get(&self, key: &Integer) -> Option<&Value> {
         self.position(key).ok().map(|i| &self.entries[i].1)
     }
 
-    /// Returns true if the key is present.
-    pub fn contains_key(&self, key: &Integer) -> bool {
-        self.position(key).is_ok()
-    }
-
-    /// Inserts a key-value pair. Returns `DuplicateKey` if the key already exists.
-    pub fn insert(&mut self, key: Integer, value: Value) -> Result<(), DictError> {
-        match self.position(&key) {
-            Ok(_) => Err(DictError::DuplicateKey),
-            Err(i) => {
-                self.entries.insert(i, (key, value));
-                Ok(())
-            }
-        }
-    }
-
-    /// Inserts or replaces a key-value pair. Returns the prior value if the key existed.
-    pub fn upsert(&mut self, key: Integer, value: Value) -> Option<Value> {
+    /// Inserts a key-value pair. If the key already exists, replaces the value
+    /// and returns the prior one.
+    pub fn insert(&mut self, key: Integer, value: Value) -> Option<Value> {
         match self.position(&key) {
             Ok(i) => Some(core::mem::replace(&mut self.entries[i].1, value)),
             Err(i) => {
@@ -93,16 +62,11 @@ impl Dict {
         Dict { entries }
     }
 
-    /// Builds a dict from entries that must already be strictly ascending by key.
-    pub fn from_sorted_entries(entries: Vec<(Integer, Value)>) -> Result<Self, DictError> {
-        for w in entries.windows(2) {
-            match w[0].0.cmp(&w[1].0) {
-                Ordering::Less => continue,
-                Ordering::Equal => return Err(DictError::DuplicateKey),
-                Ordering::Greater => return Err(DictError::KeysOutOfOrder),
-            }
-        }
-        Ok(Dict { entries })
+    /// Builds a dict from entries that the caller guarantees are strictly
+    /// ascending by key. Used by the wire decoder, which performs the
+    /// ordering check inline as it reads.
+    pub(crate) fn from_entries_unchecked(entries: Vec<(Integer, Value)>) -> Self {
+        Dict { entries }
     }
 
     fn position(&self, key: &Integer) -> Result<usize, usize> {
@@ -128,31 +92,19 @@ mod tests {
     #[test]
     fn insert_basic() {
         let mut d = Dict::new();
-        d.insert(Integer::from(5u64), v(50)).unwrap();
-        d.insert(Integer::from(1u64), v(10)).unwrap();
-        d.insert(Integer::from(3u64), v(30)).unwrap();
+        assert!(d.insert(Integer::from(5u64), v(50)).is_none());
+        assert!(d.insert(Integer::from(1u64), v(10)).is_none());
+        assert!(d.insert(Integer::from(3u64), v(30)).is_none());
         // Entries must come back in ascending key order regardless of insertion order.
         let keys: Vec<_> = d.entries().iter().map(|(k, _)| *k).collect();
         assert_eq!(keys, vec![Integer::from(1u64), Integer::from(3u64), Integer::from(5u64)]);
     }
 
     #[test]
-    fn insert_duplicate_rejected() {
+    fn insert_existing_replaces_and_returns_old() {
         let mut d = Dict::new();
-        d.insert(Integer::from(7u64), v(1)).unwrap();
-        assert_eq!(d.insert(Integer::from(7u64), v(2)), Err(DictError::DuplicateKey));
-        // Original value preserved.
-        match d.get(&Integer::from(7u64)) {
-            Some(Value::Int(i)) => assert_eq!(*i, Integer::from(1u64)),
-            _ => panic!("expected Int"),
-        }
-    }
-
-    #[test]
-    fn upsert_replaces_and_returns_old() {
-        let mut d = Dict::new();
-        assert!(d.upsert(Integer::from(2u64), v(100)).is_none());
-        let prior = d.upsert(Integer::from(2u64), v(200));
+        assert!(d.insert(Integer::from(2u64), v(100)).is_none());
+        let prior = d.insert(Integer::from(2u64), v(200));
         match prior {
             Some(Value::Int(i)) => assert_eq!(i, Integer::from(100u64)),
             _ => panic!("expected old Int"),
@@ -161,16 +113,16 @@ mod tests {
             Some(Value::Int(i)) => assert_eq!(*i, Integer::from(200u64)),
             _ => panic!("expected Int"),
         }
+        // Replacing does not grow the dict.
+        assert_eq!(d.len(), 1);
     }
 
     #[test]
-    fn get_and_contains_key() {
+    fn get_present_and_absent() {
         let mut d = Dict::new();
-        d.insert(Integer::from(1u64), v(10)).unwrap();
-        d.insert(Integer::from(99u64), Value::String(String::from(b"hi".to_vec()))).unwrap();
-        assert!(d.contains_key(&Integer::from(1u64)));
-        assert!(d.contains_key(&Integer::from(99u64)));
-        assert!(!d.contains_key(&Integer::from(50u64)));
+        d.insert(Integer::from(1u64), v(10));
+        d.insert(Integer::from(99u64), Value::String(String::from(b"hi".to_vec())));
+        assert!(d.get(&Integer::from(50u64)).is_none());
         match d.get(&Integer::from(99u64)) {
             Some(Value::String(s)) => assert_eq!(s.as_bytes(), b"hi"),
             _ => panic!("expected String"),
@@ -180,8 +132,8 @@ mod tests {
     #[test]
     fn remove_present_and_absent() {
         let mut d = Dict::new();
-        d.insert(Integer::from(1u64), v(10)).unwrap();
-        d.insert(Integer::from(2u64), v(20)).unwrap();
+        d.insert(Integer::from(1u64), v(10));
+        d.insert(Integer::from(2u64), v(20));
         let removed = d.remove(&Integer::from(1u64));
         assert!(matches!(removed, Some(Value::Int(_))));
         assert_eq!(d.len(), 1);
@@ -192,10 +144,10 @@ mod tests {
     #[test]
     fn signed_keys_ordered_negatives_first() {
         let mut d = Dict::new();
-        d.insert(Integer::from(2i64), v(2)).unwrap();
-        d.insert(Integer::from(-3i64), v(30)).unwrap();
-        d.insert(Integer::from(0i64), v(0)).unwrap();
-        d.insert(Integer::from(-1i64), v(10)).unwrap();
+        d.insert(Integer::from(2i64), v(2));
+        d.insert(Integer::from(-3i64), v(30));
+        d.insert(Integer::from(0i64), v(0));
+        d.insert(Integer::from(-1i64), v(10));
         let keys: Vec<_> = d.entries().iter().map(|(k, _)| *k).collect();
         assert_eq!(
             keys,
@@ -214,33 +166,5 @@ mod tests {
         assert_eq!(d.len(), 3);
         let keys: Vec<_> = d.entries().iter().map(|(k, _)| *k).collect();
         assert_eq!(keys, vec![Integer::from(0u64), Integer::from(1u64), Integer::from(2u64)]);
-    }
-
-    #[test]
-    fn from_sorted_entries_accepts_sorted() {
-        let d = Dict::from_sorted_entries(vec![
-            (Integer::from(-1i64), v(1)),
-            (Integer::from(0i64), v(2)),
-            (Integer::from(5i64), v(3)),
-        ]).unwrap();
-        assert_eq!(d.len(), 3);
-    }
-
-    #[test]
-    fn from_sorted_entries_rejects_unsorted() {
-        let err = Dict::from_sorted_entries(vec![
-            (Integer::from(5u64), v(1)),
-            (Integer::from(2u64), v(2)),
-        ]);
-        assert_eq!(err.err(), Some(DictError::KeysOutOfOrder));
-    }
-
-    #[test]
-    fn from_sorted_entries_rejects_duplicates() {
-        let err = Dict::from_sorted_entries(vec![
-            (Integer::from(3u64), v(1)),
-            (Integer::from(3u64), v(2)),
-        ]);
-        assert_eq!(err.err(), Some(DictError::DuplicateKey));
     }
 }

@@ -12,7 +12,7 @@ mod value;
 mod vm;
 
 pub use crypto::{Merlin, MultiscalarMul, Point};
-pub use dict::{Dict, DictError};
+pub use dict::Dict;
 pub use errors::VMError;
 pub use integer::Integer;
 pub use object::Object;

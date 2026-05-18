@@ -372,10 +372,7 @@ pub fn read_value(r: &mut impl Reader) -> Result<Option<Value>, ReadError> {
                     None => return Ok(None),
                 }
             }
-            // Safety: we just verified strictly ascending keys above.
-            let dict = Dict::from_sorted_entries(entries)
-                .map_err(|_| ReadError::InvalidFormat)?;
-            Ok(Some(Value::Dict(dict)))
+            Ok(Some(Value::Dict(Dict::from_entries_unchecked(entries))))
         }
 
         // Point
@@ -894,8 +891,8 @@ mod tests {
     #[test]
     fn write_dict_non_sequential_uses_dict_encoding() {
         let mut d = Dict::new();
-        d.insert(Integer::from(10u64), Value::Int(Integer::from(1u64))).unwrap();
-        d.insert(Integer::from(20u64), Value::Int(Integer::from(2u64))).unwrap();
+        d.insert(Integer::from(10u64), Value::Int(Integer::from(1u64)));
+        d.insert(Integer::from(20u64), Value::Int(Integer::from(2u64)));
         let mut buf = Vec::new();
         write_dict(&mut buf, &d).unwrap();
         // Should use dict prefix.
