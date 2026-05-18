@@ -356,14 +356,25 @@ pub fn read_value(r: &mut impl Reader) -> Result<Option<Value>, ReadError> {
         // Dict-style (explicit keys)
         DICT_IMM_MIN..=DICT_VAR => {
             let count = read_dict_count_with_tag(r, tag)?;
-            let mut dict = Dict::new();
+            let mut entries: Vec<(crate::Integer, Value)> = Vec::with_capacity(count);
+            let mut last_key: Option<crate::Integer> = None;
             for _ in 0..count {
                 let key = read_integer(r)?;
+                // Reject duplicate or out-of-order keys to keep the wire encoding canonical.
+                if let Some(prev) = &last_key {
+                    if key.cmp(prev) != core::cmp::Ordering::Greater {
+                        return Err(ReadError::InvalidFormat);
+                    }
+                }
+                last_key = Some(key);
                 match read_value(r)? {
-                    Some(v) => dict.push(key, v),
+                    Some(v) => entries.push((key, v)),
                     None => return Ok(None),
                 }
             }
+            // Safety: we just verified strictly ascending keys above.
+            let dict = Dict::from_sorted_entries(entries)
+                .map_err(|_| ReadError::InvalidFormat)?;
             Ok(Some(Value::Dict(dict)))
         }
 
@@ -386,7 +397,12 @@ pub fn read_value(r: &mut impl Reader) -> Result<Option<Value>, ReadError> {
 /// all keys are sequential 0, 1, 2, ...; otherwise uses the dict
 /// encoding with explicit keys.
 pub fn write_dict(w: &mut impl Writer, dict: &Dict) -> Result<(), WriteError> {
-    if dict.has_sequential_keys() {
+    let sequential = dict
+        .entries()
+        .iter()
+        .enumerate()
+        .all(|(i, (k, _))| *k == crate::Integer::from(i as u64));
+    if sequential {
         write_list_prefix(w, dict.len())?;
         for (_, v) in dict.entries() {
             write_value(w, v)?;
@@ -824,7 +840,6 @@ mod tests {
         match read_value(&mut r).unwrap() {
             Some(Value::Dict(d)) => {
                 assert_eq!(d.len(), 2);
-                assert!(d.has_sequential_keys());
                 let (k0, v0) = &d.entries()[0];
                 assert_eq!(*k0, Integer::from(0u64));
                 match v0 { Value::Int(i) => assert_eq!(*i, Integer::from(5u64)), _ => panic!("expected Int") }
@@ -846,7 +861,6 @@ mod tests {
         match read_value(&mut r).unwrap() {
             Some(Value::Dict(d)) => {
                 assert_eq!(d.len(), 1);
-                assert!(!d.has_sequential_keys()); // key 99 != 0
                 let (k, v) = &d.entries()[0];
                 assert_eq!(*k, Integer::from(99u64));
                 match v { Value::String(s) => assert_eq!(s.as_bytes(), b"hi"), _ => panic!("expected String") }
@@ -861,7 +875,6 @@ mod tests {
             Value::Int(Integer::from(10u64)),
             Value::Int(Integer::from(20u64)),
         ]);
-        assert!(d.has_sequential_keys());
         let mut buf = Vec::new();
         write_dict(&mut buf, &d).unwrap();
         // Should use list prefix, not dict prefix.
@@ -871,7 +884,8 @@ mod tests {
         match read_value(&mut r).unwrap() {
             Some(Value::Dict(d2)) => {
                 assert_eq!(d2.len(), 2);
-                assert!(d2.has_sequential_keys());
+                assert_eq!(d2.entries()[0].0, Integer::from(0u64));
+                assert_eq!(d2.entries()[1].0, Integer::from(1u64));
             }
             _ => panic!("expected Dict"),
         }
@@ -880,9 +894,8 @@ mod tests {
     #[test]
     fn write_dict_non_sequential_uses_dict_encoding() {
         let mut d = Dict::new();
-        d.push(Integer::from(10u64), Value::Int(Integer::from(1u64)));
-        d.push(Integer::from(20u64), Value::Int(Integer::from(2u64)));
-        assert!(!d.has_sequential_keys());
+        d.insert(Integer::from(10u64), Value::Int(Integer::from(1u64))).unwrap();
+        d.insert(Integer::from(20u64), Value::Int(Integer::from(2u64))).unwrap();
         let mut buf = Vec::new();
         write_dict(&mut buf, &d).unwrap();
         // Should use dict prefix.
@@ -897,6 +910,32 @@ mod tests {
             }
             _ => panic!("expected Dict"),
         }
+    }
+
+    #[test]
+    fn read_value_dict_rejects_out_of_order_keys() {
+        // Manually craft a dict-style payload with keys [5, 2] — descending.
+        let mut buf = Vec::new();
+        write_dict_prefix(&mut buf, 2).unwrap();
+        write_integer(&mut buf, &Integer::from(5u64)).unwrap();
+        write_integer(&mut buf, &Integer::from(0u64)).unwrap();
+        write_integer(&mut buf, &Integer::from(2u64)).unwrap();
+        write_integer(&mut buf, &Integer::from(0u64)).unwrap();
+        let mut r = buf.as_slice();
+        assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
+    }
+
+    #[test]
+    fn read_value_dict_rejects_duplicate_keys() {
+        // Manually craft a dict-style payload with key 7 twice.
+        let mut buf = Vec::new();
+        write_dict_prefix(&mut buf, 2).unwrap();
+        write_integer(&mut buf, &Integer::from(7u64)).unwrap();
+        write_integer(&mut buf, &Integer::from(0u64)).unwrap();
+        write_integer(&mut buf, &Integer::from(7u64)).unwrap();
+        write_integer(&mut buf, &Integer::from(0u64)).unwrap();
+        let mut r = buf.as_slice();
+        assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
     }
 
     #[test]
