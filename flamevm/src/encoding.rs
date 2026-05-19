@@ -345,12 +345,13 @@ pub fn read_string(r: &mut impl Reader) -> Result<String, ReadError> {
 }
 
 fn read_string_with_tag(r: &mut impl Reader, tag: u8) -> Result<String, ReadError> {
-    let len = match tag {
+    let len: u64 = match tag {
         STR_IMM_MIN..=STR_IMM_MAX => (tag - STR_IMM_MIN) as u64,
         STR_VAR => CONTAINER_VAR_BASE + read_subvarint(r)?,
         _ => return Err(ReadError::InvalidFormat),
     };
-    let data = r.read_bytes(len as usize)?;
+    let len = usize::try_from(len).map_err(|_| ReadError::InvalidFormat)?;
+    let data = r.read_bytes(len)?;
     Ok(String::from(data))
 }
 
@@ -417,11 +418,26 @@ fn dict_keys_are_sequential(entries: &[(Integer, Value)]) -> bool {
         .all(|(i, (k, _))| *k == Integer::from(i as u64))
 }
 
+/// Maximum nesting depth for `read_value`. Each list/dict entry counts
+/// as one level. Bounds stack use and prevents DoS via deeply nested input.
+const MAX_DEPTH: u32 = 64;
+
 /// Reads a `Value`.
 /// Returns `Ok(None)` for recognized but unimplemented type tags
 /// (tokens, objects, merlin, etc.).
-/// Returns `Err` for malformed data, including non-canonical encodings.
+/// Returns `Err` for malformed data, non-canonical encodings, or
+/// resource-exhausting input (excessive nesting, oversized counts).
 pub fn read_value(r: &mut impl Reader) -> Result<Option<Value>, ReadError> {
+    read_value_with_depth(r, 0)
+}
+
+fn read_value_with_depth(
+    r: &mut impl Reader,
+    depth: u32,
+) -> Result<Option<Value>, ReadError> {
+    if depth >= MAX_DEPTH {
+        return Err(ReadError::InvalidFormat);
+    }
     let tag = r.read_u8()?;
     match tag {
         // Integers
@@ -437,9 +453,14 @@ pub fn read_value(r: &mut impl Reader) -> Result<Option<Value>, ReadError> {
         // List-style dict (sequential keys 0..n-1)
         LIST_IMM_MIN..=LIST_VAR => {
             let count = read_list_count_with_tag(r, tag)?;
+            // Each list element is at least 1 byte; reject counts that
+            // can't possibly fit in the remaining input.
+            if count > r.remaining_bytes() {
+                return Err(ReadError::InvalidFormat);
+            }
             let mut values = Vec::with_capacity(count);
             for _ in 0..count {
-                match read_value(r)? {
+                match read_value_with_depth(r, depth + 1)? {
                     Some(v) => values.push(v),
                     None => return Ok(None),
                 }
@@ -449,6 +470,11 @@ pub fn read_value(r: &mut impl Reader) -> Result<Option<Value>, ReadError> {
         // Dict-style (explicit keys)
         DICT_IMM_MIN..=DICT_VAR => {
             let count = read_dict_count_with_tag(r, tag)?;
+            // Each dict entry is at least 2 bytes (key tag + value tag).
+            // Division avoids overflow on attacker-supplied counts.
+            if count > r.remaining_bytes() / 2 {
+                return Err(ReadError::InvalidFormat);
+            }
             let mut entries: Vec<(Integer, Value)> = Vec::with_capacity(count);
             let mut last_key: Option<Integer> = None;
             for _ in 0..count {
@@ -460,7 +486,7 @@ pub fn read_value(r: &mut impl Reader) -> Result<Option<Value>, ReadError> {
                     }
                 }
                 last_key = Some(key);
-                match read_value(r)? {
+                match read_value_with_depth(r, depth + 1)? {
                     Some(v) => entries.push((key, v)),
                     None => return Ok(None),
                 }
@@ -1005,6 +1031,39 @@ mod tests {
             let mut r: &[u8] = &buf;
             assert!(read_value(&mut r).is_err());
         }
+    }
+
+    #[test]
+    fn read_value_rejects_excessive_nesting() {
+        // 70 levels of single-element lists, then an immediate int.
+        // The decoder must reject before recursing past MAX_DEPTH.
+        let mut buf = Vec::new();
+        for _ in 0..70 {
+            buf.push(LIST_IMM_MIN + 1);
+        }
+        buf.push(0u8); // innermost int
+        let mut r = buf.as_slice();
+        assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
+    }
+
+    #[test]
+    fn read_value_rejects_oversized_list_count() {
+        // LIST_VAR claiming 1 billion entries, with no payload.
+        let mut buf = Vec::new();
+        buf.push(LIST_VAR);
+        write_subvarint(&mut buf, 1_000_000_000 - CONTAINER_VAR_BASE).unwrap();
+        let mut r = buf.as_slice();
+        assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
+    }
+
+    #[test]
+    fn read_value_rejects_oversized_dict_count() {
+        // DICT_VAR claiming 1 billion entries, with no payload.
+        let mut buf = Vec::new();
+        buf.push(DICT_VAR);
+        write_subvarint(&mut buf, 1_000_000_000 - CONTAINER_VAR_BASE).unwrap();
+        let mut r = buf.as_slice();
+        assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
     }
 
     #[test]
