@@ -351,6 +351,13 @@ fn read_string_with_tag(r: &mut impl Reader, tag: u8) -> Result<String, ReadErro
         _ => return Err(ReadError::InvalidFormat),
     };
     let len = usize::try_from(len).map_err(|_| ReadError::InvalidFormat)?;
+    // Bound against remaining input before delegating to the reader. This is
+    // defense-in-depth: the default `read_bytes` impl already pre-checks
+    // bounds, but custom `Reader` impls may not — and a malicious length
+    // shouldn't be able to trigger a giant allocation regardless.
+    if len > r.remaining_bytes() {
+        return Err(ReadError::InvalidFormat);
+    }
     let data = r.read_bytes(len)?;
     Ok(String::from(data))
 }
@@ -411,11 +418,8 @@ fn read_dict_count_with_tag(r: &mut impl Reader, tag: u8) -> Result<usize, ReadE
 
 // ── Value encoding ────────────────────────────────────────────────
 
-fn dict_keys_are_sequential(entries: &[(Integer, Value)]) -> bool {
-    entries
-        .iter()
-        .enumerate()
-        .all(|(i, (k, _))| *k == Integer::from(i as u64))
+fn keys_are_sequential<'a>(keys: impl Iterator<Item = &'a Integer>) -> bool {
+    keys.enumerate().all(|(i, k)| *k == Integer::from(i as u64))
 }
 
 /// Maximum nesting depth for `read_value`. Each list/dict entry counts
@@ -493,7 +497,7 @@ fn read_value_with_depth(
             }
             // Canonicality: reject dict-style payloads whose keys ended up as
             // 0..n-1 — they have a shorter list-style encoding.
-            if dict_keys_are_sequential(&entries) {
+            if keys_are_sequential(entries.iter().map(|(k, _)| k)) {
                 return Err(ReadError::InvalidFormat);
             }
             Ok(Some(Value::Dict(Dict::from_entries_unchecked(entries))))
@@ -515,7 +519,7 @@ fn read_value_with_depth(
 /// Writes a `Dict`. Uses the list-style encoding when keys are
 /// sequential 0, 1, 2, ...; otherwise uses the dict-style encoding.
 pub fn write_dict(w: &mut impl Writer, dict: &Dict) -> Result<(), WriteError> {
-    if dict_keys_are_sequential(dict.entries()) {
+    if keys_are_sequential(dict.entries().map(|(k, _)| k)) {
         write_list_prefix(w, dict.len())?;
         for (_, v) in dict.entries() {
             write_value(w, v)?;
@@ -925,8 +929,8 @@ mod tests {
         match read_value(&mut r).unwrap() {
             Some(Value::Dict(d)) => {
                 assert_eq!(d.len(), 2);
-                assert_eq!(d.entries()[0].0, Integer::from(0u64));
-                assert_eq!(d.entries()[1].0, Integer::from(1u64));
+                let keys: Vec<_> = d.entries().map(|(k, _)| *k).collect();
+                assert_eq!(keys, vec![Integer::from(0u64), Integer::from(1u64)]);
             }
             _ => panic!("expected Dict"),
         }
@@ -942,7 +946,7 @@ mod tests {
         match read_value(&mut r).unwrap() {
             Some(Value::Dict(d)) => {
                 assert_eq!(d.len(), 1);
-                let (k, v) = &d.entries()[0];
+                let (k, v) = d.entries().next().unwrap();
                 assert_eq!(*k, Integer::from(99u64));
                 match v {
                     Value::String(s) => assert_eq!(s.as_bytes(), b"hi"),
@@ -1042,6 +1046,16 @@ mod tests {
             buf.push(LIST_IMM_MIN + 1);
         }
         buf.push(0u8); // innermost int
+        let mut r = buf.as_slice();
+        assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
+    }
+
+    #[test]
+    fn read_value_rejects_oversized_string_len() {
+        // STR_VAR claiming 1 billion bytes, with no actual data.
+        let mut buf = Vec::new();
+        buf.push(STR_VAR);
+        write_subvarint(&mut buf, 1_000_000_000 - CONTAINER_VAR_BASE).unwrap();
         let mut r = buf.as_slice();
         assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
     }

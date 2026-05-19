@@ -1,53 +1,48 @@
+use std::collections::BTreeMap;
+
 use crate::Integer;
 use crate::Value;
 
 /// Ordered map from `Integer` keys to `Value`s.
 ///
-/// Invariant: keys are strictly ascending by `Integer::cmp`. This makes
-/// the wire encoding canonical (one wire form per logical dict) and
-/// permits O(log n) lookup via binary search.
+/// Backed by a `BTreeMap`, so `insert` / `get` / `remove` are O(log n)
+/// per call. Iteration yields entries in ascending key order, which the
+/// wire encoder relies on for canonical output.
 pub struct Dict {
-    entries: Vec<(Integer, Value)>,
+    entries: BTreeMap<Integer, Value>,
 }
 
 impl Dict {
     /// Creates an empty dictionary.
     pub fn new() -> Self {
-        Dict { entries: Vec::new() }
+        Dict { entries: BTreeMap::new() }
     }
 
-    /// Number of entries.
+    /// Number of entries. O(1).
     pub fn len(&self) -> usize { self.entries.len() }
 
-    /// Returns true if the dictionary has no entries.
+    /// Returns true if the dictionary has no entries. O(1).
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
 
-    /// Returns the entries in ascending key order.
-    pub fn entries(&self) -> &[(Integer, Value)] { &self.entries }
+    /// Iterates over entries in ascending key order.
+    pub fn entries(&self) -> impl Iterator<Item = (&Integer, &Value)> {
+        self.entries.iter()
+    }
 
     /// Looks up a value by key. O(log n).
     pub fn get(&self, key: &Integer) -> Option<&Value> {
-        self.position(key).ok().map(|i| &self.entries[i].1)
+        self.entries.get(key)
     }
 
-    /// Inserts a key-value pair. If the key already exists, replaces the value
-    /// and returns the prior one.
+    /// Inserts a key-value pair. O(log n). If the key already exists,
+    /// replaces the value and returns the prior one.
     pub fn insert(&mut self, key: Integer, value: Value) -> Option<Value> {
-        match self.position(&key) {
-            Ok(i) => Some(core::mem::replace(&mut self.entries[i].1, value)),
-            Err(i) => {
-                self.entries.insert(i, (key, value));
-                None
-            }
-        }
+        self.entries.insert(key, value)
     }
 
-    /// Removes a key and returns its value if present.
+    /// Removes a key and returns its value if present. O(log n).
     pub fn remove(&mut self, key: &Integer) -> Option<Value> {
-        match self.position(key) {
-            Ok(i) => Some(self.entries.remove(i).1),
-            Err(_) => None,
-        }
+        self.entries.remove(key)
     }
 
     /// Builds a dict from a list of values with implicit keys 0, 1, 2, ...
@@ -66,11 +61,7 @@ impl Dict {
     /// ascending by key. Used by the wire decoder, which performs the
     /// ordering check inline as it reads.
     pub(crate) fn from_entries_unchecked(entries: Vec<(Integer, Value)>) -> Self {
-        Dict { entries }
-    }
-
-    fn position(&self, key: &Integer) -> Result<usize, usize> {
-        self.entries.binary_search_by(|(k, _)| k.cmp(key))
+        Dict { entries: entries.into_iter().collect() }
     }
 }
 
@@ -95,8 +86,7 @@ mod tests {
         assert!(d.insert(Integer::from(5u64), v(50)).is_none());
         assert!(d.insert(Integer::from(1u64), v(10)).is_none());
         assert!(d.insert(Integer::from(3u64), v(30)).is_none());
-        // Entries must come back in ascending key order regardless of insertion order.
-        let keys: Vec<_> = d.entries().iter().map(|(k, _)| *k).collect();
+        let keys: Vec<_> = d.entries().map(|(k, _)| *k).collect();
         assert_eq!(keys, vec![Integer::from(1u64), Integer::from(3u64), Integer::from(5u64)]);
     }
 
@@ -113,7 +103,6 @@ mod tests {
             Some(Value::Int(i)) => assert_eq!(*i, Integer::from(200u64)),
             _ => panic!("expected Int"),
         }
-        // Replacing does not grow the dict.
         assert_eq!(d.len(), 1);
     }
 
@@ -148,7 +137,7 @@ mod tests {
         d.insert(Integer::from(-3i64), v(30));
         d.insert(Integer::from(0i64), v(0));
         d.insert(Integer::from(-1i64), v(10));
-        let keys: Vec<_> = d.entries().iter().map(|(k, _)| *k).collect();
+        let keys: Vec<_> = d.entries().map(|(k, _)| *k).collect();
         assert_eq!(
             keys,
             vec![
@@ -164,7 +153,7 @@ mod tests {
     fn from_values_produces_sequential_keys() {
         let d = Dict::from_values(vec![v(10), v(20), v(30)]);
         assert_eq!(d.len(), 3);
-        let keys: Vec<_> = d.entries().iter().map(|(k, _)| *k).collect();
+        let keys: Vec<_> = d.entries().map(|(k, _)| *k).collect();
         assert_eq!(keys, vec![Integer::from(0u64), Integer::from(1u64), Integer::from(2u64)]);
     }
 }
