@@ -355,6 +355,15 @@ mod tests {
     }
 
     #[test]
+    fn from_i64_min_does_not_overflow() {
+        // i64::MIN's magnitude is 2^63 (doesn't fit in i64). Plain `-v`
+        // would overflow in debug builds; `unsigned_abs` handles it.
+        let i = Integer::from(i64::MIN);
+        assert!(i.is_negative());
+        assert_eq!(i.abs_scalar(), Scalar::from(1u64 << 63));
+    }
+
+    #[test]
     fn from_i64_zero() {
         let i = Integer::from(0i64);
         assert!(!i.is_negative());
