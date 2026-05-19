@@ -5,6 +5,7 @@ use crate::Object;
 use crate::Point;
 use crate::String;
 use crate::{ClearToken, Token, WideToken};
+use crate::{Constraint, Expression, Variable};
 
 /// Possible values on the stack machine
 pub enum Value {
@@ -17,8 +18,8 @@ pub enum Value {
     ClearToken(ClearToken),
     Object(Object),
     Merlin(Merlin),
-    //Variable(Variable),
-    //Expression(Expression),
-    //Constraint(Constraint),
+    Variable(Variable),
+    Expression(Expression),
+    Constraint(Constraint),
     //MultiscalarMul(MultiscalarMul),
 }

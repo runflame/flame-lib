@@ -11,6 +11,9 @@ mod tx;
 mod value;
 mod vm;
 
+pub use constraints::{
+    Commitment, CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,
+};
 pub use crypto::{Merlin, MultiscalarMul, Point};
 pub use dict::Dict;
 pub use errors::VMError;

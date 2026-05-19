@@ -9,7 +9,9 @@ description = "Flame virtual machine"
 [dependencies]
 curve25519-dalek = { version = "3", features = ["serde"] }
 merlin = "2"
+rand = "0.7"
 serde = { version = "1", features = ["derive"] }
+subtle = "2"
 thiserror = "2.0.18"
 
 [dependencies.readerwriter]

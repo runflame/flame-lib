@@ -143,9 +143,9 @@ pub enum VMError {
     // #[error("R1CS detected inconsistent input")]
     // R1CSInconsistency,
 
-    // /// This error occurs when an R1CSError is returned from the ConstraintSystem.
-    // #[error("R1CSError returned when trying to build R1CS instance")]
-    // R1CSError(R1CSError),
+    /// This error occurs when an R1CSError is returned from the ConstraintSystem.
+    #[error("R1CSError returned when trying to build R1CS instance")]
+    R1CSError(R1CSError),
 
     // /// This error occurs when a prover expects some witness data, but it is missing.
     // #[error("Item misses witness data.")]
@@ -171,9 +171,9 @@ pub enum VMError {
     // #[error("Input is invalid")]
     // InvalidInput,
 
-    // /// This error occurs when a false cleartext constraint is verified.
-    // #[error("Cleartext constraint is false")]
-    // CleartextConstraintFalse,
+    /// This error occurs when a false cleartext constraint is verified.
+    #[error("Cleartext constraint is false")]
+    CleartextConstraintFalse,
 
     // /// This error occurs when tx attempts to add a fee beyond the limit.
     // #[error("Fee is too high")]
