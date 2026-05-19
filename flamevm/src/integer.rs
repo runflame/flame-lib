@@ -1,12 +1,37 @@
+//! Signed 256-bit integer with sign-magnitude representation.
+//!
+//! ## Representation
+//!
+//! Bit 255 (the high bit of `bytes[31]`) is the sign; the lower 255 bits
+//! are a canonical Ristretto scalar magnitude (strictly less than the
+//! group order ℓ ≈ 2²⁵²). Negative zero is not representable — every
+//! constructor either rejects it (`from_bytes`) or normalizes it to
+//! positive zero (`from_parts`, arithmetic ops, `Neg`).
+//!
+//! ## Arithmetic wraps modulo ℓ
+//!
+//! `Add` / `Sub` / `Mul` operate on magnitudes via `Scalar` arithmetic,
+//! which is mod ℓ. Small inputs whose results stay below ℓ behave like
+//! ordinary signed integers; results that would exceed ℓ wrap. Callers
+//! that need overflow detection should bound their inputs themselves;
+//! no `checked_*` variants are provided.
+//!
+//! ## Not constant-time
+//!
+//! Sign branching, ordering, and magnitude comparison are data-dependent.
+//! `Integer` is intended for public VM stack values. Secret witness data
+//! should flow through constraint-system types (`Variable`, `Expression`),
+//! not through `Integer`.
+
 use core::cmp::Ordering;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use curve25519_dalek::scalar::Scalar;
 use spacesuit::SignedInteger;
 
-/// Integer type backed by `[u8; 32]` with the sign bit in bit 255
-/// (the highest bit of `bytes[31]`). The lower 255 bits are a
-/// canonical Ristretto scalar (strictly less than the group order ℓ).
+/// Signed 256-bit integer in sign-magnitude form. See module docs for
+/// the canonical representation, wraparound semantics, and the
+/// non-constant-time disclaimer.
 #[derive(Copy, Clone)]
 pub struct Integer {
     bytes: [u8; 32],
@@ -57,9 +82,13 @@ impl Integer {
             .expect("Integer invariant: lower 255 bits are a canonical scalar")
     }
 
-    /// Converts to a Ristretto scalar.
-    /// Non-negative values map directly; negative values map to `-abs mod l`.
-    pub fn to_scalar(&self) -> Scalar {
+    /// Converts to a Ristretto scalar mod ℓ.
+    ///
+    /// This is a many-to-one mapping: non-negative `Integer(X)` maps
+    /// to `Scalar(X)`; negative `Integer(-X)` maps to `Scalar(ℓ − X)`.
+    /// Round-tripping through `From<Scalar>` recovers only the
+    /// non-negative representative — sign information is lost.
+    pub fn to_scalar_mod_order(&self) -> Scalar {
         let abs = self.abs_scalar();
         if self.is_negative() {
             -abs
@@ -247,7 +276,10 @@ impl From<u64> for Integer {
 impl From<i64> for Integer {
     fn from(v: i64) -> Self {
         if v < 0 {
-            let mut bytes = Scalar::from((-v) as u64).to_bytes();
+            // `unsigned_abs` handles i64::MIN correctly (its magnitude is 2^63,
+            // which doesn't fit in i64 but does fit in u64). Plain `-v` would
+            // overflow in debug builds.
+            let mut bytes = Scalar::from(v.unsigned_abs()).to_bytes();
             bytes[31] |= 0x80;
             Integer { bytes }
         } else {
@@ -285,7 +317,7 @@ impl From<SignedInteger> for Integer {
 
 impl Into<Scalar> for Integer {
     fn into(self) -> Scalar {
-        self.to_scalar()
+        self.to_scalar_mod_order()
     }
 }
 
@@ -305,28 +337,28 @@ mod tests {
     fn from_u64() {
         let i = Integer::from(42u64);
         assert!(!i.is_negative());
-        assert_eq!(i.to_scalar(), Scalar::from(42u64));
+        assert_eq!(i.to_scalar_mod_order(), Scalar::from(42u64));
     }
 
     #[test]
     fn from_i64_positive() {
         let i = Integer::from(42i64);
         assert!(!i.is_negative());
-        assert_eq!(i.to_scalar(), Scalar::from(42u64));
+        assert_eq!(i.to_scalar_mod_order(), Scalar::from(42u64));
     }
 
     #[test]
     fn from_i64_negative() {
         let i = Integer::from(-42i64);
         assert!(i.is_negative());
-        assert_eq!(i.to_scalar(), -Scalar::from(42u64));
+        assert_eq!(i.to_scalar_mod_order(), -Scalar::from(42u64));
     }
 
     #[test]
     fn from_i64_zero() {
         let i = Integer::from(0i64);
         assert!(!i.is_negative());
-        assert_eq!(i.to_scalar(), Scalar::zero());
+        assert_eq!(i.to_scalar_mod_order(), Scalar::zero());
     }
 
     #[test]
@@ -334,7 +366,7 @@ mod tests {
         let si = SignedInteger::from(100u64);
         let i = Integer::from(si);
         assert!(!i.is_negative());
-        assert_eq!(i.to_scalar(), Scalar::from(100u64));
+        assert_eq!(i.to_scalar_mod_order(), Scalar::from(100u64));
     }
 
     #[test]
@@ -342,7 +374,7 @@ mod tests {
         let si = -SignedInteger::from(100u64);
         let i = Integer::from(si);
         assert!(i.is_negative());
-        assert_eq!(i.to_scalar(), -Scalar::from(100u64));
+        assert_eq!(i.to_scalar_mod_order(), -Scalar::from(100u64));
     }
 
     #[test]
@@ -374,22 +406,22 @@ mod tests {
         let s = Scalar::from(99u64);
         let i = Integer::from(s);
         assert!(!i.is_negative());
-        assert_eq!(i.to_scalar(), s);
+        assert_eq!(i.to_scalar_mod_order(), s);
     }
 
     #[test]
     fn abs_returns_non_negative() {
         let i = Integer::from(-77i64).abs();
         assert!(!i.is_negative());
-        assert_eq!(i.to_scalar(), Scalar::from(77u64));
+        assert_eq!(i.to_scalar_mod_order(), Scalar::from(77u64));
 
         let i = Integer::from(77u64).abs();
         assert!(!i.is_negative());
-        assert_eq!(i.to_scalar(), Scalar::from(77u64));
+        assert_eq!(i.to_scalar_mod_order(), Scalar::from(77u64));
 
         // abs(0) is 0.
         let i = Integer::from(0u64).abs();
-        assert_eq!(i.to_scalar(), Scalar::zero());
+        assert_eq!(i.to_scalar_mod_order(), Scalar::zero());
     }
 
     #[test]
@@ -405,16 +437,16 @@ mod tests {
     fn from_parts() {
         let i = Integer::from_parts(true, Scalar::from(50u64));
         assert!(i.is_negative());
-        assert_eq!(i.to_scalar(), -Scalar::from(50u64));
+        assert_eq!(i.to_scalar_mod_order(), -Scalar::from(50u64));
 
         let i = Integer::from_parts(false, Scalar::from(50u64));
         assert!(!i.is_negative());
-        assert_eq!(i.to_scalar(), Scalar::from(50u64));
+        assert_eq!(i.to_scalar_mod_order(), Scalar::from(50u64));
 
         // Negative zero normalizes to positive zero.
         let i = Integer::from_parts(true, Scalar::zero());
         assert!(!i.is_negative());
-        assert_eq!(i.to_scalar(), Scalar::zero());
+        assert_eq!(i.to_scalar_mod_order(), Scalar::zero());
     }
 
     #[test]
