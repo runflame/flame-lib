@@ -33,6 +33,20 @@ impl Integer {
         (self.is_negative(), self.abs_scalar())
     }
 
+    /// Returns the value as a non-negative `u64` if it fits; otherwise `None`.
+    /// Negative values always return `None`.
+    pub fn to_u64(&self) -> Option<u64> {
+        if self.is_negative() {
+            return None;
+        }
+        if self.bytes[8..].iter().any(|&b| b != 0) {
+            return None;
+        }
+        let mut lo = [0u8; 8];
+        lo.copy_from_slice(&self.bytes[..8]);
+        Some(u64::from_le_bytes(lo))
+    }
+
     /// Returns the absolute value as a `Scalar`.
     pub fn abs_scalar(&self) -> Scalar {
         let mut abs_bytes = self.bytes;
