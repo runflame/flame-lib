@@ -86,6 +86,87 @@ TBD.
 
 TBD.
 
+## Glossary
 
+Terms are listed in dependency order: each entry uses concepts introduced above it.
 
+### Transaction
+A unit of state change in the Flame network. Comes in two forms: [external](#external-transaction) and [internal](#internal-transaction).
 
+### Block
+Ordered batch of [transactions](#transaction) appended to the chain by consensus.
+
+### FlameVM
+Stack machine that verifies a [transaction](#transaction) by executing its [script](#script). Each transaction instantiates its own VM.
+
+### Script
+Sequence of [FlameVM](#flamevm) instructions; the executable body of a [transaction](#transaction).
+
+### Value
+Typed item on the [FlameVM](#flamevm) stack. May be linear, copyable, portable, or non-portable.
+
+### Portable
+Property of a [value](#value): may exist in persistent blockchain state outside [FlameVM](#flamevm) execution.
+
+### Copyable
+Property of a [value](#value): may be duplicated during [FlameVM](#flamevm) execution.
+
+### Token
+Linear [value](#value) representing an asset instance. Bearer: cannot be duplicated, created, or destroyed except by explicit operations. Three concrete types: `Token`, [`ClearToken`](#cleartoken), [`WideToken`](#widetoken).
+
+### Quantity
+Number of atomic units in a [token](#token). May be encrypted.
+
+### Flavor
+Asset-kind identifier of a [token](#token). May be encrypted.
+
+### ClearToken
+[Token](#token) with unencrypted [quantity](#quantity) and [flavor](#flavor).
+
+### WideToken
+[Token](#token) with encrypted [quantity](#quantity) that may be negative.
+
+### Predicate
+[Script](#script) that authorizes access to a locked entity. Compressed under a public key per a Taproot variant.
+
+### Output
+Element of persistent blockchain state created and consumed by [external transactions](#external-transaction). Encodes a [predicate](#predicate) and a payload of [values](#value).
+
+### Cell
+In-[FlameVM](#flamevm) form of an [output](#output): a compressed, single-use container of [values](#value) locked by a [predicate](#predicate). Destroyed when accessed.
+
+### Actor
+Long-living, addressable entity holding persistent state and [script](#script). Stored uncompressed. Receives [message sends](#message-send) and [method calls](#method-call); supports concurrent multi-user interaction.
+
+### Address
+Identifier of an [actor](#actor); the target of [message sends](#message-send) and [method calls](#method-call).
+
+### External transaction
+[Transaction](#transaction) with user-determined results. Runs in external context with access to [Utreexo](#utreexo) and [Bulletproofs](#bulletproofs). Pays a fee atomically.
+
+### Message send
+Effect of an [external transaction](#external-transaction) that schedules an [internal transaction](#internal-transaction) targeting an [actor](#actor) at a given [address](#address). Carries arguments, [gas](#gas), [storage units](#storage-unit), and a [refund predicate](#refund-predicate).
+
+### Internal transaction
+[Transaction](#transaction) triggered by a [message send](#message-send). Operates on uncompressed [actor](#actor) state. Cannot return values to the originator and cannot use [Bulletproofs](#bulletproofs).
+
+### Method call
+Synchronous invocation between [actors](#actor) within an [internal transaction](#internal-transaction). Returns values to the caller.
+
+### Refund predicate
+[Predicate](#predicate) specified by the sender of a [message send](#message-send); seals the send's arguments into a [cell](#cell) if the send fails.
+
+### Gas
+Unit of [script](#script) execution cost, allotted to a [message send](#message-send) by the originating [external transaction](#external-transaction). Not refunded on failure.
+
+### Storage unit
+Unit of persistent state allocation cost, allotted alongside [gas](#gas) for [actor](#actor) state changes. Not refunded on failure.
+
+### Utreexo
+Compressed accumulator of the unspent [output](#output) set, accessed by [external transactions](#external-transaction).
+
+### Bulletproofs
+Zero-knowledge R1CS proof system used by [external transactions](#external-transaction) for confidential operations on [tokens](#token) and custom constraints. Not available in [internal transactions](#internal-transaction).
+
+### Schnorr ZKP
+Discrete-log-based zero-knowledge proof protocol available in both [external](#external-transaction) and [internal](#internal-transaction) transactions.
