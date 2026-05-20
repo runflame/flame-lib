@@ -17,8 +17,8 @@ pub struct ExternalTx {
     /// Header metadata
     pub header: TxHeader,
 
-    /// Program representing the transaction
-    pub program: Vec<u8>,
+    /// Script representing the transaction
+    pub script: Vec<u8>,
 
     /// Aggregated signature of the txid
     pub signature: Signature,

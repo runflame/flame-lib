@@ -103,9 +103,9 @@ pub enum VMError {
     // #[error("Item is not a signed integer.")]
     // TypeNotSignedInteger,
 
-    // /// This error occurs when a prover is supposed to provide a program.
-    // #[error("Item is not a program")]
-    // TypeNotProgram,
+    // /// This error occurs when a prover is supposed to provide a script.
+    // #[error("Item is not a script")]
+    // TypeNotScript,
 
     // /// This error occurs when a prover has an inconsistent combination of witness data
     // #[error("Witness data is inconsistent.")]
@@ -124,7 +124,7 @@ pub enum VMError {
     // StackUnderflow,
 
     // /// This error occurs when VM is left with some items on the stack
-    // #[error("Stack is not cleared by the program")]
+    // #[error("Stack is not cleared by the script")]
     // StackNotClean,
 
     // /// This error occurs when VM's anchor remains unset.

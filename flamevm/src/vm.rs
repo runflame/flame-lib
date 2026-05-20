@@ -12,7 +12,7 @@ internal tx:
 
 // TODO: change this into a trait for prover-side execution.
 struct VMRun {
-    program: Vec<u8>
+    script: Vec<u8>
 }
 
 struct VMCall {
