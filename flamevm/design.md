@@ -80,11 +80,50 @@ Confidentiality: Bulletproofs R1CS proof system for external transactions enable
 
 ## Gas
 
-TBD.
+Gas is the unit of [script](#script) execution cost. The network enforces a per-block gas limit; no single [transaction](#transaction) and no sum of transactions in a [block](#block) may exceed it.
+
+[External transactions](#external-transaction) pay for gas in _flames_ via the transaction fee. A single fee covers two categories of gas:
+
+1. Gas consumed by the external transaction's own [script](#script) execution.
+2. Gas allotted to each [message send](#message-send) the external transaction emits.
+
+Each external transaction is granted a baseline *gas credit* — an amount sufficient to execute a typical transaction without message sends. Additional gas required by message sends is purchased explicitly above the credit.
+
+[Internal transactions](#internal-transaction) cannot request or hold gas beyond what was allotted at their originating [message send](#message-send). The full allotment is committed up front; gas left over at the end of the internal transaction is discarded, not refunded.
+
+Within an internal transaction, a [method call](#method-call) may pass a gas limit to its callee; by default the callee inherits the caller's remaining gas. Unlike a message send, gas left over after a method call returns to the caller.
+
+Transactions paying higher fees per unit of gas are prioritized by minters during block construction.
+
+The opcodes `gas` (remaining gas) and `gaslimit` (current call's cap) are available during execution. The opcode `fee` records a fee, emitting a debt [WideToken](#widetoken) that must be balanced against tokens consumed in the transaction.
 
 ## Storage
 
-TBD.
+[Actor](#actor) state is metered in *virtual bytes* (vbytes). The vbyte metric is defined at the protocol level so all implementations agree on storage cost regardless of on-disk representation.
+
+Each actor holds a balance of vbytes representing prepaid storage. At the end of every block, after all [transactions](#transaction) are processed, each actor's balance is decremented by the number of vbytes it occupies.
+
+The protocol introduces 5000 new vbytes per block, on top of any vbytes recycled from cleared actors. Network supermajority can adjust the per-block supply by up to 2× in either direction. Recycled vbytes rejoin the global pool after a 100-block maturity. This makes hoarding storage costly: an actor that holds unused vbytes continuously bleeds them with each block.
+
+Vbytes are purchased by [external transactions](#external-transaction) through fees and deposited onto actors via [message sends](#message-send). A message send attaches a vbyte allotment that is credited to the destination actor; an empty message send (no method, no arguments) is the dedicated form for transferring vbytes alone and is guaranteed not to fail. Actors may also transfer vbytes to each other through the allotment carried by a [method call](#method-call).
+
+### Depletion and grace period
+
+When an actor's vbyte balance reaches zero, it does not vanish immediately. Each actor records the block in which it was most recently activated (initial deployment, or a top-up from zero). When the balance is depleted, the actor enters a *frozen* state: it stops accepting calls, but its state is preserved.
+
+The frozen state lasts for a grace period equal to one block of grace per four blocks of prior activity, capped at six months of blocks. During the grace period, any [message send](#message-send) that delivers vbytes restores the actor and clears the frozen flag. If the grace period elapses without a top-up, the actor's state is cleared and its vbytes rejoin the pool (subject to the 100-block maturity).
+
+This bounds the freeloading risk of short-lived actors — which earn little grace — while giving operators of long-lived actors months of headroom to notice a depleted balance and refill it.
+
+### Transient memory
+
+In addition to its persistent vbyte balance, an [actor](#actor) may use *transient memory* during a call — scratch space released when the call ends. Like [gas](#gas), transient memory must be bounded by a network-defined limit to prevent runaway allocations. The opcode `memlimit` returns the cap available to the current call.
+
+Whether that cap is tied to the actor's persistent vbyte allocation, or is paid for through [gas](#gas) alone, is undecided. The first model rewards actors that rented a large arena with proportional working memory; the second leans entirely on gas to meter compute, which already scales with memory pressure.
+
+### Opcodes
+
+`bytes` returns the actor's remaining persistent vbyte balance. `newbytes` returns the vbytes received during the current call. `memlimit` returns the transient memory cap for the current call.
 
 ## Glossary
 
@@ -145,7 +184,7 @@ Identifier of an [actor](#actor); the target of [message sends](#message-send) a
 [Transaction](#transaction) with user-determined results. Runs in external context with access to [Utreexo](#utreexo) and [Bulletproofs](#bulletproofs). Pays a fee atomically.
 
 ### Message send
-Effect of an [external transaction](#external-transaction) that schedules an [internal transaction](#internal-transaction) targeting an [actor](#actor) at a given [address](#address). Carries arguments, [gas](#gas), [storage units](#storage-unit), and a [refund predicate](#refund-predicate).
+Effect of an [external transaction](#external-transaction) that schedules an [internal transaction](#internal-transaction) targeting an [actor](#actor) at a given [address](#address). Carries arguments, [gas](#gas), [vbytes](#vbyte), and a [refund predicate](#refund-predicate).
 
 ### Internal transaction
 [Transaction](#transaction) triggered by a [message send](#message-send). Operates on uncompressed [actor](#actor) state. Cannot return values to the originator and cannot use [Bulletproofs](#bulletproofs).
@@ -157,10 +196,10 @@ Synchronous invocation between [actors](#actor) within an [internal transaction]
 [Predicate](#predicate) specified by the sender of a [message send](#message-send); seals the send's arguments into a [cell](#cell) if the send fails.
 
 ### Gas
-Unit of [script](#script) execution cost, allotted to a [message send](#message-send) by the originating [external transaction](#external-transaction). Not refunded on failure.
+Unit of [script](#script) execution cost. Allotted via the [external transaction](#external-transaction) fee, both for the transaction's own [script](#script) and for each [message send](#message-send) it emits. Not refunded on failure.
 
-### Storage unit
-Unit of persistent state allocation cost, allotted alongside [gas](#gas) for [actor](#actor) state changes. Not refunded on failure.
+### Vbyte
+Virtual byte: protocol-level unit of persistent [actor](#actor) state allocation. Allotted by [message sends](#message-send), decremented per [block](#block), and reclaimed (after a 100-block maturity) when an [actor](#actor) is cleared. Not refunded on failure.
 
 ### Utreexo
 Compressed accumulator of the unspent [output](#output) set, accessed by [external transactions](#external-transaction).
