@@ -826,20 +826,12 @@ impl VM {
         Ok(())
     }
 
-    /// `0x1b` `pushtoken` — reads 32 inline bytes as the flavor's
-    /// canonical scalar, pushes a zero-qty `ClearToken`.
-    ///
-    /// The spec says "0-qty token of any flavor"; we materialize this as
-    /// a `ClearToken { qty: 0, flv: Int253(scalar) }`. The bytes are
-    /// interpreted as a canonical Ristretto scalar (no sign bit) —
-    /// flavors are typically hash outputs, which are positive scalars.
+    /// `0x1b` `pushtoken` — `flv → token`. Pops an `Int253` flavor from
+    /// the stack and pushes a zero-qty `ClearToken { qty: 0, flv }`. This
+    /// is the canonical "empty bearer of a flavor" used as a starting
+    /// point for issuance / borrow flows.
     fn op_pushtoken(&mut self) -> Result<(), VMError> {
-        let bytes = self.current_call.current_run.read_bytes(32)?;
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(bytes);
-        let scalar = Scalar::from_canonical_bytes(arr)
-            .ok_or(VMError::InvalidInt253Encoding)?;
-        let flv = Int253::from_parts(false, scalar);
+        let flv = self.pop_int253()?;
         self.push_value(Value::ClearToken(ClearToken::new(Int253::zero(), flv)));
         Ok(())
     }
@@ -1927,9 +1919,37 @@ mod tests {
 
     #[test]
     fn pushtoken_zero_qty_with_flavor() {
-        let flv = Int253::from(7u64);
-        let mut script = vec![0x1b];
+        // push:7, pushtoken — flavor comes from the stack now.
+        let mut vm = vm_with_script(vec![0x07, 0x1b]);
+        run_to_end(&mut vm).unwrap();
+        match &vm.current_call.stack[0] {
+            Value::ClearToken(t) => {
+                assert!(t.is_zero_qty());
+                assert_eq!(t.flv(), Int253::from(7u64));
+            }
+            other => panic!("expected ClearToken, got {}", value_kind(other)),
+        }
+    }
+
+    #[test]
+    fn pushtoken_requires_int_flavor() {
+        // pushstr "x", pushtoken — top is String, not Int253.
+        let mut script = pushstr_bytes(b"x");
+        script.push(0x1b);
+        let mut vm = vm_with_script(script);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::TypeNotInt253
+        ));
+    }
+
+    #[test]
+    fn pushtoken_full_flavor_via_pushint_full() {
+        // pushint full <bytes>, pushtoken — exercises a non-small flavor.
+        let flv = Int253::from(0x1234567890abcdefu64);
+        let mut script = vec![0x18];
         script.extend_from_slice(&flv.to_bytes());
+        script.push(0x1b);
         let mut vm = vm_with_script(script);
         run_to_end(&mut vm).unwrap();
         match &vm.current_call.stack[0] {
@@ -1937,20 +1957,8 @@ mod tests {
                 assert!(t.is_zero_qty());
                 assert_eq!(t.flv(), flv);
             }
-            other => panic!("expected ClearToken, got {}", value_kind(other)),
+            _ => panic!("expected ClearToken"),
         }
-    }
-
-    #[test]
-    fn pushtoken_rejects_noncanonical_flavor() {
-        // All-ones bytes are not a canonical Ristretto scalar.
-        let mut script = vec![0x1b];
-        script.extend_from_slice(&[0xffu8; 32]);
-        let mut vm = vm_with_script(script);
-        assert!(matches!(
-            run_to_end(&mut vm).unwrap_err(),
-            VMError::InvalidInt253Encoding
-        ));
     }
 
     // ── drop (0x1c) ──────────────────────────────────────────────
@@ -2012,11 +2020,8 @@ mod tests {
 
     #[test]
     fn dup_noncopyable_errors() {
-        // pushtoken (linear) then dup:0
-        let mut script = vec![0x1b];
-        script.extend_from_slice(&Int253::from(1u64).to_bytes());
-        script.push(0x20);
-        let mut vm = vm_with_script(script);
+        // push:1, pushtoken (linear), dup:0
+        let mut vm = vm_with_script(vec![0x01, 0x1b, 0x20]);
         assert!(matches!(
             run_to_end(&mut vm).unwrap_err(),
             VMError::TypeNotCopyable
@@ -2446,13 +2451,8 @@ mod tests {
     #[test]
     fn eq_noncomparable_linear_type_errors() {
         // Two ClearTokens of same flavor — same variant, but linear.
-        let flv = Int253::from(7u64).to_bytes();
-        let mut script = vec![0x1b];
-        script.extend_from_slice(&flv);
-        script.push(0x1b);
-        script.extend_from_slice(&flv);
-        script.push(0x51);
-        let mut vm = vm_with_script(script);
+        // push:7, pushtoken, push:7, pushtoken, eq
+        let mut vm = vm_with_script(vec![0x07, 0x1b, 0x07, 0x1b, 0x51]);
         assert!(matches!(
             run_to_end(&mut vm).unwrap_err(),
             VMError::TypeNotComparable
@@ -3242,15 +3242,16 @@ mod tests {
     #[test]
     fn getdup_noncopyable_errors() {
         // {5: ClearToken(0, 7)}; getdup k=5 → TypeNotCopyable
-        let flv = Int253::from(7u64).to_bytes();
-        let mut script = vec![0x1b];
-        script.extend_from_slice(&flv); // value = ClearToken
-        script.push(0x05);              // key 5
-        script.push(0x01);              // count 1
-        script.push(0x60);              // dict
-        script.push(0x05);              // k
-        script.push(0x65);              // getdup
-        let mut vm = vm_with_script(script);
+        // push:7 (flavor), pushtoken (value), push:5 (key), push:1 (count),
+        //   dict, push:5 (k), getdup.
+        let mut vm = vm_with_script(vec![
+            0x07, 0x1b, // value = ClearToken with flavor 7
+            0x05,       // key 5
+            0x01,       // count 1
+            0x60,       // dict
+            0x05,       // k
+            0x65,       // getdup
+        ]);
         assert!(matches!(
             run_to_end(&mut vm).unwrap_err(),
             VMError::TypeNotCopyable
@@ -3319,14 +3320,9 @@ mod tests {
 
     #[test]
     fn dict_with_token_is_noncopyable() {
-        // Build {5: ClearToken}; the dict should be marked non-copyable.
-        let flv = Int253::from(7u64).to_bytes();
-        let mut script = vec![0x1b];
-        script.extend_from_slice(&flv);
-        script.push(0x05); // key
-        script.push(0x01); // count
-        script.push(0x60); // dict
-        let mut vm = vm_with_script(script);
+        // Build {5: ClearToken(0, flavor=7)}; the dict should be marked
+        // non-copyable.  push:7 (flavor), pushtoken, push:5, push:1, dict
+        let mut vm = vm_with_script(vec![0x07, 0x1b, 0x05, 0x01, 0x60]);
         run_to_end(&mut vm).unwrap();
         match &vm.current_call.stack[0] {
             Value::Dict(d) => {
@@ -3357,14 +3353,8 @@ mod tests {
 
     #[test]
     fn dup_of_noncopyable_dict_errors() {
-        let flv = Int253::from(7u64).to_bytes();
-        let mut script = vec![0x1b];
-        script.extend_from_slice(&flv);
-        script.push(0x05); // key
-        script.push(0x01); // count
-        script.push(0x60); // dict
-        script.push(0x20); // dup:0
-        let mut vm = vm_with_script(script);
+        // push:7, pushtoken, push:5, push:1, dict, dup:0
+        let mut vm = vm_with_script(vec![0x07, 0x1b, 0x05, 0x01, 0x60, 0x20]);
         assert!(matches!(
             run_to_end(&mut vm).unwrap_err(),
             VMError::TypeNotCopyable

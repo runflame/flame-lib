@@ -316,7 +316,7 @@ Layout of all the instructions:
 | 18 | pushint | ø → int | Reads 32 more bytes, highest bit is a sign bit. |
 | 19 | pushstr | ø → string | Pushes a string on stack. |
 | 1a | pushpoint | ø → point | Pushes a point on stack. |
-| 1b | pushtoken | ø → token | Pushes 0-qty token of any flavor, reading next 32 bytes for flavor. |
+| 1b | pushtoken | flv → token | Pops an Int253 flavor and pushes a 0-qty ClearToken with that flavor. |
 | 1c | drop | x → ø | Drops any droppable item, including empty structs and zero-tokens. |
 | 1d | nop | ø → ø | Does nothing. |
 | 1e | dup | x… k → x ... x | Copies k-th item to the top of the stack, takes integer k from stack. |
