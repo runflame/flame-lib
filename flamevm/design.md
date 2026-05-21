@@ -277,14 +277,6 @@ Because the proof binds to the outcome of the transaction, Bulletproofs are unav
 
 Discrete-log-based ZKP protocols can be evaluated in both external and internal transactions via the `Merlin` transcript and `MultiscalarMul` types. Users construct custom proofs of knowledge bound to arbitrary data.
 
-## Concurrency and privacy
-
-### Concurrency
-
-External transactions are verifiable in parallel because each one is bound only to its own TxID and reads only from already-confirmed state (the previous block's Utreexo accumulator and actor registry). Two external transactions in the same block cannot observe each other's effects.
-
-Internal transactions are verified serially within a block because they share the live actor registry: an actor's state mutation in one internal transaction is visible to the next. The serial order is fixed by the order minters chose for the originating external transactions.
-
 ### Privacy boundaries
 
 An on-chain observer sees different information depending on the transaction type.
@@ -298,7 +290,7 @@ An on-chain observer sees different information depending on the transaction typ
 
 **External transactions hide:**
 
-- The cleartext payload of unopened [cells](#cell).
+- The unexecuted scripts in [cells](#cell) (via Taproot).
 - Variable assignments inside Bulletproofs.
 - The plaintext quantities and flavors of encrypted tokens.
 
@@ -308,7 +300,13 @@ An on-chain observer sees different information depending on the transaction typ
 - All mutations to actor state.
 - Outputs emitted to Utreexo.
 
-Internal transactions have no native confidentiality story: they operate on uncompressed actor state in the clear. Custom Schnorr ZKPs may be used by an actor to attest to facts about its inputs without revealing them, but the actor's own state remains visible.
+Internal transactions have no native confidentiality story: they operate on uncompressed actor state in the clear. Custom Schnorr ZKPs may be used by an actor to attest to facts about secret data.
+
+## Concurrency
+
+External transactions are verifiable in parallel because each one is bound only to its own set of consumed UTXOs. Two external transactions in the same block cannot observe each other's effects.
+
+Internal transactions are verified serially within a block becuase they share the global state of all actors: an actor's state mutation in one internal transaction is visible to the next. The serial order is fixed by the order minters chose for the originating external transactions.
 
 ## Resources
 
