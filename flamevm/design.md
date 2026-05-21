@@ -35,10 +35,10 @@ A composite value (a `Dict`) inherits these flags from its members: once a non-p
 
 | Type      | Description |
 |-----------|-------------|
-| `Int`     | Signed 256-bit integer (Ristretto group order with an explicit sign bit). |
+| `Int253` | Signed sign-magnitude integer; magnitude is a canonical Ristretto scalar (`< ℓ ≈ 2²⁵²`), plus an explicit sign bit. The name reflects the effective conceptual width: `⌈log₂(ℓ)⌉ = 253` bits of magnitude. |
 | `String`  | Variable-length byte string; also acts as a builder/reader for parsing. |
 | `Point`   | Element of the Ristretto255 group; used for public keys and Pedersen commitments. |
-| `Dict`    | Map from `Int` keys to arbitrary values; used for lists, maps, and enum variants. |
+| `Dict`    | Map from `Int253` keys to arbitrary values; used for lists, maps, and enum variants. |
 
 ### Tokens
 
@@ -89,6 +89,18 @@ When an [external transaction](#external-transaction) consumes an output via `in
 - A **payload** — any portable collection of values (tokens, integers, strings, dicts).
 - A **predicate** — a [script](#script) compressed under a public key that gates access to the payload.
 
+Cell is encoded as a list (sequential Dict) where first element is a predicate, second is an anchor and the rest are items in the same order as they are placed on stack (topmost goes last in the list).
+
+```
+Cell = Dict {
+  0: Point,  // predicate
+  1: String, // anchor
+  1: Value,  // list of values
+  2: ...
+}
+```
+
+
 Cells are linear: once opened (with `open` or via transaction signature), they vanish, and their payload values are released onto the stack. New cells are produced by `output`, sealing portable values from the stack under a fresh predicate. Cells are stored compressed in the Utreexo accumulator.
 
 Cells are designed for private covenants — payments, multisignature vaults, escrow agreements. Their compressed on-chain footprint and single-use semantics make them cheap to store and natural for few-party use cases.
@@ -99,10 +111,10 @@ An actor is a long-living, addressable entity holding persistent state and metho
 
 ### Structure
 
-```text
-ActorState = Dict {
-  public:  Dict<MethodKey, Script>   // callable methods; key 0 = recv
-  private: Dict<DataKey, Value>      // internal state and helpers
+```
+Actor = Dict {
+  public#0:  Dict<Int253, String>   // callable methods; key 0 = recv
+  private#1: Dict<Int253, Value>    // internal state and helpers
 }
 ```
 
@@ -138,7 +150,7 @@ Address = enum {
        dst:    ActorID
        method: MethodKey
        args:   Tuple
-       gas:    Int
+       gas:    Int253
      }
 }
 ```
@@ -256,7 +268,11 @@ The internal context permits most external-context operations except [Bulletproo
 
 ### Re-entrancy
 
-Whether and how an actor may be re-entered during its own call chain is an open question. Two coherent models are under consideration: full re-entrancy (any actor can call any actor at any time, including itself), and forbidden re-entrancy (an actor cannot be entered while it has an unfinished invocation on the call stack). The choice has direct security implications and is left open.
+An [actor](#actor) cannot be entered via [`call`](#method-call) while it already has an unfinished invocation on the call stack. Attempts fail deterministically and abort the enclosing internal transaction. This applies to both direct self-calls and indirect call chains (A → B → A).
+
+Recursion within a single method is unrestricted — the boundary is the actor, not the method. Cross-actor recursion or any mutual interaction that would require re-entry is expressed via asynchronous [`send`](#message-send), which executes in a separate internal transaction.
+
+The rule eliminates the class of re-entrancy hazards by construction: no concurrent write sessions per actor, no broken mid-call invariants, no mid-transition reads. Validators enforce it with a single check — is the target actor's ID present on the current call stack? — at the cost of disallowing some patterns (synchronous callbacks, cross-actor mutual recursion) that must be re-expressed via explicit argument passing or async sends.
 
 ## Confidentiality
 
@@ -310,11 +326,11 @@ Internal transactions are verified serially within a block becuase they share th
 
 ## Resources
 
-FlameVM execution is metered by two resources: **gas** (compute cost) and **vbytes** (persistent storage cost). Both are committed up front via the external-transaction fee and are not refunded on failure.
+FlameVM execution is metered by two resources: **gas** (compute cost) and **virtual bytes** (persistent storage cost). Both are committed up front via the external-transaction fee and are not refunded on failure.
 
 ### Gas
 
-Gas is the unit of [script](#script) execution cost. The network enforces a per-block gas limit; no single [transaction](#transaction) and no sum of transactions in a [block](#block) may exceed it.
+Gas is the unit of [script](#script) execution cost. The network enforces per-block limits on parallel and serial gas separately (see [Block limits](#block-limits)); the sum of transactions in a [block](#block) may not exceed either.
 
 [External transactions](#external-transaction) pay for gas in *flames* via the transaction fee. A single fee covers two categories of gas:
 
@@ -331,6 +347,21 @@ Transactions paying higher fees per unit of gas are prioritized by minters durin
 
 The opcodes `gas` (remaining gas) and `gaslimit` (current call's cap) are available during execution. The opcode `fee` records a fee, emitting a debt [`WideToken`](#widetoken) that must be balanced against tokens consumed in the transaction.
 
+### Gas limits
+
+The block-level gas budget is partitioned into two independent caps:
+
+- **Parallel pool** (`B_par`): the sum of gas consumed by all external transactions in the block.
+- **Serial pool** (`B_ser`): the sum of gas allotments forwarded by all [send](#message-send) effects in the block's external transactions.
+
+The ratio `B_par / B_ser` is initially set to **4**, reflecting the wall-clock cost differential between parallel and serial execution on a reference validator with 4 effective verification threads. Both caps are protocol parameters published separately from the opcode table.
+
+Sub-sends emitted by [internal transactions](#internal-transaction) consume their originator's already-allotted budget and do not contribute additional charges to the serial pool; `B_ser` accounting sums only originating allotments from external sends.
+
+Because the serial pool is `1/4` the size of the parallel pool, serial-gas usage is the scarcer resource by construction. Under congestion, minters prioritize transactions paying higher fees per unit of serial gas, and the scarcity premium emerges from the market without requiring a per-send multiplier in the gas cost model.
+
+Both caps may be tightened by supermajority soft fork. Supermajority vote may also raise either cap explicitly, subject to the same governance threshold as the [vbyte introduction rate](#storage).
+
 ### Storage
 
 [Actor](#actor) state is metered in *virtual bytes* (vbytes). The vbyte metric is defined at the protocol level so all implementations agree on storage cost regardless of on-disk representation.
@@ -340,6 +371,8 @@ Each actor holds a balance of vbytes representing prepaid storage. At the end of
 The protocol introduces 5000 new vbytes per block, on top of any vbytes recycled from cleared actors. Network supermajority can adjust the per-block supply by up to 2× in either direction. Recycled vbytes rejoin the global pool after a 100-block maturity. This makes hoarding storage costly: an actor that holds unused vbytes continuously bleeds them with each block.
 
 Vbytes are purchased by [external transactions](#external-transaction) through fees and deposited onto actors via [message sends](#message-send). A message send attaches a vbyte allotment that is credited to the destination actor; an empty message send (no method, no arguments) is the dedicated form for transferring vbytes alone and is guaranteed not to fail. Actors may also transfer vbytes to each other through the allotment carried by a [method call](#method-call).
+
+Instruction `bytes` returns the actor's remaining persistent vbyte balance. `newbytes` returns the vbytes received during the current call. `memlimit` returns the transient memory cap for the current call.
 
 #### Depletion and grace period
 
@@ -353,13 +386,9 @@ This bounds the freeloading risk of short-lived actors — which earn little gra
 
 In addition to its persistent state, an [actor](#actor) may use *transient memory* during a call — scratch space released when the call ends. The cap is fixed at **4× the actor's current persistent state size in vbytes**, returned by the `memlimit` opcode.
 
-The rule is deliberately minimal: no per-call parameter, no separately-priced transient resource, no declared allocation size. An actor occupying N vbytes can use up to 4N vbytes of working memory — enough headroom to `load` its state, mutate it in place, and `save` a new version without exceeding the cap. Allocations that would push live memory past the cap fail the call.
+An actor occupying N vbytes can use up to 4N vbytes of working memory: enough headroom to `load` its state, mutate it in place, and `save` a new version without exceeding the cap. Allocations that would push live memory past the cap fail the call.
 
-#### Resource opcodes
-
-`bytes` returns the actor's remaining persistent vbyte balance. `newbytes` returns the vbytes received during the current call. `memlimit` returns the transient memory cap for the current call.
-
-## Worked examples
+## Examples
 
 The two sketches below are illustrative pseudocode, not literal scripts. They show the conceptual flow of values and effects; consult the FlameVM specification for exact opcode signatures and stack effects.
 

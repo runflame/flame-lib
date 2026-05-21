@@ -9,16 +9,16 @@
 //! ## Tag namespace
 //!
 //! ```text
-//! 0..=58     Int positive immediate (value = tag)
-//! 59         Int +U8     (1-byte payload b; value = 59 + b;  range 59..=314)
-//! 60         Int +U32    (4-byte payload w; value = 315 + w; range 315..≈4.3e9)
-//! 61         Int +U64    (8-byte payload w; value = 4_294_967_611 + w)
-//! 62         Int +FULL   (32-byte canonical scalar; value > U64 range)
-//! 63         Int -1
-//! 64         Int -U8     (value = -(2 + b);   range -2..=-257)
-//! 65         Int -U32    (value = -(258 + w))
-//! 66         Int -U64    (value = -(4_294_967_554 + w))
-//! 67         Int -FULL   (32-byte sign-magnitude; magnitude > U64 range)
+//! 0..=58     Int253 positive immediate (value = tag)
+//! 59         Int253 +U8     (1-byte payload b; value = 59 + b;  range 59..=314)
+//! 60         Int253 +U32    (4-byte payload w; value = 315 + w; range 315..≈4.3e9)
+//! 61         Int253 +U64    (8-byte payload w; value = 4_294_967_611 + w)
+//! 62         Int253 +FULL   (32-byte canonical scalar; value > U64 range)
+//! 63         Int253 -1
+//! 64         Int253 -U8     (value = -(2 + b);   range -2..=-257)
+//! 65         Int253 -U32    (value = -(258 + w))
+//! 66         Int253 -U64    (value = -(4_294_967_554 + w))
+//! 67         Int253 -FULL   (32-byte sign-magnitude; magnitude > U64 range)
 //! 68..=126   Str immediate length (length = tag - 68; range 0..=58)
 //! 127        Str VAR     (sub-varint v; length = 59 + v)
 //! 128..=186  List immediate count (count = tag - 128; range 0..=58)
@@ -63,13 +63,13 @@ pub use readerwriter::{ReadError, Reader, WriteError, Writer};
 
 use crate::crypto::Point;
 use crate::dict::Dict;
-use crate::integer::Integer;
+use crate::int253::Int253;
 use crate::string::String;
 use crate::value::Value;
 
 // ── Tag constants ─────────────────────────────────────────────────
 
-// Integers
+// Int253
 const INT_IMM_MAX: u8 = 58;
 const INT_PU8: u8 = 59;
 const INT_PU32: u8 = 60;
@@ -109,7 +109,7 @@ const MERLIN_TAG: u8 = 253;
 // Number of IMM slots (values 0..=58) shared across int/str/list/dict.
 const IMM_COUNT: u8 = INT_IMM_MAX + 1; // 59
 
-// Integer width-class bases (the value encoded with a zero payload).
+// Int253 width-class bases (the value encoded with a zero payload).
 const PU8_BASE: u64 = 59;
 const PU32_BASE: u64 = 315;
 const PU64_BASE: u64 = 4_294_967_611; // PU32_BASE + 2^32
@@ -173,18 +173,18 @@ fn read_subvarint(r: &mut impl Reader) -> Result<u64, ReadError> {
     }
 }
 
-// ── Integer encoding ──────────────────────────────────────────────
+// ── Int253 encoding ──────────────────────────────────────────────
 
-/// Writes an `Integer` in compact canonical form.
-pub fn write_integer(w: &mut impl Writer, int: &Integer) -> Result<(), WriteError> {
+/// Writes an `Int253` in compact canonical form.
+pub fn write_int253(w: &mut impl Writer, int: &Int253) -> Result<(), WriteError> {
     if int.is_negative() {
-        write_negative_integer(w, int)
+        write_negative_int253(w, int)
     } else {
-        write_positive_integer(w, int)
+        write_positive_int253(w, int)
     }
 }
 
-fn write_positive_integer(w: &mut impl Writer, int: &Integer) -> Result<(), WriteError> {
+fn write_positive_int253(w: &mut impl Writer, int: &Int253) -> Result<(), WriteError> {
     if let Some(v) = int.to_u64() {
         if v <= INT_IMM_MAX as u64 {
             return w.write_u8(b"int.tag", v as u8);
@@ -204,9 +204,9 @@ fn write_positive_integer(w: &mut impl Writer, int: &Integer) -> Result<(), Writ
     }
 
     // Doesn't fit u64. Might still fit PU64 if value <= PU64_BASE + u64::MAX.
-    let pu64_top = Integer::from(PU64_BASE) + Integer::from(u64::MAX);
+    let pu64_top = Int253::from(PU64_BASE) + Int253::from(u64::MAX);
     if int.cmp(&pu64_top) != Ordering::Greater {
-        let payload_int = *int - Integer::from(PU64_BASE);
+        let payload_int = *int - Int253::from(PU64_BASE);
         let payload = payload_int
             .to_u64()
             .expect("invariant: int - PU64_BASE fits u64 when int <= pu64_top");
@@ -219,9 +219,9 @@ fn write_positive_integer(w: &mut impl Writer, int: &Integer) -> Result<(), Writ
     w.write(b"int.full", &int.to_bytes())
 }
 
-fn write_negative_integer(w: &mut impl Writer, int: &Integer) -> Result<(), WriteError> {
+fn write_negative_int253(w: &mut impl Writer, int: &Int253) -> Result<(), WriteError> {
     let abs = int.abs();
-    if abs == Integer::one() {
+    if abs == Int253::one() {
         return w.write_u8(b"int.tag", INT_NEG1);
     }
     if let Some(mag) = abs.to_u64() {
@@ -238,9 +238,9 @@ fn write_negative_integer(w: &mut impl Writer, int: &Integer) -> Result<(), Writ
         return w.write_u64(b"int.u64", mag - NU64_BASE);
     }
 
-    let nu64_top_mag = Integer::from(NU64_BASE) + Integer::from(u64::MAX);
+    let nu64_top_mag = Int253::from(NU64_BASE) + Int253::from(u64::MAX);
     if abs.cmp(&nu64_top_mag) != Ordering::Greater {
-        let payload_int = abs - Integer::from(NU64_BASE);
+        let payload_int = abs - Int253::from(NU64_BASE);
         let payload = payload_int
             .to_u64()
             .expect("invariant: magnitude - NU64_BASE fits u64 when abs <= nu64_top_mag");
@@ -253,40 +253,40 @@ fn write_negative_integer(w: &mut impl Writer, int: &Integer) -> Result<(), Writ
     w.write(b"int.full", &int.to_bytes())
 }
 
-/// Reads a compact-encoded `Integer`.
-pub fn read_integer(r: &mut impl Reader) -> Result<Integer, ReadError> {
+/// Reads a compact-encoded `Int253`.
+pub fn read_int253(r: &mut impl Reader) -> Result<Int253, ReadError> {
     let tag = r.read_u8()?;
-    read_integer_with_tag(r, tag)
+    read_int253_with_tag(r, tag)
 }
 
-fn read_integer_with_tag(r: &mut impl Reader, tag: u8) -> Result<Integer, ReadError> {
+fn read_int253_with_tag(r: &mut impl Reader, tag: u8) -> Result<Int253, ReadError> {
     match tag {
-        0..=INT_IMM_MAX => Ok(Integer::from(tag as u64)),
+        0..=INT_IMM_MAX => Ok(Int253::from(tag as u64)),
         INT_PU8 => {
             let b = r.read_u8()?;
-            Ok(Integer::from(PU8_BASE + (b as u64)))
+            Ok(Int253::from(PU8_BASE + (b as u64)))
         }
         INT_PU32 => {
             let w = r.read_u32()? as u64;
-            Ok(Integer::from(PU32_BASE + w))
+            Ok(Int253::from(PU32_BASE + w))
         }
         INT_PU64 => {
             let w = r.read_u64()?;
-            Ok(Integer::from(PU64_BASE) + Integer::from(w))
+            Ok(Int253::from(PU64_BASE) + Int253::from(w))
         }
         INT_PFULL => read_positive_full(r),
-        INT_NEG1 => Ok(Integer::from(-1i64)),
+        INT_NEG1 => Ok(Int253::from(-1i64)),
         INT_NU8 => {
             let b = r.read_u8()?;
-            Ok(Integer::from_parts(true, Scalar::from(NU8_BASE + (b as u64))))
+            Ok(Int253::from_parts(true, Scalar::from(NU8_BASE + (b as u64))))
         }
         INT_NU32 => {
             let w = r.read_u32()? as u64;
-            Ok(Integer::from_parts(true, Scalar::from(NU32_BASE + w)))
+            Ok(Int253::from_parts(true, Scalar::from(NU32_BASE + w)))
         }
         INT_NU64 => {
             let w = r.read_u64()?;
-            let mag = Integer::from(NU64_BASE) + Integer::from(w);
+            let mag = Int253::from(NU64_BASE) + Int253::from(w);
             Ok(-mag)
         }
         INT_NFULL => read_negative_full(r),
@@ -294,30 +294,30 @@ fn read_integer_with_tag(r: &mut impl Reader, tag: u8) -> Result<Integer, ReadEr
     }
 }
 
-fn read_positive_full(r: &mut impl Reader) -> Result<Integer, ReadError> {
+fn read_positive_full(r: &mut impl Reader) -> Result<Int253, ReadError> {
     let buf = r.read_u8x32()?;
-    let int = Integer::from_bytes(buf).ok_or(ReadError::InvalidFormat)?;
+    let int = Int253::from_bytes(buf).ok_or(ReadError::InvalidFormat)?;
     // Sign bit must be clear for a positive FULL.
     if int.is_negative() {
         return Err(ReadError::InvalidFormat);
     }
     // Canonicality: value must exceed the PU64 range.
-    let pu64_top = Integer::from(PU64_BASE) + Integer::from(u64::MAX);
+    let pu64_top = Int253::from(PU64_BASE) + Int253::from(u64::MAX);
     if int.cmp(&pu64_top) != Ordering::Greater {
         return Err(ReadError::InvalidFormat);
     }
     Ok(int)
 }
 
-fn read_negative_full(r: &mut impl Reader) -> Result<Integer, ReadError> {
+fn read_negative_full(r: &mut impl Reader) -> Result<Int253, ReadError> {
     let buf = r.read_u8x32()?;
-    let int = Integer::from_bytes(buf).ok_or(ReadError::InvalidFormat)?;
+    let int = Int253::from_bytes(buf).ok_or(ReadError::InvalidFormat)?;
     // Sign bit must be set for a negative FULL.
     if !int.is_negative() {
         return Err(ReadError::InvalidFormat);
     }
     // Canonicality: magnitude must exceed the NU64 range.
-    let nu64_top_mag = Integer::from(NU64_BASE) + Integer::from(u64::MAX);
+    let nu64_top_mag = Int253::from(NU64_BASE) + Int253::from(u64::MAX);
     if int.abs().cmp(&nu64_top_mag) != Ordering::Greater {
         return Err(ReadError::InvalidFormat);
     }
@@ -418,8 +418,8 @@ fn read_dict_count_with_tag(r: &mut impl Reader, tag: u8) -> Result<usize, ReadE
 
 // ── Value encoding ────────────────────────────────────────────────
 
-fn keys_are_sequential<'a>(keys: impl Iterator<Item = &'a Integer>) -> bool {
-    keys.enumerate().all(|(i, k)| *k == Integer::from(i as u64))
+fn keys_are_sequential<'a>(keys: impl Iterator<Item = &'a Int253>) -> bool {
+    keys.enumerate().all(|(i, k)| *k == Int253::from(i as u64))
 }
 
 /// Maximum nesting depth for `read_value`. Each list/dict entry counts
@@ -444,10 +444,10 @@ fn read_value_with_depth(
     }
     let tag = r.read_u8()?;
     match tag {
-        // Integers
+        // Int253
         0..=INT_NFULL => {
-            let int = read_integer_with_tag(r, tag)?;
-            Ok(Some(Value::Int(int)))
+            let int = read_int253_with_tag(r, tag)?;
+            Ok(Some(Value::Int253(int)))
         }
         // Strings
         STR_IMM_MIN..=STR_VAR => {
@@ -479,10 +479,10 @@ fn read_value_with_depth(
             if count > r.remaining_bytes() / 2 {
                 return Err(ReadError::InvalidFormat);
             }
-            let mut entries: Vec<(Integer, Value)> = Vec::with_capacity(count);
-            let mut last_key: Option<Integer> = None;
+            let mut entries: Vec<(Int253, Value)> = Vec::with_capacity(count);
+            let mut last_key: Option<Int253> = None;
             for _ in 0..count {
-                let key = read_integer(r)?;
+                let key = read_int253(r)?;
                 // Reject duplicate or out-of-order keys (canonicality).
                 if let Some(prev) = &last_key {
                     if key.cmp(prev) != Ordering::Greater {
@@ -527,7 +527,7 @@ pub fn write_dict(w: &mut impl Writer, dict: &Dict) -> Result<(), WriteError> {
     } else {
         write_dict_prefix(w, dict.len())?;
         for (k, v) in dict.entries() {
-            write_integer(w, k)?;
+            write_int253(w, k)?;
             write_value(w, v)?;
         }
     }
@@ -537,7 +537,7 @@ pub fn write_dict(w: &mut impl Writer, dict: &Dict) -> Result<(), WriteError> {
 /// Writes a `Value`. Returns `Err(WriteError)` for unimplemented types.
 pub fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), WriteError> {
     match val {
-        Value::Int(i) => write_integer(w, i),
+        Value::Int253(i) => write_int253(w, i),
         Value::String(s) => write_string(w, s),
         Value::Dict(d) => write_dict(w, d),
         Value::Point(p) => {
@@ -552,28 +552,28 @@ pub fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), WriteError> {
 mod tests {
     use super::*;
 
-    fn roundtrip_int(int: Integer) -> Integer {
+    fn roundtrip_int(int: Int253) -> Int253 {
         let mut buf = Vec::new();
-        write_integer(&mut buf, &int).unwrap();
+        write_int253(&mut buf, &int).unwrap();
         let mut r = buf.as_slice();
-        read_integer(&mut r).unwrap()
+        read_int253(&mut r).unwrap()
     }
 
-    fn encode_int(int: Integer) -> Vec<u8> {
+    fn encode_int(int: Int253) -> Vec<u8> {
         let mut buf = Vec::new();
-        write_integer(&mut buf, &int).unwrap();
+        write_int253(&mut buf, &int).unwrap();
         buf
     }
 
-    // ── Integer encoding: width-class selection ───────────────────
+    // ── Int253 encoding: width-class selection ───────────────────
 
     #[test]
     fn int_immediate_contiguous() {
         for v in 0u64..=58 {
-            let buf = encode_int(Integer::from(v));
+            let buf = encode_int(Int253::from(v));
             assert_eq!(buf.len(), 1, "value {} should be 1 byte", v);
             assert_eq!(buf[0], v as u8);
-            assert_eq!(roundtrip_int(Integer::from(v)), Integer::from(v));
+            assert_eq!(roundtrip_int(Int253::from(v)), Int253::from(v));
         }
     }
 
@@ -581,43 +581,43 @@ mod tests {
     fn int_pu8_range() {
         // Just above immediate (59), middle (180), top (314).
         for (val, payload) in [(59u64, 0u8), (180, 121), (314, 255)] {
-            let buf = encode_int(Integer::from(val));
+            let buf = encode_int(Int253::from(val));
             assert_eq!(buf, vec![INT_PU8, payload], "value {}", val);
-            assert_eq!(roundtrip_int(Integer::from(val)), Integer::from(val));
+            assert_eq!(roundtrip_int(Int253::from(val)), Int253::from(val));
         }
     }
 
     #[test]
     fn int_pu32_range() {
         for val in [315u64, 1_000, 70_000, 4_294_967_610] {
-            let buf = encode_int(Integer::from(val));
+            let buf = encode_int(Int253::from(val));
             assert_eq!(buf[0], INT_PU32);
             assert_eq!(buf.len(), 5);
-            assert_eq!(roundtrip_int(Integer::from(val)), Integer::from(val));
+            assert_eq!(roundtrip_int(Int253::from(val)), Int253::from(val));
         }
         // Tag-payload bijection at base.
-        let buf = encode_int(Integer::from(315u64));
+        let buf = encode_int(Int253::from(315u64));
         assert_eq!(&buf[1..], &0u32.to_le_bytes());
     }
 
     #[test]
     fn int_pu64_range() {
         for val in [4_294_967_611u64, 1u64 << 40, u64::MAX] {
-            let buf = encode_int(Integer::from(val));
+            let buf = encode_int(Int253::from(val));
             assert_eq!(buf[0], INT_PU64);
             assert_eq!(buf.len(), 9);
-            assert_eq!(roundtrip_int(Integer::from(val)), Integer::from(val));
+            assert_eq!(roundtrip_int(Int253::from(val)), Int253::from(val));
         }
         // Base value encodes payload 0.
-        let buf = encode_int(Integer::from(PU64_BASE));
+        let buf = encode_int(Int253::from(PU64_BASE));
         assert_eq!(&buf[1..], &0u64.to_le_bytes());
     }
 
     #[test]
     fn int_pfull_just_above_pu64_top() {
         // pu64_top = PU64_BASE + u64::MAX. Value just above that goes to PFULL.
-        let pu64_top = Integer::from(PU64_BASE) + Integer::from(u64::MAX);
-        let above = pu64_top + Integer::one();
+        let pu64_top = Int253::from(PU64_BASE) + Int253::from(u64::MAX);
+        let above = pu64_top + Int253::one();
         let buf = encode_int(above);
         assert_eq!(buf[0], INT_PFULL);
         assert_eq!(buf.len(), 33);
@@ -627,7 +627,7 @@ mod tests {
     #[test]
     fn int_pu64_top_does_not_use_pfull() {
         // The boundary value (= pu64_top) must use PU64, not PFULL.
-        let pu64_top = Integer::from(PU64_BASE) + Integer::from(u64::MAX);
+        let pu64_top = Int253::from(PU64_BASE) + Int253::from(u64::MAX);
         let buf = encode_int(pu64_top);
         assert_eq!(buf[0], INT_PU64);
         assert_eq!(roundtrip_int(pu64_top), pu64_top);
@@ -635,41 +635,41 @@ mod tests {
 
     #[test]
     fn int_neg1() {
-        let buf = encode_int(Integer::from(-1i64));
+        let buf = encode_int(Int253::from(-1i64));
         assert_eq!(buf, vec![INT_NEG1]);
-        assert_eq!(roundtrip_int(Integer::from(-1i64)), Integer::from(-1i64));
+        assert_eq!(roundtrip_int(Int253::from(-1i64)), Int253::from(-1i64));
     }
 
     #[test]
     fn int_nu8_range() {
         for (val, payload) in [(-2i64, 0u8), (-100, 98), (-257, 255)] {
-            let buf = encode_int(Integer::from(val));
+            let buf = encode_int(Int253::from(val));
             assert_eq!(buf, vec![INT_NU8, payload], "value {}", val);
-            assert_eq!(roundtrip_int(Integer::from(val)), Integer::from(val));
+            assert_eq!(roundtrip_int(Int253::from(val)), Int253::from(val));
         }
     }
 
     #[test]
     fn int_nu32_range() {
         for val in [-258i64, -1_000_000, -4_294_967_553] {
-            let buf = encode_int(Integer::from(val));
+            let buf = encode_int(Int253::from(val));
             assert_eq!(buf[0], INT_NU32);
             assert_eq!(buf.len(), 5);
-            assert_eq!(roundtrip_int(Integer::from(val)), Integer::from(val));
+            assert_eq!(roundtrip_int(Int253::from(val)), Int253::from(val));
         }
     }
 
     #[test]
     fn int_nu64_range() {
         // Just above NU32_TOP, and at u64::MAX magnitude.
-        let mag_at_base = Integer::from(NU64_BASE);
+        let mag_at_base = Int253::from(NU64_BASE);
         let val_at_base = -mag_at_base;
         let buf = encode_int(val_at_base);
         assert_eq!(buf[0], INT_NU64);
         assert_eq!(&buf[1..], &0u64.to_le_bytes());
         assert_eq!(roundtrip_int(val_at_base), val_at_base);
 
-        let mag_max = Integer::from(NU64_BASE) + Integer::from(u64::MAX);
+        let mag_max = Int253::from(NU64_BASE) + Int253::from(u64::MAX);
         let val_max = -mag_max;
         let buf = encode_int(val_max);
         assert_eq!(buf[0], INT_NU64);
@@ -679,8 +679,8 @@ mod tests {
 
     #[test]
     fn int_nfull_just_above_nu64_top() {
-        let nu64_top_mag = Integer::from(NU64_BASE) + Integer::from(u64::MAX);
-        let mag_above = nu64_top_mag + Integer::one();
+        let nu64_top_mag = Int253::from(NU64_BASE) + Int253::from(u64::MAX);
+        let mag_above = nu64_top_mag + Int253::one();
         let value = -mag_above;
         let buf = encode_int(value);
         assert_eq!(buf[0], INT_NFULL);
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(roundtrip_int(value), value);
     }
 
-    // ── Integer canonicality: decoder rejection ───────────────────
+    // ── Int253 canonicality: decoder rejection ───────────────────
 
     #[test]
     fn int_pfull_decoder_rejects_low_value() {
@@ -696,10 +696,10 @@ mod tests {
         // in FULL form should be rejected by the decoder.
         let mut buf = Vec::new();
         buf.push(INT_PFULL);
-        let small = Integer::from(42u64);
+        let small = Int253::from(42u64);
         buf.extend_from_slice(&small.to_bytes());
         let mut r = buf.as_slice();
-        assert!(matches!(read_integer(&mut r), Err(ReadError::InvalidFormat)));
+        assert!(matches!(read_int253(&mut r), Err(ReadError::InvalidFormat)));
     }
 
     #[test]
@@ -707,10 +707,10 @@ mod tests {
         // Boundary: even the PU64 top, dressed in PFULL, must be rejected.
         let mut buf = Vec::new();
         buf.push(INT_PFULL);
-        let top = Integer::from(PU64_BASE) + Integer::from(u64::MAX);
+        let top = Int253::from(PU64_BASE) + Int253::from(u64::MAX);
         buf.extend_from_slice(&top.to_bytes());
         let mut r = buf.as_slice();
-        assert!(matches!(read_integer(&mut r), Err(ReadError::InvalidFormat)));
+        assert!(matches!(read_int253(&mut r), Err(ReadError::InvalidFormat)));
     }
 
     #[test]
@@ -723,17 +723,17 @@ mod tests {
         bytes[31] = 0x80 | 0x01;
         buf.extend_from_slice(&bytes);
         let mut r = buf.as_slice();
-        assert!(matches!(read_integer(&mut r), Err(ReadError::InvalidFormat)));
+        assert!(matches!(read_int253(&mut r), Err(ReadError::InvalidFormat)));
     }
 
     #[test]
     fn int_nfull_decoder_rejects_low_magnitude() {
         let mut buf = Vec::new();
         buf.push(INT_NFULL);
-        let small_neg = Integer::from(-42i64);
+        let small_neg = Int253::from(-42i64);
         buf.extend_from_slice(&small_neg.to_bytes());
         let mut r = buf.as_slice();
-        assert!(matches!(read_integer(&mut r), Err(ReadError::InvalidFormat)));
+        assert!(matches!(read_int253(&mut r), Err(ReadError::InvalidFormat)));
     }
 
     #[test]
@@ -741,10 +741,10 @@ mod tests {
         // Negative tag with sign bit clear in the payload must be rejected.
         let mut buf = Vec::new();
         buf.push(INT_NFULL);
-        let pos_large = Integer::from(PU64_BASE) + Integer::from(u64::MAX) + Integer::one();
+        let pos_large = Int253::from(PU64_BASE) + Int253::from(u64::MAX) + Int253::one();
         buf.extend_from_slice(&pos_large.to_bytes());
         let mut r = buf.as_slice();
-        assert!(matches!(read_integer(&mut r), Err(ReadError::InvalidFormat)));
+        assert!(matches!(read_int253(&mut r), Err(ReadError::InvalidFormat)));
     }
 
     // ── String encoding ──────────────────────────────────────────
@@ -887,11 +887,11 @@ mod tests {
     #[test]
     fn read_value_int() {
         let mut buf = Vec::new();
-        write_integer(&mut buf, &Integer::from(42u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(42u64)).unwrap();
         let mut r = buf.as_slice();
         match read_value(&mut r).unwrap() {
-            Some(Value::Int(i)) => assert_eq!(i, Integer::from(42u64)),
-            _ => panic!("expected Int"),
+            Some(Value::Int253(i)) => assert_eq!(i, Int253::from(42u64)),
+            _ => panic!("expected Int253"),
         }
     }
 
@@ -923,14 +923,14 @@ mod tests {
     fn read_value_list_style_dict() {
         let mut buf = Vec::new();
         write_list_prefix(&mut buf, 2).unwrap();
-        write_integer(&mut buf, &Integer::from(5u64)).unwrap();
-        write_integer(&mut buf, &Integer::from(10u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(5u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(10u64)).unwrap();
         let mut r = buf.as_slice();
         match read_value(&mut r).unwrap() {
             Some(Value::Dict(d)) => {
                 assert_eq!(d.len(), 2);
                 let keys: Vec<_> = d.entries().map(|(k, _)| *k).collect();
-                assert_eq!(keys, vec![Integer::from(0u64), Integer::from(1u64)]);
+                assert_eq!(keys, vec![Int253::from(0u64), Int253::from(1u64)]);
             }
             _ => panic!("expected Dict"),
         }
@@ -940,14 +940,14 @@ mod tests {
     fn read_value_dict_style() {
         let mut buf = Vec::new();
         write_dict_prefix(&mut buf, 1).unwrap();
-        write_integer(&mut buf, &Integer::from(99u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(99u64)).unwrap();
         write_string(&mut buf, &String::from(b"hi".to_vec())).unwrap();
         let mut r = buf.as_slice();
         match read_value(&mut r).unwrap() {
             Some(Value::Dict(d)) => {
                 assert_eq!(d.len(), 1);
                 let (k, v) = d.entries().next().unwrap();
-                assert_eq!(*k, Integer::from(99u64));
+                assert_eq!(*k, Int253::from(99u64));
                 match v {
                     Value::String(s) => assert_eq!(s.as_bytes(), b"hi"),
                     _ => panic!("expected String"),
@@ -962,8 +962,8 @@ mod tests {
     #[test]
     fn write_dict_sequential_uses_list_encoding() {
         let d = Dict::from_values(vec![
-            Value::Int(Integer::from(10u64)),
-            Value::Int(Integer::from(20u64)),
+            Value::Int253(Int253::from(10u64)),
+            Value::Int253(Int253::from(20u64)),
         ]);
         let mut buf = Vec::new();
         write_dict(&mut buf, &d).unwrap();
@@ -973,8 +973,8 @@ mod tests {
     #[test]
     fn write_dict_non_sequential_uses_dict_encoding() {
         let mut d = Dict::new();
-        d.insert(Integer::from(10u64), Value::Int(Integer::from(1u64)));
-        d.insert(Integer::from(20u64), Value::Int(Integer::from(2u64)));
+        d.insert(Int253::from(10u64), Value::Int253(Int253::from(1u64)));
+        d.insert(Int253::from(20u64), Value::Int253(Int253::from(2u64)));
         let mut buf = Vec::new();
         write_dict(&mut buf, &d).unwrap();
         assert!(buf[0] >= DICT_IMM_MIN && buf[0] <= DICT_IMM_MAX);
@@ -986,10 +986,10 @@ mod tests {
         // they should have been list-style.
         let mut buf = Vec::new();
         write_dict_prefix(&mut buf, 2).unwrap();
-        write_integer(&mut buf, &Integer::from(0u64)).unwrap();
-        write_integer(&mut buf, &Integer::from(7u64)).unwrap();
-        write_integer(&mut buf, &Integer::from(1u64)).unwrap();
-        write_integer(&mut buf, &Integer::from(8u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(0u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(7u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(1u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(8u64)).unwrap();
         let mut r = buf.as_slice();
         assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
     }
@@ -998,10 +998,10 @@ mod tests {
     fn read_value_dict_rejects_out_of_order_keys() {
         let mut buf = Vec::new();
         write_dict_prefix(&mut buf, 2).unwrap();
-        write_integer(&mut buf, &Integer::from(5u64)).unwrap();
-        write_integer(&mut buf, &Integer::from(0u64)).unwrap();
-        write_integer(&mut buf, &Integer::from(2u64)).unwrap();
-        write_integer(&mut buf, &Integer::from(0u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(5u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(0u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(2u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(0u64)).unwrap();
         let mut r = buf.as_slice();
         assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
     }
@@ -1010,10 +1010,10 @@ mod tests {
     fn read_value_dict_rejects_duplicate_keys() {
         let mut buf = Vec::new();
         write_dict_prefix(&mut buf, 2).unwrap();
-        write_integer(&mut buf, &Integer::from(7u64)).unwrap();
-        write_integer(&mut buf, &Integer::from(0u64)).unwrap();
-        write_integer(&mut buf, &Integer::from(7u64)).unwrap();
-        write_integer(&mut buf, &Integer::from(0u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(7u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(0u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(7u64)).unwrap();
+        write_int253(&mut buf, &Int253::from(0u64)).unwrap();
         let mut r = buf.as_slice();
         assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
     }

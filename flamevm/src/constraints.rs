@@ -9,7 +9,7 @@ use std::ops::{Add, Neg};
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 
 use crate::errors::VMError;
-use crate::integer::Integer;
+use crate::int253::Int253;
 
 /// Variable represents a high-level R1CS variable specified by its
 /// Pedersen commitment.
@@ -23,10 +23,10 @@ pub struct Variable {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expression {
     /// Represents a constant. Operations on constants produce constants.
-    Constant(Integer),
+    Constant(Int253),
 
     /// Linear combination of R1CS variables and constants.
-    LinearCombination(Vec<(r1cs::Variable, Scalar)>, Option<Integer>),
+    LinearCombination(Vec<(r1cs::Variable, Scalar)>, Option<Int253>),
 }
 
 /// Constraint is a boolean function of expressions and other constraints.
@@ -73,7 +73,7 @@ pub enum Commitment {
 /// Prover's representation of the commitment secret: witness and blinding factor.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommitmentWitness {
-    value: Integer,
+    value: Int253,
     blinding: Scalar,
 }
 
@@ -251,7 +251,7 @@ impl Commitment {
     }
 
     /// Creates an open commitment with a zero blinding factor.
-    pub fn unblinded<T: Into<Integer>>(x: T) -> Self {
+    pub fn unblinded<T: Into<Int253>>(x: T) -> Self {
         Commitment::Open(Box::new(CommitmentWitness {
             blinding: Scalar::zero(),
             value: x.into(),
@@ -259,7 +259,7 @@ impl Commitment {
     }
 
     /// Creates an open commitment with a random blinding factor.
-    pub fn blinded<T: Into<Integer>>(x: T) -> Self {
+    pub fn blinded<T: Into<Int253>>(x: T) -> Self {
         Commitment::Open(Box::new(CommitmentWitness {
             blinding: Scalar::random(&mut rand::thread_rng()),
             value: x.into(),
@@ -267,7 +267,7 @@ impl Commitment {
     }
 
     /// Creates an open commitment with a specified blinding factor.
-    pub fn blinded_with_factor<T: Into<Integer>>(x: T, blinding: Scalar) -> Self {
+    pub fn blinded_with_factor<T: Into<Int253>>(x: T, blinding: Scalar) -> Self {
         Commitment::Open(Box::new(CommitmentWitness {
             blinding,
             value: x.into(),
@@ -275,7 +275,7 @@ impl Commitment {
     }
 
     /// Returns the committed value and its blinding factor, if known.
-    pub fn witness(&self) -> Option<(Integer, Scalar)> {
+    pub fn witness(&self) -> Option<(Int253, Scalar)> {
         match self {
             Commitment::Closed(_) => None,
             Commitment::Open(w) => Some((w.value, w.blinding)),
@@ -283,7 +283,7 @@ impl Commitment {
     }
 
     /// Returns the committed value, without the blinding factor.
-    pub fn assignment(&self) -> Option<Integer> {
+    pub fn assignment(&self) -> Option<Int253> {
         match self {
             Commitment::Closed(_) => None,
             Commitment::Open(w) => Some(w.value),
@@ -300,7 +300,7 @@ impl CommitmentWitness {
 
 impl Expression {
     /// Creates a constant expression for a given integer or scalar.
-    pub fn constant<S: Into<Integer>>(a: S) -> Self {
+    pub fn constant<S: Into<Int253>>(a: S) -> Self {
         Expression::Constant(a.into())
     }
 
@@ -356,7 +356,7 @@ impl Expression {
 
     /// Evaluates the expression using its optional scalar witness data.
     /// Returns None if there is no witness.
-    fn eval(&self) -> Option<Integer> {
+    fn eval(&self) -> Option<Int253> {
         match self {
             Expression::Constant(a) => Some(*a),
             Expression::LinearCombination(_, a) => *a,
@@ -445,95 +445,95 @@ mod tests {
     fn expression_arithmetic() {
         // const + const => const
         assert_eq!(
-            Expression::Constant(Integer::from(1u64)) + Expression::Constant(Integer::from(2u64)),
-            Expression::Constant(Integer::from(3u64))
+            Expression::Constant(Int253::from(1u64)) + Expression::Constant(Int253::from(2u64)),
+            Expression::Constant(Int253::from(3u64))
         );
         // const + lincomb => prepend to lincomb
         assert_eq!(
-            Expression::Constant(Integer::from(1u64))
+            Expression::Constant(Int253::from(1u64))
                 + Expression::LinearCombination(
                     vec![(r1cs::Variable::One(), Scalar::from(2u64))],
-                    Some(Integer::from(2u64))
+                    Some(Int253::from(2u64))
                 ),
             Expression::LinearCombination(
                 vec![
                     (r1cs::Variable::One(), Scalar::from(1u64)),
                     (r1cs::Variable::One(), Scalar::from(2u64))
                 ],
-                Some(Integer::from(3u64))
+                Some(Int253::from(3u64))
             )
         );
         // lincomb + const => append to lincomb
         assert_eq!(
             Expression::LinearCombination(
                 vec![(r1cs::Variable::One(), Scalar::from(1u64))],
-                Some(Integer::from(1u64))
-            ) + Expression::Constant(Integer::from(2u64)),
+                Some(Int253::from(1u64))
+            ) + Expression::Constant(Int253::from(2u64)),
             Expression::LinearCombination(
                 vec![
                     (r1cs::Variable::One(), Scalar::from(1u64)),
                     (r1cs::Variable::One(), Scalar::from(2u64))
                 ],
-                Some(Integer::from(3u64))
+                Some(Int253::from(3u64))
             )
         );
         // lincomb + lincomb => concat
         assert_eq!(
             Expression::LinearCombination(
                 vec![(r1cs::Variable::Committed(1), Scalar::from(11u64))],
-                Some(Integer::from(100u64))
+                Some(Int253::from(100u64))
             ) + Expression::LinearCombination(
                 vec![(r1cs::Variable::Committed(2), Scalar::from(22u64))],
-                Some(Integer::from(42u64))
+                Some(Int253::from(42u64))
             ),
             Expression::LinearCombination(
                 vec![
                     (r1cs::Variable::Committed(1), Scalar::from(11u64)),
                     (r1cs::Variable::Committed(2), Scalar::from(22u64))
                 ],
-                Some(Integer::from(142u64))
+                Some(Int253::from(142u64))
             )
         );
         // -expr => negate weights
         assert_eq!(
-            -Expression::Constant(Integer::from(1u64)),
-            Expression::Constant(-Integer::from(1u64))
+            -Expression::Constant(Int253::from(1u64)),
+            Expression::Constant(-Int253::from(1u64))
         );
         assert_eq!(
             -Expression::LinearCombination(
                 vec![(r1cs::Variable::One(), Scalar::from(1u64))],
-                Some(Integer::from(1u64))
+                Some(Int253::from(1u64))
             ),
             Expression::LinearCombination(
                 vec![(r1cs::Variable::One(), -Scalar::from(1u64))],
-                Some(-Integer::from(1u64))
+                Some(-Int253::from(1u64))
             )
         );
 
         let mut cs = MockMultiplierCS { num_multipliers: 0 };
 
-        let e1 = Expression::Constant(Integer::from(10u64));
-        let e2 = Expression::Constant(Integer::from(20u64));
+        let e1 = Expression::Constant(Int253::from(10u64));
+        let e2 = Expression::Constant(Int253::from(20u64));
         let e3 = Expression::LinearCombination(
             vec![(r1cs::Variable::Committed(0), Scalar::from(3u64))],
-            Some(Integer::from(3u64)),
+            Some(Int253::from(3u64)),
         );
         let e4 = Expression::LinearCombination(
             vec![(r1cs::Variable::Committed(1), Scalar::from(4u64))],
-            Some(Integer::from(4u64)),
+            Some(Int253::from(4u64)),
         );
 
         // const * const => mult consts
         assert_eq!(
             e1.clone().multiply(e2.clone(), &mut cs),
-            Expression::Constant(Integer::from(200u64))
+            Expression::Constant(Int253::from(200u64))
         );
         // const * expr => mult weights
         assert_eq!(
             e1.clone().multiply(e3.clone(), &mut cs),
             Expression::LinearCombination(
                 vec![(r1cs::Variable::Committed(0), Scalar::from(30u64))],
-                Some(Integer::from(30u64))
+                Some(Int253::from(30u64))
             )
         );
         // expr * const => mult weights
@@ -541,7 +541,7 @@ mod tests {
             e3.clone().multiply(e1.clone(), &mut cs),
             Expression::LinearCombination(
                 vec![(r1cs::Variable::Committed(0), Scalar::from(30u64))],
-                Some(Integer::from(30u64))
+                Some(Int253::from(30u64))
             )
         );
         // expr * expr => allocate new multiplier
@@ -549,7 +549,7 @@ mod tests {
             e3.clone().multiply(e4.clone(), &mut cs),
             Expression::LinearCombination(
                 vec![(r1cs::Variable::MultiplierOutput(0), Scalar::from(1u64))],
-                Some(Integer::from(12u64))
+                Some(Int253::from(12u64))
             )
         );
     }
@@ -559,24 +559,24 @@ mod tests {
         // eq(const, const) => cleartext(true)
         assert_eq!(
             Constraint::eq(
-                Expression::Constant(Integer::from(1u64)),
-                Expression::Constant(Integer::from(1u64))
+                Expression::Constant(Int253::from(1u64)),
+                Expression::Constant(Int253::from(1u64))
             ),
             Constraint::Cleartext(true)
         );
         // eq(const1, const2) => cleartext(false)
         assert_eq!(
             Constraint::eq(
-                Expression::Constant(Integer::from(1u64)),
-                Expression::Constant(Integer::from(2u64))
+                Expression::Constant(Int253::from(1u64)),
+                Expression::Constant(Int253::from(2u64))
             ),
             Constraint::Cleartext(false)
         );
         // eq(const, nonconst) => ::Eq
-        let e1 = Expression::Constant(Integer::from(1u64));
+        let e1 = Expression::Constant(Int253::from(1u64));
         let e2 = Expression::LinearCombination(
             vec![(r1cs::Variable::One(), Scalar::from(2u64))],
-            Some(Integer::from(2u64)),
+            Some(Int253::from(2u64)),
         );
         assert_eq!(
             Constraint::eq(e1.clone(), e2.clone()),

@@ -1,5 +1,5 @@
 use crate::Dict;
-use crate::Integer;
+use crate::Int253;
 use crate::Merlin;
 use crate::Object;
 use crate::Point;
@@ -9,7 +9,7 @@ use crate::{Constraint, Expression, Variable};
 
 /// Possible values on the stack machine
 pub enum Value {
-    Int(Integer),
+    Int253(Int253),
     String(String),
     Dict(Dict),
     Point(Point),

@@ -3,7 +3,7 @@ mod encoding;
 mod crypto;
 mod dict;
 mod errors;
-mod integer;
+mod int253;
 mod object;
 mod string;
 mod token;
@@ -17,7 +17,7 @@ pub use constraints::{
 pub use crypto::{Merlin, MultiscalarMul, Point};
 pub use dict::Dict;
 pub use errors::VMError;
-pub use integer::Integer;
+pub use int253::Int253;
 pub use object::Object;
 pub use string::String;
 pub use token::{ClearToken, Token, WideToken};
