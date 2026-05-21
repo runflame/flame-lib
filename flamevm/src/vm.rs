@@ -506,6 +506,35 @@ impl VM {
                 self.op_roll_k((op - 0x30) as usize)?;
                 Ok(true)
             }
+            // ── Phase 2: control flow ──────────────────────────────
+            0x79 => {
+                self.op_verify()?;
+                Ok(true)
+            }
+            0x7b => {
+                self.op_run()?;
+                Ok(true)
+            }
+            0x7c => {
+                self.op_loop()?;
+                Ok(true)
+            }
+            0x7d => {
+                self.op_switch()?;
+                Ok(true)
+            }
+            0x7e => {
+                self.op_return()?;
+                Ok(true)
+            }
+            0x7f => {
+                self.op_type()?;
+                Ok(true)
+            }
+            0x80..=0x8f => {
+                self.op_break_k((op - 0x80) as usize)?;
+                Ok(true)
+            }
             _ => Ok(false),
         }
     }
@@ -701,6 +730,150 @@ impl VM {
         let v = stack.remove(idx);
         stack.push(v);
         Ok(())
+    }
+
+    // ── Phase 2: control flow ────────────────────────────────────
+
+    /// `0x79` `verify` — fails the script if the top of stack is zero.
+    /// Pops the value on success.
+    fn op_verify(&mut self) -> Result<(), VMError> {
+        let v = self.pop_int253()?;
+        if v.is_zero() {
+            return Err(VMError::VerifyFailed);
+        }
+        Ok(())
+    }
+
+    /// `0x7b` `run` — pops a `String`, suspends the current Run onto
+    /// the run-stack, and switches to a fresh Run over the string's bytes.
+    fn op_run(&mut self) -> Result<(), VMError> {
+        let s = self.pop_string()?;
+        self.enter_run(s.as_bytes().to_vec());
+        Ok(())
+    }
+
+    /// `0x7c` `loop` — resets the current Run's PC to the start.
+    /// Without a `break`/`return` reachable from inside, this is an
+    /// unbounded loop; gas metering (Phase 17) is the long-term cap.
+    fn op_loop(&mut self) -> Result<(), VMError> {
+        self.current_call.current_run.pc = 0;
+        Ok(())
+    }
+
+    /// `0x7d` `switch` — pops three values `x a b` (top is `b`), chooses
+    /// `a` if `x` is non-zero and `b` if `x` is zero, then enters the
+    /// chosen program as a new Run (same semantics as `run`).
+    fn op_switch(&mut self) -> Result<(), VMError> {
+        let b = self.pop_string()?;
+        let a = self.pop_string()?;
+        let x = self.pop_int253()?;
+        let chosen = if x.is_zero() { b } else { a };
+        self.enter_run(chosen.as_bytes().to_vec());
+        Ok(())
+    }
+
+    /// `0x7e` `return k` — atomic cross-frame return:
+    ///
+    /// 1. pop the `k` count (must be a non-negative `Int253`),
+    /// 2. assert the callee's stack has *exactly* `k` items left,
+    /// 3. pop the call frame,
+    /// 4. refund leftover gas to the parent,
+    /// 5. push the `k` items onto the parent's stack.
+    ///
+    /// At the outermost frame, `return 0` exits the transaction cleanly.
+    /// `return k` with `k > 0` at the outermost frame is an error
+    /// (`BadReturnArity`) — there is no parent to receive the values.
+    fn op_return(&mut self) -> Result<(), VMError> {
+        let k_int = self.pop_int253()?;
+        let k_u64 = k_int.to_u64().ok_or(VMError::BadReturnArity)?;
+        let k = usize::try_from(k_u64).map_err(|_| VMError::BadReturnArity)?;
+
+        // Strict: exactly `k` items must remain. Fewer → arity mismatch,
+        // more → leftover state the script forgot about.
+        if self.current_call.stack.len() < k {
+            return Err(VMError::BadReturnArity);
+        }
+        if self.current_call.stack.len() > k {
+            return Err(VMError::StackNotClean);
+        }
+
+        let return_values: Vec<Value> = self.current_call.stack.drain(..).collect();
+        let leftover_gas = self
+            .current_call
+            .gas_limit
+            .saturating_sub(self.current_call.gas_used);
+
+        if let Some(parent) = self.call_stack.pop() {
+            self.current_call = parent;
+            self.current_call.gas_limit = self
+                .current_call
+                .gas_limit
+                .saturating_add(leftover_gas);
+            self.current_call.stack.extend(return_values);
+            return Ok(());
+        }
+
+        // Outermost frame. No parent to receive values.
+        if k != 0 {
+            return Err(VMError::BadReturnArity);
+        }
+        // Signal end of execution by emptying the current Run and the
+        // run-stack. The dispatch loop will then call finish_call which
+        // sees an empty stack and exits.
+        self.current_call.run_stack.clear();
+        self.current_call.current_run.pc = self.current_call.current_run.script.len();
+        Ok(())
+    }
+
+    /// `0x7f` `type` — peeks the top value and pushes its type code as an
+    /// `Int253`. The original value remains on the stack underneath.
+    fn op_type(&mut self) -> Result<(), VMError> {
+        let code = self
+            .current_call
+            .stack
+            .last()
+            .ok_or(VMError::StackUnderflow)?
+            .type_code();
+        self.push_value(Value::Int253(Int253::from(code as u64)));
+        Ok(())
+    }
+
+    /// `0x80..=0x8f` `break:k` — stops the current Run and, if `k > 0`,
+    /// also discards the `k` Runs that would have resumed next. If `k`
+    /// exceeds the number of suspended Runs in this call, the script
+    /// tried to break past the call boundary — fail (`BreakOutOfCall`).
+    fn op_break_k(&mut self, k: usize) -> Result<(), VMError> {
+        if k > self.current_call.run_stack.len() {
+            return Err(VMError::BreakOutOfCall);
+        }
+        // Discard `k` to-be-resumed Runs.
+        for _ in 0..k {
+            self.current_call.run_stack.pop();
+        }
+        // End the current Run by jumping its PC to the script end. The
+        // dispatch loop's `finish_run` will pop the next saved Run (or
+        // call `finish_call` if none).
+        let run = &mut self.current_call.current_run;
+        run.pc = run.script.len();
+        Ok(())
+    }
+
+    // ── Phase 2 helpers ──────────────────────────────────────────
+
+    /// Pops the top value, asserting it is a `String`.
+    fn pop_string(&mut self) -> Result<String, VMError> {
+        match self.pop_value()? {
+            Value::String(s) => Ok(s),
+            _ => Err(VMError::TypeNotString),
+        }
+    }
+
+    /// Pushes the current Run onto the run-stack and replaces it with a
+    /// fresh Run over `script`. Used by `run` and `switch`.
+    fn enter_run(&mut self, script: Vec<u8>) {
+        let new_run = Run::new(script);
+        let old_run = mem::replace(&mut self.current_call.current_run, new_run);
+        self.current_call.run_stack.push(old_run);
     }
 
     fn op_nop(&mut self) -> Result<(), VMError> {
@@ -1141,6 +1314,317 @@ mod tests {
         assert!(matches!(
             run_to_end(&mut vm).unwrap_err(),
             VMError::IndexOutOfRange
+        ));
+    }
+
+    // ── Phase 2: control flow helpers ────────────────────────────
+
+    /// Runs `step_internal` until it reports the tx is done (Ok(false)).
+    /// Used to exercise full programs including post-`run`/`switch`
+    /// resumption and call-frame exit.
+    fn run_until_tx_done(vm: &mut VM) -> Result<(), VMError> {
+        while vm.step_internal()? {}
+        Ok(())
+    }
+
+    /// Builds an inline subprogram string-payload as a script that
+    /// `pushstr`s the subprogram's bytes. Returns the prefix bytes
+    /// (`0x19` + sub-varint length + payload).
+    fn pushstr_bytes(payload: &[u8]) -> Vec<u8> {
+        let mut s = vec![0x19, 0x00, payload.len() as u8];
+        s.extend_from_slice(payload);
+        s
+    }
+
+    // ── verify (0x79) ────────────────────────────────────────────
+
+    #[test]
+    fn verify_truthy_pops() {
+        // push:1, verify — succeeds, stack empties.
+        let mut vm = vm_with_script(vec![0x01, 0x79]);
+        run_to_end(&mut vm).unwrap();
+        assert!(vm.current_call.stack.is_empty());
+    }
+
+    #[test]
+    fn verify_zero_fails() {
+        let mut vm = vm_with_script(vec![0x00, 0x79]);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::VerifyFailed
+        ));
+    }
+
+    #[test]
+    fn verify_requires_int() {
+        // pushpoint, verify — top is Point not Int253.
+        let mut script = vec![0x1a];
+        script.extend_from_slice(&[0u8; 32]);
+        script.push(0x79);
+        let mut vm = vm_with_script(script);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::TypeNotInt253
+        ));
+    }
+
+    // ── run (0x7b) ───────────────────────────────────────────────
+
+    #[test]
+    fn run_creates_nested_run() {
+        // pushstr [push:7], run — after run, current_run is the
+        // subprogram and outer is suspended.
+        let mut script = pushstr_bytes(&[0x07]);
+        script.push(0x7b);
+        let mut vm = vm_with_script(script);
+        vm.step_internal().unwrap(); // pushstr
+        assert_eq!(vm.current_call.stack.len(), 1);
+        vm.step_internal().unwrap(); // run
+        assert_eq!(vm.current_call.run_stack.len(), 1);
+        assert!(vm.current_call.stack.is_empty());
+        vm.step_internal().unwrap(); // push:7 in subprog
+        assert_int(&vm.current_call.stack[0], Int253::from(7u64));
+    }
+
+    #[test]
+    fn run_resumes_outer_after_subprogram_finishes() {
+        // pushstr [push:7, drop], run — subprog cleans up, outer ends empty.
+        let mut script = pushstr_bytes(&[0x07, 0x1c]);
+        script.push(0x7b);
+        let mut reg = StubRegistry { script };
+        let block = BlockContext { height: 0 };
+        VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block).unwrap();
+    }
+
+    #[test]
+    fn run_requires_string() {
+        // push:5, run — top is Int253 not String.
+        let mut vm = vm_with_script(vec![0x05, 0x7b]);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::TypeNotString
+        ));
+    }
+
+    // ── loop (0x7c) ──────────────────────────────────────────────
+
+    #[test]
+    fn loop_resets_pc_to_zero() {
+        // nop, loop — after nop pc=1; after loop pc=0.
+        let mut vm = vm_with_script(vec![0x1d, 0x7c]);
+        vm.step_internal().unwrap();
+        assert_eq!(vm.current_call.current_run.pc, 1);
+        vm.step_internal().unwrap();
+        assert_eq!(vm.current_call.current_run.pc, 0);
+    }
+
+    // ── switch (0x7d) ────────────────────────────────────────────
+
+    #[test]
+    fn switch_picks_a_when_x_nonzero() {
+        // push:1, pushstr [push:9, drop], pushstr [push:8, drop], switch
+        // — x=1 → runs a (pushes 9, drops it). End stack empty.
+        let mut script = vec![0x01];
+        script.extend_from_slice(&pushstr_bytes(&[0x09, 0x1c]));
+        script.extend_from_slice(&pushstr_bytes(&[0x08, 0x1c]));
+        script.push(0x7d);
+        let mut reg = StubRegistry { script };
+        let block = BlockContext { height: 0 };
+        VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block)
+            .unwrap();
+    }
+
+    #[test]
+    fn switch_a_actually_runs_when_x_nonzero() {
+        // Verifies the *chosen* branch executes by inspecting mid-flight.
+        // push:1, pushstr [push:9], pushstr [push:8], switch
+        let mut script = vec![0x01];
+        script.extend_from_slice(&pushstr_bytes(&[0x09]));
+        script.extend_from_slice(&pushstr_bytes(&[0x08]));
+        script.push(0x7d);
+        let mut vm = vm_with_script(script);
+        while !vm.current_call.run_stack.is_empty()
+            || !vm.current_call.current_run.is_finished()
+        {
+            // Pre-switch: keep stepping until switch happens (run_stack
+            // becomes non-empty) and then the chosen subprogram runs to
+            // its end.
+            if !vm.step_internal().unwrap() {
+                break;
+            }
+            if !vm.current_call.run_stack.is_empty()
+                && vm.current_call.current_run.is_finished()
+            {
+                break;
+            }
+        }
+        // The 9 (from branch a) should be the only stack item.
+        assert_int(
+            vm.current_call.stack.last().unwrap(),
+            Int253::from(9u64),
+        );
+    }
+
+    #[test]
+    fn switch_picks_b_when_x_zero() {
+        // push:0, pushstr [push:9, drop], pushstr [push:8, drop], switch
+        let mut script = vec![0x00];
+        script.extend_from_slice(&pushstr_bytes(&[0x09, 0x1c]));
+        script.extend_from_slice(&pushstr_bytes(&[0x08, 0x1c]));
+        script.push(0x7d);
+        let mut reg = StubRegistry { script };
+        let block = BlockContext { height: 0 };
+        // x=0 → runs branch b (push:8, drop) → empty stack at end → ok.
+        VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block).unwrap();
+    }
+
+    // ── return (0x7e) ────────────────────────────────────────────
+
+    #[test]
+    fn return_zero_at_root_exits_cleanly() {
+        // push:0, return — k=0, empty stack remaining, root frame: clean exit.
+        let mut vm = vm_with_script(vec![0x00, 0x7e]);
+        run_until_tx_done(&mut vm).unwrap();
+    }
+
+    #[test]
+    fn return_nonzero_at_root_errors() {
+        // push:7, push:1, return — k=1 at root: nowhere for 7 to go.
+        let mut vm = vm_with_script(vec![0x07, 0x01, 0x7e]);
+        assert!(matches!(
+            run_until_tx_done(&mut vm).unwrap_err(),
+            VMError::BadReturnArity
+        ));
+    }
+
+    #[test]
+    fn return_with_dirty_leftover_errors() {
+        // push:9, push:7, push:1, return — k=1, but two items below count.
+        // After popping k, stack has 2 items > k=1 → StackNotClean.
+        let mut vm = vm_with_script(vec![0x09, 0x07, 0x01, 0x7e]);
+        assert!(matches!(
+            run_until_tx_done(&mut vm).unwrap_err(),
+            VMError::StackNotClean
+        ));
+    }
+
+    #[test]
+    fn return_too_few_items_errors() {
+        // push:5, return — k=5 (popped) but only zero items left.
+        let mut vm = vm_with_script(vec![0x05, 0x7e]);
+        assert!(matches!(
+            run_until_tx_done(&mut vm).unwrap_err(),
+            VMError::BadReturnArity
+        ));
+    }
+
+    #[test]
+    fn return_transfers_values_to_parent() {
+        // Set up a nested call manually (proper `call` lands in Phase 15).
+        // Child script: push:7, push:1, return (k=1).
+        let child_script = vec![0x07, 0x01, 0x7e];
+        let parent_frame =
+            CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
+        let child_kind = CallKind::CellOpen {
+            anchor: Anchor([0u8; 32]),
+            predicate: Predicate(CompressedRistretto([0u8; 32])),
+        };
+        let child_frame = CallFrame::new(child_script, child_kind, 500, 0, 0);
+        let mut vm = VM::new(dummy_header(), parent_frame);
+        let initial_parent = mem::replace(&mut vm.current_call, child_frame);
+        vm.call_stack.push(initial_parent);
+
+        // Step until the call_stack collapses back to the parent. Stops
+        // before the root finish_call check kicks in (it would error on
+        // the leftover 7 because there's no further script to clean it).
+        while !vm.call_stack.is_empty() {
+            vm.step_internal().unwrap();
+        }
+
+        // Parent received the 7.
+        assert_eq!(vm.current_call.stack.len(), 1);
+        assert_int(&vm.current_call.stack[0], Int253::from(7u64));
+    }
+
+    // ── break:k (0x80..=0x8f) ────────────────────────────────────
+
+    #[test]
+    fn break_zero_ends_current_run_only() {
+        // Outer: pushstr [break:0, pushint8 99], run
+        // — break:0 stops the subprog before pushint8 runs; outer resumes
+        //   with empty stack and the tx exits clean.
+        let mut script = pushstr_bytes(&[0x80, 0x10, 99]);
+        script.push(0x7b);
+        let mut reg = StubRegistry { script };
+        let block = BlockContext { height: 0 };
+        VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block)
+            .unwrap();
+    }
+
+    #[test]
+    fn break_one_ends_subprog_and_outer() {
+        // Outer: pushstr [break:1], run, push:99
+        //  — subprog issues break:1, which also discards the outer's
+        //    resumed run, so push:99 never executes. Outer call exits
+        //    with empty stack.
+        // (push:99 is encoded as pushint8 + byte, but break:1 makes it
+        // unreachable, so we don't even need to keep stack clean for it.)
+        let mut script = pushstr_bytes(&[0x81]); // [break:1]
+        script.push(0x7b); // run
+        script.push(0x10); // pushint8
+        script.push(99);
+        let mut reg = StubRegistry { script };
+        let block = BlockContext { height: 0 };
+        VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block).unwrap();
+    }
+
+    #[test]
+    fn break_out_of_call_errors() {
+        // Top-level break:1 — but run_stack is empty, so this tries to
+        // break past the call boundary.
+        let mut vm = vm_with_script(vec![0x81]);
+        assert!(matches!(
+            run_until_tx_done(&mut vm).unwrap_err(),
+            VMError::BreakOutOfCall
+        ));
+    }
+
+    #[test]
+    fn break_zero_at_root_ends_cleanly() {
+        // break:0 at root: ends current run (which IS the root run),
+        // run_stack empty → finish_call with empty stack → clean exit.
+        let mut vm = vm_with_script(vec![0x80]);
+        run_until_tx_done(&mut vm).unwrap();
+    }
+
+    // ── type (0x7f) ──────────────────────────────────────────────
+
+    #[test]
+    fn type_pushes_int253_code() {
+        // push:5, type, drop, drop — top is type code (0 for Int253), then 5.
+        let mut vm = vm_with_script(vec![0x05, 0x7f]);
+        vm.step_internal().unwrap(); // push:5
+        vm.step_internal().unwrap(); // type
+        assert_eq!(vm.current_call.stack.len(), 2);
+        assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+        assert_int(&vm.current_call.stack[0], Int253::from(5u64));
+    }
+
+    #[test]
+    fn type_pushes_string_code() {
+        let mut script = pushstr_bytes(&[]); // empty string
+        script.push(0x7f); // type
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_int(&vm.current_call.stack[1], Int253::from(68u64));
+    }
+
+    #[test]
+    fn type_underflow_errors() {
+        let mut vm = vm_with_script(vec![0x7f]);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::StackUnderflow
         ));
     }
 }

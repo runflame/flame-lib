@@ -56,27 +56,44 @@ Convention per phase: **Goal**, **Reuses** (already in `flame-lib`), **New** (to
 
 ---
 
-### Phase 2 — Control flow & explicit return
+### ✅ Phase 2 — Control flow & explicit return (done)
 
 **Goal**: scripts can branch, loop, and cross call boundaries explicitly. **Strict cross-frame value transfer lives only here.**
 
-**Reuses**: phase-1 stack helpers.
+**Reuses**: phase-1 stack helpers (`pop_value`, `pop_int253`, `push_value`).
 
-**New**:
-- `VM::push_run(script)` (pushes current onto `run_stack`).
-- `VM::break_runs(k)` — errors with `BreakOutOfCall` if `k > run_stack.len()`.
-- `VM::return_from_call(k)` — pop `k` items + count, **assert remaining stack empty**, pop call frame, push items onto parent. One atomic step.
-- `Value::type_code() -> u8` per the encoding-tag table in spec.md §Types.
-- `VMError::VerifyFailed`, `BreakOutOfCall`, `BadReturnArity`.
+**Added**:
+- `VM::enter_run(script)` — pushes current Run onto the run-stack, swaps in a fresh Run. Used by both `run` and `switch`.
+- `VM::op_return` — atomic frame-pop with strict empty-stack check after taking `k` return values. At the outermost frame, only `return 0` is permitted (no parent to receive values).
+- `VM::op_break_k` — discards `k` to-be-resumed Runs, then advances the current Run's PC to its end. Dispatch loop's `finish_run` then resumes the next Run or invokes `finish_call`. `k > run_stack.len()` → `BreakOutOfCall`.
+- `VM::pop_string` helper.
+- `Value::type_code()` — uses wire-encoding base tags from spec.md §Types for encodable types; assigns provisional `0xc0..` codes to stack-only types (`Variable`/`Expression`/`Constraint`) pending Architect confirmation.
+- `VMError::TypeNotString`, `VerifyFailed`, `BreakOutOfCall`, `BadReturnArity`.
 
 **Opcodes**:
-- [ ] `0x79` `verify`
-- [ ] `0x7b` `run`, `0x7c` `loop`, `0x7d` `switch`
-- [ ] `0x7e` `return k` — the **only** way values cross a call boundary
-- [ ] `0x80..=0x8f` `break:k`
-- [ ] `0x7f` `type`
+- [x] `0x79` `verify` — fails on zero; pops on success
+- [x] `0x7b` `run` — pops a String, suspends current Run, switches to new
+- [x] `0x7c` `loop` — resets current Run's PC to 0 (gas will eventually cap unbounded loops)
+- [x] `0x7d` `switch` — pops `x a b`, runs `a` if `x` non-zero else `b`
+- [x] `0x7e` `return k` — the only way values cross a call boundary; strict arity + clean-stack check
+- [x] `0x80..=0x8f` `break:k` — stops current Run plus `k` more from the run-stack; `k` past run-stack depth is `BreakOutOfCall`
+- [x] `0x7f` `type` — peeks the top, pushes its type code as `Int253`
 
-**Tests**: `return` with leftover stack → `StackNotClean`; `break:k` past run_stack → `BreakOutOfCall`; nested `run`/`loop` terminates only on `break`/`return`.
+**Tests landed** (22 new, all green):
+- `verify_truthy_pops`, `verify_zero_fails`, `verify_requires_int`
+- `run_creates_nested_run`, `run_resumes_outer_after_subprogram_finishes`, `run_requires_string`
+- `loop_resets_pc_to_zero`
+- `switch_picks_a_when_x_nonzero`, `switch_a_actually_runs_when_x_nonzero`, `switch_picks_b_when_x_zero`
+- `return_zero_at_root_exits_cleanly`, `return_nonzero_at_root_errors`, `return_with_dirty_leftover_errors`, `return_too_few_items_errors`, `return_transfers_values_to_parent`
+- `break_zero_ends_current_run_only`, `break_one_ends_subprog_and_outer`, `break_out_of_call_errors`, `break_zero_at_root_ends_cleanly`
+- `type_pushes_int253_code`, `type_pushes_string_code`, `type_underflow_errors`
+
+**Deferred to later phases**:
+- `verify` accepting `Expression` (not just `Int253`) → Phase 11 once constraint dispatch lands.
+- `return` exercised via real `call`/`open` boundary → Phase 15 / 9.
+- Type codes for stack-only types are provisional `0xc0..`; surface to Architect for canonicalization.
+
+**Note for Architect**: I extended `pushint16/64/128` BE consistency from spec.md's explicit "big-endian" wording on `pushint16`; worth a sentence to nail down for the other widths. Also: stack-only type codes (Variable/Expression/Constraint) need a canonical assignment — current codes are internal.
 
 ---
 

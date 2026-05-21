@@ -62,4 +62,30 @@ impl Value {
             _ => false,
         }
     }
+
+    /// Returns the type code used by the `type` opcode.
+    ///
+    /// Wire-encodable types use the base tag of their wire-encoding range
+    /// from spec.md §Types (`Int253` → 0, `String` → 68, `Dict` → 128,
+    /// `Point` → 248, …). Stack-only types (no wire encoding) are assigned
+    /// codes in `0xc0..` that don't collide with any wire tag; these are
+    /// implementation-defined for now and will be confirmed with Architect
+    /// before any cross-implementation use.
+    pub fn type_code(&self) -> u8 {
+        match self {
+            Value::Int253(_) => 0,
+            Value::String(_) => 68,
+            Value::Dict(_) => 128,
+            Value::Point(_) => 248,
+            Value::Token(_) => 249,
+            Value::ClearToken(_) => 250,
+            Value::WideToken(_) => 251,
+            Value::Object(_) => 252,
+            Value::Merlin(_) => 253,
+            // Stack-only — code TBC by Architect.
+            Value::Variable(_) => 0xc0,
+            Value::Expression(_) => 0xc1,
+            Value::Constraint(_) => 0xc2,
+        }
+    }
 }

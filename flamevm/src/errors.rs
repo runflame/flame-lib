@@ -167,6 +167,25 @@ pub enum VMError {
     #[error("Index out of range")]
     IndexOutOfRange,
 
+    /// An opcode required a top-of-stack `String` but found a different type.
+    #[error("Item is not a String")]
+    TypeNotString,
+
+    /// The `verify` opcode saw a zero value on top of the stack.
+    #[error("verify failed: zero value")]
+    VerifyFailed,
+
+    /// `break:k` attempted to skip more nesting levels than the current
+    /// call has available (i.e. tried to break past the call boundary).
+    #[error("break exceeds call depth")]
+    BreakOutOfCall,
+
+    /// `return k` was called with a `k` that exceeds the callee's stack
+    /// depth, or with a `k` other than `0` at the outermost frame, or
+    /// with non-`Int253` k.
+    #[error("Bad return arity")]
+    BadReturnArity,
+
     // /// This error occurs when VM's anchor remains unset.
     // #[error("VM anchor is not set via `input`")]
     // AnchorMissing,
