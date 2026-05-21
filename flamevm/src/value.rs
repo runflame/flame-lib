@@ -63,6 +63,43 @@ impl Value {
         }
     }
 
+    /// Equality across two stack values.
+    ///
+    /// - Cross-variant: always `Ok(false)` (different types are not equal).
+    /// - Same-variant for plain-data types (`Int253`, `String`, `Point`):
+    ///   bytewise / by-value comparison.
+    /// - Same-variant for `Dict`: recursive entry-wise comparison.
+    /// - Same-variant for linear types (tokens, objects, variables,
+    ///   expressions, constraints, transcripts): `Err(TypeNotComparable)`
+    ///   until later phases define their equality. Linear types should
+    ///   rarely need on-stack equality; the constraint-system path uses
+    ///   `0x51 eq` differently (yields a `Constraint`).
+    pub fn try_eq(&self, other: &Value) -> Result<bool, VMError> {
+        match (self, other) {
+            (Value::Int253(a), Value::Int253(b)) => Ok(a == b),
+            (Value::String(a), Value::String(b)) => Ok(a.as_bytes() == b.as_bytes()),
+            (Value::Point(a), Value::Point(b)) => Ok(a.as_bytes() == b.as_bytes()),
+            (Value::Dict(a), Value::Dict(b)) => {
+                if a.len() != b.len() {
+                    return Ok(false);
+                }
+                for ((ka, va), (kb, vb)) in a.entries().zip(b.entries()) {
+                    if ka != kb {
+                        return Ok(false);
+                    }
+                    if !va.try_eq(vb)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            // Cross-variant always unequal.
+            (sa, sb) if core::mem::discriminant(sa) != core::mem::discriminant(sb) => Ok(false),
+            // Same-variant linear / constraint / token types: not yet defined.
+            _ => Err(VMError::TypeNotComparable),
+        }
+    }
+
     /// Returns the type code used by the `type` opcode.
     ///
     /// Wire-encodable types use the base tag of their wire-encoding range

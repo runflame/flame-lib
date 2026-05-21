@@ -97,26 +97,43 @@ Convention per phase: **Goal**, **Reuses** (already in `flame-lib`), **New** (to
 
 ---
 
-### Phase 3 — Int253 arithmetic, logic, size
+### ✅ Phase 3 — Int253 arithmetic, logic, size (done)
 
-**Goal**: numeric/logical operations. Wires the existing `Int253` ops through dispatch.
+**Goal**: numeric/logical operations. Wires the existing `Int253` ops through dispatch, adds truncated `div_rem`, and bridges to Dalek for `mod252`.
 
-**Reuses**: `Int253` arithmetic, ordering, `Scalar::from_bytes_mod_order_wide`.
+**Reuses**: `Int253` arithmetic + ordering + sign-magnitude helpers, `Scalar::from_bytes_mod_order_wide`, `Dict::len`, `String::len`.
 
-**New**:
-- `Int253::div_rem` (currently missing).
-- `Int253::abs_with_sign()` (split).
-- `Int253::from_string_mod_l(bytes)` for `mod252`.
-- `Value` equality across compatible variants.
+**Added**:
+- `Int253::div_rem(other) -> Option<(Int253, Int253)>` — truncated division: `sign(q) = sign(self) ^ sign(other)`, `sign(r) = sign(self)`. Returns `None` for zero divisor or magnitudes exceeding `u64::MAX` (the latter is a Phase-3 limitation; big-int division comes later).
+- `Value::try_eq(&other) -> Result<bool, VMError>` — cross-variant always false; same-variant for plain-data types compares value; `Dict` recursive; linear/constraint same-variant cases error `TypeNotComparable` until later phases.
+- `VMError::DivByZero`, `MagnitudeTooLarge`, `StringTooLongForModReduction`, `TypeHasNoLength`, `TypeNotComparable`.
 
 **Opcodes**:
-- [ ] `0x50` `abs`, `0x51` `eq`, `0x52` `neg`
-- [ ] `0x53` `add`, `0x54` `mul` (Int253 path only; Expression overload in Phase 11)
-- [ ] `0x55` `divmod`, `0x56` `mod252`
-- [ ] `0x57` `not`, `0x58` `and`, `0x59` `or` (Constraint overload in Phase 12)
-- [ ] `0x5f` `size` (string len / dict count)
+- [x] `0x50` `abs` — pops Int253, pushes (magnitude, sign-bit) with sign-bit on top
+- [x] `0x51` `eq` — peeks top two, pushes 1/0; operands stay on stack
+- [x] `0x52` `neg` — Int253 negation (Expression overload deferred to Phase 11)
+- [x] `0x53` `add`, `0x54` `mul` — Int253 wrap-mod-ℓ arithmetic
+- [x] `0x55` `divmod` — truncated division, `DivByZero`/`MagnitudeTooLarge` on bad inputs
+- [x] `0x56` `mod252` — String (0..=64 bytes) → LE unsigned → reduce mod ℓ
+- [x] `0x57` `not`, `0x58` `and`, `0x59` `or` — Int253 logical (Constraint overloads deferred to Phase 12)
+- [x] `0x5f` `size` — String byte count / Dict entry count; other types error `TypeHasNoLength`
 
-**Tests**: wraparound matches Int253 unit tests; `divmod` rejects zero divisor; `mod252` on 64-byte input matches Dalek reference.
+**Tests landed** (30 new, all green):
+- `abs_of_negative_pushes_magnitude_and_sign`, `abs_of_positive_pushes_sign_zero`, `abs_of_zero_is_sign_zero`
+- `eq_pushes_one_for_equal_ints`, `eq_pushes_zero_for_distinct_ints`, `eq_cross_type_is_zero`, `eq_underflow_errors`, `eq_noncomparable_linear_type_errors`
+- `neg_flips_sign`, `neg_of_zero_stays_positive`
+- `add_basic`, `add_with_negative`, `mul_basic`, `mul_sign_xor`, `add_requires_int_operands`
+- `divmod_basic`, `divmod_negative_dividend`, `divmod_by_zero_errors`, `divmod_magnitude_too_large`
+- `mod252_empty_string_is_zero`, `mod252_short_string_is_le_value`, `mod252_64_bytes_reduces`, `mod252_too_long_errors`
+- `not_zero_to_one`, `not_nonzero_to_zero`
+- `and_truth_table` (all four cases), `or_truth_table` (three cases)
+- `size_of_string`, `size_of_int_errors`, `size_underflow_errors`
+
+**Deferred to later phases**:
+- Expression overloads for `neg`/`add`/`mul`/`eq` → Phase 11.
+- Constraint overloads for `not`/`and`/`or` → Phase 12.
+- `divmod` for magnitudes exceeding `u64::MAX` (needs big-int division) → out of scope for the current spec; revisit if user demand arises.
+- `size` of Dict in spec also covers "struct's number of entries" — the wire layout for non-Dict structs (if any) is folded into Dict for now.
 
 ---
 

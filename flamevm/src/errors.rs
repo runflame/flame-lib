@@ -186,6 +186,29 @@ pub enum VMError {
     #[error("Bad return arity")]
     BadReturnArity,
 
+    /// `divmod` saw a zero divisor.
+    #[error("Division by zero")]
+    DivByZero,
+
+    /// `divmod` was invoked with operands whose magnitude exceeds `u64::MAX`.
+    /// Big-int division will lift this in a later phase.
+    #[error("Operand magnitude exceeds u64")]
+    MagnitudeTooLarge,
+
+    /// `mod252` saw a String longer than 64 bytes.
+    #[error("String too long for mod252 (max 64 bytes)")]
+    StringTooLongForModReduction,
+
+    /// `size` was applied to a type that has no length defined.
+    #[error("Type has no length")]
+    TypeHasNoLength,
+
+    /// `eq` cannot compare these operand types (e.g., linear types in
+    /// Phase 3). Cross-type comparisons return `0` (false) and never reach
+    /// this; same-type non-comparable variants do.
+    #[error("Operand types are not comparable")]
+    TypeNotComparable,
+
     // /// This error occurs when VM's anchor remains unset.
     // #[error("VM anchor is not set via `input`")]
     // AnchorMissing,

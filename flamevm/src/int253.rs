@@ -151,6 +151,32 @@ impl Int253 {
         bytes == [0u8; 32]
     }
 
+    /// Truncated division and remainder.
+    ///
+    /// Returns `Some((q, r))` such that `self = q * other + r`, with
+    /// `sign(q) = sign(self) XOR sign(other)` and `sign(r) = sign(self)`
+    /// (the convention Rust's i64 division uses). Sign on zero results
+    /// is normalized to positive.
+    ///
+    /// Returns `None` if `other` is zero **or** if either magnitude
+    /// exceeds `u64::MAX`. Larger magnitudes need big-int division and
+    /// are out of scope for Phase 3; callers must surface this as
+    /// `MagnitudeTooLarge` or similar.
+    pub fn div_rem(self, other: Int253) -> Option<(Int253, Int253)> {
+        if other.is_zero() {
+            return None;
+        }
+        let a = self.abs().to_u64()?;
+        let b = other.abs().to_u64()?;
+        let q_mag = a / b;
+        let r_mag = a % b;
+        let q_sign = self.is_negative() ^ other.is_negative();
+        let r_sign = self.is_negative();
+        let q = Int253::from_parts(q_sign, Scalar::from(q_mag));
+        let r = Int253::from_parts(r_sign, Scalar::from(r_mag));
+        Some((q, r))
+    }
+
     /// Compares two `Int253`s by magnitude (ignoring sign).
     pub(crate) fn cmp_magnitude(&self, other: &Int253) -> Ordering {
         let mut a = self.bytes;
