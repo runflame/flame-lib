@@ -233,21 +233,42 @@ Convention per phase: **Goal**, **Reuses** (already in `flame-lib`), **New** (to
 
 ---
 
-### Phase 6 — Hash & Merlin
+### ✅ Phase 6 — Hash & Merlin (done)
 
 **Goal**: cryptographic primitives that don't touch the CS.
 
-**Reuses**: `crypto::Merlin`.
+**Reuses**: `crypto::Merlin` wrapper, `merlin::Transcript`.
 
-**New**:
-- `sha2`, `sha3` crate deps.
-- `VMError::MerlinLabelTooLong`.
+**Added**:
+- `sha2 = "0.10"`, `sha3 = "0.10"` deps in `flamevm/Cargo.toml`.
+- `Merlin::new(user_label)` — fresh transcript bound to a fixed domain separator (`flamevm::merlin.v1`) plus the user label, since `Transcript::new` requires `'static`.
+- `Merlin::write_bytes(user_label, data)` — absorbs `(label, data)` into the transcript.
+- `Merlin::read_bytes(user_label, n)` — squeezes `n` bytes of challenge under `label`.
+- `VM::pop_merlin` helper.
+- `VMError::TypeNotMerlin`.
 
 **Opcodes**:
-- [ ] `0x69..=0x6b` `merlin`, `merlinwrite`, `merlinread`
-- [ ] `0x6c..=0x6e` `sha256`, `sha512`, `sha3`
+- [x] `0x69` `merlin` — pops label, pushes a fresh transcript.
+- [x] `0x6a` `merlinwrite` — `merlin label str → merlin`. Stack order per spec (str on top).
+- [x] `0x6b` `merlinread` — `merlin label n → merlin str`. Squeezes `n` bytes.
+- [x] `0x6c` `sha256`, `0x6d` `sha512`, `0x6e` `sha3` (SHA3-256) — pop a String, push the digest.
 
-**Tests**: known-vector roundtrips for each hash; transcript roundtrip.
+**Tests landed** (11 new, all green):
+- `merlin_creates_transcript`
+- `merlin_is_noncopyable_and_nondroppable` — confirms linear-type discipline
+- `merlin_write_then_read_produces_bytes`
+- `merlin_read_is_deterministic` — same inputs → same challenge
+- `merlin_read_diverges_on_different_label` — protocol-level separation
+- `merlin_write_requires_merlin_on_bottom`
+- `sha256_empty`, `sha256_abc` — NIST test vectors
+- `sha512_empty` — NIST test vector
+- `sha3_empty`, `sha3_abc` — NIST test vectors
+
+**Design notes**:
+- `Merlin::new` cannot pass a runtime label directly to `Transcript::new` (`'static` constraint). Workaround: fixed domain separator + first message is the user label under a fixed tag. Protocol property preserved (different user labels → divergent transcripts from byte 0).
+- `Merlin` is **linear**: neither copyable nor droppable. Tests confirm both via `dup:0` and `drop` opcodes returning the right errors.
+- No `MerlinLabelTooLong` introduced — strings can be any length per Phase 4 semantics. If DoS becomes a concern, gas metering (Phase 17) is the natural cap.
+- SHA test vectors use NIST FIPS-180 / FIPS-202 published values; one positive vector and one empty-input vector per hash.
 
 ---
 

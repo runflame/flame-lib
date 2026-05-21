@@ -231,6 +231,10 @@ pub enum VMError {
     #[error("Dict key not found")]
     DictKeyNotFound,
 
+    /// An opcode required a top-of-stack `Merlin` but found a different type.
+    #[error("Item is not a Merlin transcript")]
+    TypeNotMerlin,
+
     // /// This error occurs when VM's anchor remains unset.
     // #[error("VM anchor is not set via `input`")]
     // AnchorMissing,

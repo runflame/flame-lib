@@ -28,7 +28,7 @@ use core::mem;
 
 use crate::errors::VMError;
 use crate::tx::TxHeader;
-use crate::{ClearToken, Dict, Int253, Point, String, Value};
+use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
 
 // ── Identifiers and metadata ──────────────────────────────────────
 
@@ -645,6 +645,31 @@ impl VM {
                 self.op_next()?;
                 Ok(true)
             }
+            // ── Phase 6: Hash & Merlin ─────────────────────────────
+            0x69 => {
+                self.op_merlin()?;
+                Ok(true)
+            }
+            0x6a => {
+                self.op_merlin_write()?;
+                Ok(true)
+            }
+            0x6b => {
+                self.op_merlin_read()?;
+                Ok(true)
+            }
+            0x6c => {
+                self.op_sha256()?;
+                Ok(true)
+            }
+            0x6d => {
+                self.op_sha512()?;
+                Ok(true)
+            }
+            0x6e => {
+                self.op_sha3()?;
+                Ok(true)
+            }
             // ── Phase 2: control flow ──────────────────────────────
             0x79 => {
                 self.op_verify()?;
@@ -868,6 +893,76 @@ impl VM {
         let idx = stack.len() - 1 - k;
         let v = stack.remove(idx);
         stack.push(v);
+        Ok(())
+    }
+
+    // ── Phase 6: Hash & Merlin ───────────────────────────────────
+
+    /// Pops the top value, asserting it is a `Merlin` transcript.
+    fn pop_merlin(&mut self) -> Result<Merlin, VMError> {
+        match self.pop_value()? {
+            Value::Merlin(m) => Ok(m),
+            _ => Err(VMError::TypeNotMerlin),
+        }
+    }
+
+    /// `0x69` `merlin` — `label → merlin`. Pops a label string, creates
+    /// a fresh transcript bound to it.
+    fn op_merlin(&mut self) -> Result<(), VMError> {
+        let label = self.pop_string()?;
+        self.push_value(Value::Merlin(Merlin::new(label.as_bytes())));
+        Ok(())
+    }
+
+    /// `0x6a` `merlinwrite` — `merlin label str → merlin`. Pops `str`
+    /// (top), `label`, and `merlin`; absorbs `(label, str)` into the
+    /// transcript; pushes merlin back.
+    fn op_merlin_write(&mut self) -> Result<(), VMError> {
+        let data = self.pop_string()?;
+        let label = self.pop_string()?;
+        let mut m = self.pop_merlin()?;
+        m.write_bytes(label.as_bytes(), data.as_bytes());
+        self.push_value(Value::Merlin(m));
+        Ok(())
+    }
+
+    /// `0x6b` `merlinread` — `merlin label n → merlin str`. Squeezes
+    /// `n` bytes of challenge from the transcript under `label`; pushes
+    /// the merlin back, then the new String.
+    fn op_merlin_read(&mut self) -> Result<(), VMError> {
+        let n = self.pop_byte_count(usize::MAX)?;
+        let label = self.pop_string()?;
+        let mut m = self.pop_merlin()?;
+        let out = m.read_bytes(label.as_bytes(), n);
+        self.push_value(Value::Merlin(m));
+        self.push_value(Value::String(String::from(out)));
+        Ok(())
+    }
+
+    /// `0x6c` `sha256` — pops a String, pushes the 32-byte SHA-256 digest.
+    fn op_sha256(&mut self) -> Result<(), VMError> {
+        use sha2::{Digest, Sha256};
+        let s = self.pop_string()?;
+        let digest = Sha256::digest(s.as_bytes());
+        self.push_value(Value::String(String::from(digest.to_vec())));
+        Ok(())
+    }
+
+    /// `0x6d` `sha512` — pops a String, pushes the 64-byte SHA-512 digest.
+    fn op_sha512(&mut self) -> Result<(), VMError> {
+        use sha2::{Digest, Sha512};
+        let s = self.pop_string()?;
+        let digest = Sha512::digest(s.as_bytes());
+        self.push_value(Value::String(String::from(digest.to_vec())));
+        Ok(())
+    }
+
+    /// `0x6e` `sha3` — pops a String, pushes the 32-byte SHA3-256 digest.
+    fn op_sha3(&mut self) -> Result<(), VMError> {
+        use sha3::{Digest, Sha3_256};
+        let s = self.pop_string()?;
+        let digest = Sha3_256::digest(s.as_bytes());
+        self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
     }
 
@@ -3293,5 +3388,223 @@ mod tests {
             run_to_end(&mut vm).unwrap_err(),
             VMError::TypeNotDroppable
         ));
+    }
+
+    // ── Phase 6 ──────────────────────────────────────────────────
+
+    // ── merlin (0x69) ────────────────────────────────────────────
+
+    #[test]
+    fn merlin_creates_transcript() {
+        // pushstr [], merlin → Merlin on top
+        let mut script = pushstr_bytes(&[]);
+        script.push(0x69);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        match &vm.current_call.stack[0] {
+            Value::Merlin(_) => {}
+            other => panic!("expected Merlin, got {}", value_kind(other)),
+        }
+    }
+
+    #[test]
+    fn merlin_is_noncopyable_and_nondroppable() {
+        // pushstr [], merlin, dup:0 → TypeNotCopyable
+        let mut script = pushstr_bytes(&[]);
+        script.push(0x69);
+        script.push(0x20);
+        let mut vm = vm_with_script(script);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::TypeNotCopyable
+        ));
+
+        // pushstr [], merlin, drop → TypeNotDroppable
+        let mut script = pushstr_bytes(&[]);
+        script.push(0x69);
+        script.push(0x1c);
+        let mut vm = vm_with_script(script);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::TypeNotDroppable
+        ));
+    }
+
+    // ── merlinwrite / merlinread (0x6a, 0x6b) ────────────────────
+
+    #[test]
+    fn merlin_write_then_read_produces_bytes() {
+        // pushstr "init", merlin            -- transcript
+        // pushstr "lbl", pushstr "data", merlinwrite  -- absorb data
+        // pushstr "rd", push:8, merlinread  -- squeeze 8 bytes
+        let mut script = pushstr_bytes(b"init");
+        script.push(0x69);
+        script.extend_from_slice(&pushstr_bytes(b"lbl"));
+        script.extend_from_slice(&pushstr_bytes(b"data"));
+        script.push(0x6a);
+        script.extend_from_slice(&pushstr_bytes(b"rd"));
+        script.push(0x08); // push:8
+        script.push(0x6b);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        // Stack: [Merlin, String(8 bytes)]
+        assert_eq!(vm.current_call.stack.len(), 2);
+        match &vm.current_call.stack[0] {
+            Value::Merlin(_) => {}
+            other => panic!("expected Merlin, got {}", value_kind(other)),
+        }
+        match &vm.current_call.stack[1] {
+            Value::String(s) => assert_eq!(s.len(), 8),
+            other => panic!("expected String, got {}", value_kind(other)),
+        }
+    }
+
+    #[test]
+    fn merlin_read_is_deterministic() {
+        // Two scripts that absorb the same input should produce the same
+        // challenge bytes.
+        fn build_script() -> Vec<u8> {
+            let mut script = pushstr_bytes(b"label");
+            script.push(0x69);
+            script.extend_from_slice(&pushstr_bytes(b"k"));
+            script.extend_from_slice(&pushstr_bytes(b"value"));
+            script.push(0x6a);
+            script.extend_from_slice(&pushstr_bytes(b"r"));
+            script.push(0x10); // pushint8
+            script.push(16);
+            script.push(0x6b);
+            script
+        }
+        let mut a = vm_with_script(build_script());
+        run_to_end(&mut a).unwrap();
+        let mut b = vm_with_script(build_script());
+        run_to_end(&mut b).unwrap();
+        let bytes_a = match &a.current_call.stack[1] {
+            Value::String(s) => s.as_bytes().to_vec(),
+            _ => panic!("expected String"),
+        };
+        let bytes_b = match &b.current_call.stack[1] {
+            Value::String(s) => s.as_bytes().to_vec(),
+            _ => panic!("expected String"),
+        };
+        assert_eq!(bytes_a, bytes_b);
+    }
+
+    #[test]
+    fn merlin_read_diverges_on_different_label() {
+        // Same data, different label → different challenge bytes.
+        fn build(label: &[u8]) -> Vec<u8> {
+            let mut script = pushstr_bytes(b"l");
+            script.push(0x69);
+            script.extend_from_slice(&pushstr_bytes(b"k"));
+            script.extend_from_slice(&pushstr_bytes(b"data"));
+            script.push(0x6a);
+            script.extend_from_slice(&pushstr_bytes(label));
+            script.push(0x10);
+            script.push(16);
+            script.push(0x6b);
+            script
+        }
+        let mut a = vm_with_script(build(b"A"));
+        let mut b = vm_with_script(build(b"B"));
+        run_to_end(&mut a).unwrap();
+        run_to_end(&mut b).unwrap();
+        let ba = match &a.current_call.stack[1] {
+            Value::String(s) => s.as_bytes().to_vec(),
+            _ => panic!(),
+        };
+        let bb = match &b.current_call.stack[1] {
+            Value::String(s) => s.as_bytes().to_vec(),
+            _ => panic!(),
+        };
+        assert_ne!(ba, bb);
+    }
+
+    #[test]
+    fn merlin_write_requires_merlin_on_bottom() {
+        // push:5 (wrong type), pushstr "lbl", pushstr "data", merlinwrite
+        let mut script = vec![0x05];
+        script.extend_from_slice(&pushstr_bytes(b"lbl"));
+        script.extend_from_slice(&pushstr_bytes(b"data"));
+        script.push(0x6a);
+        let mut vm = vm_with_script(script);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::TypeNotMerlin
+        ));
+    }
+
+    // ── sha256 (0x6c) ────────────────────────────────────────────
+
+    #[test]
+    fn sha256_empty() {
+        let mut script = pushstr_bytes(b"");
+        script.push(0x6c);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        let expected = hex_to_bytes(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        );
+        assert_str(&vm.current_call.stack[0], &expected);
+    }
+
+    #[test]
+    fn sha256_abc() {
+        let mut script = pushstr_bytes(b"abc");
+        script.push(0x6c);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        let expected = hex_to_bytes(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        );
+        assert_str(&vm.current_call.stack[0], &expected);
+    }
+
+    // ── sha512 (0x6d) ────────────────────────────────────────────
+
+    #[test]
+    fn sha512_empty() {
+        let mut script = pushstr_bytes(b"");
+        script.push(0x6d);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        let expected = hex_to_bytes(
+            "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
+             47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+        );
+        assert_str(&vm.current_call.stack[0], &expected);
+    }
+
+    // ── sha3 (0x6e) ──────────────────────────────────────────────
+
+    #[test]
+    fn sha3_empty() {
+        let mut script = pushstr_bytes(b"");
+        script.push(0x6e);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        let expected = hex_to_bytes(
+            "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+        );
+        assert_str(&vm.current_call.stack[0], &expected);
+    }
+
+    #[test]
+    fn sha3_abc() {
+        let mut script = pushstr_bytes(b"abc");
+        script.push(0x6e);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        let expected = hex_to_bytes(
+            "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
+        );
+        assert_str(&vm.current_call.stack[0], &expected);
+    }
+
+    fn hex_to_bytes(h: &str) -> Vec<u8> {
+        let h: std::string::String = h.chars().filter(|c| !c.is_whitespace()).collect();
+        (0..h.len() / 2)
+            .map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).unwrap())
+            .collect()
     }
 }

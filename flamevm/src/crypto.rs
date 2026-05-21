@@ -30,6 +30,39 @@ pub struct MultiscalarMul {
     points: Vec<Option<RistrettoPoint>>,
 }
 
+/// A Merlin transcript wrapper. Linear (non-copyable, non-droppable).
+///
+/// The `merlin` crate requires `Transcript::new` to take a `&'static [u8]`
+/// label, which we can't honor for user-supplied labels. Instead, every
+/// `Merlin` opens with a fixed domain separator `flamevm::merlin.v1` and
+/// the user-supplied label is appended as the first message under a
+/// fixed tag. This preserves the protocol property that two transcripts
+/// with different user labels diverge from byte zero.
 pub struct Merlin {
     transcript: Transcript,
+}
+
+impl Merlin {
+    /// Creates a fresh transcript bound to `user_label`.
+    pub fn new(user_label: &[u8]) -> Self {
+        let mut t = Transcript::new(b"flamevm::merlin.v1");
+        t.append_message(b"label", user_label);
+        Merlin { transcript: t }
+    }
+
+    /// Appends `data` to the transcript under `user_label`. Used by the
+    /// `merlinwrite` opcode.
+    pub fn write_bytes(&mut self, user_label: &[u8], data: &[u8]) {
+        self.transcript.append_message(b"write.label", user_label);
+        self.transcript.append_message(b"write.data", data);
+    }
+
+    /// Squeezes `n` bytes of challenge from the transcript, tagged by
+    /// `user_label`. Used by the `merlinread` opcode.
+    pub fn read_bytes(&mut self, user_label: &[u8], n: usize) -> Vec<u8> {
+        self.transcript.append_message(b"read.label", user_label);
+        let mut out = vec![0u8; n];
+        self.transcript.challenge_bytes(b"read.bytes", &mut out);
+        out
+    }
 }
