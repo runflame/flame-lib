@@ -209,6 +209,16 @@ pub enum VMError {
     #[error("Operand types are not comparable")]
     TypeNotComparable,
 
+    /// `bitor` / `bitand` / `bitxor` saw operands of different lengths.
+    #[error("Bitwise operands have different sizes")]
+    BitwiseSizeMismatch,
+
+    /// `writebits`/`shiftleft`/`shiftright` saw a bit count outside the
+    /// permitted range (`writebits`: multiple of 8 and ≤ 256; shifts:
+    /// ≤ 256).
+    #[error("Bit count out of range")]
+    BitCountOutOfRange,
+
     // /// This error occurs when VM's anchor remains unset.
     // #[error("VM anchor is not set via `input`")]
     // AnchorMissing,

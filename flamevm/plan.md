@@ -137,24 +137,50 @@ Convention per phase: **Goal**, **Reuses** (already in `flame-lib`), **New** (to
 
 ---
 
-### Phase 4 — String ops
+### ✅ Phase 4 — String ops (done)
 
 **Goal**: parse and assemble byte buffers (for cells, signature messages, custom protocols).
 
-**Reuses**: `crate::String`.
+**Reuses**: `crate::String`, `Int253::abs/to_bytes/from_parts`, `Scalar::from_canonical_bytes`.
 
-**New**:
-- Destructive readers: `String::read_uint_le(n)`, `read_int_le(n)`, `read_substr(n)`, `read_point`.
-- Appenders: `write_bits_le(int, n)`, `write_int_full(int)`, `write_zeros(n)`, `bitwise(op, other)`, `shift_left/right(n)`.
-- `VMError::StringTooShort`, `BitwiseSizeMismatch`, `ShiftTooLarge`.
+**Added**:
+- `String::append(&other)`, `append_bytes(&[u8])`, `split_at(n) -> Option<(remainder, head)>`.
+- `String::bit_not()`, `bit_or/and/xor(&other) -> Option<String>` (None on size mismatch).
+- `String::shift_left(n)`, `shift_right(n)` — bit-level shifts with big-endian semantics; return `(shifted, removed)`. `shift_left` removed is zero-padded on the *left*; `shift_right` removed is zero-padded on the *right*. Implemented via bit-by-bit copy (clear and correct; can be optimized later).
+- Internal helpers `bit_at`/`set_bit` (MSB-first numbering).
+- `VM::pop_byte_count(max)` helper for the "pop an `Int253`, validate as `usize ≤ max`" pattern.
+- `VM::push_read_failure(original)` — restores the original string under a `0` flag for the `read*` opcodes' failure path.
+- `VMError::BitwiseSizeMismatch`, `BitCountOutOfRange`.
 
 **Opcodes**:
-- [ ] `0x40..=0x43` `read{uint,int,str,point}`
-- [ ] `0x44..=0x47` `write{bits,int,zeros}`, `append`
-- [ ] `0x48..=0x4b` `bit{not,or,and,xor}`
-- [ ] `0x4c..=0x4d` `shift{left,right}`
+- [x] `0x40` `readuint` — `s n → s' x 1 | s 0`. Reads `n ≤ 32` bytes LE as unsigned `Int253`.
+- [x] `0x41` `readint` — same, but high bit of byte `n-1` is the sign bit.
+- [x] `0x42` `readstr` — splits off `n` bytes as a new `String`.
+- [x] `0x43` `readpoint` — splits off 32 bytes as a `Point`.
+- [x] `0x44` `writebits` — appends low `n` bits of `Int253` magnitude; `n` must be a multiple of 8, `≤ 256`.
+- [x] `0x45` `writeint` — appends the full 32-byte sign-magnitude form.
+- [x] `0x46` `append` — `s || s'`.
+- [x] `0x47` `writezeros` — appends `n` zero bytes.
+- [x] `0x48..=0x4b` `bit{not,or,and,xor}` — bytewise; OR/AND/XOR require equal length.
+- [x] `0x4c..=0x4d` `shift{left,right}` — bit-level, `n ≤ 256`. Result keeps original length; removed bits returned as a side string with padding side matching the shift direction (left→left-pad, right→right-pad).
 
-**Tests**: short-input rejection; bitwise on mismatched sizes errors.
+**Tests landed** (24 new, all green):
+- `read_uint_success`, `read_uint_too_short_preserves_string`, `read_uint_n_too_large_errors`
+- `read_int_positive`, `read_int_negative`
+- `read_str_success`, `read_str_too_short_preserves`
+- `read_point_success`, `read_point_too_short`
+- `write_bits_basic`, `write_bits_non_multiple_of_8_errors`
+- `write_int_appends_full_32_bytes`
+- `append_concatenates`, `write_zeros_appends_n_zero_bytes`
+- `bit_not_inverts`, `bit_or_basic`, `bit_and_basic`, `bit_xor_basic`, `bit_or_size_mismatch_errors`
+- `shift_left_by_byte`, `shift_left_by_4_bits_left_pads_removed`, `shift_left_zero_is_noop`
+- `shift_right_by_byte`, `shift_right_by_4_bits_right_pads_removed`
+- `shift_too_large_errors`
+
+**Deferred / open**:
+- `writebits` accepting non-byte-aligned `n` — spec says "appends low n bits" without alignment constraint. Phase 4 enforces a multiple-of-8 to preserve byte-aligned strings. If sub-byte writes are wanted, spec must define how to handle the trailing partial byte.
+- Reading values whose top byte makes them non-canonical (≥ ℓ) currently produces `InvalidInt253Encoding` rather than the soft-failure path. Confirm with Architect whether such inputs should soft-fail (push original + 0) or hard-error.
+- Shift implementation is bit-by-bit; optimize to byte+bit memmove later if hot.
 
 ---
 

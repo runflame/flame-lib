@@ -506,6 +506,63 @@ impl VM {
                 self.op_roll_k((op - 0x30) as usize)?;
                 Ok(true)
             }
+            // ── Phase 4: string ops ────────────────────────────────
+            0x40 => {
+                self.op_read_uint()?;
+                Ok(true)
+            }
+            0x41 => {
+                self.op_read_int()?;
+                Ok(true)
+            }
+            0x42 => {
+                self.op_read_str()?;
+                Ok(true)
+            }
+            0x43 => {
+                self.op_read_point()?;
+                Ok(true)
+            }
+            0x44 => {
+                self.op_write_bits()?;
+                Ok(true)
+            }
+            0x45 => {
+                self.op_write_int()?;
+                Ok(true)
+            }
+            0x46 => {
+                self.op_append()?;
+                Ok(true)
+            }
+            0x47 => {
+                self.op_write_zeros()?;
+                Ok(true)
+            }
+            0x48 => {
+                self.op_bit_not()?;
+                Ok(true)
+            }
+            0x49 => {
+                self.op_bit_or()?;
+                Ok(true)
+            }
+            0x4a => {
+                self.op_bit_and()?;
+                Ok(true)
+            }
+            0x4b => {
+                self.op_bit_xor()?;
+                Ok(true)
+            }
+            0x4c => {
+                self.op_shift_left()?;
+                Ok(true)
+            }
+            0x4d => {
+                self.op_shift_right()?;
+                Ok(true)
+            }
             // ── Phase 3: Int253 arithmetic, logic, size ────────────
             0x50 => {
                 self.op_abs()?;
@@ -774,6 +831,217 @@ impl VM {
         let idx = stack.len() - 1 - k;
         let v = stack.remove(idx);
         stack.push(v);
+        Ok(())
+    }
+
+    // ── Phase 4: String ops ──────────────────────────────────────
+
+    /// Helper: converts a stack-popped count into a `usize` ≤ `max`.
+    /// Returns `IndexOutOfRange` on overflow or above `max`.
+    fn pop_byte_count(&mut self, max: usize) -> Result<usize, VMError> {
+        let n_int = self.pop_int253()?;
+        let n_u64 = n_int.to_u64().ok_or(VMError::IndexOutOfRange)?;
+        let n = usize::try_from(n_u64).map_err(|_| VMError::IndexOutOfRange)?;
+        if n > max {
+            return Err(VMError::IndexOutOfRange);
+        }
+        Ok(n)
+    }
+
+    /// Pushes a failure marker (`Int253(0)`) — used by `read*` opcodes
+    /// when the source string is too short to satisfy the request. The
+    /// original string is restored under the marker.
+    fn push_read_failure(&mut self, original: String) {
+        self.push_value(Value::String(original));
+        self.push_value(Value::Int253(Int253::zero()));
+    }
+
+    /// `0x40` `readuint` — `s n → s' x 1 | s 0`. Consume first `n ≤ 32`
+    /// bytes of `s` as a little-endian unsigned integer.
+    fn op_read_uint(&mut self) -> Result<(), VMError> {
+        let n = self.pop_byte_count(32)?;
+        let s = self.pop_string()?;
+        if s.len() < n {
+            self.push_read_failure(s);
+            return Ok(());
+        }
+        let mut scalar_bytes = [0u8; 32];
+        scalar_bytes[..n].copy_from_slice(&s.as_bytes()[..n]);
+        let scalar = Scalar::from_canonical_bytes(scalar_bytes)
+            .ok_or(VMError::InvalidInt253Encoding)?;
+        let value = Int253::from_parts(false, scalar);
+        let (remainder, _consumed) = s.split_at(n).expect("length checked");
+        self.push_value(Value::String(remainder));
+        self.push_value(Value::Int253(value));
+        self.push_value(Value::Int253(Int253::from(1u64)));
+        Ok(())
+    }
+
+    /// `0x41` `readint` — `s n → s' x 1 | s 0`. Same as `readuint` but
+    /// the high bit of byte `n-1` is interpreted as the sign bit;
+    /// remaining bits form the magnitude.
+    fn op_read_int(&mut self) -> Result<(), VMError> {
+        let n = self.pop_byte_count(32)?;
+        let s = self.pop_string()?;
+        if s.len() < n {
+            self.push_read_failure(s);
+            return Ok(());
+        }
+        if n == 0 {
+            // Reading zero bytes yields value 0.
+            self.push_value(Value::String(s));
+            self.push_value(Value::Int253(Int253::zero()));
+            self.push_value(Value::Int253(Int253::from(1u64)));
+            return Ok(());
+        }
+        let mut magnitude_bytes = [0u8; 32];
+        magnitude_bytes[..n].copy_from_slice(&s.as_bytes()[..n]);
+        let sign_neg = magnitude_bytes[n - 1] & 0x80 != 0;
+        magnitude_bytes[n - 1] &= 0x7f;
+        let scalar = Scalar::from_canonical_bytes(magnitude_bytes)
+            .ok_or(VMError::InvalidInt253Encoding)?;
+        let value = Int253::from_parts(sign_neg, scalar);
+        let (remainder, _consumed) = s.split_at(n).expect("length checked");
+        self.push_value(Value::String(remainder));
+        self.push_value(Value::Int253(value));
+        self.push_value(Value::Int253(Int253::from(1u64)));
+        Ok(())
+    }
+
+    /// `0x42` `readstr` — `s n → s' s'' 1 | s 0`. Splits off the first
+    /// `n` bytes of `s` as a new String.
+    fn op_read_str(&mut self) -> Result<(), VMError> {
+        let n = self.pop_byte_count(usize::MAX)?;
+        let s = self.pop_string()?;
+        if s.len() < n {
+            self.push_read_failure(s);
+            return Ok(());
+        }
+        let (remainder, consumed) = s.split_at(n).expect("length checked");
+        self.push_value(Value::String(remainder));
+        self.push_value(Value::String(consumed));
+        self.push_value(Value::Int253(Int253::from(1u64)));
+        Ok(())
+    }
+
+    /// `0x43` `readpoint` — `s → s' point 1 | s 0`. Splits off the first
+    /// 32 bytes of `s` as a `Point` (decompressability not validated
+    /// here; later opcodes that consume the point may reject it).
+    fn op_read_point(&mut self) -> Result<(), VMError> {
+        let s = self.pop_string()?;
+        if s.len() < 32 {
+            self.push_read_failure(s);
+            return Ok(());
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&s.as_bytes()[..32]);
+        let point = Point::from_bytes(arr);
+        let (remainder, _consumed) = s.split_at(32).expect("length checked");
+        self.push_value(Value::String(remainder));
+        self.push_value(Value::Point(point));
+        self.push_value(Value::Int253(Int253::from(1u64)));
+        Ok(())
+    }
+
+    /// `0x44` `writebits` — `s x n → s'`. Appends the low `n` bits of
+    /// the magnitude of `x` to `s`. Phase 4 constraint: `n` must be a
+    /// multiple of 8 and `≤ 256` (byte-aligned strings).
+    fn op_write_bits(&mut self) -> Result<(), VMError> {
+        let n = self.pop_byte_count(256)?;
+        if n % 8 != 0 {
+            return Err(VMError::BitCountOutOfRange);
+        }
+        let n_bytes = n / 8;
+        let x = self.pop_int253()?;
+        let s = self.pop_string()?;
+        let magnitude_bytes = x.abs().to_bytes();
+        // magnitude_bytes is 32-byte LE of magnitude. Low n bits = first n_bytes.
+        let appended = s.append_bytes(&magnitude_bytes[..n_bytes]);
+        self.push_value(Value::String(appended));
+        Ok(())
+    }
+
+    /// `0x45` `writeint` — `s x → s'`. Appends the full 32-byte
+    /// sign-magnitude representation of `x` to `s`.
+    fn op_write_int(&mut self) -> Result<(), VMError> {
+        let x = self.pop_int253()?;
+        let s = self.pop_string()?;
+        let appended = s.append_bytes(&x.to_bytes());
+        self.push_value(Value::String(appended));
+        Ok(())
+    }
+
+    /// `0x46` `append` — `s s' → s''`. Concatenates two strings.
+    fn op_append(&mut self) -> Result<(), VMError> {
+        let s2 = self.pop_string()?;
+        let s1 = self.pop_string()?;
+        self.push_value(Value::String(s1.append(&s2)));
+        Ok(())
+    }
+
+    /// `0x47` `writezeros` — `s n → s'`. Appends `n` zero bytes.
+    fn op_write_zeros(&mut self) -> Result<(), VMError> {
+        let n = self.pop_byte_count(usize::MAX)?;
+        let s = self.pop_string()?;
+        let appended = s.append_bytes(&vec![0u8; n]);
+        self.push_value(Value::String(appended));
+        Ok(())
+    }
+
+    /// `0x48` `bitnot` — `s → s'`. Inverts every bit.
+    fn op_bit_not(&mut self) -> Result<(), VMError> {
+        let s = self.pop_string()?;
+        self.push_value(Value::String(s.bit_not()));
+        Ok(())
+    }
+
+    /// `0x49` `bitor` — `a b → c`. Bytewise OR. Fails if sizes differ.
+    fn op_bit_or(&mut self) -> Result<(), VMError> {
+        let b = self.pop_string()?;
+        let a = self.pop_string()?;
+        let c = a.bit_or(&b).ok_or(VMError::BitwiseSizeMismatch)?;
+        self.push_value(Value::String(c));
+        Ok(())
+    }
+
+    /// `0x4a` `bitand` — `a b → c`. Bytewise AND. Fails on size mismatch.
+    fn op_bit_and(&mut self) -> Result<(), VMError> {
+        let b = self.pop_string()?;
+        let a = self.pop_string()?;
+        let c = a.bit_and(&b).ok_or(VMError::BitwiseSizeMismatch)?;
+        self.push_value(Value::String(c));
+        Ok(())
+    }
+
+    /// `0x4b` `bitxor` — `a b → c`. Bytewise XOR. Fails on size mismatch.
+    fn op_bit_xor(&mut self) -> Result<(), VMError> {
+        let b = self.pop_string()?;
+        let a = self.pop_string()?;
+        let c = a.bit_xor(&b).ok_or(VMError::BitwiseSizeMismatch)?;
+        self.push_value(Value::String(c));
+        Ok(())
+    }
+
+    /// `0x4c` `shiftleft` — `a n → b c`. Shifts `a` left by `n ≤ 256`
+    /// bits; pushes the shifted string and the removed bits (zero-padded
+    /// on the left).
+    fn op_shift_left(&mut self) -> Result<(), VMError> {
+        let n = self.pop_byte_count(256)?;
+        let a = self.pop_string()?;
+        let (shifted, removed) = a.shift_left(n);
+        self.push_value(Value::String(shifted));
+        self.push_value(Value::String(removed));
+        Ok(())
+    }
+
+    /// `0x4d` `shiftright` — `a n → b c`. Mirror of `shiftleft`; removed
+    /// bits are zero-padded on the right.
+    fn op_shift_right(&mut self) -> Result<(), VMError> {
+        let n = self.pop_byte_count(256)?;
+        let a = self.pop_string()?;
+        let (shifted, removed) = a.shift_right(n);
+        self.push_value(Value::String(shifted));
+        self.push_value(Value::String(removed));
         Ok(())
     }
 
@@ -2137,4 +2405,323 @@ mod tests {
         ));
     }
 
+    // ── Phase 4 ──────────────────────────────────────────────────
+
+    fn assert_str(v: &Value, expected: &[u8]) {
+        match v {
+            Value::String(s) => assert_eq!(s.as_bytes(), expected),
+            other => panic!("expected String, got {}", value_kind(other)),
+        }
+    }
+
+    // ── readuint (0x40) ──────────────────────────────────────────
+
+    #[test]
+    fn read_uint_success() {
+        let mut script = pushstr_bytes(&[0x07, 0x00, 0x01, 0xff, 0xfe]);
+        script.push(0x03);
+        script.push(0x40);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_eq!(vm.current_call.stack.len(), 3);
+        assert_int(&vm.current_call.stack[1], Int253::from(65543u64));
+        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+        assert_str(&vm.current_call.stack[0], &[0xff, 0xfe]);
+    }
+
+    #[test]
+    fn read_uint_too_short_preserves_string() {
+        let mut script = pushstr_bytes(&[0xaa]);
+        script.push(0x03);
+        script.push(0x40);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_eq!(vm.current_call.stack.len(), 2);
+        assert_str(&vm.current_call.stack[0], &[0xaa]);
+        assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    }
+
+    #[test]
+    fn read_uint_n_too_large_errors() {
+        let mut script = pushstr_bytes(&[0u8; 40]);
+        script.push(0x10);
+        script.push(33);
+        script.push(0x40);
+        let mut vm = vm_with_script(script);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::IndexOutOfRange
+        ));
+    }
+
+    // ── readint (0x41) ───────────────────────────────────────────
+
+    #[test]
+    fn read_int_positive() {
+        // 2-byte LE 0xff 0x7f: magnitude 0x7fff, sign bit of byte 1 = 0
+        let mut script = pushstr_bytes(&[0xff, 0x7f]);
+        script.push(0x02);
+        script.push(0x41);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_int(&vm.current_call.stack[1], Int253::from(32767u64));
+    }
+
+    #[test]
+    fn read_int_negative() {
+        // 2-byte LE 0xff 0xff: sign bit of byte 1 = 1; magnitude after mask = 0x7fff
+        let mut script = pushstr_bytes(&[0xff, 0xff]);
+        script.push(0x02);
+        script.push(0x41);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_int(&vm.current_call.stack[1], Int253::from(-32767i64));
+    }
+
+    // ── readstr (0x42) ───────────────────────────────────────────
+
+    #[test]
+    fn read_str_success() {
+        let mut script = pushstr_bytes(&[1, 2, 3, 4, 5]);
+        script.push(0x02);
+        script.push(0x42);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[3, 4, 5]);
+        assert_str(&vm.current_call.stack[1], &[1, 2]);
+        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    }
+
+    #[test]
+    fn read_str_too_short_preserves() {
+        let mut script = pushstr_bytes(&[1]);
+        script.push(0x05);
+        script.push(0x42);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[1]);
+        assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    }
+
+    // ── readpoint (0x43) ─────────────────────────────────────────
+
+    #[test]
+    fn read_point_success() {
+        let mut bytes = vec![0x55u8; 32];
+        bytes.push(0xaa);
+        let mut script = pushstr_bytes(&bytes);
+        script.push(0x43);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[0xaa]);
+        match &vm.current_call.stack[1] {
+            Value::Point(p) => assert_eq!(p.as_bytes(), &[0x55u8; 32]),
+            other => panic!("expected Point, got {}", value_kind(other)),
+        }
+        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    }
+
+    #[test]
+    fn read_point_too_short() {
+        let mut script = pushstr_bytes(&[0; 31]);
+        script.push(0x43);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    }
+
+    // ── writebits (0x44) ─────────────────────────────────────────
+
+    #[test]
+    fn write_bits_basic() {
+        let mut script = pushstr_bytes(&[0xaa]);
+        script.push(0x10);
+        script.push(0xab);
+        script.push(0x10);
+        script.push(8);
+        script.push(0x44);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[0xaa, 0xab]);
+    }
+
+    #[test]
+    fn write_bits_non_multiple_of_8_errors() {
+        let mut script = pushstr_bytes(&[]);
+        script.push(0x10);
+        script.push(0x05);
+        script.push(0x10);
+        script.push(7);
+        script.push(0x44);
+        let mut vm = vm_with_script(script);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::BitCountOutOfRange
+        ));
+    }
+
+    // ── writeint (0x45) ──────────────────────────────────────────
+
+    #[test]
+    fn write_int_appends_full_32_bytes() {
+        let mut script = pushstr_bytes(&[]);
+        script.push(0x10);
+        script.push(0x07);
+        script.push(0x45);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        let expected = Int253::from(7u64).to_bytes();
+        assert_str(&vm.current_call.stack[0], &expected);
+    }
+
+    // ── append (0x46) ────────────────────────────────────────────
+
+    #[test]
+    fn append_concatenates() {
+        let mut script = pushstr_bytes(&[1, 2]);
+        script.extend_from_slice(&pushstr_bytes(&[3, 4, 5]));
+        script.push(0x46);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[1, 2, 3, 4, 5]);
+    }
+
+    // ── writezeros (0x47) ────────────────────────────────────────
+
+    #[test]
+    fn write_zeros_appends_n_zero_bytes() {
+        let mut script = pushstr_bytes(&[0xaa]);
+        script.push(0x03);
+        script.push(0x47);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[0xaa, 0, 0, 0]);
+    }
+
+    // ── bit ops (0x48..=0x4b) ────────────────────────────────────
+
+    #[test]
+    fn bit_not_inverts() {
+        let mut script = pushstr_bytes(&[0x00, 0xff, 0xa5]);
+        script.push(0x48);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[0xff, 0x00, 0x5a]);
+    }
+
+    #[test]
+    fn bit_or_basic() {
+        let mut script = pushstr_bytes(&[0xa0, 0x0f]);
+        script.extend_from_slice(&pushstr_bytes(&[0x05, 0xf0]));
+        script.push(0x49);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[0xa5, 0xff]);
+    }
+
+    #[test]
+    fn bit_and_basic() {
+        let mut script = pushstr_bytes(&[0xff, 0xf0]);
+        script.extend_from_slice(&pushstr_bytes(&[0xa5, 0xa5]));
+        script.push(0x4a);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[0xa5, 0xa0]);
+    }
+
+    #[test]
+    fn bit_xor_basic() {
+        let mut script = pushstr_bytes(&[0xff, 0x00]);
+        script.extend_from_slice(&pushstr_bytes(&[0xa5, 0xa5]));
+        script.push(0x4b);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[0x5a, 0xa5]);
+    }
+
+    #[test]
+    fn bit_or_size_mismatch_errors() {
+        let mut script = pushstr_bytes(&[0xa0]);
+        script.extend_from_slice(&pushstr_bytes(&[0x05, 0xf0]));
+        script.push(0x49);
+        let mut vm = vm_with_script(script);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::BitwiseSizeMismatch
+        ));
+    }
+
+    // ── shiftleft (0x4c) ─────────────────────────────────────────
+
+    #[test]
+    fn shift_left_by_byte() {
+        let mut script = pushstr_bytes(&[0xa0, 0xb1, 0xc2, 0xd3]);
+        script.push(0x10);
+        script.push(8);
+        script.push(0x4c);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[0xb1, 0xc2, 0xd3, 0x00]);
+        assert_str(&vm.current_call.stack[1], &[0xa0]);
+    }
+
+    #[test]
+    fn shift_left_by_4_bits_left_pads_removed() {
+        let mut script = pushstr_bytes(&[0xab]);
+        script.push(0x04);
+        script.push(0x4c);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[0xb0]);
+        assert_str(&vm.current_call.stack[1], &[0x0a]);
+    }
+
+    #[test]
+    fn shift_left_zero_is_noop() {
+        let mut script = pushstr_bytes(&[0xab, 0xcd]);
+        script.push(0x00);
+        script.push(0x4c);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[0xab, 0xcd]);
+        assert_str(&vm.current_call.stack[1], &[]);
+    }
+
+    // ── shiftright (0x4d) ────────────────────────────────────────
+
+    #[test]
+    fn shift_right_by_byte() {
+        let mut script = pushstr_bytes(&[0xa0, 0xb1, 0xc2, 0xd3]);
+        script.push(0x10);
+        script.push(8);
+        script.push(0x4d);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[0x00, 0xa0, 0xb1, 0xc2]);
+        assert_str(&vm.current_call.stack[1], &[0xd3]);
+    }
+
+    #[test]
+    fn shift_right_by_4_bits_right_pads_removed() {
+        let mut script = pushstr_bytes(&[0xab]);
+        script.push(0x04);
+        script.push(0x4d);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[0x0a]);
+        assert_str(&vm.current_call.stack[1], &[0xb0]);
+    }
+
+    #[test]
+    fn shift_too_large_errors() {
+        let mut script = pushstr_bytes(&[0xab]);
+        script.push(0x12); // pushint16 positive
+        script.extend_from_slice(&257u16.to_be_bytes()); // 257 > 256
+        script.push(0x4c);
+        let mut vm = vm_with_script(script);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::IndexOutOfRange
+        ));
+    }
 }
