@@ -39,8 +39,8 @@ impl Value {
             Value::Int253(i) => Ok(Value::Int253(*i)),
             Value::String(s) => Ok(Value::String(s.clone())),
             Value::Point(p) => Ok(Value::Point(*p)),
-            Value::Dict(_)
-            | Value::Token(_)
+            Value::Dict(d) => Ok(Value::Dict(d.try_clone()?)),
+            Value::Token(_)
             | Value::ClearToken(_)
             | Value::WideToken(_)
             | Value::Object(_)
@@ -51,13 +51,43 @@ impl Value {
         }
     }
 
+    /// True iff this value's type permits duplication (`dup`/`getdup`).
+    /// Plain-data and copyable containers; never linear types.
+    pub fn is_copyable(&self) -> bool {
+        match self {
+            Value::Int253(_) | Value::String(_) | Value::Point(_) => true,
+            Value::Dict(d) => d.is_copyable(),
+            _ => false,
+        }
+    }
+
+    /// True iff this value can survive across VM execution — sealed into
+    /// a cell or actor state. Plain-data types are portable; `ClearToken`
+    /// is portable iff its quantity is non-negative; encrypted in-range
+    /// `Token` is portable; everything else (linear, intermediate,
+    /// constraint-system-only types) is not.
+    pub fn is_portable(&self) -> bool {
+        match self {
+            Value::Int253(_) | Value::String(_) | Value::Point(_) => true,
+            Value::Dict(d) => d.is_portable(),
+            Value::ClearToken(t) => !t.qty().is_negative(),
+            // Phase 1 / 5: `Token` (encrypted, in-range) is a placeholder
+            // empty struct. Treat as portable once it gains real fields
+            // in Phase 13. For now, `Token` instances cannot be created,
+            // so this case is unreachable in practice.
+            Value::Token(_) => true,
+            _ => false,
+        }
+    }
+
     /// Returns true iff this value can be silently discarded by `drop`.
     /// Plain-data types are always droppable; cleartokens are droppable
-    /// when quantity is zero; everything else (linear types, non-empty
-    /// containers in later phases) is not.
+    /// when quantity is zero; empty dicts are droppable; everything else
+    /// is not.
     pub fn is_droppable(&self) -> bool {
         match self {
             Value::Int253(_) | Value::String(_) | Value::Point(_) => true,
+            Value::Dict(d) => d.is_empty(),
             Value::ClearToken(t) => t.is_zero_qty(),
             _ => false,
         }

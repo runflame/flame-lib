@@ -184,23 +184,52 @@ Convention per phase: **Goal**, **Reuses** (already in `flame-lib`), **New** (to
 
 ---
 
-### Phase 5 — Dict ops
+### ✅ Phase 5 — Dict ops (done)
 
-**Goal**: build/query/iterate dicts (lists, structs, enum variants).
+**Goal**: build/query/iterate dicts (lists, structs, enum variants), with copyable/portable flag tracking so `dup`/`getdup` and (future) `output` enforce linear-type discipline correctly.
 
-**Reuses**: `Dict` (BTreeMap-backed, sorted).
+**Reuses**: `Dict` (BTreeMap-backed), `Int253` ordering.
 
-**New**:
-- `Dict::insert_strict` (fails on occupied key).
-- `Dict::range_after(k)` for `next`.
-- Portable / copyable flag propagation when items are inserted.
+**Added**:
+- Dict carries two **sticky** flags: `copyable` and `portable`. Both start `true`; insertion of a non-copyable or non-portable value flips the corresponding flag false permanently. Removal does *not* unset; once poisoned, stays poisoned. This is a safe over-approximation matching the script's intuition.
+- `Dict::insert_strict(k, v) -> Result<(), Value>` — strict insert, returns the rejected value on key conflict.
+- `Dict::first_key()`, `last_key()`, `next_key_after(&k)` — ordered traversal via `BTreeMap::range`.
+- `Dict::try_clone()` — deep clone gated on the sticky `copyable` flag; recursively clones every member.
+- `Dict::is_copyable()`, `is_portable()` — accessors for the flags.
+- `Dict::insert` now updates flags; `from_values`/`from_entries_unchecked` updated to absorb flags.
+- `Value::is_copyable()`, `is_portable()` (parallel to `is_droppable`).
+- `Value::try_clone` extended to handle Dict via `Dict::try_clone`.
+- `Value::is_droppable` extended: empty dict is droppable.
+- `VM::pop_dict` helper.
+- `VMError::TypeNotDict`, `DictKeyOccupied`, `DictKeyNotFound`.
 
 **Opcodes**:
-- [ ] `0x60` `dict`, `0x61` `put`, `0x62` `replace`
-- [ ] `0x63` `get`, `0x64` `getopt`, `0x65` `getdup`
-- [ ] `0x66` `first`, `0x67` `last`, `0x68` `next`
+- [x] `0x60` `dict` — pop `n`, then `n` key/value pairs (key on top of each pair); duplicates error.
+- [x] `0x61` `put` — strict insert; conflict errors.
+- [x] `0x62` `replace` — overwrite; returns prior value as optional `{prev 1 | 0}`. Operand order per spec: `dict v k`.
+- [x] `0x63` `get` — remove and return `(dict', k, v)`; missing key hard-errors.
+- [x] `0x64` `getopt` — remove and return `(dict', {v 1 | 0})`; missing key soft-fails.
+- [x] `0x65` `getdup` — copy value at key; missing soft-fails, non-copyable hard-errors. Dict stays on stack unchanged.
+- [x] `0x66` `first` — smallest key + flag, or `0` on empty.
+- [x] `0x67` `last` — largest key + flag, or `0` on empty.
+- [x] `0x68` `next` — smallest key strictly greater than the popped `k`, or `0` if none.
 
-**Tests**: `put` on occupied key fails; `getdup` of non-copyable errors; non-portable item poisons dict's portable flag.
+**Tests landed** (24 new, all green):
+- `dict_construction_zero_pairs`, `dict_construction_two_pairs`, `dict_construction_duplicate_keys_errors`
+- `put_inserts_into_empty`, `put_on_occupied_key_errors`
+- `replace_existing_returns_prev`, `replace_absent_returns_zero`
+- `get_existing_returns_dict_k_v`, `get_missing_errors`
+- `getopt_existing`, `getopt_missing`
+- `getdup_copyable`, `getdup_missing_pushes_zero`, `getdup_noncopyable_errors`
+- `first_of_empty_pushes_zero`, `first_returns_smallest_key`, `last_returns_largest_key`
+- `next_finds_strictly_greater_key`, `next_past_last_pushes_zero`
+- `dict_with_token_is_noncopyable`, `dup_of_copyable_dict_succeeds`, `dup_of_noncopyable_dict_errors`
+- `empty_dict_is_droppable`, `nonempty_dict_is_not_droppable`
+
+**Open / deferred**:
+- The `replace` opcode's operand order (`dict v k`, with `k` on top) differs from `put`'s (`dict k v`). Confirm with Architect — this could be a spec typo, in which case I'll mirror to `dict k v` and re-test.
+- `dict_with_token_is_noncopyable` only covers the zero-qty ClearToken case (the only token currently constructible). Re-verify non-portable flag propagation in Phase 8 when ClearTokens can hold non-zero / negative qty.
+- Real wire-format encoding/decoding for dicts already exists in `encoding.rs` and is now exercised through `from_entries_unchecked`; flag tracking added via `absorb_flags`.
 
 ---
 

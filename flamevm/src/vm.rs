@@ -28,7 +28,7 @@ use core::mem;
 
 use crate::errors::VMError;
 use crate::tx::TxHeader;
-use crate::{ClearToken, Int253, Point, String, Value};
+use crate::{ClearToken, Dict, Int253, Point, String, Value};
 
 // ── Identifiers and metadata ──────────────────────────────────────
 
@@ -608,6 +608,43 @@ impl VM {
                 self.op_size()?;
                 Ok(true)
             }
+            // ── Phase 5: Dict ops ──────────────────────────────────
+            0x60 => {
+                self.op_dict()?;
+                Ok(true)
+            }
+            0x61 => {
+                self.op_put()?;
+                Ok(true)
+            }
+            0x62 => {
+                self.op_replace()?;
+                Ok(true)
+            }
+            0x63 => {
+                self.op_get()?;
+                Ok(true)
+            }
+            0x64 => {
+                self.op_getopt()?;
+                Ok(true)
+            }
+            0x65 => {
+                self.op_getdup()?;
+                Ok(true)
+            }
+            0x66 => {
+                self.op_first()?;
+                Ok(true)
+            }
+            0x67 => {
+                self.op_last()?;
+                Ok(true)
+            }
+            0x68 => {
+                self.op_next()?;
+                Ok(true)
+            }
             // ── Phase 2: control flow ──────────────────────────────
             0x79 => {
                 self.op_verify()?;
@@ -831,6 +868,174 @@ impl VM {
         let idx = stack.len() - 1 - k;
         let v = stack.remove(idx);
         stack.push(v);
+        Ok(())
+    }
+
+    // ── Phase 5: Dict ops ────────────────────────────────────────
+
+    /// Pops the top value, asserting it is a `Dict`.
+    fn pop_dict(&mut self) -> Result<Dict, VMError> {
+        match self.pop_value()? {
+            Value::Dict(d) => Ok(d),
+            _ => Err(VMError::TypeNotDict),
+        }
+    }
+
+    /// `0x60` `dict` — `... val key val key n → dict`. Pops `n`, then `n`
+    /// key/value pairs (key on top of each pair). Duplicate keys error.
+    fn op_dict(&mut self) -> Result<(), VMError> {
+        let n = self.pop_byte_count(usize::MAX)?;
+        let mut dict = Dict::new();
+        for _ in 0..n {
+            let key = self.pop_int253()?;
+            let value = self.pop_value()?;
+            if dict.insert_strict(key, value).is_err() {
+                return Err(VMError::DictKeyOccupied);
+            }
+        }
+        self.push_value(Value::Dict(dict));
+        Ok(())
+    }
+
+    /// `0x61` `put` — `dict k v → dict'`. Strict insert; fails on
+    /// occupied key.
+    fn op_put(&mut self) -> Result<(), VMError> {
+        let v = self.pop_value()?;
+        let k = self.pop_int253()?;
+        let mut dict = self.pop_dict()?;
+        if dict.insert_strict(k, v).is_err() {
+            return Err(VMError::DictKeyOccupied);
+        }
+        self.push_value(Value::Dict(dict));
+        Ok(())
+    }
+
+    /// `0x62` `replace` — `dict v k → dict' {prev 1 | 0}`. Overwrites
+    /// the slot, returning the prior value (if any) as an optional.
+    /// Note operand order per spec: `k` is the top of stack, `v` below.
+    fn op_replace(&mut self) -> Result<(), VMError> {
+        let k = self.pop_int253()?;
+        let v = self.pop_value()?;
+        let mut dict = self.pop_dict()?;
+        let prev = dict.insert(k, v);
+        self.push_value(Value::Dict(dict));
+        match prev {
+            Some(prev_v) => {
+                self.push_value(prev_v);
+                self.push_value(Value::Int253(Int253::from(1u64)));
+            }
+            None => {
+                self.push_value(Value::Int253(Int253::zero()));
+            }
+        }
+        Ok(())
+    }
+
+    /// `0x63` `get` — `dict k → dict' k v`. Removes and returns the
+    /// value at `k`. Fails if the key is missing.
+    fn op_get(&mut self) -> Result<(), VMError> {
+        let k = self.pop_int253()?;
+        let mut dict = self.pop_dict()?;
+        let v = dict.remove(&k).ok_or(VMError::DictKeyNotFound)?;
+        self.push_value(Value::Dict(dict));
+        self.push_value(Value::Int253(k));
+        self.push_value(v);
+        Ok(())
+    }
+
+    /// `0x64` `getopt` — `dict k → dict' {v 1 | 0}`. Like `get`, but
+    /// soft-fails (pushes `0`) when the key is missing.
+    fn op_getopt(&mut self) -> Result<(), VMError> {
+        let k = self.pop_int253()?;
+        let mut dict = self.pop_dict()?;
+        let v = dict.remove(&k);
+        self.push_value(Value::Dict(dict));
+        match v {
+            Some(v) => {
+                self.push_value(v);
+                self.push_value(Value::Int253(Int253::from(1u64)));
+            }
+            None => {
+                self.push_value(Value::Int253(Int253::zero()));
+            }
+        }
+        Ok(())
+    }
+
+    /// `0x65` `getdup` — `dict k → dict {v 1 | 0}`. Copies the value
+    /// without consuming it. Soft-fails with `0` on missing key; hard
+    /// errors if the value exists but isn't copyable.
+    fn op_getdup(&mut self) -> Result<(), VMError> {
+        let k = self.pop_int253()?;
+        let dict = self.pop_dict()?;
+        let copied = match dict.get(&k) {
+            Some(v) => Some(v.try_clone()?),
+            None => None,
+        };
+        self.push_value(Value::Dict(dict));
+        match copied {
+            Some(v) => {
+                self.push_value(v);
+                self.push_value(Value::Int253(Int253::from(1u64)));
+            }
+            None => {
+                self.push_value(Value::Int253(Int253::zero()));
+            }
+        }
+        Ok(())
+    }
+
+    /// `0x66` `first` — `dict → dict {k 1 | 0}`. Pushes the smallest key
+    /// alongside a flag, or `0` if the dict is empty.
+    fn op_first(&mut self) -> Result<(), VMError> {
+        let dict = self.pop_dict()?;
+        let k = dict.first_key();
+        self.push_value(Value::Dict(dict));
+        match k {
+            Some(k) => {
+                self.push_value(Value::Int253(k));
+                self.push_value(Value::Int253(Int253::from(1u64)));
+            }
+            None => {
+                self.push_value(Value::Int253(Int253::zero()));
+            }
+        }
+        Ok(())
+    }
+
+    /// `0x67` `last` — `dict → dict {k 1 | 0}`. Mirror of `first`.
+    fn op_last(&mut self) -> Result<(), VMError> {
+        let dict = self.pop_dict()?;
+        let k = dict.last_key();
+        self.push_value(Value::Dict(dict));
+        match k {
+            Some(k) => {
+                self.push_value(Value::Int253(k));
+                self.push_value(Value::Int253(Int253::from(1u64)));
+            }
+            None => {
+                self.push_value(Value::Int253(Int253::zero()));
+            }
+        }
+        Ok(())
+    }
+
+    /// `0x68` `next` — `dict k → dict {k' 1 | 0}`. Smallest key strictly
+    /// greater than `k`, or `0` if no such key exists.
+    fn op_next(&mut self) -> Result<(), VMError> {
+        let k = self.pop_int253()?;
+        let dict = self.pop_dict()?;
+        let next_k = dict.next_key_after(&k);
+        self.push_value(Value::Dict(dict));
+        match next_k {
+            Some(k) => {
+                self.push_value(Value::Int253(k));
+                self.push_value(Value::Int253(Int253::from(1u64)));
+            }
+            None => {
+                self.push_value(Value::Int253(Int253::zero()));
+            }
+        }
         Ok(())
     }
 
@@ -2722,6 +2927,371 @@ mod tests {
         assert!(matches!(
             run_to_end(&mut vm).unwrap_err(),
             VMError::IndexOutOfRange
+        ));
+    }
+
+    // ── Phase 5 ──────────────────────────────────────────────────
+
+    fn assert_dict_keys(v: &Value, expected: &[Int253]) {
+        match v {
+            Value::Dict(d) => {
+                let keys: Vec<Int253> = d.entries().map(|(k, _)| *k).collect();
+                assert_eq!(keys, expected);
+            }
+            other => panic!("expected Dict, got {}", value_kind(other)),
+        }
+    }
+
+    // ── dict (0x60) ──────────────────────────────────────────────
+
+    #[test]
+    fn dict_construction_zero_pairs() {
+        // push:0, dict — empty dict
+        let mut vm = vm_with_script(vec![0x00, 0x60]);
+        run_to_end(&mut vm).unwrap();
+        match &vm.current_call.stack[0] {
+            Value::Dict(d) => assert!(d.is_empty()),
+            other => panic!("expected Dict, got {}", value_kind(other)),
+        }
+    }
+
+    #[test]
+    fn dict_construction_two_pairs() {
+        // Stack order: val key val key n
+        // Build {5: 50, 1: 10}: push 50, push 5, push 10, push 1, push 2, dict
+        // (Pairs popped top-first: pair1 = (1, 10), pair2 = (5, 50).)
+        // After construction, keys sorted: [1, 5].
+        let mut vm = vm_with_script(vec![
+            0x10, 50, // val for first pair (will end up at key 5)
+            0x05,     // key 5
+            0x10, 10, // val for second pair (key 1)
+            0x01,     // key 1
+            0x02,     // push:2
+            0x60,     // dict
+        ]);
+        run_to_end(&mut vm).unwrap();
+        assert_dict_keys(
+            &vm.current_call.stack[0],
+            &[Int253::from(1u64), Int253::from(5u64)],
+        );
+    }
+
+    #[test]
+    fn dict_construction_duplicate_keys_errors() {
+        let mut vm = vm_with_script(vec![
+            0x10, 50, 0x05, // (5, 50)
+            0x10, 60, 0x05, // (5, 60)  duplicate!
+            0x02, 0x60,
+        ]);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::DictKeyOccupied
+        ));
+    }
+
+    // ── put (0x61) ───────────────────────────────────────────────
+
+    #[test]
+    fn put_inserts_into_empty() {
+        // push:0, dict (empty)  →  put k=3, v=99
+        let mut vm = vm_with_script(vec![
+            0x00, 0x60,       // empty dict
+            0x03,             // key 3
+            0x10, 99,         // value 99
+            0x61,
+        ]);
+        run_to_end(&mut vm).unwrap();
+        match &vm.current_call.stack[0] {
+            Value::Dict(d) => {
+                assert_eq!(d.len(), 1);
+                match d.get(&Int253::from(3u64)) {
+                    Some(Value::Int253(i)) => assert_eq!(*i, Int253::from(99u64)),
+                    _ => panic!("expected Int253"),
+                }
+            }
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn put_on_occupied_key_errors() {
+        let mut vm = vm_with_script(vec![
+            0x10, 50, 0x05, // (5, 50)
+            0x01, 0x60,     // dict (1 pair)
+            0x05,           // key 5
+            0x10, 99,
+            0x61,           // put → conflict
+        ]);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::DictKeyOccupied
+        ));
+    }
+
+    // ── replace (0x62) ───────────────────────────────────────────
+
+    #[test]
+    fn replace_existing_returns_prev() {
+        // Build {5: 50}, then replace v at key 5 with 99.
+        // Spec stack: dict v k → dict' {prev 1 | 0}
+        let mut vm = vm_with_script(vec![
+            0x10, 50, 0x05, // (5, 50)
+            0x01, 0x60,     // dict
+            0x10, 99,       // v
+            0x05,           // k
+            0x62,           // replace
+        ]);
+        run_to_end(&mut vm).unwrap();
+        // Stack: [dict', 50, 1]
+        assert_eq!(vm.current_call.stack.len(), 3);
+        assert_int(&vm.current_call.stack[1], Int253::from(50u64));
+        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    }
+
+    #[test]
+    fn replace_absent_returns_zero() {
+        let mut vm = vm_with_script(vec![
+            0x00, 0x60, // empty dict
+            0x10, 99,   // v
+            0x05,       // k
+            0x62,
+        ]);
+        run_to_end(&mut vm).unwrap();
+        // Stack: [dict', 0]
+        assert_eq!(vm.current_call.stack.len(), 2);
+        assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    }
+
+    // ── get (0x63) ───────────────────────────────────────────────
+
+    #[test]
+    fn get_existing_returns_dict_k_v() {
+        // {5: 50}, get key 5.
+        let mut vm = vm_with_script(vec![
+            0x10, 50, 0x05, 0x01, 0x60, // dict
+            0x05,                       // k
+            0x63,
+        ]);
+        run_to_end(&mut vm).unwrap();
+        // Stack: [dict', k=5, v=50]
+        assert_eq!(vm.current_call.stack.len(), 3);
+        assert_int(&vm.current_call.stack[1], Int253::from(5u64));
+        assert_int(&vm.current_call.stack[2], Int253::from(50u64));
+        // Dict should now be empty.
+        match &vm.current_call.stack[0] {
+            Value::Dict(d) => assert!(d.is_empty()),
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn get_missing_errors() {
+        let mut vm = vm_with_script(vec![0x00, 0x60, 0x05, 0x63]);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::DictKeyNotFound
+        ));
+    }
+
+    // ── getopt (0x64) ────────────────────────────────────────────
+
+    #[test]
+    fn getopt_existing() {
+        let mut vm = vm_with_script(vec![
+            0x10, 50, 0x05, 0x01, 0x60, // dict {5: 50}
+            0x05,                       // k
+            0x64,
+        ]);
+        run_to_end(&mut vm).unwrap();
+        // Stack: [dict', 50, 1]
+        assert_int(&vm.current_call.stack[1], Int253::from(50u64));
+        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    }
+
+    #[test]
+    fn getopt_missing() {
+        let mut vm = vm_with_script(vec![0x00, 0x60, 0x05, 0x64]);
+        run_to_end(&mut vm).unwrap();
+        // Stack: [dict', 0]
+        assert_eq!(vm.current_call.stack.len(), 2);
+        assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    }
+
+    // ── getdup (0x65) ────────────────────────────────────────────
+
+    #[test]
+    fn getdup_copyable() {
+        // {5: 50}; getdup k=5 → dict unchanged + 50 + 1
+        let mut vm = vm_with_script(vec![
+            0x10, 50, 0x05, 0x01, 0x60, 0x05, 0x65,
+        ]);
+        run_to_end(&mut vm).unwrap();
+        assert_eq!(vm.current_call.stack.len(), 3);
+        assert_int(&vm.current_call.stack[1], Int253::from(50u64));
+        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+        // Dict still has the entry.
+        match &vm.current_call.stack[0] {
+            Value::Dict(d) => assert_eq!(d.len(), 1),
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn getdup_missing_pushes_zero() {
+        let mut vm = vm_with_script(vec![0x00, 0x60, 0x05, 0x65]);
+        run_to_end(&mut vm).unwrap();
+        assert_eq!(vm.current_call.stack.len(), 2);
+        assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    }
+
+    #[test]
+    fn getdup_noncopyable_errors() {
+        // {5: ClearToken(0, 7)}; getdup k=5 → TypeNotCopyable
+        let flv = Int253::from(7u64).to_bytes();
+        let mut script = vec![0x1b];
+        script.extend_from_slice(&flv); // value = ClearToken
+        script.push(0x05);              // key 5
+        script.push(0x01);              // count 1
+        script.push(0x60);              // dict
+        script.push(0x05);              // k
+        script.push(0x65);              // getdup
+        let mut vm = vm_with_script(script);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::TypeNotCopyable
+        ));
+    }
+
+    // ── first/last/next (0x66-0x68) ──────────────────────────────
+
+    #[test]
+    fn first_of_empty_pushes_zero() {
+        let mut vm = vm_with_script(vec![0x00, 0x60, 0x66]);
+        run_to_end(&mut vm).unwrap();
+        assert_eq!(vm.current_call.stack.len(), 2);
+        assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    }
+
+    #[test]
+    fn first_returns_smallest_key() {
+        // Build dict {5: 50, 1: 10}.
+        let mut vm = vm_with_script(vec![
+            0x10, 50, 0x05, 0x10, 10, 0x01, 0x02, 0x60, // dict
+            0x66,                                       // first
+        ]);
+        run_to_end(&mut vm).unwrap();
+        assert_int(&vm.current_call.stack[1], Int253::from(1u64));
+        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    }
+
+    #[test]
+    fn last_returns_largest_key() {
+        let mut vm = vm_with_script(vec![
+            0x10, 50, 0x05, 0x10, 10, 0x01, 0x02, 0x60, // dict
+            0x67,                                       // last
+        ]);
+        run_to_end(&mut vm).unwrap();
+        assert_int(&vm.current_call.stack[1], Int253::from(5u64));
+        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    }
+
+    #[test]
+    fn next_finds_strictly_greater_key() {
+        // {1: 10, 5: 50}; next of 1 → 5.
+        let mut vm = vm_with_script(vec![
+            0x10, 50, 0x05, 0x10, 10, 0x01, 0x02, 0x60, // dict
+            0x01,                                       // k = 1
+            0x68,
+        ]);
+        run_to_end(&mut vm).unwrap();
+        assert_int(&vm.current_call.stack[1], Int253::from(5u64));
+        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    }
+
+    #[test]
+    fn next_past_last_pushes_zero() {
+        let mut vm = vm_with_script(vec![
+            0x10, 50, 0x05, 0x01, 0x60, // {5: 50}
+            0x05,                       // k = 5
+            0x68,
+        ]);
+        run_to_end(&mut vm).unwrap();
+        assert_eq!(vm.current_call.stack.len(), 2);
+        assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    }
+
+    // ── Flag propagation ─────────────────────────────────────────
+
+    #[test]
+    fn dict_with_token_is_noncopyable() {
+        // Build {5: ClearToken}; the dict should be marked non-copyable.
+        let flv = Int253::from(7u64).to_bytes();
+        let mut script = vec![0x1b];
+        script.extend_from_slice(&flv);
+        script.push(0x05); // key
+        script.push(0x01); // count
+        script.push(0x60); // dict
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        match &vm.current_call.stack[0] {
+            Value::Dict(d) => {
+                assert!(!d.is_copyable());
+                assert!(d.is_portable()); // zero-qty ClearToken is portable
+            }
+            _ => panic!("expected Dict"),
+        }
+    }
+
+    #[test]
+    fn dup_of_copyable_dict_succeeds() {
+        // {5: 50}, dup:0 — should copy the dict.
+        let mut vm = vm_with_script(vec![
+            0x10, 50, 0x05, 0x01, 0x60, // dict
+            0x20,                       // dup:0
+        ]);
+        run_to_end(&mut vm).unwrap();
+        assert_eq!(vm.current_call.stack.len(), 2);
+        // Both stack entries should be dicts of length 1.
+        for v in &vm.current_call.stack {
+            match v {
+                Value::Dict(d) => assert_eq!(d.len(), 1),
+                _ => panic!("expected Dict"),
+            }
+        }
+    }
+
+    #[test]
+    fn dup_of_noncopyable_dict_errors() {
+        let flv = Int253::from(7u64).to_bytes();
+        let mut script = vec![0x1b];
+        script.extend_from_slice(&flv);
+        script.push(0x05); // key
+        script.push(0x01); // count
+        script.push(0x60); // dict
+        script.push(0x20); // dup:0
+        let mut vm = vm_with_script(script);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::TypeNotCopyable
+        ));
+    }
+
+    #[test]
+    fn empty_dict_is_droppable() {
+        let mut vm = vm_with_script(vec![0x00, 0x60, 0x1c]); // empty dict, drop
+        run_to_end(&mut vm).unwrap();
+        assert!(vm.current_call.stack.is_empty());
+    }
+
+    #[test]
+    fn nonempty_dict_is_not_droppable() {
+        let mut vm = vm_with_script(vec![
+            0x10, 50, 0x05, 0x01, 0x60, // {5: 50}
+            0x1c,                       // drop
+        ]);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::TypeNotDroppable
         ));
     }
 }

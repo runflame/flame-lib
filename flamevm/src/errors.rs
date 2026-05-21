@@ -219,6 +219,18 @@ pub enum VMError {
     #[error("Bit count out of range")]
     BitCountOutOfRange,
 
+    /// An opcode required a top-of-stack `Dict` but found a different type.
+    #[error("Item is not a Dict")]
+    TypeNotDict,
+
+    /// `put` or `dict` tried to occupy a key that already exists.
+    #[error("Dict key already occupied")]
+    DictKeyOccupied,
+
+    /// `get` was called with a key not in the dictionary.
+    #[error("Dict key not found")]
+    DictKeyNotFound,
+
     // /// This error occurs when VM's anchor remains unset.
     // #[error("VM anchor is not set via `input`")]
     // AnchorMissing,

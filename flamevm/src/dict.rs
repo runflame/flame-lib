@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::ops::Bound::{Excluded, Unbounded};
 
+use crate::errors::VMError;
 use crate::Int253;
 use crate::Value;
 
@@ -8,21 +10,41 @@ use crate::Value;
 /// Backed by a `BTreeMap`, so `insert` / `get` / `remove` are O(log n)
 /// per call. Iteration yields entries in ascending key order, which the
 /// wire encoder relies on for canonical output.
+///
+/// Carries two **sticky** flags that summarize member types:
+///
+/// - `copyable` — true iff every value ever inserted was copyable. Once
+///   a non-copyable value enters, the flag stays false even if the
+///   value is later removed. This is a safe over-approximation that
+///   matches the script's intuition that a poisoned dict stays poisoned.
+/// - `portable` — same shape, tracking whether any non-portable value
+///   has ever been inserted.
 pub struct Dict {
     entries: BTreeMap<Int253, Value>,
+    copyable: bool,
+    portable: bool,
 }
 
 impl Dict {
-    /// Creates an empty dictionary.
+    /// Creates an empty dictionary. An empty dict is both copyable and
+    /// portable (vacuously).
     pub fn new() -> Self {
-        Dict { entries: BTreeMap::new() }
+        Dict {
+            entries: BTreeMap::new(),
+            copyable: true,
+            portable: true,
+        }
     }
 
     /// Number of entries. O(1).
-    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
 
     /// Returns true if the dictionary has no entries. O(1).
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 
     /// Iterates over entries in ascending key order.
     pub fn entries(&self) -> impl Iterator<Item = (&Int253, &Value)> {
@@ -35,33 +57,110 @@ impl Dict {
     }
 
     /// Inserts a key-value pair. O(log n). If the key already exists,
-    /// replaces the value and returns the prior one.
+    /// replaces the value and returns the prior one. Updates the sticky
+    /// copyable/portable flags from the new value.
     pub fn insert(&mut self, key: Int253, value: Value) -> Option<Value> {
+        self.absorb_flags(&value);
         self.entries.insert(key, value)
     }
 
+    /// Inserts a key-value pair, failing if the key is already occupied.
+    /// Returns the rejected value on conflict so the caller can decide
+    /// whether to discard or surface it.
+    pub fn insert_strict(&mut self, key: Int253, value: Value) -> Result<(), Value> {
+        if self.entries.contains_key(&key) {
+            return Err(value);
+        }
+        self.insert(key, value);
+        Ok(())
+    }
+
     /// Removes a key and returns its value if present. O(log n).
+    /// Does **not** unset the sticky flags — see the struct doc-comment.
     pub fn remove(&mut self, key: &Int253) -> Option<Value> {
         self.entries.remove(key)
+    }
+
+    /// Smallest key in the dict, or `None` if empty. O(log n).
+    pub fn first_key(&self) -> Option<Int253> {
+        self.entries.keys().next().copied()
+    }
+
+    /// Largest key in the dict, or `None` if empty. O(log n).
+    pub fn last_key(&self) -> Option<Int253> {
+        self.entries.keys().next_back().copied()
+    }
+
+    /// Smallest key strictly greater than `k`, or `None` if no such key
+    /// exists. O(log n).
+    pub fn next_key_after(&self, k: &Int253) -> Option<Int253> {
+        self.entries
+            .range((Excluded(*k), Unbounded))
+            .next()
+            .map(|(k, _)| *k)
+    }
+
+    /// Returns true iff this dict can be safely duplicated (every member
+    /// ever inserted was copyable).
+    pub fn is_copyable(&self) -> bool {
+        self.copyable
+    }
+
+    /// Returns true iff this dict can be sealed into long-term storage
+    /// (every member ever inserted was portable).
+    pub fn is_portable(&self) -> bool {
+        self.portable
+    }
+
+    /// Deep clone. Errors with `TypeNotCopyable` if the sticky copyable
+    /// flag is false (some non-copyable member entered at some point).
+    pub fn try_clone(&self) -> Result<Dict, VMError> {
+        if !self.copyable {
+            return Err(VMError::TypeNotCopyable);
+        }
+        let mut new = Dict::new();
+        for (k, v) in self.entries() {
+            // Every value is copyable by the flag invariant.
+            new.entries.insert(*k, v.try_clone()?);
+        }
+        // Preserve the flags (try_clone of an all-copyable dict produces
+        // another all-copyable dict).
+        new.copyable = self.copyable;
+        new.portable = self.portable;
+        Ok(new)
     }
 
     /// Builds a dict from a list of values with implicit keys 0, 1, 2, ...
     /// The resulting dict has sequential keys, which is the canonical input
     /// for list-style wire encoding.
     pub fn from_values(values: Vec<Value>) -> Self {
-        let entries = values
-            .into_iter()
-            .enumerate()
-            .map(|(i, v)| (Int253::from(i as u64), v))
-            .collect();
-        Dict { entries }
+        let mut d = Dict::new();
+        for (i, v) in values.into_iter().enumerate() {
+            d.insert(Int253::from(i as u64), v);
+        }
+        d
     }
 
     /// Builds a dict from entries that the caller guarantees are strictly
     /// ascending by key. Used by the wire decoder, which performs the
     /// ordering check inline as it reads.
     pub(crate) fn from_entries_unchecked(entries: Vec<(Int253, Value)>) -> Self {
-        Dict { entries: entries.into_iter().collect() }
+        let mut d = Dict::new();
+        for (k, v) in entries {
+            d.absorb_flags(&v);
+            d.entries.insert(k, v);
+        }
+        d
+    }
+
+    /// Updates the sticky flags based on `v`. Internal use only.
+    fn absorb_flags(&mut self, v: &Value) {
+        if !v.is_copyable() {
+            self.copyable = false;
+        }
+        if !v.is_portable() {
+            self.portable = false;
+        }
     }
 }
 
