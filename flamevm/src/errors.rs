@@ -123,9 +123,15 @@ pub enum VMError {
     // #[error("Stack does not have enough items")]
     // StackUnderflow,
 
-    // /// This error occurs when VM is left with some items on the stack
-    // #[error("Stack is not cleared by the script")]
-    // StackNotClean,
+    /// This error occurs when VM is left with some items on the stack
+    /// at the end of a call frame (no declared return values to consume them).
+    #[error("Stack is not cleared by the script")]
+    StackNotClean,
+
+    /// Encountered an opcode byte that the dispatch loop does not recognize
+    /// (and the current context does not allow extension opcodes).
+    #[error("Unknown opcode: {0:#x}")]
+    UnknownOpcode(u8),
 
     // /// This error occurs when VM's anchor remains unset.
     // #[error("VM anchor is not set via `input`")]
