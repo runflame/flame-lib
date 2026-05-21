@@ -13,29 +13,46 @@ Convention per phase: **Goal**, **Reuses** (already in `flame-lib`), **New** (to
 
 ---
 
-### Phase 1 — Stack literals & manipulation
+### ✅ Phase 1 — Stack literals & manipulation (done)
 
 **Goal**: scripts can place every primitive on the stack and shuffle items. Unblocks every later phase.
 
-**Reuses**: `Int253::from_bytes`, `Value` variants, `string::String`, `crypto::Point`, `Token`.
+**Reuses**: `Int253::from_bytes`, `Int253::from_parts`, `Value` variants, `String`, `Point`, `Scalar::from_canonical_bytes`.
 
-**New**:
-- `VM::push_value`, `pop_value`, `pop_int253`, `pop_string`, `peek(k)`, `roll(k)`.
-- `Run::read_u8`, `read_le(n)`, `read_bytes(n)` — inline-bytes reader for `pushint*`/`pushstr`.
-- `Value::is_copyable()`, `is_droppable()` (per spec.md §Types).
-- `VMError::StackUnderflow`, `TypeNotCopyable`, `TypeNotDroppable`, `UnexpectedEndOfScript`.
+**Added**:
+- `Run::read_u8`, `read_bytes(n)`, `read_be_uint(n)`, `read_sub_varint()`, `is_finished()`.
+- `VM::push_value`, `pop_value`, `pop_int253`, `int253_to_stack_index`.
+- `Value::try_clone()` (errors `TypeNotCopyable` for linear types), `is_droppable()` (true for plain data + zero-qty `ClearToken`).
+- `Point::from_bytes(32)` constructor; `#[derive(Clone, Copy, Debug)]`.
+- `String`: `#[derive(Clone, Debug)]`.
+- `ClearToken { qty: Int253, flv: Int253 }` with `new`, `qty`, `flv`, `is_zero_qty`.
+- `VMError::StackUnderflow`, `TypeNotCopyable`, `TypeNotDroppable`, `UnexpectedEndOfScript`, `TypeNotInt253`, `InvalidInt253Encoding`, `IndexOutOfRange`.
 
 **Opcodes**:
-- [ ] `0x00..=0x0f` `push:k`
-- [ ] `0x10..=0x18` `pushint8/16/64/128/full`
-- [ ] `0x19` `pushstr` (uses `encoding::sub_varint`)
-- [ ] `0x1a` `pushpoint`
-- [ ] `0x1b` `pushtoken` (zero-qty)
-- [ ] `0x1c` `drop`
-- [ ] `0x1e` `dup`, `0x20..=0x2f` `dup:k`
-- [ ] `0x1f` `roll`, `0x30..=0x3f` `roll:k`
+- [x] `0x00..=0x0f` `push:k`
+- [x] `0x10..=0x18` `pushint8/16/64/128/full` (big-endian magnitude; sign from opcode pair)
+- [x] `0x19` `pushstr` (sub-varint length + bytes)
+- [x] `0x1a` `pushpoint`
+- [x] `0x1b` `pushtoken` (zero-qty `ClearToken` with canonical-scalar flavor)
+- [x] `0x1c` `drop` (refuses non-droppable; preserves the value on error)
+- [x] `0x1e` `dup`, `0x20..=0x2f` `dup:k`
+- [x] `0x1f` `roll`, `0x30..=0x3f` `roll:k`
 
-**Tests**: round-trip each literal type; `dup` on `Token` errors; `roll` past stack depth errors.
+**Tests landed** (24 new, all green):
+- `push_immediate_k_roundtrips_0_to_15`
+- `pushint8_positive_and_negative`, `pushint16/64/128_be_decoding`, `pushint_full_roundtrip`
+- `pushint_full_rejects_negative_zero`, `pushint8_at_end_of_script_errors`
+- `pushstr_immediate_length`, `pushstr_short_input_errors`
+- `pushpoint_roundtrip`
+- `pushtoken_zero_qty_with_flavor`, `pushtoken_rejects_noncanonical_flavor`
+- `drop_droppable_int`, `drop_underflow_errors`
+- `dup_immediate_zero_copies_top`, `dup_immediate_k_picks_kth_from_top`, `dup_dynamic_pops_index`, `dup_out_of_range_errors`, `dup_noncopyable_errors`
+- `roll_immediate_moves_kth_to_top`, `roll_zero_is_noop`, `roll_dynamic_pops_index`, `roll_out_of_range_errors`
+
+**Deferred to later phases**:
+- `Dict` copyability flag propagation → Phase 5.
+- `drop` on linear types that aren't trivially constructible in Phase 1 (Variable/Expression/Constraint) tested only after Phase 11.
+- Non-zero-qty `ClearToken` non-droppable case retested once `merge`/`split`/`issue` land in Phase 8.
 
 ---
 

@@ -1,4 +1,5 @@
-/// Binary string, byte-aligned.
+/// Binary string, byte-aligned. Plain data; copyable and portable.
+#[derive(Clone, Debug)]
 pub struct String {
     inner: Vec<u8>,
 }

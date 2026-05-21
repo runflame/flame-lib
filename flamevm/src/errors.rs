@@ -133,6 +133,40 @@ pub enum VMError {
     #[error("Unknown opcode: {0:#x}")]
     UnknownOpcode(u8),
 
+    /// An opcode tried to pop more items than the current call stack holds.
+    #[error("Stack underflow")]
+    StackUnderflow,
+
+    /// An opcode tried to copy (`dup`) a value of a type the spec marks
+    /// non-copyable (linear types: tokens, cells, variables, expressions,
+    /// constraints, transcripts, multiscalar muls, objects).
+    #[error("Item is not a copyable type")]
+    TypeNotCopyable,
+
+    /// `drop` was used on a value the spec marks non-droppable (linear
+    /// types in general, and non-empty containers / non-zero-qty tokens).
+    #[error("Item is not a droppable type")]
+    TypeNotDroppable,
+
+    /// An opcode tried to read more inline bytes than the current script
+    /// has remaining (e.g. `pushint8` at the very last byte of a script).
+    #[error("Unexpected end of script")]
+    UnexpectedEndOfScript,
+
+    /// An opcode required a top-of-stack `Int253` but found a different type.
+    #[error("Item is not an Int253")]
+    TypeNotInt253,
+
+    /// An opcode read 32 bytes that do not encode a canonical Int253
+    /// (non-canonical scalar, or negative zero).
+    #[error("Invalid Int253 encoding")]
+    InvalidInt253Encoding,
+
+    /// An `Int253` index argument was outside `[0, usize::MAX]`, or beyond
+    /// the depth of the addressed stack.
+    #[error("Index out of range")]
+    IndexOutOfRange,
+
     // /// This error occurs when VM's anchor remains unset.
     // #[error("VM anchor is not set via `input`")]
     // AnchorMissing,
