@@ -271,11 +271,11 @@ External transactions carry a single Bulletproofs R1CS proof at the end of the t
 - Expressions feed into `Constraint`s (logical predicates).
 - The transaction's final proof asserts the conjunction of all Constraints.
 
-Because the proof binds to TxID, Bulletproofs is unavailable in internal transactions — an internal result depends on actor state that the prover cannot fix in advance.
+Because the proof binds to the outcome of the transaction, Bulletproofs are unavailable in internal transactions — an internal result depends on actor state that the prover cannot fix in advance.
 
 ### Schnorr ZKP
 
-Discrete-log-based ZKP protocols are available in both contexts via the `Merlin` transcript and `MultiscalarMul` types. Users construct custom proofs of knowledge bound to chosen transcripts; these proofs are independent of TxID and therefore work in internal context.
+Discrete-log-based ZKP protocols can be evaluated in both external and internal transactions via the `Merlin` transcript and `MultiscalarMul` types. Users construct custom proofs of knowledge bound to arbitrary data.
 
 ## Concurrency and privacy
 
@@ -353,9 +353,9 @@ This bounds the freeloading risk of short-lived actors — which earn little gra
 
 #### Transient memory
 
-In addition to its persistent vbyte balance, an [actor](#actor) may use *transient memory* during a call — scratch space released when the call ends. Like [gas](#gas), transient memory must be bounded by a network-defined limit to prevent runaway allocations. The opcode `memlimit` returns the cap available to the current call.
+In addition to its persistent state, an [actor](#actor) may use *transient memory* during a call — scratch space released when the call ends. The cap is fixed at **4× the actor's current persistent state size in vbytes**, returned by the `memlimit` opcode.
 
-Whether that cap is tied to the actor's persistent vbyte allocation, or is paid for through [gas](#gas) alone, is undecided. The first model rewards actors that rented a large arena with proportional working memory; the second leans entirely on gas to meter compute, which already scales with memory pressure.
+The rule is deliberately minimal: no per-call parameter, no separately-priced transient resource, no declared allocation size. An actor occupying N vbytes can use up to 4N vbytes of working memory — enough headroom to `load` its state, mutate it in place, and `save` a new version without exceeding the cap. Allocations that would push live memory past the cap fail the call.
 
 #### Resource opcodes
 
