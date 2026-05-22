@@ -36,7 +36,7 @@ Spec only states "big-endian" explicitly for `pushint16` (`0x12/0x13`). The othe
 >
 > Stakes: changes the encoded literal layout; consensus-critical for scripts that embed multi-byte ints.
 >
-> _Architect response:_
+> _Architect response:_ use LE everywhere.
 
 ---
 
@@ -50,7 +50,7 @@ Spec table maps wire-encodable types to a tag base (Int253 → 0, String → 68,
 >
 > Stakes: any script using the `type` opcode (`0x7f`) on a stack-only value sees these codes. They become observable behavior and need a canonical assignment if scripts are to be portable across implementations.
 >
-> _Architect response:_
+> _Architect response:_ wire encoding is also observable behavior and will be stuck forever. In principle, we don't have to conflate typecodes with wire prefixes, but if all our types fit among the codes, we might as well reuse them. It does not mean, though, that all types are encodeable - we will not serialize Variables, Expressios, MultiscalarMul, WideTokens and some others.
 
 ### 2.2 End-of-script without explicit `return`
 
@@ -60,7 +60,7 @@ Spec describes `return` and `break:0` but does not state whether a script *must*
 >
 > Stakes: stricter interpretation would catch a missing return statement at validation time; looser is forgiving but allows silent script truncation.
 >
-> _Architect response:_
+> _Architect response:_ no need to do explicit return to save space on compact scripts. We need to be protected against script truncation by correct cryptographic commitment (under signature, taproot hash etc.) If we do not return explicitly, we return 0 items and need to keep the stack clean as well.
 
 ---
 
@@ -74,7 +74,7 @@ Spec (`0x55 divmod`): "Computes the quotient and the remainder for int." No defi
 >
 > Stakes: divmod is the only signed-division op; rounding convention is consensus-critical for scripts that do signed arithmetic.
 >
-> _Architect response:_
+> _Architect response:_ let's use the simplest option that makes the smallest code. If it matches Rust convention, even better.
 
 ### 3.2 `divmod` for magnitudes exceeding `u64::MAX`
 
@@ -82,7 +82,7 @@ Spec (`0x55 divmod`): "Computes the quotient and the remainder for int." No defi
 >
 > Stakes: the spec doesn't restrict magnitudes, so this is a "spec hole" the implementation chose to fill conservatively. Any script using divmod on > 64-bit operands fails.
 >
-> _Architect response:_
+> _Architect response:_ implement a full-sized divmod with rust-like i64 semantics.
 
 ### 3.3 `eq` semantics for linear types
 
@@ -92,7 +92,7 @@ Spec (`0x51 eq`): "Checks equality of two types." Silent on what equality means 
 >
 > Stakes: scripts that try to compare linear values get a hard fail rather than a meaningful boolean. Alternatives: always return 0, or define identity equality (pointer-style — but linear types have no stable identity).
 >
-> _Architect response:_
+> _Architect response:_ we don't have references semantics, so identity-equality is impossible. Tokens are confusing to compare since encrypted token can in theory be equal to unencrypted one, but that requires extra checks and computation. Lets enable `eq` only for obvious primitives: only ints, string, points. dicts require recursion and non-trivial gas computation, so lets avoid it.
 
 ### 3.4 `mod252` upper-bound semantics
 
@@ -104,7 +104,7 @@ Spec (`0x56 mod252`): "Interprets 0..64-byte as a little-endian unsigned integer
 >
 > Stakes: edge-case behavior for 64-byte inputs.
 >
-> _Architect response:_
+> _Architect response:_ Accept up to 64 bits inclusive.
 
 ---
 
@@ -120,7 +120,7 @@ Spec (`0x44 writebits`): "Appends low n bits of an int."
 >
 > Stakes: spec compliance and script expressiveness.
 >
-> _Architect response:_
+> _Architect response:_ require alignment: n % 8 == 0
 
 ### 4.2 `writebits` ignores sign
 
@@ -130,7 +130,7 @@ Spec: "Appends low n bits of an int."
 >
 > Stakes: scripts that round-trip integers via `writebits`/`readint` would lose sign information unless they encode it separately. Alternative: write a sign-magnitude bit pattern matching `pushint`'s full form.
 >
-> _Architect response:_
+> _Architect response:_ keep it simple - interpret bits of the int as just bits. If the sign is included into the requested window - it gets written.
 
 ### 4.3 `readuint`/`readint` for values ≥ ℓ
 
@@ -140,7 +140,7 @@ Both opcodes' soft-failure path is "string too short". The spec is silent on wha
 >
 > Stakes: a careless script that reads from attacker-controlled bytes can hit a hard error mid-execution. Alternative: also soft-fail (push original + 0) on canonical violations.
 >
-> _Architect response:_
+> _Architect response:_ int must be valid and canonical. if we read from arbitrary source, we could use mod252 operation to mod-reduce any bit-pattern as a LE integer. Also, what's the difference between readuint and readint really? Maybe we need just one of those.
 
 ### 4.4 `shiftleft`/`shiftright` for `n > 256`
 
@@ -150,7 +150,7 @@ Spec: "Shifts bits left by n≤256 bits." Says nothing about what happens for `n
 >
 > Stakes: consistency check; some chains allow arbitrarily large shifts (return all-zero result), some error.
 >
-> _Architect response:_
+> _Architect response:_ yes, explicit error for all out-of-range situations in all instructions.
 
 ---
 

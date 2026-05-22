@@ -287,7 +287,7 @@ Layout of all the instructions:
 
 |  | 00 | 10 | 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | A0 | B0 | C0 | D0 | E0 | F0 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 | push0 | pushi8 | dup0 | roll0 | readuint | abs | dict | amount | break0 | input | callerid |  |  |  |  |  |
+| 0 | push0 | pushi8 | dup0 | roll0 | readbits | abs | dict | amount | break0 | input | callerid |  |  |  |  |  |
 | 1 | push1 | pushi8s | dup1 | roll1 | readint | eq | put | issue | break1 | object | method |  |  |  |  |  |
 | 2 | push2 | pushi16 | dup2 | roll2 | readstr | neg | replace | retire | break2 | output | gaslimit |  |  |  |  |  |
 | 3 | push3 | pushi16s | dup3 | roll3 | readpoint | add | get | borrow | break3 | open | memlimit |  |  |  |  |  |
@@ -326,14 +326,16 @@ Layout of all the instructions:
 
 ### String operations
 
+**Failure principle (bit/int read/write opcodes).** Violations of constraints derived from *external data* — string length, canonical magnitude, negative-zero — are **soft fails**: the opcode returns the optional-`0` shape and leaves the source string on the stack untouched, letting the script branch on the failure. Violations of *author-controlled* bounds — e.g. a static bit count `n > 256` — are **hard fails**: the script aborts with a programmer-error. The same principle applies to other read/write opcodes in this section: a hard-fail signals "the script is wrong", a soft-fail signals "the input doesn't fit".
+
 | Hex | Name | Stack diagram | Notes |
 | --- | --- | --- | --- |
-| 40 | readuint | s n → s’ x 1 | s 0 | Reads n≤32 bytes as unsigned LE into an int. |
-| 41 | readint | s n → s’ x 1 | s 0 | Reads b≤32 bytes as signed int (high bit is used as sign). |
+| 40 | readbits | s n → s’ x 1 | s 0 | Reads `n ≤ 256` bits **LSB-first within byte** into bits 0..n-1 of a new `Int253`. Sign at fixed bit position 255 — only set when `n = 256` AND input bit 255 is 1. Soft-fails (`s 0`, string untouched) on insufficient bytes, magnitude ≥ ℓ (possible when `n ≥ 253`), or negative zero (possible when `n = 256`). **Hard-fails the script if `n > 256`** (programmer error). |
+| 41 | readint | s → s’ x 1 | s 0 | Equivalent to `readbits(s, 256)`. Reads the canonical 32-byte `Int253` (bit 255 = sign). Same soft-fail conditions: insufficient bytes, magnitude ≥ ℓ, or negative zero. |
 | 42 | readstr | s n → s’ s’’ 1  | s 0 | Reads n bytes in a new string, consuming them from the first string. |
 | 43 | readpoint | s → s’ point 1 | s 0 | Reads point |
-| 44 | writebits | s x n → s’ | Appends low n bits of an int. |
-| 45 | writeint | s x → s’ | Writes the whole integer (256 bits). |
+| 44 | writebits | s x n → s’ | Appends low `n ≤ 256` bits of `x`'s canonical 32-byte `Int253` representation, **LSB-first within byte**. Resulting string is byte-aligned: a partial final byte is high-padded with zeros. **Hard-fails if `n > 256`** (programmer error). |
+| 45 | writeint | s x → s’ | Appends the canonical 32-byte `Int253` representation of `x`. Equivalent to `writebits(s, x, 256)`. |
 | 46 | append | s s’ → s’’ | Appends s’ to s: s’’ = s || s’ |
 | 47 | writezeros | s n → s’ | Appends n zero-bytes. |
 | 48 | bitnot | s → s’ | Inverts all bits in a string. |

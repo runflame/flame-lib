@@ -508,7 +508,7 @@ impl VM {
             }
             // ── Phase 4: string ops ────────────────────────────────
             0x40 => {
-                self.op_read_uint()?;
+                self.op_read_bits()?;
                 Ok(true)
             }
             0x41 => {
@@ -1148,52 +1148,86 @@ impl VM {
         self.push_value(Value::Int253(Int253::zero()));
     }
 
-    /// `0x40` `readuint` — `s n → s' x 1 | s 0`. Consume first `n ≤ 32`
-    /// bytes of `s` as a little-endian unsigned integer.
-    fn op_read_uint(&mut self) -> Result<(), VMError> {
-        let n = self.pop_byte_count(32)?;
+
+    /// `0x40` `readbits` — `s n → s' x 1 | s 0`. Reads `n ≤ 256` bits
+    /// from the front of `s`, **LSB-first within each byte**, into bits
+    /// `0..n-1` of a fresh `Int253`. The sign bit (in-memory bit 255) is
+    /// only set when `n = 256` AND the input's bit 255 is `1`; for any
+    /// `n < 256` the result is non-negative.
+    ///
+    /// Soft-fails (`s 0`, string left untouched) on:
+    /// - insufficient bytes in `s` (need `ceil(n/8)` bytes),
+    /// - magnitude ≥ ℓ (only reachable when `n ≥ 253`),
+    /// - negative zero (only reachable when `n = 256`, magnitude = 0,
+    ///   sign bit = 1).
+    ///
+    /// **Hard-fails** the script (programmer error) when `n > 256`.
+    fn op_read_bits(&mut self) -> Result<(), VMError> {
+        // Hard-fail at n > 256 (script abort). `pop_byte_count` returns
+        // `IndexOutOfRange` if n exceeds the cap, which is the
+        // hard-fail path.
+        let n = self.pop_byte_count(256)?;
         let s = self.pop_string()?;
-        if s.len() < n {
+        let n_bytes = (n + 7) / 8;
+        if s.len() < n_bytes {
             self.push_read_failure(s);
             return Ok(());
         }
-        let mut scalar_bytes = [0u8; 32];
-        scalar_bytes[..n].copy_from_slice(&s.as_bytes()[..n]);
-        let scalar = Scalar::from_canonical_bytes(scalar_bytes)
-            .ok_or(VMError::InvalidInt253Encoding)?;
-        let value = Int253::from_parts(false, scalar);
-        let (remainder, _consumed) = s.split_at(n).expect("length checked");
+        let (remainder, consumed) = s.split_at(n_bytes).expect("length checked");
+        let mut int_bytes = [0u8; 32];
+        if n_bytes > 0 {
+            int_bytes[..n_bytes].copy_from_slice(consumed.as_bytes());
+            // Mask off bits above position n-1 within the final byte so
+            // that bits `n..n_bytes*8` are forced to zero.
+            let tail_bits = n % 8;
+            if tail_bits != 0 {
+                let mask = (1u8 << tail_bits) - 1;
+                int_bytes[n_bytes - 1] &= mask;
+            }
+        }
+        // `Int253::from_bytes` enforces both canonicality (magnitude < ℓ)
+        // and the negative-zero invariant. Either violation soft-fails.
+        let value = match Int253::from_bytes(int_bytes) {
+            Some(v) => v,
+            None => {
+                // Restore the original string (untouched) and push 0.
+                let mut v = Vec::with_capacity(consumed.len() + remainder.len());
+                v.extend_from_slice(consumed.as_bytes());
+                v.extend_from_slice(remainder.as_bytes());
+                self.push_read_failure(String::from(v));
+                return Ok(());
+            }
+        };
         self.push_value(Value::String(remainder));
         self.push_value(Value::Int253(value));
         self.push_value(Value::Int253(Int253::from(1u64)));
         Ok(())
     }
 
-    /// `0x41` `readint` — `s n → s' x 1 | s 0`. Same as `readuint` but
-    /// the high bit of byte `n-1` is interpreted as the sign bit;
-    /// remaining bits form the magnitude.
+    /// `0x41` `readint` — `s → s' x 1 | s 0`. Reads the canonical
+    /// 32-byte `Int253` (bit 255 = sign, bits 0..254 = magnitude) from
+    /// the front of `s`. Equivalent to `readbits(s, 256)`. Soft-fails
+    /// on insufficient bytes, magnitude ≥ ℓ, or negative zero.
     fn op_read_int(&mut self) -> Result<(), VMError> {
-        let n = self.pop_byte_count(32)?;
         let s = self.pop_string()?;
-        if s.len() < n {
+        if s.len() < 32 {
             self.push_read_failure(s);
             return Ok(());
         }
-        if n == 0 {
-            // Reading zero bytes yields value 0.
-            self.push_value(Value::String(s));
-            self.push_value(Value::Int253(Int253::zero()));
-            self.push_value(Value::Int253(Int253::from(1u64)));
-            return Ok(());
-        }
-        let mut magnitude_bytes = [0u8; 32];
-        magnitude_bytes[..n].copy_from_slice(&s.as_bytes()[..n]);
-        let sign_neg = magnitude_bytes[n - 1] & 0x80 != 0;
-        magnitude_bytes[n - 1] &= 0x7f;
-        let scalar = Scalar::from_canonical_bytes(magnitude_bytes)
-            .ok_or(VMError::InvalidInt253Encoding)?;
-        let value = Int253::from_parts(sign_neg, scalar);
-        let (remainder, _consumed) = s.split_at(n).expect("length checked");
+        let (remainder, consumed) = s.split_at(32).expect("length checked");
+        let mut int_bytes = [0u8; 32];
+        int_bytes.copy_from_slice(consumed.as_bytes());
+        let value = match Int253::from_bytes(int_bytes) {
+            Some(v) => v,
+            None => {
+                // Restore the original string and push 0.
+                let mut v = Vec::with_capacity(consumed.len() + remainder.len());
+                v.extend_from_slice(consumed.as_bytes());
+                v.extend_from_slice(remainder.as_bytes());
+                self.push_read_failure(String::from(v));
+                return Ok(());
+            }
+        };
         self.push_value(Value::String(remainder));
         self.push_value(Value::Int253(value));
         self.push_value(Value::Int253(Int253::from(1u64)));
@@ -1235,26 +1269,41 @@ impl VM {
         Ok(())
     }
 
-    /// `0x44` `writebits` — `s x n → s'`. Appends the low `n` bits of
-    /// the magnitude of `x` to `s`. Phase 4 constraint: `n` must be a
-    /// multiple of 8 and `≤ 256` (byte-aligned strings).
+    /// `0x44` `writebits` — `s x n → s'`. Appends the low `n ≤ 256`
+    /// bits of `x`'s canonical 32-byte `Int253` representation to `s`,
+    /// **LSB-first within each byte** (bit 0 of `x` → bit 0 of the
+    /// first appended byte). The resulting string is byte-aligned: if
+    /// `n` is not a multiple of 8, the high bits of the final appended
+    /// byte are zero-padded.
+    ///
+    /// **Hard-fails** the script (programmer error) when `n > 256`.
     fn op_write_bits(&mut self) -> Result<(), VMError> {
+        // Hard-fail at n > 256 (script abort) via the `pop_byte_count` cap.
         let n = self.pop_byte_count(256)?;
-        if n % 8 != 0 {
-            return Err(VMError::BitCountOutOfRange);
-        }
-        let n_bytes = n / 8;
         let x = self.pop_int253()?;
         let s = self.pop_string()?;
-        let magnitude_bytes = x.abs().to_bytes();
-        // magnitude_bytes is 32-byte LE of magnitude. Low n bits = first n_bytes.
-        let appended = s.append_bytes(&magnitude_bytes[..n_bytes]);
+        let int_bytes = x.to_bytes();
+        let n_bytes = (n + 7) / 8;
+        let mut tail = [0u8; 32];
+        if n_bytes > 0 {
+            tail[..n_bytes].copy_from_slice(&int_bytes[..n_bytes]);
+            // Zero out bits above position n-1 in the final byte so the
+            // string-level result holds exactly the low-`n` bits.
+            let tail_bits = n % 8;
+            if tail_bits != 0 {
+                let mask = (1u8 << tail_bits) - 1;
+                tail[n_bytes - 1] &= mask;
+            }
+        }
+        let appended = s.append_bytes(&tail[..n_bytes]);
         self.push_value(Value::String(appended));
         Ok(())
     }
 
-    /// `0x45` `writeint` — `s x → s'`. Appends the full 32-byte
-    /// sign-magnitude representation of `x` to `s`.
+    /// `0x45` `writeint` — `s x → s'`. Appends the canonical 32-byte
+    /// `Int253` representation of `x` to `s` (bit 255 carries the sign;
+    /// bits 0..254 carry the magnitude). Equivalent to
+    /// `writebits(s, x, 256)`.
     fn op_write_int(&mut self) -> Result<(), VMError> {
         let x = self.pop_int253()?;
         let s = self.pop_string()?;
@@ -1393,15 +1442,10 @@ impl VM {
 
     /// `0x55` `divmod` — `x z → d r`. Truncated division: `sign(d) =
     /// sign(x) XOR sign(z)`, `sign(r) = sign(x)`. Errors on zero divisor.
-    /// Phase 3 limitation: magnitudes must fit `u64`; larger operands
-    /// produce `MagnitudeTooLarge` until big-int division lands.
     fn op_divmod(&mut self) -> Result<(), VMError> {
         let z = self.pop_int253()?;
         let x = self.pop_int253()?;
-        if z.is_zero() {
-            return Err(VMError::DivByZero);
-        }
-        let (d, r) = x.div_rem(z).ok_or(VMError::MagnitudeTooLarge)?;
+        let (d, r) = x.div_rem(z).ok_or(VMError::DivByZero)?;
         self.push_value(Value::Int253(d));
         self.push_value(Value::Int253(r));
         Ok(())
@@ -2556,8 +2600,9 @@ mod tests {
     }
 
     #[test]
-    fn divmod_magnitude_too_large() {
-        // pushint full with a magnitude > u64::MAX, then push:1, divmod
+    fn divmod_full_width_magnitude_succeeds() {
+        // 2^128 / 1 → d = 2^128, r = 0. Verifies the opcode now handles
+        // magnitudes beyond u64::MAX (was MagnitudeTooLarge in Phase 3).
         let mut huge = [0u8; 32];
         huge[16] = 1; // 2^128
         let mut script = vec![0x18];
@@ -2565,10 +2610,9 @@ mod tests {
         script.push(0x01); // push:1
         script.push(0x55);
         let mut vm = vm_with_script(script);
-        assert!(matches!(
-            run_to_end(&mut vm).unwrap_err(),
-            VMError::MagnitudeTooLarge
-        ));
+        run_to_end(&mut vm).unwrap();
+        assert_int(&vm.current_call.stack[0], Int253::from_bytes(huge).unwrap());
+        assert_int(&vm.current_call.stack[1], Int253::zero());
     }
 
     // ── mod252 (0x56) ────────────────────────────────────────────
@@ -2714,25 +2758,71 @@ mod tests {
         }
     }
 
-    // ── readuint (0x40) ──────────────────────────────────────────
+    // ── readbits (0x40) ──────────────────────────────────────────
+
+    /// Helper: pushes integer `n` (`0 ≤ n ≤ 65535`) onto the script
+    /// using the shortest available immediate.
+    fn push_small_uint(script: &mut Vec<u8>, n: u32) {
+        if n <= 15 {
+            script.push(n as u8);
+        } else if n <= 255 {
+            script.push(0x10);
+            script.push(n as u8);
+        } else {
+            assert!(n <= 65_535);
+            script.push(0x12);
+            script.extend_from_slice(&(n as u16).to_be_bytes());
+        }
+    }
+
+    /// Helper: encodes `value` (non-negative `Int253`) as a low-`n_bits`
+    /// LSB-first byte sequence (writebits-compatible).
+    fn writebits_bytes(value: &Int253, n_bits: usize) -> Vec<u8> {
+        assert!(n_bits <= 256);
+        let int_bytes = value.to_bytes();
+        let n_bytes = (n_bits + 7) / 8;
+        let mut out = int_bytes[..n_bytes].to_vec();
+        let tail = n_bits % 8;
+        if tail != 0 && n_bytes > 0 {
+            let mask = (1u8 << tail) - 1;
+            out[n_bytes - 1] &= mask;
+        }
+        out
+    }
 
     #[test]
-    fn read_uint_success() {
-        let mut script = pushstr_bytes(&[0x07, 0x00, 0x01, 0xff, 0xfe]);
-        script.push(0x03);
+    fn read_bits_n_zero_succeeds_and_yields_zero() {
+        let mut script = pushstr_bytes(&[0xaa, 0xbb]);
+        push_small_uint(&mut script, 0);
         script.push(0x40);
         let mut vm = vm_with_script(script);
         run_to_end(&mut vm).unwrap();
         assert_eq!(vm.current_call.stack.len(), 3);
-        assert_int(&vm.current_call.stack[1], Int253::from(65543u64));
+        // string is unchanged (no bytes consumed)
+        assert_str(&vm.current_call.stack[0], &[0xaa, 0xbb]);
+        assert_int(&vm.current_call.stack[1], Int253::zero());
         assert_int(&vm.current_call.stack[2], Int253::from(1u64));
-        assert_str(&vm.current_call.stack[0], &[0xff, 0xfe]);
     }
 
     #[test]
-    fn read_uint_too_short_preserves_string() {
+    fn read_bits_partial_byte_masks_high_bits() {
+        // Source byte: 0b1111_1111 = 0xff. Read 5 bits LSB-first → low 5 bits = 0b11111 = 31.
+        let mut script = pushstr_bytes(&[0xff, 0x00]);
+        push_small_uint(&mut script, 5);
+        script.push(0x40);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        // One byte was consumed even though only 5 bits were "used".
+        assert_str(&vm.current_call.stack[0], &[0x00]);
+        assert_int(&vm.current_call.stack[1], Int253::from(31u64));
+        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    }
+
+    #[test]
+    fn read_bits_too_short_preserves_string() {
+        // n=16 requires 2 bytes; only 1 available.
         let mut script = pushstr_bytes(&[0xaa]);
-        script.push(0x03);
+        push_small_uint(&mut script, 16);
         script.push(0x40);
         let mut vm = vm_with_script(script);
         run_to_end(&mut vm).unwrap();
@@ -2742,10 +2832,9 @@ mod tests {
     }
 
     #[test]
-    fn read_uint_n_too_large_errors() {
-        let mut script = pushstr_bytes(&[0u8; 40]);
-        script.push(0x10);
-        script.push(33);
+    fn read_bits_n_257_hard_fails() {
+        let mut script = pushstr_bytes(&[0u8; 33]);
+        push_small_uint(&mut script, 257);
         script.push(0x40);
         let mut vm = vm_with_script(script);
         assert!(matches!(
@@ -2754,28 +2843,176 @@ mod tests {
         ));
     }
 
-    // ── readint (0x41) ───────────────────────────────────────────
-
     #[test]
-    fn read_int_positive() {
-        // 2-byte LE 0xff 0x7f: magnitude 0x7fff, sign bit of byte 1 = 0
-        let mut script = pushstr_bytes(&[0xff, 0x7f]);
-        script.push(0x02);
-        script.push(0x41);
+    fn read_bits_magnitude_at_ell_soft_fails() {
+        // Canonical scalar magnitude exactly ℓ (the order) is *not*
+        // canonical — `from_canonical_bytes` rejects. With n=256 and
+        // sign bit = 0, bytes are the encoding of ℓ.
+        let ell_le: [u8; 32] = [
+            0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+            0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+        ];
+        let mut script = pushstr_bytes(&ell_le);
+        push_small_uint(&mut script, 256);
+        script.push(0x40);
         let mut vm = vm_with_script(script);
         run_to_end(&mut vm).unwrap();
-        assert_int(&vm.current_call.stack[1], Int253::from(32767u64));
+        // Soft-fail: original 32-byte string restored, marker = 0.
+        assert_eq!(vm.current_call.stack.len(), 2);
+        assert_str(&vm.current_call.stack[0], &ell_le);
+        assert_int(&vm.current_call.stack[1], Int253::from(0u64));
     }
 
     #[test]
-    fn read_int_negative() {
-        // 2-byte LE 0xff 0xff: sign bit of byte 1 = 1; magnitude after mask = 0x7fff
-        let mut script = pushstr_bytes(&[0xff, 0xff]);
-        script.push(0x02);
+    fn read_bits_magnitude_above_ell_soft_fails() {
+        // ℓ + 1: still non-canonical, must soft-fail.
+        let mut bytes: [u8; 32] = [
+            0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+            0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+        ];
+        bytes[0] = bytes[0].wrapping_add(1);
+        let mut script = pushstr_bytes(&bytes);
+        push_small_uint(&mut script, 256);
+        script.push(0x40);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &bytes);
+        assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    }
+
+    #[test]
+    fn read_bits_negative_zero_soft_fails() {
+        // n=256, magnitude = 0, sign bit = 1 → negative zero. Reject.
+        let mut bytes = [0u8; 32];
+        bytes[31] = 0x80;
+        let mut script = pushstr_bytes(&bytes);
+        push_small_uint(&mut script, 256);
+        script.push(0x40);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &bytes);
+        assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    }
+
+    #[test]
+    fn read_bits_roundtrip_nonneg_at_various_n() {
+        // n=1,8,64,252,253,255,256. Value chosen distinct for each.
+        let cases: &[(usize, u64)] = &[
+            (1, 1),
+            (8, 0xab),
+            (64, 0x0123_4567_89ab_cdef),
+            (252, 0xdead_beef_cafe_babe),
+            (253, 0xfeed_face_0123_4567),
+            (255, 0x5555_5555_5555_5555),
+            (256, 0x7fff_ffff_ffff_ffff), // bit 255 = 0 → positive
+        ];
+        for (n, v) in cases.iter().copied() {
+            let value = Int253::from(v);
+            let bytes = writebits_bytes(&value, n);
+            // build script: pushstr(bytes), push n, readbits
+            let mut script = pushstr_bytes(&bytes);
+            push_small_uint(&mut script, n as u32);
+            script.push(0x40);
+            let mut vm = vm_with_script(script);
+            run_to_end(&mut vm).unwrap_or_else(|e| panic!("n={} v={} err={:?}", n, v, e));
+            assert_int(&vm.current_call.stack[1], value);
+            assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+            assert_str(&vm.current_call.stack[0], &[]);
+        }
+    }
+
+    #[test]
+    fn read_bits_roundtrip_negative_at_n_256() {
+        // Only n=256 carries the sign bit. Pick a small negative value.
+        let value = Int253::from_parts(true, Scalar::from(12345u64));
+        let bytes = value.to_bytes();
+        let mut script = pushstr_bytes(&bytes);
+        push_small_uint(&mut script, 256);
+        script.push(0x40);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_int(&vm.current_call.stack[1], value);
+        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    }
+
+    // ── readint (0x41) ───────────────────────────────────────────
+
+    #[test]
+    fn read_int_positive_roundtrip() {
+        let value = Int253::from(1u64);
+        let mut script = pushstr_bytes(&value.to_bytes());
         script.push(0x41);
         let mut vm = vm_with_script(script);
         run_to_end(&mut vm).unwrap();
-        assert_int(&vm.current_call.stack[1], Int253::from(-32767i64));
+        assert_int(&vm.current_call.stack[1], value);
+        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    }
+
+    #[test]
+    fn read_int_negative_roundtrip() {
+        let value = Int253::from_parts(true, Scalar::from(1u64));
+        let mut script = pushstr_bytes(&value.to_bytes());
+        script.push(0x41);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_int(&vm.current_call.stack[1], value);
+    }
+
+    #[test]
+    fn read_int_zero_roundtrip() {
+        let value = Int253::zero();
+        let mut script = pushstr_bytes(&value.to_bytes());
+        script.push(0x41);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_int(&vm.current_call.stack[1], value);
+    }
+
+    #[test]
+    fn read_int_large_magnitude_roundtrip() {
+        // ℓ - 1 (max canonical magnitude), positive.
+        let ell_minus_1: [u8; 32] = [
+            0xec, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+            0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+        ];
+        let mut script = pushstr_bytes(&ell_minus_1);
+        script.push(0x41);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        match &vm.current_call.stack[1] {
+            Value::Int253(i) => assert_eq!(i.to_bytes(), ell_minus_1),
+            other => panic!("expected Int253, got {}", value_kind(other)),
+        }
+        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    }
+
+    #[test]
+    fn read_int_too_short_preserves_string() {
+        let mut script = pushstr_bytes(&[0xaa; 31]);
+        script.push(0x41);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_eq!(vm.current_call.stack.len(), 2);
+        assert_str(&vm.current_call.stack[0], &[0xaa; 31]);
+        assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    }
+
+    #[test]
+    fn read_int_negative_zero_soft_fails() {
+        let mut bytes = [0u8; 32];
+        bytes[31] = 0x80;
+        let mut script = pushstr_bytes(&bytes);
+        script.push(0x41);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &bytes);
+        assert_int(&vm.current_call.stack[1], Int253::from(0u64));
     }
 
     // ── readstr (0x42) ───────────────────────────────────────────
@@ -2833,12 +3070,11 @@ mod tests {
     // ── writebits (0x44) ─────────────────────────────────────────
 
     #[test]
-    fn write_bits_basic() {
+    fn write_bits_full_byte() {
         let mut script = pushstr_bytes(&[0xaa]);
         script.push(0x10);
         script.push(0xab);
-        script.push(0x10);
-        script.push(8);
+        push_small_uint(&mut script, 8);
         script.push(0x44);
         let mut vm = vm_with_script(script);
         run_to_end(&mut vm).unwrap();
@@ -2846,18 +3082,91 @@ mod tests {
     }
 
     #[test]
-    fn write_bits_non_multiple_of_8_errors() {
+    fn write_bits_partial_byte_high_bits_zeroed() {
+        // Append low 5 bits of 0xff: byte 0b0001_1111 = 0x1f.
         let mut script = pushstr_bytes(&[]);
         script.push(0x10);
-        script.push(0x05);
+        script.push(0xff);
+        push_small_uint(&mut script, 5);
+        script.push(0x44);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[0x1f]);
+    }
+
+    #[test]
+    fn write_bits_n_zero_is_noop() {
+        let mut script = pushstr_bytes(&[0xaa]);
         script.push(0x10);
-        script.push(7);
+        script.push(0x07);
+        push_small_uint(&mut script, 0);
+        script.push(0x44);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_str(&vm.current_call.stack[0], &[0xaa]);
+    }
+
+    #[test]
+    fn write_bits_n_257_hard_fails() {
+        let mut script = pushstr_bytes(&[]);
+        script.push(0x10);
+        script.push(0x07);
+        push_small_uint(&mut script, 257);
         script.push(0x44);
         let mut vm = vm_with_script(script);
         assert!(matches!(
             run_to_end(&mut vm).unwrap_err(),
-            VMError::BitCountOutOfRange
+            VMError::IndexOutOfRange
         ));
+    }
+
+    #[test]
+    fn write_then_read_bits_roundtrip_nonneg() {
+        let cases: &[(usize, u64)] = &[
+            (1, 1),
+            (8, 0xab),
+            (64, 0x0123_4567_89ab_cdef),
+            (252, 0xdead_beef_cafe_babe),
+            (253, 0xfeed_face_0123_4567),
+            (255, 0x5555_5555_5555_5555),
+            (256, 0x7fff_ffff_ffff_ffff),
+        ];
+        for (n, v) in cases.iter().copied() {
+            // Script: pushstr(empty), pushint(v), pushint(n), writebits,
+            //         pushint(n), readbits, verify, … (we just inspect the stack).
+            let value = Int253::from(v);
+            let mut script = pushstr_bytes(&[]);
+            // push v (≤ u64::MAX)
+            script.push(0x14);
+            script.extend_from_slice(&v.to_be_bytes());
+            push_small_uint(&mut script, n as u32);
+            script.push(0x44); // writebits → stack: [s']
+            push_small_uint(&mut script, n as u32);
+            script.push(0x40); // readbits → stack: [s'' x 1]
+            let mut vm = vm_with_script(script);
+            run_to_end(&mut vm).unwrap_or_else(|e| panic!("n={} v={} err={:?}", n, v, e));
+            assert_str(&vm.current_call.stack[0], &[]);
+            assert_int(&vm.current_call.stack[1], value);
+            assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+        }
+    }
+
+    #[test]
+    fn write_then_read_bits_roundtrip_negative_n_256() {
+        // For n=256, sign bit at position 255 is preserved.
+        let value = Int253::from_parts(true, Scalar::from(12345u64));
+        let bytes = value.to_bytes();
+        // Build manually to avoid relying on a "push negative int" path.
+        let mut script = pushstr_bytes(&[]);
+        // pushstr the int's encoding, then append to the empty string.
+        script.extend_from_slice(&pushstr_bytes(&bytes));
+        script.push(0x46); // append (s s' → s'')
+        push_small_uint(&mut script, 256);
+        script.push(0x40); // readbits
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        assert_int(&vm.current_call.stack[1], value);
+        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
     }
 
     // ── writeint (0x45) ──────────────────────────────────────────
@@ -2872,6 +3181,48 @@ mod tests {
         run_to_end(&mut vm).unwrap();
         let expected = Int253::from(7u64).to_bytes();
         assert_str(&vm.current_call.stack[0], &expected);
+    }
+
+    #[test]
+    fn write_then_read_int_roundtrip_signs_and_extremes() {
+        // ±1, ±(ℓ-1), zero, and a moderately large positive magnitude.
+        let ell_minus_1: [u8; 32] = [
+            0xec, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+            0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+        ];
+        let mut neg_ell_minus_1 = ell_minus_1;
+        neg_ell_minus_1[31] |= 0x80;
+        let values: Vec<Int253> = vec![
+            Int253::from(1u64),
+            Int253::from_parts(true, Scalar::from(1u64)),
+            Int253::from_bytes(ell_minus_1).unwrap(),
+            Int253::from_bytes(neg_ell_minus_1).unwrap(),
+            Int253::zero(),
+            Int253::from(0xdead_beef_cafe_babe_u64),
+        ];
+        for v in values {
+            let bytes = v.to_bytes();
+            // pushstr(empty), pushstr(bytes), append, readint
+            let mut script = pushstr_bytes(&[]);
+            script.extend_from_slice(&pushstr_bytes(&bytes));
+            script.push(0x46);
+            script.push(0x41);
+            let mut vm = vm_with_script(script);
+            run_to_end(&mut vm)
+                .unwrap_or_else(|e| panic!("value={:?} err={:?}", v, e));
+            match &vm.current_call.stack[1] {
+                Value::Int253(i) => assert_eq!(
+                    i.to_bytes(),
+                    v.to_bytes(),
+                    "roundtrip differed for {:?}",
+                    v
+                ),
+                other => panic!("expected Int253, got {}", value_kind(other)),
+            }
+            assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+        }
     }
 
     // ── append (0x46) ────────────────────────────────────────────

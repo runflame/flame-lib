@@ -190,11 +190,6 @@ pub enum VMError {
     #[error("Division by zero")]
     DivByZero,
 
-    /// `divmod` was invoked with operands whose magnitude exceeds `u64::MAX`.
-    /// Big-int division will lift this in a later phase.
-    #[error("Operand magnitude exceeds u64")]
-    MagnitudeTooLarge,
-
     /// `mod252` saw a String longer than 64 bytes.
     #[error("String too long for mod252 (max 64 bytes)")]
     StringTooLongForModReduction,

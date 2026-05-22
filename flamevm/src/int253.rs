@@ -158,23 +158,24 @@ impl Int253 {
     /// (the convention Rust's i64 division uses). Sign on zero results
     /// is normalized to positive.
     ///
-    /// Returns `None` if `other` is zero **or** if either magnitude
-    /// exceeds `u64::MAX`. Larger magnitudes need big-int division and
-    /// are out of scope for Phase 3; callers must surface this as
-    /// `MagnitudeTooLarge` or similar.
+    /// Returns `None` iff `other` is zero.
     pub fn div_rem(self, other: Int253) -> Option<(Int253, Int253)> {
         if other.is_zero() {
             return None;
         }
-        let a = self.abs().to_u64()?;
-        let b = other.abs().to_u64()?;
-        let q_mag = a / b;
-        let r_mag = a % b;
+        let n = bytes_to_limbs(self.abs_scalar().to_bytes());
+        let d = bytes_to_limbs(other.abs_scalar().to_bytes());
+        let (q_limbs, r_limbs) = divmod_u256(n, d);
+        let q_scalar = Scalar::from_canonical_bytes(limbs_to_bytes(q_limbs))
+            .expect("Int253 invariant: quotient magnitude < ℓ");
+        let r_scalar = Scalar::from_canonical_bytes(limbs_to_bytes(r_limbs))
+            .expect("Int253 invariant: remainder magnitude < ℓ");
         let q_sign = self.is_negative() ^ other.is_negative();
         let r_sign = self.is_negative();
-        let q = Int253::from_parts(q_sign, Scalar::from(q_mag));
-        let r = Int253::from_parts(r_sign, Scalar::from(r_mag));
-        Some((q, r))
+        Some((
+            Int253::from_parts(q_sign, q_scalar),
+            Int253::from_parts(r_sign, r_scalar),
+        ))
     }
 
     /// Compares two `Int253`s by magnitude (ignoring sign).
@@ -358,6 +359,75 @@ impl PartialEq for Int253 {
 }
 
 impl Eq for Int253 {}
+
+// ── Unsigned 256-bit divmod (private helpers for `div_rem`) ────────
+//
+// Both operands fed in are canonical Ristretto-scalar magnitudes
+// (< ℓ < 2²⁵³), so 4 u64 LE limbs suffice. Not constant-time, matching
+// `Int253`'s module-level disclaimer.
+
+fn bytes_to_limbs(bytes: [u8; 32]) -> [u64; 4] {
+    let mut limbs = [0u64; 4];
+    for (i, chunk) in bytes.chunks_exact(8).enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(chunk);
+        limbs[i] = u64::from_le_bytes(buf);
+    }
+    limbs
+}
+
+fn limbs_to_bytes(limbs: [u64; 4]) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    for (i, &limb) in limbs.iter().enumerate() {
+        bytes[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
+    }
+    bytes
+}
+
+fn ge_u256(a: &[u64; 4], b: &[u64; 4]) -> bool {
+    for i in (0..4).rev() {
+        if a[i] != b[i] {
+            return a[i] > b[i];
+        }
+    }
+    true
+}
+
+fn sub_in_place_u256(a: &mut [u64; 4], b: &[u64; 4]) {
+    let mut borrow: u64 = 0;
+    for i in 0..4 {
+        let (t1, b1) = a[i].overflowing_sub(b[i]);
+        let (t2, b2) = t1.overflowing_sub(borrow);
+        a[i] = t2;
+        // b1 && b2 is unreachable: b1 implies t1 >= 1, so t1.sub(1) cannot
+        // underflow. OR is therefore equivalent to addition.
+        borrow = (b1 as u64) | (b2 as u64);
+    }
+}
+
+/// Unsigned 256-bit divmod by shift-and-subtract long division.
+/// Precondition: `d != [0; 4]`.
+fn divmod_u256(n: [u64; 4], d: [u64; 4]) -> ([u64; 4], [u64; 4]) {
+    let mut q = [0u64; 4];
+    let mut r = [0u64; 4];
+    for i in (0..256).rev() {
+        // r <<= 1
+        let mut carry = 0u64;
+        for limb in &mut r {
+            let next = *limb >> 63;
+            *limb = (*limb << 1) | carry;
+            carry = next;
+        }
+        // r |= bit i of n
+        r[0] |= (n[i >> 6] >> (i & 63)) & 1;
+        // if r >= d: r -= d; set bit i of q
+        if ge_u256(&r, &d) {
+            sub_in_place_u256(&mut r, &d);
+            q[i >> 6] |= 1u64 << (i & 63);
+        }
+    }
+    (q, r)
+}
 
 #[cfg(test)]
 mod tests {
@@ -755,5 +825,63 @@ mod tests {
         let a = Int253::from(-5i64);
         let b = Int253::from(10i64);
         assert_eq!(a.cmp_magnitude(&b), Ordering::Less);
+    }
+
+    // ── div_rem ────────────────────────────────────────────────────
+
+    #[test]
+    fn div_rem_zero_divisor_is_none() {
+        assert!(Int253::from(1i64).div_rem(Int253::zero()).is_none());
+        assert!(Int253::zero().div_rem(Int253::zero()).is_none());
+    }
+
+    #[test]
+    fn div_rem_matches_i64() {
+        let xs = [i64::MIN + 1, -1_000_000, -7, -1, 0, 1, 7, 1_000_000, i64::MAX];
+        let ys = [-1_000_000i64, -7, -1, 1, 7, 1_000_000];
+        for &a in &xs {
+            for &b in &ys {
+                let (q, r) = Int253::from(a).div_rem(Int253::from(b)).unwrap();
+                assert_eq!(q, Int253::from(a / b), "{} / {}", a, b);
+                assert_eq!(r, Int253::from(a % b), "{} % {}", a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn div_rem_full_width_identity() {
+        // For magnitudes beyond u64::MAX (where there is no native operator
+        // to cross-check against), verify the contract directly:
+        //   n == q*d + r   (Int253 arithmetic preserves this mod ℓ; since
+        //                   |n| < ℓ, the mod-ℓ equality implies integer
+        //                   equality)
+        //   |r| < |d|
+        //   sign(q) == sign(n) ^ sign(d)   (when q != 0)
+        //   sign(r) == sign(n)              (when r != 0)
+        let big = Int253::from(-Scalar::one()); // magnitude ℓ-1, positive
+        let huge = Int253::from(Scalar::from(u64::MAX) * Scalar::from(u64::MAX));
+        for &n in &[big, -big, huge, -huge] {
+            for &d in &[
+                Int253::from(7i64),
+                Int253::from(-3i64),
+                Int253::from(u64::MAX),
+                -Int253::from(u64::MAX),
+            ] {
+                let (q, r) = n.div_rem(d).unwrap();
+                assert_eq!(q * d + r, n, "identity n={:?} d={:?}", n, d);
+                assert!(r.abs() < d.abs(), "|r| < |d| n={:?} d={:?}", n, d);
+                if !q.is_zero() {
+                    assert_eq!(
+                        q.is_negative(),
+                        n.is_negative() ^ d.is_negative(),
+                        "q sign n={:?} d={:?}", n, d,
+                    );
+                }
+                if !r.is_zero() {
+                    assert_eq!(r.is_negative(), n.is_negative(),
+                               "r sign n={:?} d={:?}", n, d);
+                }
+            }
+        }
     }
 }
