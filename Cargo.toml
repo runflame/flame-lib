@@ -18,3 +18,10 @@ members = [
 
 # `demo` crate is built separately with nightly as required by Rocket
 exclude = ["demo"]
+
+# Use the runflame fork of merlin to lift the `&'static [u8]` label
+# restriction. The `dynamic-labels` feature (enabled by flamevm) widens
+# the transcript API to accept `&[u8]`, letting the VM pass user-supplied
+# labels through without internal prefixing.
+[patch.crates-io]
+merlin = { git = "https://github.com/runflame/merlin.git" }

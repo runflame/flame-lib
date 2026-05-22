@@ -32,37 +32,31 @@ pub struct MultiscalarMul {
 
 /// A Merlin transcript wrapper. Linear (non-copyable, non-droppable).
 ///
-/// The `merlin` crate requires `Transcript::new` to take a `&'static [u8]`
-/// label, which we can't honor for user-supplied labels. Instead, every
-/// `Merlin` opens with a fixed domain separator `flamevm::merlin.v1` and
-/// the user-supplied label is appended as the first message under a
-/// fixed tag. This preserves the protocol property that two transcripts
-/// with different user labels diverge from byte zero.
+/// User-supplied labels are passed directly to the underlying
+/// `Transcript` API. This relies on the `dynamic-labels` feature of the
+/// runflame fork of merlin, which relaxes the upstream `&'static [u8]`
+/// constraint to `&[u8]`.
 pub struct Merlin {
     transcript: Transcript,
 }
 
 impl Merlin {
-    /// Creates a fresh transcript bound to `user_label`.
-    pub fn new(user_label: &[u8]) -> Self {
-        let mut t = Transcript::new(b"flamevm::merlin.v1");
-        t.append_message(b"label", user_label);
-        Merlin { transcript: t }
+    /// Creates a fresh transcript bound to `label`.
+    pub fn new(label: &[u8]) -> Self {
+        Merlin { transcript: Transcript::new(label) }
     }
 
-    /// Appends `data` to the transcript under `user_label`. Used by the
+    /// Appends `data` to the transcript under `label`. Used by the
     /// `merlinwrite` opcode.
-    pub fn write_bytes(&mut self, user_label: &[u8], data: &[u8]) {
-        self.transcript.append_message(b"write.label", user_label);
-        self.transcript.append_message(b"write.data", data);
+    pub fn write_bytes(&mut self, label: &[u8], data: &[u8]) {
+        self.transcript.append_message(label, data);
     }
 
     /// Squeezes `n` bytes of challenge from the transcript, tagged by
-    /// `user_label`. Used by the `merlinread` opcode.
-    pub fn read_bytes(&mut self, user_label: &[u8], n: usize) -> Vec<u8> {
-        self.transcript.append_message(b"read.label", user_label);
+    /// `label`. Used by the `merlinread` opcode.
+    pub fn read_bytes(&mut self, label: &[u8], n: usize) -> Vec<u8> {
         let mut out = vec![0u8; n];
-        self.transcript.challenge_bytes(b"read.bytes", &mut out);
+        self.transcript.challenge_bytes(label, &mut out);
         out
     }
 }
