@@ -295,14 +295,14 @@ Layout of all the instructions:
 | 5 | push5 | pushi64s | dup5 | roll5 | writeint | divmod | getdup | split | break5 | call | height |  |  |  |  |  |
 | 6 | push6 | pushi128 | dup6 | roll6 | append | mod252 | first | mix | break6 | load | blockhash |  |  |  |  |  |
 | 7 | push7 | pushi128s | dup7 | roll7 | writezeros | not | last | decrypt | break7 | save | blockburn |  |  |  |  |  |
-| 8 | push8 | pushint | dup8 | roll8 | padleft | and | next | issueflv | break8 | signtx | blockweight |  |  |  |  |  |
-| 9 | push9 | pushstr | dup9 | roll9 | padright | or | merlin | verify | break9 | signrun | blockrate |  |  |  |  |  |
-| A | push10 | pushpoint | dup10 | roll10 | bitnot | const | merlinwrite | fee | break10 | timelock | chainstate |  |  |  |  |  |
-| B | push11 | pushtoken | dup11 | roll11 | bitor | extvar | merlinread | run | break11 | version |  |  |  |  |  |  |
-| C | push12 | drop | dup12 | roll12 | bitand | intvar | sha256 | loop | break12 | actorid |  |  |  |  |  |  |
-| D | push13 | nop | dup13 | roll13 | bitxor | expr | sha512 | switch | break13 | anchor |  |  |  |  |  |  |
-| E | push14 | dup | dup14 | roll14 | shiftleft | range | sha3 | return | break14 | gas |  |  |  |  |  |  |
-| F | push15 | roll | dup15 | roll15 | shiftright | size | sigverify | type | break15 | bytes |  |  |  |  |  |  |
+| 8 | push8 | pushint | dup8 | roll8 | bitnot | and | next | issueflv | break8 | signtx | blockweight |  |  |  |  |  |
+| 9 | push9 | pushstr | dup9 | roll9 | bitor | or | merlin | verify | break9 | signrun | blockrate |  |  |  |  |  |
+| A | push10 | pushpoint | dup10 | roll10 | bitand | const | merlinwrite | fee | break10 | timelock | chainstate |  |  |  |  |  |
+| B | push11 | pushtoken | dup11 | roll11 | bitxor | extvar | merlinread | run | break11 | version |  |  |  |  |  |  |
+| C | push12 | drop | dup12 | roll12 | shiftleft | intvar | sha256 | loop | break12 | actorid |  |  |  |  |  |  |
+| D | push13 | nop | dup13 | roll13 | shiftright | expr | sha512 | switch | break13 | anchor |  |  |  |  |  |  |
+| E | push14 | dup | dup14 | roll14 | keccak256 | range | sha3 | return | break14 | gas |  |  |  |  |  |  |
+| F | push15 | roll | dup15 | roll15 |  | size | sigverify | type | break15 | bytes |  |  |  |  |  |  |
 
 ### Stack operations
 
@@ -310,10 +310,10 @@ Layout of all the instructions:
 | --- | --- | --- | --- |
 | 0k | push:k | ø → int | Pushes an integer in range 0..15 |
 | 10, 11 | pushint8 | ø → int | Reads one more byte, sets the sign to s. |
-| 12, 13 | pushint16 | ø → int | Reads 2 more bytes and reads them as big-endian number, setting the sign to `s`. |
-| 14, 15 | pushint64 | ø → int | Reads 8 more bytes, sets the sign. |
-| 16, 17 | pushint128 | ø → int | Reads 16 more bytes, sets the sign. |
-| 18 | pushint | ø → int | Reads 32 more bytes, highest bit is a sign bit. |
+| 12, 13 | pushint16 | ø → int | Reads 2 more bytes little-endian, sets the sign to `s`. |
+| 14, 15 | pushint64 | ø → int | Reads 8 more bytes little-endian, sets the sign to `s`. |
+| 16, 17 | pushint128 | ø → int | Reads 16 more bytes little-endian, sets the sign to `s`. |
+| 18 | pushint | ø → int | Reads 32 more bytes; bytes are the sign-magnitude form (LE magnitude in bytes 0..31; highest bit of byte 31 is the sign). |
 | 19 | pushstr | ø → string | Pushes a string on stack. |
 | 1a | pushpoint | ø → point | Pushes a point on stack. |
 | 1b | pushtoken | flv → token | Pops an Int253 flavor and pushes a 0-qty ClearToken with that flavor. |
@@ -334,7 +334,7 @@ Layout of all the instructions:
 | 41 | readint | s → s’ x 1 | s 0 | Equivalent to `readbits(s, 256)`. Reads the canonical 32-byte `Int253` (bit 255 = sign). Same soft-fail conditions: insufficient bytes, magnitude ≥ ℓ, or negative zero. |
 | 42 | readstr | s n → s’ s’’ 1  | s 0 | Reads n bytes in a new string, consuming them from the first string. |
 | 43 | readpoint | s → s’ point 1 | s 0 | Reads point |
-| 44 | writebits | s x n → s’ | Appends low `n ≤ 256` bits of `x`'s canonical 32-byte `Int253` representation, **LSB-first within byte**. Resulting string is byte-aligned: a partial final byte is high-padded with zeros. **Hard-fails if `n > 256`** (programmer error). |
+| 44 | writebits | s x n → s’ | Appends the low `n` bits of `x`'s canonical 32-byte `Int253` representation as bytes (LSB-first). `n` must be a multiple of 8 and `≤ 256`; **hard-fails** otherwise. The sign bit (bit 255) is included iff `n = 256`. |
 | 45 | writeint | s x → s’ | Appends the canonical 32-byte `Int253` representation of `x`. Equivalent to `writebits(s, x, 256)`. |
 | 46 | append | s s’ → s’’ | Appends s’ to s: s’’ = s || s’ |
 | 47 | writezeros | s n → s’ | Appends n zero-bytes. |
@@ -379,7 +379,7 @@ All constraint operations available on external transactions only.
 | --- | --- | --- | --- |
 | 60 | dict | … val key val key n → dict | Creates a new dict with 2*n items as key-value pairs. |
 | 61 | put | dict k v → dict’ | Inserts the value at key, fails if the slot is already occupied. |
-| 62 | replace | dict v k → dict’ {prev 1 | 0 } | Set value at the key, returning previous value as optional. |
+| 62 | replace | dict k v → dict’ {prev 1 | 0 } | Set value at the key, returning previous value as optional. |
 | 63 | get | dict k → dict’ k v | Takes out value at key `k`, fails if the value is missing. |
 | 64 | getopt | dict k → dict’ {v 1 | 0} | Removes the value as optional. |
 | 65 | getdup | dict k → dict {v 1 | 0} | Copies the value at key. Returns 0 if key is missing, fails if value exists but not copyable. |
@@ -396,7 +396,8 @@ All constraint operations available on external transactions only.
 | 6b | merlinread | merlin label n → merlin str | Reads n bytes with a given label. |
 | 6c | sha256 | str → x | Returns a 256-bit string with sha256 digest of an input |
 | 6d | sha512 | str → x | Returns a 512-bit string with sha2-512 digest of an input |
-| 6e | sha3 | str → x | Returns a 256-bit string with sha3-256 digest of an input |
+| 6e | sha3 | str → x | Returns a 256-bit string with sha3-256 (FIPS-202) digest of an input |
+| 4e | keccak256 | str → x | Returns a 256-bit string with Keccak-256 digest of an input (Ethereum compatibility). |
 | 6f | sigverify | msg pk sig scheme → ø | Checks the signature or fails.  |
 
 ### Tokens
