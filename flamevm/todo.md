@@ -166,7 +166,7 @@ Stack diagram has `k` on top, `v` below. This differs from `put`'s `dict k v` (v
 >
 > Stakes: trivial implementation flip if the spec is corrected; significant footgun if scripts use both opcodes.
 >
-> _Architect response:_
+> _Architect response:_ let's flip to "k v" for consistency.
 
 ### 5.2 `dict` opcode duplicate-key handling
 
@@ -178,7 +178,7 @@ Spec (`0x60 dict`): "Creates a new dict with 2*n items as key-value pairs."
 >
 > Stakes: alternative is "last wins" (BTreeMap default), which is permissive but allows non-canonical input.
 >
-> _Architect response:_
+> _Architect response:_ duplicates are forbidden. 
 
 ### 5.3 Portability flag for `Token`
 
@@ -188,7 +188,7 @@ Spec (`0x60 dict`): "Creates a new dict with 2*n items as key-value pairs."
 >
 > Stakes: once Token has Point commitments, `is_portable` should likely still be true (range-proof attests non-negativity). But the *check* may want to be: "Token is portable iff its range proof is valid", which only the constraint system knows. Currently flagging as a Phase-13 confirmation point.
 >
-> _Architect response:_
+> _Architect response:_ Token is always portable. WideToken is never portable. ClearToken is conditionally portable based on qty. Rangeproof is added behind the scenes by `mix` gadget (cloak protocol) when it creates Token instances on stack.
 
 ---
 
@@ -202,7 +202,7 @@ Spec (`0x60 dict`): "Creates a new dict with 2*n items as key-value pairs."
 >
 > Stakes: the literal byte stream of the transcript is not the same as a hypothetical reference implementation that managed to feed the user label directly into `Transcript::new`. Consensus-critical if `merlin*` opcodes are ever observable on-chain.
 >
-> _Architect response:_
+> _Architect response:_ we need to feed labels as-is from the smart contracts to implement the same protocols you'd have in the offchain code. Merlin's API is limiting due to use of static - add suggestion to improve the API. We might need to fork Merlin with extension API.
 
 ### 6.2 SHA-3 variant
 
@@ -212,7 +212,7 @@ Spec (`0x6e sha3`): "Returns a 256-bit string with sha3-256 digest of an input."
 >
 > Stakes: a one-byte padding difference produces entirely different digests. Wrong choice breaks consensus.
 >
-> _Architect response:_
+> _Architect response:_ add `keccak256` opcode for ethereum compatibility, keep sha3 fips-202 compliant.
 
 ---
 
