@@ -311,7 +311,56 @@ Convention per phase: **Goal**, **Reuses** (already in `flame-lib`), **New** (to
 
 ---
 
-### Phase 9 — Outputs, objects, cell-open, signtx/signrun
+### ✅ Phase 9 — Cells, outputs, open, signtx, signrun (done)
+
+**Goal**: cell life-cycle (construction → sealing → opening) with Taproot-style unlock; first opcodes that nest a new `Run` driven by an external program.
+
+**Simplification adopted**: cell-opening is **Run-level, not Call-level**. `open`/`signrun` push a new Run onto `run_stack` and pour the cell's payload + caller's args onto the current call's stack. No isolation. Any failure inside is a hard call-level failure (= whole external tx). Full transactional isolation (Model B) is deferred to Phase 15 for `call`.
+
+**Added**:
+- `Anchor::ratchet()` — domain-separated next-anchor derivation via Merlin transcript `flamevm.anchor.ratchet.v1`.
+- `cell.rs` module — `Predicate { Opaque, Tree }` enum, `PredicateTree` (single-leaf for Phase 9), `CallProof { internal_key, neighbors, position, program }`, `Cell { predicate, anchor, payload }`. Taproot helpers (`taproot_tweak`, `merkle_leaf_hash`, `merkle_node_hash`, `merkle_walk_up`) all via Merlin per architect.
+- `Value::Cell(Cell)` — renamed from `Value::Object(Object)`; the old `object.rs` was renamed to `cell.rs`.
+- `TxEntry::Output(Cell)` variant; `VM.txlog` field. (Note: TxEntry no longer derives Clone/Debug/Serde since Cell isn't.)
+- `VM::pop_point`, `pop_cell`, `pop_n_values`, `pop_n_portable` helpers.
+- `VM::decode_callproof` with a fixed-layout wire form (internal_key || pos_len:u32 || position || n_count:u32 || neighbors × 32 || program).
+- `VM::signtx_message` / `signrun_message` — Merlin transcripts binding the deferred sigs to cell-id / cell-id+program.
+- `VMError`: `TypeNotCell`, `CallProofMismatch`, `AnchorMissing`, `NonPortableInOutput`, `BadSignatureBytes`, `TypeNotPoint`, `MalformedCallProof`.
+
+**Opcodes**:
+- [x] `0x91` `cell` — `args… k pred → cell`. Builds a transient Cell; consumes `last_anchor`, ratchets.
+- [x] `0x92` `output` — same construction, emits `TxEntry::Output` instead of pushing.
+- [x] `0x93` `open` — `cell args… k callproof → results…`. Verifies callproof (hard-fail), pours payload + args onto stack, enters Run with unlocked program.
+- [x] `0x98` `signtx` — `cell → items… k`. Pours payload + count onto stack; records DeferredSig (signature resolved at finalize).
+- [x] `0x99` `signrun` — `cell prog sig args… m → items… k`. Records DeferredSig over (cell-id, program); pours payload + args; enters Run with `prog`.
+
+**Tests landed** (11 new, all green):
+- `anchor_ratchet_changes_value_and_is_deterministic`
+- `cell_opcode_requires_seeded_anchor`
+- `cell_opcode_builds_a_cell_and_ratchets_anchor`
+- `cell_opcode_rejects_non_portable_payload`
+- `cell_is_noncopyable_and_nondroppable`
+- `output_opcode_emits_to_txlog_without_pushing`
+- `open_with_valid_callproof_runs_program`
+- `open_with_wrong_program_hard_fails`
+- `signtx_pours_payload_and_records_deferred_sig`
+- `signrun_runs_signed_program`
+- `signrun_rejects_wrong_signature_length`
+
+**Deferred to later phases**:
+- Full canonical wire encoding of Cell (list-style Dict) — Phase 17 territory; current `Cell::id` uses a Merlin-transcript hash over predicate+anchor+payload type-codes (sufficient for distinguishing cells but not yet bytewise-canonical with payload contents).
+- Multi-leaf `PredicateTree` (general balanced merkle); Phase 9 ships single-leaf only.
+- Batched Schnorr verification of `DeferredSig` (Phase 14).
+- Anchor seeded via `input` opcode (Phase 10); for Phase 9 tests seed `VM.last_anchor` directly.
+- `Model B` (full transactional rollback at call boundaries) for Phase 15 `call`.
+
+**Surfaced for Architect**:
+- The `Cell::id` Merlin transcript currently absorbs payload via type-code only. Full encoding-driven payload binding lands when the cell wire format is finalized.
+- `decode_callproof` uses a minimal fixed-layout wire form. The architect-suggested "list-style Dict with strings" encoding (neighbors as a Dict of strings, position as a String, program as a String, internal_key as a String) is more idiomatic but adds Dict-decoding plumbing. Worth a follow-up to align with the rest of the wire formats.
+
+---
+
+### Phase 9 — Outputs, objects, cell-open, signtx/signrun (superseded by ✅ Phase 9 above)
 
 **Goal**: external tx can seal portable values into cells; cell-opening creates a `CellOpen` call frame.
 

@@ -230,6 +230,41 @@ pub enum VMError {
     #[error("Item is not a Merlin transcript")]
     TypeNotMerlin,
 
+    /// An opcode required a top-of-stack `Cell` but found a different type.
+    #[error("Item is not a Cell")]
+    TypeNotCell,
+
+    /// `open` / `signrun` was given a `CallProof` that doesn't verify
+    /// against the cell's predicate (path mismatch, point decompression
+    /// failure, etc.).
+    #[error("CallProof does not match the cell's predicate")]
+    CallProofMismatch,
+
+    /// `cell` / `output` was invoked without a seeded anchor (no prior
+    /// `input` or test-only seed).
+    #[error("No anchor available — input or seed required first")]
+    AnchorMissing,
+
+    /// `output` saw a non-portable item in the payload (cells, tokens
+    /// with negative qty, linear types, etc.).
+    #[error("Non-portable item in cell payload")]
+    NonPortableInOutput,
+
+    /// `signrun` saw signature bytes that aren't 64 bytes long.
+    #[error("Bad signature byte length")]
+    BadSignatureBytes,
+
+    /// `Point` decoding required a top-of-stack `Point` but found a
+    /// different type.
+    #[error("Item is not a Point")]
+    TypeNotPoint,
+
+    /// `CallProof` decoded from on-stack strings was malformed (wrong
+    /// number of components, bad inner Dict structure, neighbor entry
+    /// not 32 bytes, etc.).
+    #[error("Malformed CallProof")]
+    MalformedCallProof,
+
     // /// This error occurs when VM's anchor remains unset.
     // #[error("VM anchor is not set via `input`")]
     // AnchorMissing,

@@ -1,8 +1,8 @@
 use crate::errors::VMError;
+use crate::Cell;
 use crate::Dict;
 use crate::Int253;
 use crate::Merlin;
-use crate::Object;
 use crate::Point;
 use crate::String;
 use crate::{ClearToken, Token, WideToken};
@@ -17,7 +17,7 @@ pub enum Value {
     Token(Token),
     WideToken(WideToken),
     ClearToken(ClearToken),
-    Object(Object),
+    Cell(Cell),
     Merlin(Merlin),
     Variable(Variable),
     Expression(Expression),
@@ -28,12 +28,8 @@ pub enum Value {
 impl Value {
     /// Returns a fresh copy of this value if its type is **copyable** per
     /// spec.md §Stack discipline (plain-data types). Linear types
-    /// (tokens, objects, variables, expressions, constraints, transcripts,
+    /// (tokens, cells, variables, expressions, constraints, transcripts,
     /// …) are never copyable and produce [`VMError::TypeNotCopyable`].
-    ///
-    /// Phase 1 covers the types currently constructible by stack-literal
-    /// opcodes (`Int253`, `String`, `Point`). `Dict` becomes copyable in
-    /// Phase 5 once member-flag propagation lands.
     pub fn try_clone(&self) -> Result<Value, VMError> {
         match self {
             Value::Int253(i) => Ok(Value::Int253(*i)),
@@ -43,7 +39,7 @@ impl Value {
             Value::Token(_)
             | Value::ClearToken(_)
             | Value::WideToken(_)
-            | Value::Object(_)
+            | Value::Cell(_)
             | Value::Merlin(_)
             | Value::Variable(_)
             | Value::Expression(_)
@@ -66,15 +62,18 @@ impl Value {
     /// is portable iff its quantity is non-negative; encrypted in-range
     /// `Token` is portable; everything else (linear, intermediate,
     /// constraint-system-only types) is not.
+    ///
+    /// Cells are themselves linear handles, not portable — a cell's
+    /// payload is portable, but a cell *value on the stack* may not be
+    /// placed into another cell's payload (sealing a cell-in-a-cell).
     pub fn is_portable(&self) -> bool {
         match self {
             Value::Int253(_) | Value::String(_) | Value::Point(_) => true,
             Value::Dict(d) => d.is_portable(),
             Value::ClearToken(t) => !t.qty().is_negative(),
-            // Phase 1 / 5: `Token` (encrypted, in-range) is a placeholder
-            // empty struct. Treat as portable once it gains real fields
-            // in Phase 13. For now, `Token` instances cannot be created,
-            // so this case is unreachable in practice.
+            // `Token` is portable per design (encrypted in-range token).
+            // The struct is currently empty; once Phase 13 wires fields,
+            // every `Token` instance is portable by construction.
             Value::Token(_) => true,
             _ => false,
         }
@@ -83,7 +82,7 @@ impl Value {
     /// Returns true iff this value can be silently discarded by `drop`.
     /// Plain-data types are always droppable; cleartokens are droppable
     /// when quantity is zero; empty dicts are droppable; everything else
-    /// is not.
+    /// (including cells — they're linear) is not.
     pub fn is_droppable(&self) -> bool {
         match self {
             Value::Int253(_) | Value::String(_) | Value::Point(_) => true,
@@ -99,11 +98,9 @@ impl Value {
     /// - Same-variant for plain-data types (`Int253`, `String`, `Point`):
     ///   bytewise / by-value comparison.
     /// - Same-variant for `Dict`: recursive entry-wise comparison.
-    /// - Same-variant for linear types (tokens, objects, variables,
+    /// - Same-variant for linear types (tokens, cells, variables,
     ///   expressions, constraints, transcripts): `Err(TypeNotComparable)`
-    ///   until later phases define their equality. Linear types should
-    ///   rarely need on-stack equality; the constraint-system path uses
-    ///   `0x51 eq` differently (yields a `Constraint`).
+    ///   — linear types have no stable identity for `eq`.
     pub fn try_eq(&self, other: &Value) -> Result<bool, VMError> {
         match (self, other) {
             (Value::Int253(a), Value::Int253(b)) => Ok(a == b),
@@ -111,7 +108,7 @@ impl Value {
             (Value::Point(a), Value::Point(b)) => Ok(a.as_bytes() == b.as_bytes()),
             // Cross-variant always unequal.
             (sa, sb) if core::mem::discriminant(sa) != core::mem::discriminant(sb) => Ok(false),
-            // Same-variant non-primitives (Dict, tokens, linear types):
+            // Same-variant non-primitives (Dict, tokens, cells, linear types):
             // dicts require recursion + non-trivial gas; linear types have
             // no defined equality. All hard-fail.
             _ => Err(VMError::TypeNotComparable),
@@ -119,13 +116,6 @@ impl Value {
     }
 
     /// Returns the type code used by the `type` opcode.
-    ///
-    /// Wire-encodable types use the base tag of their wire-encoding range
-    /// from spec.md §Types (`Int253` → 0, `String` → 68, `Dict` → 128,
-    /// `Point` → 248, …). Stack-only types (no wire encoding) are assigned
-    /// codes in `0xc0..` that don't collide with any wire tag; these are
-    /// implementation-defined for now and will be confirmed with Architect
-    /// before any cross-implementation use.
     pub fn type_code(&self) -> u8 {
         match self {
             Value::Int253(_) => 0,
@@ -135,7 +125,10 @@ impl Value {
             Value::Token(_) => 249,
             Value::ClearToken(_) => 250,
             Value::WideToken(_) => 251,
-            Value::Object(_) => 252,
+            // `Cell` reuses the wire tag previously assigned to `Object`
+            // (the value type was renamed in Phase 9; the wire-tag table
+            // stays).
+            Value::Cell(_) => 252,
             Value::Merlin(_) => 253,
             // Stack-only — code TBC by Architect.
             Value::Variable(_) => 0xc0,

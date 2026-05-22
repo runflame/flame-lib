@@ -35,21 +35,16 @@ pub struct InternalTx {}
 pub struct TxID(pub Hash);
 
 /// Entry in a transaction log. All entries are hashed into a [transaction ID](TxID).
-#[derive(Clone, Debug, Deserialize, Serialize)]
+///
+/// Linear-value variants (`Output` carries a `Cell`) prevent us from
+/// deriving `Clone`/`Debug`/`Serialize`/`Deserialize` here; downstream
+/// code wanting those should hash entries to bytes first or wrap.
 pub enum TxEntry {
-    /// Transaction [header](self::TxHeader).
-    /// This entry is not present in the transaction log, but used only for computing a TxID.
-    //Header(TxHeader),
-    /// Asset issuance entry that consists of a _flavor commitment_ and a _quantity commitment_.
-    //Issue(CompressedRistretto, CompressedRistretto),
-    /// Asset retirement entry that consists of a _flavor commitment_ and a _quantity commitment_.
-    //Retire(CompressedRistretto, CompressedRistretto),
-    /// Input entry that signals that a contract was spent. Contains the [ID](crate::contract::ContractID) of a contract.
-    //Input(ContractID),
-    /// Output entry that signals that a contract was created. Contains the [Contract](crate::contract::Contract).
-    //Output(Contract),
-    /// Amount of fee being paid (transaction may have multiple fee entries).
-    //Fee(u64),
     /// Plain data entry created by `log` instruction. Contains arbitrary binary string.
     Data(Vec<u8>),
+
+    /// Output: a newly sealed cell, emitted by the `output` opcode.
+    Output(crate::Cell),
+    // Future variants (preserved here as comments for the historical record):
+    // Input(CellID), Issue(...), Retire(...), Fee(u64), Send(Message), etc.
 }
