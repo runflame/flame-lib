@@ -28,7 +28,7 @@ Spec (`0x1b pushtoken`): "Pushes 0-qty token of any flavor, reading next 32 byte
 >
 > **Applied** — `0x1b pushtoken` now reads `flv → token` (pops an Int253 from the stack instead of reading 32 inline bytes); spec.md line 319 updated; `op_pushtoken` rewritten; 7 tests retargeted, `pushtoken_rejects_noncanonical_flavor` removed (no longer reachable), `pushtoken_requires_int_flavor` + `pushtoken_full_flavor_via_pushint_full` added. 236 tests green.
 
-### 1.2 `pushint{16,64,128}` byte order
+### 1.2 `pushint{16,64,128}` byte order ✅ **resolved**
 
 Spec only states "big-endian" explicitly for `pushint16` (`0x12/0x13`). The other widths inherit no explicit endian.
 
@@ -37,12 +37,14 @@ Spec only states "big-endian" explicitly for `pushint16` (`0x12/0x13`). The othe
 > Stakes: changes the encoded literal layout; consensus-critical for scripts that embed multi-byte ints.
 >
 > _Architect response:_ use LE everywhere.
+>
+> **Applied** — `Run::read_be_uint` renamed to `read_le_uint`; spec.md rows 0x12-0x18 updated to say "little-endian"; tests renamed `pushint{16,64,128}_be_decoding` → `_le_decoding` and re-encoded with `to_le_bytes()`; `shift_too_large_errors` and `push_small_uint` helper switched to LE. 254 tests green.
 
 ---
 
 ## Phase 2 — Control flow
 
-### 2.1 Type codes for stack-only types
+### 2.1 Type codes for stack-only types ✅ **resolved**
 
 Spec table maps wire-encodable types to a tag base (Int253 → 0, String → 68, Dict → 128, Point → 248, …, Merlin → 253). It does not assign codes for stack-only types (`Variable`, `Expression`, `Constraint`, `MultiscalarMul`).
 
@@ -51,8 +53,10 @@ Spec table maps wire-encodable types to a tag base (Int253 → 0, String → 68,
 > Stakes: any script using the `type` opcode (`0x7f`) on a stack-only value sees these codes. They become observable behavior and need a canonical assignment if scripts are to be portable across implementations.
 >
 > _Architect response:_ wire encoding is also observable behavior and will be stuck forever. In principle, we don't have to conflate typecodes with wire prefixes, but if all our types fit among the codes, we might as well reuse them. It does not mean, though, that all types are encodeable - we will not serialize Variables, Expressios, MultiscalarMul, WideTokens and some others.
+>
+> **Applied** — kept current `type_code()` assignments: encodable types reuse their wire-tag base (Int253=0, String=68, Dict=128, Point=248, Token=249, ClearToken=250, WideToken=251, Object=252, Merlin=253); non-encodable stack-only types use the higher private range (Variable=0xc0, Expression=0xc1, Constraint=0xc2). The split between "has a wire tag" and "is actually serialized" will be reconciled in encoding work (revisit which of Token/WideToken/Object/Merlin actually round-trip through the wire format).
 
-### 2.2 End-of-script without explicit `return`
+### 2.2 End-of-script without explicit `return` ✅ **resolved**
 
 Spec describes `return` and `break:0` but does not state whether a script *must* end with one or whether falling off the end is also a clean exit.
 
@@ -61,12 +65,14 @@ Spec describes `return` and `break:0` but does not state whether a script *must*
 > Stakes: stricter interpretation would catch a missing return statement at validation time; looser is forgiving but allows silent script truncation.
 >
 > _Architect response:_ no need to do explicit return to save space on compact scripts. We need to be protected against script truncation by correct cryptographic commitment (under signature, taproot hash etc.) If we do not return explicitly, we return 0 items and need to keep the stack clean as well.
+>
+> **Applied** — no code change. Current `finish_call` semantics already match: end-of-entry-Run + empty stack = clean exit; end-of-entry-Run + non-empty stack = `StackNotClean`. Script-truncation protection is the caller's responsibility (signature / Taproot binding on the script bytes).
 
 ---
 
 ## Phase 3 — Int253 arithmetic, logic, size
 
-### 3.1 `divmod` rounding convention
+### 3.1 `divmod` rounding convention ✅ **resolved**
 
 Spec (`0x55 divmod`): "Computes the quotient and the remainder for int." No definition of rounding behavior for negative operands.
 
@@ -75,16 +81,20 @@ Spec (`0x55 divmod`): "Computes the quotient and the remainder for int." No defi
 > Stakes: divmod is the only signed-division op; rounding convention is consensus-critical for scripts that do signed arithmetic.
 >
 > _Architect response:_ let's use the simplest option that makes the smallest code. If it matches Rust convention, even better.
+>
+> **Applied** — no code change. Current `Int253::div_rem` already implements truncated division matching Rust's `i64`. Tests `divmod_basic` + `divmod_negative_dividend` confirm.
 
-### 3.2 `divmod` for magnitudes exceeding `u64::MAX`
+### 3.2 `divmod` for magnitudes exceeding `u64::MAX` ✅ **resolved**
 
 > Implementation today: returns `MagnitudeTooLarge` error for any input whose magnitude doesn't fit `u64`. Rationale: bigint division isn't trivial; deferred until demand.
 >
 > Stakes: the spec doesn't restrict magnitudes, so this is a "spec hole" the implementation chose to fill conservatively. Any script using divmod on > 64-bit operands fails.
 >
 > _Architect response:_ implement a full-sized divmod with rust-like i64 semantics.
+>
+> **Applied** — `Int253::div_rem` rewritten to use a 4×u64-limb unsigned divmod (`divmod_u256` in `int253.rs`); operands up to ℓ are supported. `MagnitudeTooLarge` removed from `VMError`. The Phase-3 test `divmod_magnitude_too_large` was replaced with `divmod_full_width_magnitude_succeeds` (`2^128 / 1`).
 
-### 3.3 `eq` semantics for linear types
+### 3.3 `eq` semantics for linear types ✅ **resolved**
 
 Spec (`0x51 eq`): "Checks equality of two types." Silent on what equality means for tokens, transcripts, variables, expressions.
 
@@ -93,8 +103,10 @@ Spec (`0x51 eq`): "Checks equality of two types." Silent on what equality means 
 > Stakes: scripts that try to compare linear values get a hard fail rather than a meaningful boolean. Alternatives: always return 0, or define identity equality (pointer-style — but linear types have no stable identity).
 >
 > _Architect response:_ we don't have references semantics, so identity-equality is impossible. Tokens are confusing to compare since encrypted token can in theory be equal to unencrypted one, but that requires extra checks and computation. Lets enable `eq` only for obvious primitives: only ints, string, points. dicts require recursion and non-trivial gas computation, so lets avoid it.
+>
+> **Applied** — `Value::try_eq` Dict branch removed; Dict same-variant now falls into the `TypeNotComparable` catch-all. Cross-variant still returns `Ok(false)`. New test `eq_two_dicts_is_not_comparable` asserts.
 
-### 3.4 `mod252` upper-bound semantics
+### 3.4 `mod252` upper-bound semantics ✅ **resolved**
 
 Spec (`0x56 mod252`): "Interprets 0..64-byte as a little-endian unsigned integer and mod-reduces to R255 group order."
 
@@ -105,12 +117,14 @@ Spec (`0x56 mod252`): "Interprets 0..64-byte as a little-endian unsigned integer
 > Stakes: edge-case behavior for 64-byte inputs.
 >
 > _Architect response:_ Accept up to 64 bits inclusive.
+>
+> **Applied** — no code change. Implementation already accepts 0..=64 *bytes* (the response says "bits" but context makes it clear 64-byte upper bound was intended; the inclusive bound matches). Test `mod252_64_bytes_reduces` confirms the 64-byte case.
 
 ---
 
 ## Phase 4 — String ops
 
-### 4.1 `writebits` for non-byte-aligned `n`
+### 4.1 `writebits` for non-byte-aligned `n` ✅ **resolved**
 
 Spec (`0x44 writebits`): "Appends low n bits of an int."
 
@@ -121,8 +135,10 @@ Spec (`0x44 writebits`): "Appends low n bits of an int."
 > Stakes: spec compliance and script expressiveness.
 >
 > _Architect response:_ require alignment: n % 8 == 0
+>
+> **Applied** — `op_write_bits` re-tightened to require `n % 8 == 0`; spec.md row 0x44 updated to say so; test `write_bits_partial_byte_high_bits_zeroed` replaced by `write_bits_non_aligned_hard_fails` asserting `BitCountOutOfRange`. Roundtrip tests (`write_then_read_bits_roundtrip_nonneg`) now skip non-aligned `n` cases. Asymmetric with `readbits` (which still accepts sub-byte `n` with high-bit masking) — this matches the architect's response which targeted writebits specifically.
 
-### 4.2 `writebits` ignores sign
+### 4.2 `writebits` ignores sign ✅ **resolved**
 
 Spec: "Appends low n bits of an int."
 
@@ -131,8 +147,10 @@ Spec: "Appends low n bits of an int."
 > Stakes: scripts that round-trip integers via `writebits`/`readint` would lose sign information unless they encode it separately. Alternative: write a sign-magnitude bit pattern matching `pushint`'s full form.
 >
 > _Architect response:_ keep it simple - interpret bits of the int as just bits. If the sign is included into the requested window - it gets written.
+>
+> **Applied** — `op_write_bits` now uses `x.to_bytes()` (raw 32-byte sign-magnitude LE form) instead of `x.abs().to_bytes()`. The sign bit lives at bit 7 of byte 31 and is included iff `n = 256`. Doc-comment on `op_write_bits` updated.
 
-### 4.3 `readuint`/`readint` for values ≥ ℓ
+### 4.3 `readuint`/`readint` for values ≥ ℓ ✅ **resolved**
 
 Both opcodes' soft-failure path is "string too short". The spec is silent on what happens if the 32-byte value isn't a canonical Ristretto scalar.
 
@@ -141,8 +159,10 @@ Both opcodes' soft-failure path is "string too short". The spec is silent on wha
 > Stakes: a careless script that reads from attacker-controlled bytes can hit a hard error mid-execution. Alternative: also soft-fail (push original + 0) on canonical violations.
 >
 > _Architect response:_ int must be valid and canonical. if we read from arbitrary source, we could use mod252 operation to mod-reduce any bit-pattern as a LE integer. Also, what's the difference between readuint and readint really? Maybe we need just one of those.
+>
+> **Applied** — the opcodes have been unified into `0x40 readbits` (replacing `readuint`) and `0x41 readint = readbits(s, 256)`. Both soft-fail on canonical violations (magnitude ≥ ℓ, negative zero, insufficient bytes) — the architect's "must be valid and canonical" requirement is encoded as: invalid bytes → soft-fail with the original string preserved, so the script can branch on the `0` flag and fall back to `mod252` for arbitrary-source reduction. Tests `read_bits_magnitude_at_ell_soft_fails`, `read_bits_magnitude_above_ell_soft_fails`, `read_bits_negative_zero_soft_fails` confirm.
 
-### 4.4 `shiftleft`/`shiftright` for `n > 256`
+### 4.4 `shiftleft`/`shiftright` for `n > 256` ✅ **resolved**
 
 Spec: "Shifts bits left by n≤256 bits." Says nothing about what happens for `n` exceeding 256.
 
@@ -151,12 +171,14 @@ Spec: "Shifts bits left by n≤256 bits." Says nothing about what happens for `n
 > Stakes: consistency check; some chains allow arbitrarily large shifts (return all-zero result), some error.
 >
 > _Architect response:_ yes, explicit error for all out-of-range situations in all instructions.
+>
+> **Applied** — no code change. Implementation already errors with `IndexOutOfRange` for `n > 256`. Test `shift_too_large_errors` confirms.
 
 ---
 
 ## Phase 5 — Dict ops
 
-### 5.1 `replace` operand order
+### 5.1 `replace` operand order ✅ **resolved**
 
 Spec (`0x62 replace`): `dict v k → dict' {prev 1 | 0}`.
 
@@ -167,8 +189,10 @@ Stack diagram has `k` on top, `v` below. This differs from `put`'s `dict k v` (v
 > Stakes: trivial implementation flip if the spec is corrected; significant footgun if scripts use both opcodes.
 >
 > _Architect response:_ let's flip to "k v" for consistency.
+>
+> **Applied** — `op_replace` now pops `v` first (top), then `k`. Spec.md row 0x62 updated to `dict k v → dict' {prev 1 | 0}`. Tests `replace_existing_returns_prev` + `replace_absent_returns_zero` retargeted (push k before v).
 
-### 5.2 `dict` opcode duplicate-key handling
+### 5.2 `dict` opcode duplicate-key handling ✅ **resolved**
 
 Spec (`0x60 dict`): "Creates a new dict with 2*n items as key-value pairs."
 
@@ -178,9 +202,11 @@ Spec (`0x60 dict`): "Creates a new dict with 2*n items as key-value pairs."
 >
 > Stakes: alternative is "last wins" (BTreeMap default), which is permissive but allows non-canonical input.
 >
-> _Architect response:_ duplicates are forbidden. 
+> _Architect response:_ duplicates are forbidden.
+>
+> **Applied** — no code change. Implementation already errors `DictKeyOccupied`. Test `dict_construction_duplicate_keys_errors` confirms.
 
-### 5.3 Portability flag for `Token`
+### 5.3 Portability flag for `Token` ✅ **resolved**
 
 `Token` (encrypted, in-range) is per spec "portable: yes". The struct is still empty (Phase 13 adds fields).
 
@@ -189,12 +215,14 @@ Spec (`0x60 dict`): "Creates a new dict with 2*n items as key-value pairs."
 > Stakes: once Token has Point commitments, `is_portable` should likely still be true (range-proof attests non-negativity). But the *check* may want to be: "Token is portable iff its range proof is valid", which only the constraint system knows. Currently flagging as a Phase-13 confirmation point.
 >
 > _Architect response:_ Token is always portable. WideToken is never portable. ClearToken is conditionally portable based on qty. Rangeproof is added behind the scenes by `mix` gadget (cloak protocol) when it creates Token instances on stack.
+>
+> **Applied** — no code change. Current `Value::is_portable` already matches: Token=true, WideToken=false, ClearToken=qty≥0. Phase 13 will wire the cloak/mix gadget that produces Token instances; that flow inherits this policy.
 
 ---
 
 ## Phase 6 — Hash & Merlin
 
-### 6.1 Merlin constructor label channel
+### 6.1 Merlin constructor label channel ✅ **resolved** (feedback filed)
 
 `merlin::Transcript::new(label: &'static [u8])` requires a 'static label, but user-supplied labels are runtime-only.
 
@@ -203,8 +231,10 @@ Spec (`0x60 dict`): "Creates a new dict with 2*n items as key-value pairs."
 > Stakes: the literal byte stream of the transcript is not the same as a hypothetical reference implementation that managed to feed the user label directly into `Transcript::new`. Consensus-critical if `merlin*` opcodes are ever observable on-chain.
 >
 > _Architect response:_ we need to feed labels as-is from the smart contracts to implement the same protocols you'd have in the offchain code. Merlin's API is limiting due to use of static - add suggestion to improve the API. We might need to fork Merlin with extension API.
+>
+> **Applied** — feedback note filed at `feedback/2026-05-22-vm-engineer-on-merlin-api.md` proposing three resolution options (document wrapper as canonical / vendor `merlin-flame` shim / fork merlin). Code unchanged pending architect's choice. Phase 14 (sigverify/signtx) is the deadline — those bind to transcripts and need the canonical bytes locked.
 
-### 6.2 SHA-3 variant
+### 6.2 SHA-3 variant ✅ **resolved**
 
 Spec (`0x6e sha3`): "Returns a 256-bit string with sha3-256 digest of an input."
 
@@ -213,6 +243,8 @@ Spec (`0x6e sha3`): "Returns a 256-bit string with sha3-256 digest of an input."
 > Stakes: a one-byte padding difference produces entirely different digests. Wrong choice breaks consensus.
 >
 > _Architect response:_ add `keccak256` opcode for ethereum compatibility, keep sha3 fips-202 compliant.
+>
+> **Applied** — new opcode `0x4e keccak256` added (slot was empty in the string-ops range; thematic placement aside, it's the only consecutive free slot). Implementation in `op_keccak256` uses `sha3::Keccak256`. Spec.md updated. Tests: `keccak256_empty`, `keccak256_abc` against Ethereum reference vectors, and `keccak256_differs_from_sha3` confirms the FIPS-202 vs Keccak distinction at the byte level.
 
 ---
 

@@ -169,14 +169,14 @@ impl Run {
         Ok(&self.script[start..end])
     }
 
-    /// Reads `n` ≤ 16 inline bytes as a big-endian unsigned magnitude.
-    /// `pushint16/64/128` use this for their magnitude operand.
-    fn read_be_uint(&mut self, n: usize) -> Result<u128, VMError> {
+    /// Reads `n` ≤ 16 inline bytes as a little-endian unsigned magnitude.
+    /// `pushint8/16/64/128` use this for their magnitude operand.
+    fn read_le_uint(&mut self, n: usize) -> Result<u128, VMError> {
         debug_assert!(n <= 16);
         let bytes = self.read_bytes(n)?;
         let mut acc: u128 = 0;
-        for &b in bytes {
-            acc = (acc << 8) | (b as u128);
+        for (i, &b) in bytes.iter().enumerate() {
+            acc |= (b as u128) << (8 * i);
         }
         Ok(acc)
     }
@@ -563,6 +563,10 @@ impl VM {
                 self.op_shift_right()?;
                 Ok(true)
             }
+            0x4e => {
+                self.op_keccak256()?;
+                Ok(true)
+            }
             // ── Phase 3: Int253 arithmetic, logic, size ────────────
             0x50 => {
                 self.op_abs()?;
@@ -779,11 +783,11 @@ impl VM {
 
     // ── Phase 1 opcode handlers ─────────────────────────────────
 
-    /// `0x10..=0x17` `pushint{8,16,64,128}` — reads `n_bytes` big-endian
+    /// `0x10..=0x17` `pushint{8,16,64,128}` — reads `n_bytes` little-endian
     /// inline bytes as an unsigned magnitude, attaches the opcode-encoded
     /// sign, pushes an `Int253`.
     fn op_pushint_magnitude(&mut self, n_bytes: usize, negative: bool) -> Result<(), VMError> {
-        let magnitude = self.current_call.current_run.read_be_uint(n_bytes)?;
+        let magnitude = self.current_call.current_run.read_le_uint(n_bytes)?;
         // All u128 values are valid scalars (well below ℓ ≈ 2²⁵²).
         let mut scalar_bytes = [0u8; 32];
         scalar_bytes[..16].copy_from_slice(&magnitude.to_le_bytes());
@@ -949,11 +953,23 @@ impl VM {
         Ok(())
     }
 
-    /// `0x6e` `sha3` — pops a String, pushes the 32-byte SHA3-256 digest.
+    /// `0x6e` `sha3` — pops a String, pushes the 32-byte SHA3-256 digest
+    /// (FIPS-202; padding `0x06`).
     fn op_sha3(&mut self) -> Result<(), VMError> {
         use sha3::{Digest, Sha3_256};
         let s = self.pop_string()?;
         let digest = Sha3_256::digest(s.as_bytes());
+        self.push_value(Value::String(String::from(digest.to_vec())));
+        Ok(())
+    }
+
+    /// `0x4e` `keccak256` — pops a String, pushes the 32-byte Keccak-256
+    /// digest (pre-FIPS Keccak; padding `0x01`). Distinct from `sha3` for
+    /// Ethereum compatibility.
+    fn op_keccak256(&mut self) -> Result<(), VMError> {
+        use sha3::{Digest, Keccak256};
+        let s = self.pop_string()?;
+        let digest = Keccak256::digest(s.as_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
     }
@@ -997,12 +1013,12 @@ impl VM {
         Ok(())
     }
 
-    /// `0x62` `replace` — `dict v k → dict' {prev 1 | 0}`. Overwrites
+    /// `0x62` `replace` — `dict k v → dict' {prev 1 | 0}`. Overwrites
     /// the slot, returning the prior value (if any) as an optional.
-    /// Note operand order per spec: `k` is the top of stack, `v` below.
+    /// Stack order matches `put`: `v` on top, `k` below.
     fn op_replace(&mut self) -> Result<(), VMError> {
-        let k = self.pop_int253()?;
         let v = self.pop_value()?;
+        let k = self.pop_int253()?;
         let mut dict = self.pop_dict()?;
         let prev = dict.insert(k, v);
         self.push_value(Value::Dict(dict));
@@ -1269,33 +1285,25 @@ impl VM {
         Ok(())
     }
 
-    /// `0x44` `writebits` — `s x n → s'`. Appends the low `n ≤ 256`
-    /// bits of `x`'s canonical 32-byte `Int253` representation to `s`,
-    /// **LSB-first within each byte** (bit 0 of `x` → bit 0 of the
-    /// first appended byte). The resulting string is byte-aligned: if
-    /// `n` is not a multiple of 8, the high bits of the final appended
-    /// byte are zero-padded.
+    /// `0x44` `writebits` — `s x n → s'`. Appends the low `n` bits of
+    /// `x`'s canonical 32-byte `Int253` representation to `s`. `n` must
+    /// be a multiple of 8 and `≤ 256` (byte-aligned strings only —
+    /// non-multiples-of-8 hard-fail with `BitCountOutOfRange`).
     ///
-    /// **Hard-fails** the script (programmer error) when `n > 256`.
+    /// The sign bit lives at bit 7 of byte 31; it is included in the
+    /// output iff `n = 256`.
     fn op_write_bits(&mut self) -> Result<(), VMError> {
         // Hard-fail at n > 256 (script abort) via the `pop_byte_count` cap.
         let n = self.pop_byte_count(256)?;
+        if n % 8 != 0 {
+            return Err(VMError::BitCountOutOfRange);
+        }
+        let n_bytes = n / 8;
         let x = self.pop_int253()?;
         let s = self.pop_string()?;
-        let int_bytes = x.to_bytes();
-        let n_bytes = (n + 7) / 8;
-        let mut tail = [0u8; 32];
-        if n_bytes > 0 {
-            tail[..n_bytes].copy_from_slice(&int_bytes[..n_bytes]);
-            // Zero out bits above position n-1 in the final byte so the
-            // string-level result holds exactly the low-`n` bits.
-            let tail_bits = n % 8;
-            if tail_bits != 0 {
-                let mask = (1u8 << tail_bits) - 1;
-                tail[n_bytes - 1] &= mask;
-            }
-        }
-        let appended = s.append_bytes(&tail[..n_bytes]);
+        // Raw 32-byte sign-magnitude form; low `n` bits = first `n_bytes`.
+        let raw = x.to_bytes();
+        let appended = s.append_bytes(&raw[..n_bytes]);
         self.push_value(Value::String(appended));
         Ok(())
     }
@@ -1858,28 +1866,28 @@ mod tests {
     }
 
     #[test]
-    fn pushint16_be_decoding() {
-        // 0x12 = positive; bytes 0x01 0x02 BE = 258
-        let mut vm = vm_with_script(vec![0x12, 0x01, 0x02]);
+    fn pushint16_le_decoding() {
+        // 0x12 = positive; bytes 0x02 0x01 LE = 258
+        let mut vm = vm_with_script(vec![0x12, 0x02, 0x01]);
         run_to_end(&mut vm).unwrap();
         assert_int(&vm.current_call.stack[0], Int253::from(258u64));
     }
 
     #[test]
-    fn pushint64_be_decoding() {
+    fn pushint64_le_decoding() {
         let val: u64 = 0x0102_0304_0506_0708;
         let mut script = vec![0x14];
-        script.extend_from_slice(&val.to_be_bytes());
+        script.extend_from_slice(&val.to_le_bytes());
         let mut vm = vm_with_script(script);
         run_to_end(&mut vm).unwrap();
         assert_int(&vm.current_call.stack[0], Int253::from(val));
     }
 
     #[test]
-    fn pushint128_be_decoding() {
+    fn pushint128_le_decoding() {
         let val: u128 = 0xFEED_FACE_DEAD_BEEF_CAFE_BABE_BADD_CAFEu128;
         let mut script = vec![0x16];
-        script.extend_from_slice(&val.to_be_bytes());
+        script.extend_from_slice(&val.to_le_bytes());
         let mut vm = vm_with_script(script);
         run_to_end(&mut vm).unwrap();
         let mut bytes = [0u8; 32];
@@ -2503,6 +2511,16 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn eq_two_dicts_is_not_comparable() {
+        // push:0, dict, push:0, dict, eq — two empty dicts; eq must err.
+        let mut vm = vm_with_script(vec![0x00, 0x60, 0x00, 0x60, 0x51]);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::TypeNotComparable
+        ));
+    }
+
     // ── neg (0x52) ───────────────────────────────────────────────
 
     #[test]
@@ -2771,7 +2789,7 @@ mod tests {
         } else {
             assert!(n <= 65_535);
             script.push(0x12);
-            script.extend_from_slice(&(n as u16).to_be_bytes());
+            script.extend_from_slice(&(n as u16).to_le_bytes());
         }
     }
 
@@ -3082,16 +3100,18 @@ mod tests {
     }
 
     #[test]
-    fn write_bits_partial_byte_high_bits_zeroed() {
-        // Append low 5 bits of 0xff: byte 0b0001_1111 = 0x1f.
+    fn write_bits_non_aligned_hard_fails() {
+        // n=5 is not a multiple of 8 → hard-fail with BitCountOutOfRange.
         let mut script = pushstr_bytes(&[]);
         script.push(0x10);
         script.push(0xff);
         push_small_uint(&mut script, 5);
         script.push(0x44);
         let mut vm = vm_with_script(script);
-        run_to_end(&mut vm).unwrap();
-        assert_str(&vm.current_call.stack[0], &[0x1f]);
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::BitCountOutOfRange
+        ));
     }
 
     #[test]
@@ -3132,13 +3152,17 @@ mod tests {
             (256, 0x7fff_ffff_ffff_ffff),
         ];
         for (n, v) in cases.iter().copied() {
-            // Script: pushstr(empty), pushint(v), pushint(n), writebits,
-            //         pushint(n), readbits, verify, … (we just inspect the stack).
+            // writebits requires n to be a multiple of 8; skip the others
+            // for this roundtrip (sub-byte n is exercised in the readbits
+            // round-trip tests which do not write via the opcode).
+            if n % 8 != 0 {
+                continue;
+            }
             let value = Int253::from(v);
             let mut script = pushstr_bytes(&[]);
-            // push v (≤ u64::MAX)
+            // push v (≤ u64::MAX), LE per opcode spec.
             script.push(0x14);
-            script.extend_from_slice(&v.to_be_bytes());
+            script.extend_from_slice(&v.to_le_bytes());
             push_small_uint(&mut script, n as u32);
             script.push(0x44); // writebits → stack: [s']
             push_small_uint(&mut script, n as u32);
@@ -3367,7 +3391,7 @@ mod tests {
     fn shift_too_large_errors() {
         let mut script = pushstr_bytes(&[0xab]);
         script.push(0x12); // pushint16 positive
-        script.extend_from_slice(&257u16.to_be_bytes()); // 257 > 256
+        script.extend_from_slice(&257u16.to_le_bytes()); // 257 > 256
         script.push(0x4c);
         let mut vm = vm_with_script(script);
         assert!(matches!(
@@ -3479,12 +3503,12 @@ mod tests {
     #[test]
     fn replace_existing_returns_prev() {
         // Build {5: 50}, then replace v at key 5 with 99.
-        // Spec stack: dict v k → dict' {prev 1 | 0}
+        // Spec stack: dict k v → dict' {prev 1 | 0}
         let mut vm = vm_with_script(vec![
             0x10, 50, 0x05, // (5, 50)
             0x01, 0x60,     // dict
-            0x10, 99,       // v
             0x05,           // k
+            0x10, 99,       // v
             0x62,           // replace
         ]);
         run_to_end(&mut vm).unwrap();
@@ -3498,8 +3522,8 @@ mod tests {
     fn replace_absent_returns_zero() {
         let mut vm = vm_with_script(vec![
             0x00, 0x60, // empty dict
-            0x10, 99,   // v
             0x05,       // k
+            0x10, 99,   // v
             0x62,
         ]);
         run_to_end(&mut vm).unwrap();
@@ -3940,6 +3964,52 @@ mod tests {
             "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
         );
         assert_str(&vm.current_call.stack[0], &expected);
+    }
+
+    // ── keccak256 (0x4e) ─────────────────────────────────────────
+
+    #[test]
+    fn keccak256_empty() {
+        let mut script = pushstr_bytes(b"");
+        script.push(0x4e);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        let expected = hex_to_bytes(
+            "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        );
+        assert_str(&vm.current_call.stack[0], &expected);
+    }
+
+    #[test]
+    fn keccak256_abc() {
+        let mut script = pushstr_bytes(b"abc");
+        script.push(0x4e);
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).unwrap();
+        let expected = hex_to_bytes(
+            "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45",
+        );
+        assert_str(&vm.current_call.stack[0], &expected);
+    }
+
+    #[test]
+    fn keccak256_differs_from_sha3() {
+        // SHA3-256 and Keccak-256 of the same input must differ
+        // (FIPS-202 added a domain separator).
+        let mut script_a = pushstr_bytes(b"abc");
+        script_a.push(0x6e); // sha3
+        let mut script_b = pushstr_bytes(b"abc");
+        script_b.push(0x4e); // keccak256
+        let mut a = vm_with_script(script_a);
+        run_to_end(&mut a).unwrap();
+        let mut b = vm_with_script(script_b);
+        run_to_end(&mut b).unwrap();
+        match (&a.current_call.stack[0], &b.current_call.stack[0]) {
+            (Value::String(sa), Value::String(sb)) => {
+                assert_ne!(sa.as_bytes(), sb.as_bytes());
+            }
+            _ => panic!(),
+        }
     }
 
     fn hex_to_bytes(h: &str) -> Vec<u8> {

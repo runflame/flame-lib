@@ -109,23 +109,11 @@ impl Value {
             (Value::Int253(a), Value::Int253(b)) => Ok(a == b),
             (Value::String(a), Value::String(b)) => Ok(a.as_bytes() == b.as_bytes()),
             (Value::Point(a), Value::Point(b)) => Ok(a.as_bytes() == b.as_bytes()),
-            (Value::Dict(a), Value::Dict(b)) => {
-                if a.len() != b.len() {
-                    return Ok(false);
-                }
-                for ((ka, va), (kb, vb)) in a.entries().zip(b.entries()) {
-                    if ka != kb {
-                        return Ok(false);
-                    }
-                    if !va.try_eq(vb)? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
             // Cross-variant always unequal.
             (sa, sb) if core::mem::discriminant(sa) != core::mem::discriminant(sb) => Ok(false),
-            // Same-variant linear / constraint / token types: not yet defined.
+            // Same-variant non-primitives (Dict, tokens, linear types):
+            // dicts require recursion + non-trivial gas; linear types have
+            // no defined equality. All hard-fail.
             _ => Err(VMError::TypeNotComparable),
         }
     }
