@@ -4365,6 +4365,10 @@ mod tests {
     use crate::cell::{CallProof, Cell, Predicate, PredicateTree};
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 
+    /// Fixed blinding-key seed for tests — keeps tree construction
+    /// deterministic across runs.
+    const TEST_BLINDING_KEY: [u8; 32] = [0u8; 32];
+
     /// Helper: builds a single-leaf `PredicateTree` from a program and a
     /// known internal-key scalar, plus the `CallProof` that opens it.
     fn build_predicate_with_program(
@@ -4374,7 +4378,12 @@ mod tests {
         let secret = Scalar::from(internal_secret);
         let x_point = &secret * &RISTRETTO_BASEPOINT_TABLE;
         let internal_key = x_point.compress();
-        let tree = PredicateTree::new(internal_key, vec![program.to_vec()]).unwrap();
+        let tree = PredicateTree::new(
+            Some(internal_key),
+            vec![program.to_vec()],
+            TEST_BLINDING_KEY,
+        )
+        .unwrap();
         let cp = tree.callproof_for(0).unwrap();
         (tree, cp)
     }
@@ -4389,7 +4398,12 @@ mod tests {
         let secret = Scalar::from(internal_secret);
         let x_point = &secret * &RISTRETTO_BASEPOINT_TABLE;
         let internal_key = x_point.compress();
-        let tree = PredicateTree::new(internal_key, programs).unwrap();
+        let tree = PredicateTree::new(
+            Some(internal_key),
+            programs,
+            TEST_BLINDING_KEY,
+        )
+        .unwrap();
         let cp = tree.callproof_for(program_index).unwrap();
         (tree, cp)
     }
@@ -4711,15 +4725,54 @@ mod tests {
         let secret = Scalar::from(1u64);
         let ik = (&secret * &RISTRETTO_BASEPOINT_TABLE).compress();
         assert!(matches!(
-            PredicateTree::new(ik, Vec::new()).unwrap_err(),
+            PredicateTree::new(Some(ik), Vec::new(), TEST_BLINDING_KEY).unwrap_err(),
             VMError::EmptyPredicateTree
         ));
         // Garbage internal_key bytes → InvalidPoint.
         let bad = CompressedRistretto([0xff; 32]); // not a valid Ristretto point
         assert!(matches!(
-            PredicateTree::new(bad, vec![vec![0x1d]]).unwrap_err(),
+            PredicateTree::new(Some(bad), vec![vec![0x1d]], TEST_BLINDING_KEY).unwrap_err(),
             VMError::InvalidPoint
         ));
+        // None → unspendable internal key (B_blinding). Succeeds and
+        // produces a tree whose internal key is the unspendable point.
+        let tree = PredicateTree::new(None, vec![vec![0x1d]], TEST_BLINDING_KEY).unwrap();
+        assert_eq!(*tree.internal_key(), Predicate::unspendable_key());
+        // scripts_only is the documented convenience wrapper for the same
+        // pattern; it must produce an identical tree.
+        let via_helper = PredicateTree::scripts_only(
+            vec![vec![0x1d]],
+            TEST_BLINDING_KEY,
+        )
+        .unwrap();
+        assert_eq!(via_helper.compute_point(), tree.compute_point());
+    }
+
+    #[test]
+    fn scripts_only_predicate_opens_via_program_path() {
+        // End-to-end: build a scripts-only predicate, lock a cell under
+        // it, and unlock via `open` with the script-path proof. Verifies
+        // the unspendable-internal-key construction is wire-compatible
+        // with the existing `open` opcode.
+        let program = vec![0x1c]; // drop (cell payload is one item)
+        let tree = PredicateTree::scripts_only(
+            vec![program.clone()],
+            TEST_BLINDING_KEY,
+        )
+        .unwrap();
+        let cp = tree.callproof_for(0).unwrap();
+        let pred_point = tree.compute_point();
+
+        let mut script = vec![0x05, 0x01]; // payload: push:5; k=1
+        push_point_bytes(&mut script, pred_point.as_bytes());
+        script.push(0x91); // cell
+        push_callproof_pieces(&mut script, &cp);
+        script.push(0x00); // 0 args
+        script.push(0x93); // open
+        let mut vm = vm_with_script(script);
+        vm.last_anchor = Some(Anchor([0x42; 32]));
+        run_to_end(&mut vm).unwrap();
+        assert!(vm.current_call.stack.is_empty());
     }
 
     #[test]
@@ -4801,7 +4854,12 @@ mod tests {
     fn callproof_for_out_of_range_index_errors() {
         let secret = Scalar::from(1u64);
         let ik = (&secret * &RISTRETTO_BASEPOINT_TABLE).compress();
-        let tree = PredicateTree::new(ik, vec![vec![0x1d], vec![0x1c]]).unwrap();
+        let tree = PredicateTree::new(
+            Some(ik),
+            vec![vec![0x1d], vec![0x1c]],
+            TEST_BLINDING_KEY,
+        )
+        .unwrap();
         assert!(matches!(
             tree.callproof_for(5).unwrap_err(),
             VMError::ProgramIndexOutOfRange

@@ -30,6 +30,7 @@
 //! point P. Prover-side witnesses (the internal key, the merkle tree) are
 //! stripped before encoding.
 
+use bulletproofs::PedersenGens;
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
@@ -62,17 +63,36 @@ pub enum Predicate {
     Tree(PredicateTree),
 }
 
+/// One leaf in a `PredicateTree`'s merkle commitment. Every program leaf
+/// is paired with a `Blinding` sibling so the position of any given
+/// program inside its pair is uniformly random — observers walking a
+/// merkle proof cannot tell program leaves apart from blinding leaves.
+#[derive(Clone, Debug)]
+pub enum PredicateLeaf {
+    /// A script program that, if matched by a `CallProof`, unlocks the cell.
+    Program(Vec<u8>),
+    /// A 32-byte random sibling that hides its program partner's position.
+    Blinding([u8; 32]),
+}
+
 /// Prover-side witness for a Taproot predicate.
 ///
 /// The tree commits to one or more **programs** via a balanced merkle
-/// root, then Taproot-tweaks the internal key by `H(X, M)` to produce the
-/// opaque predicate point. Construction validates both `internal_key`
-/// (must decompress) and `programs` (must be non-empty); fields are
-/// `pub(crate)` to enforce that invariant.
+/// root over `leaves`, then Taproot-tweaks the internal key by
+/// `H(X, M)` to produce the opaque predicate point. Each program leaf
+/// is paired with a `Blinding` sibling derived deterministically from
+/// the `blinding_key` seed passed to `new`, so the on-tree position of
+/// a program within its pair is uniformly random. The seed itself is
+/// not retained — once the leaves are built, the seed is no longer
+/// needed for `compute_point` or `callproof_for`.
+///
+/// Fields are `pub(crate)` to enforce the construction invariants:
+/// non-empty `leaves` exactly `2 × programs.len()` in length, and an
+/// `internal_key` that decompresses to a valid Ristretto point.
 #[derive(Clone, Debug)]
 pub struct PredicateTree {
     pub(crate) internal_key: CompressedRistretto,
-    pub(crate) programs: Vec<Vec<u8>>,
+    pub(crate) leaves: Vec<PredicateLeaf>,
 }
 
 impl Predicate {
@@ -97,6 +117,16 @@ impl Predicate {
         self.to_point()
     }
 
+    /// The secondary Pedersen generator `B_blinding`, compressed.
+    /// Suitable as an internal key when no key-path spend is desired:
+    /// the discrete log of `B_blinding` w.r.t. the primary basepoint
+    /// `B` is unknown by construction, so signing for the resulting
+    /// tweaked predicate point is computationally infeasible.
+    /// `PredicateTree::new(None, …)` substitutes this point.
+    pub fn unspendable_key() -> CompressedRistretto {
+        PedersenGens::default().B_blinding.compress()
+    }
+
     /// Verifies a `CallProof` against this predicate. On success returns
     /// the unlocked program bytes (the leaf the proof opens). On failure
     /// (path mismatch, decompression failure, etc.) returns
@@ -106,7 +136,7 @@ impl Predicate {
         cp: &'a CallProof,
     ) -> Result<&'a [u8], VMError> {
         // 1. Compute the merkle root from program + neighbors + position.
-        let leaf = merkle_leaf_hash(&cp.program);
+        let leaf = program_leaf_hash(&cp.program);
         let root = merkle_walk_up(leaf, &cp.neighbors, &cp.position)?;
         // 2. Compute h = H(X, M) and the expected point P' = X + h·B.
         let h = taproot_tweak(&cp.internal_key, &root);
@@ -124,19 +154,44 @@ impl Predicate {
 }
 
 impl PredicateTree {
-    /// Builds a validated tree. Errors if `programs` is empty or if
+    /// Builds a validated tree.
+    ///
+    /// `internal_key = None` substitutes `Predicate::unspendable_key()`
+    /// (the secondary Pedersen generator `B_blinding`), producing a
+    /// program-only predicate that nobody can sign for — the only way to
+    /// satisfy it is via a `CallProof` against one of the embedded leaves.
+    ///
+    /// `blinding_key` seeds a deterministic per-program blinding factor
+    /// so the same `(internal_key, programs, blinding_key)` triple always
+    /// produces the same opaque predicate point.
+    ///
+    /// Errors if `programs` is empty, or if a caller-supplied
     /// `internal_key` does not decompress to a valid Ristretto point.
     pub fn new(
-        internal_key: CompressedRistretto,
+        internal_key: Option<CompressedRistretto>,
         programs: Vec<Vec<u8>>,
+        blinding_key: [u8; 32],
     ) -> Result<PredicateTree, VMError> {
         if programs.is_empty() {
             return Err(VMError::EmptyPredicateTree);
         }
+        let internal_key = internal_key.unwrap_or_else(Predicate::unspendable_key);
         if internal_key.decompress().is_none() {
             return Err(VMError::InvalidPoint);
         }
-        Ok(PredicateTree { internal_key, programs })
+        let leaves = create_merkle_leaves(&programs, &blinding_key);
+        Ok(PredicateTree { internal_key, leaves })
+    }
+
+    /// Convenience: builds a tree with the unspendable internal key
+    /// (`Predicate::unspendable_key`), so the predicate can only be
+    /// satisfied via a `CallProof` against one of the embedded programs.
+    /// Equivalent to `PredicateTree::new(None, programs, blinding_key)`.
+    pub fn scripts_only(
+        programs: Vec<Vec<u8>>,
+        blinding_key: [u8; 32],
+    ) -> Result<PredicateTree, VMError> {
+        PredicateTree::new(None, programs, blinding_key)
     }
 
     /// Read-only accessor for the internal key.
@@ -144,9 +199,17 @@ impl PredicateTree {
         &self.internal_key
     }
 
-    /// Read-only accessor for the leaf programs.
-    pub fn programs(&self) -> &[Vec<u8>] {
-        &self.programs
+    /// Read-only accessor for the leaves (both program and blinding).
+    pub fn leaves(&self) -> &[PredicateLeaf] {
+        &self.leaves
+    }
+
+    /// Iterator over the program leaves in original input order.
+    pub fn programs(&self) -> impl Iterator<Item = &[u8]> {
+        self.leaves.iter().filter_map(|l| match l {
+            PredicateLeaf::Program(p) => Some(p.as_slice()),
+            PredicateLeaf::Blinding(_) => None,
+        })
     }
 
     /// Computes the predicate's opaque point `P = X + H(X, M)·B`.
@@ -160,43 +223,41 @@ impl PredicateTree {
         (x_point + &h * &RISTRETTO_BASEPOINT_TABLE).compress()
     }
 
-    /// Computes the merkle root over the leaf programs. For a single
-    /// program, the root is the leaf hash itself. For more, the tree
-    /// is balanced by repeatedly splitting at
-    /// `next_power_of_two(n) / 2` — the same convention as zkvm's
-    /// `merkle::MerkleTree`.
+    /// Computes the merkle root over the leaves. For a single leaf the
+    /// root is its leaf hash; otherwise the tree is balanced by repeatedly
+    /// splitting at `next_power_of_two(n) / 2`.
     pub fn merkle_root(&self) -> [u8; 32] {
-        merkle_root_of_programs(&self.programs)
+        merkle_root_of_leaves(&self.leaves)
     }
 
-    /// Builds a `CallProof` that opens the `program_index`-th leaf.
-    /// Errors if `program_index >= programs.len()`.
+    /// Builds a `CallProof` that opens the `program_index`-th program leaf.
+    /// Errors if `program_index` is beyond the number of programs.
     ///
-    /// The returned proof's `neighbors` are leaf-to-root; `position`
-    /// is a bit-packed string where bit `i` (LSB-first within byte)
-    /// describes step `i` of the walk-up: `0` means "current hash on
-    /// left / neighbor on right", `1` means "swap".
+    /// The returned proof's `neighbors` are leaf-to-root; `position` is a
+    /// bit-packed string where bit `i` (LSB-first within byte) describes
+    /// step `i` of the walk-up: `0` means "current hash on left / neighbor
+    /// on right", `1` means "swap".
     pub fn callproof_for(&self, program_index: usize) -> Result<CallProof, VMError> {
-        if program_index >= self.programs.len() {
-            return Err(VMError::ProgramIndexOutOfRange);
-        }
-        // We walk root-to-leaf during construction (descending into halves)
-        // but `merkle_walk_up` consumes neighbors leaf-to-root. Push in
-        // descent order, then reverse — O(n) once vs. O(n) per insert(0).
+        let leaf_index = self.program_leaf_index(program_index)?;
+        let program = match &self.leaves[leaf_index] {
+            PredicateLeaf::Program(p) => p.clone(),
+            PredicateLeaf::Blinding(_) => unreachable!("program_leaf_index points at a Program"),
+        };
+        // Descend root-to-leaf, collecting siblings, then reverse so the
+        // resulting list is leaf-to-root (the order `merkle_walk_up` wants).
         let mut neighbors = Vec::new();
         let mut bits = Vec::new();
-        let mut sublist: &[Vec<u8>] = &self.programs;
-        let mut subindex = program_index;
+        let mut sublist: &[PredicateLeaf] = &self.leaves;
+        let mut subindex = leaf_index;
         while sublist.len() >= 2 {
             let k = sublist.len().next_power_of_two() / 2;
             if subindex >= k {
-                // Current is in the right half; sibling is left subtree.
-                neighbors.push(merkle_root_of_programs(&sublist[..k]));
+                neighbors.push(merkle_root_of_leaves(&sublist[..k]));
                 bits.push(1);
                 sublist = &sublist[k..];
                 subindex -= k;
             } else {
-                neighbors.push(merkle_root_of_programs(&sublist[k..]));
+                neighbors.push(merkle_root_of_leaves(&sublist[k..]));
                 bits.push(0);
                 sublist = &sublist[..k];
             }
@@ -207,22 +268,68 @@ impl PredicateTree {
             internal_key: self.internal_key,
             neighbors,
             position: pack_position_bits(&bits),
-            program: self.programs[program_index].clone(),
+            program,
+        })
+    }
+
+    /// Maps a logical program index to its position among the leaves.
+    /// Programs occupy pairs `(2k, 2k+1)` with the Program in either slot
+    /// per the blinding-factor LSB; we probe slot `2k` first, fall back
+    /// to `2k+1`.
+    fn program_leaf_index(&self, program_index: usize) -> Result<usize, VMError> {
+        let pair = program_index
+            .checked_mul(2)
+            .ok_or(VMError::ProgramIndexOutOfRange)?;
+        if pair >= self.leaves.len() {
+            return Err(VMError::ProgramIndexOutOfRange);
+        }
+        Ok(match &self.leaves[pair] {
+            PredicateLeaf::Program(_) => pair,
+            PredicateLeaf::Blinding(_) => pair + 1,
         })
     }
 }
 
-/// Balanced merkle root over an ordered list of programs. Splits at
-/// `next_power_of_two(n) / 2`. For `n = 1` the leaf hash itself is the
-/// root.
-fn merkle_root_of_programs(programs: &[Vec<u8>]) -> [u8; 32] {
-    debug_assert!(!programs.is_empty(), "merkle_root_of_programs: empty list");
-    if programs.len() == 1 {
-        merkle_leaf_hash(&programs[0])
+/// Deterministically generates the leaf list: for each program, a
+/// 32-byte blinding factor is squeezed from a domain-separated transcript
+/// keyed by `blinding_key` and bound to the entire program list. The
+/// blinding factor's LSB picks whether the program sits on the left or
+/// right of its blinding sibling.
+fn create_merkle_leaves(progs: &[Vec<u8>], blinding_key: &[u8; 32]) -> Vec<PredicateLeaf> {
+    let mut t = Transcript::new(b"flamevm.taproot.blinding.v1");
+    let n = progs.len() as u64;
+    t.append_message(b"n", &n.to_le_bytes());
+    t.append_message(b"key", blinding_key);
+    for prog in progs {
+        t.append_message(b"prog", prog);
+    }
+    let mut leaves = Vec::with_capacity(progs.len() * 2);
+    for prog in progs {
+        let mut blinding = [0u8; 32];
+        t.challenge_bytes(b"blinding", &mut blinding);
+        let blinding_leaf = PredicateLeaf::Blinding(blinding);
+        let program_leaf = PredicateLeaf::Program(prog.clone());
+        if blinding[0] & 1 == 0 {
+            leaves.push(blinding_leaf);
+            leaves.push(program_leaf);
+        } else {
+            leaves.push(program_leaf);
+            leaves.push(blinding_leaf);
+        }
+    }
+    leaves
+}
+
+/// Balanced merkle root over an ordered leaf list. Splits at
+/// `next_power_of_two(n) / 2`; a singleton leaf hashes to its own root.
+fn merkle_root_of_leaves(leaves: &[PredicateLeaf]) -> [u8; 32] {
+    debug_assert!(!leaves.is_empty(), "merkle_root_of_leaves: empty list");
+    if leaves.len() == 1 {
+        leaf_hash(&leaves[0])
     } else {
-        let k = programs.len().next_power_of_two() / 2;
-        let left = merkle_root_of_programs(&programs[..k]);
-        let right = merkle_root_of_programs(&programs[k..]);
+        let k = leaves.len().next_power_of_two() / 2;
+        let left = merkle_root_of_leaves(&leaves[..k]);
+        let right = merkle_root_of_leaves(&leaves[k..]);
         merkle_node_hash(&left, &right)
     }
 }
@@ -339,10 +446,29 @@ fn taproot_tweak(internal_key: &CompressedRistretto, merkle_root: &[u8; 32]) -> 
     Scalar::from_bytes_mod_order_wide(&buf)
 }
 
-/// Merkle leaf hash for a program.
-fn merkle_leaf_hash(program: &[u8]) -> [u8; 32] {
+/// Domain-tagged leaf hash dispatching on the variant.
+fn leaf_hash(leaf: &PredicateLeaf) -> [u8; 32] {
+    match leaf {
+        PredicateLeaf::Program(p) => program_leaf_hash(p),
+        PredicateLeaf::Blinding(b) => blinding_leaf_hash(b),
+    }
+}
+
+/// Merkle leaf hash for a program leaf — also what the verifier
+/// computes from `CallProof::program` before walking up.
+fn program_leaf_hash(program: &[u8]) -> [u8; 32] {
     let mut t = Transcript::new(b"flamevm.merkle.leaf.v1");
     t.append_message(b"program", program);
+    let mut h = [0u8; 32];
+    t.challenge_bytes(b"hash", &mut h);
+    h
+}
+
+/// Merkle leaf hash for a blinding leaf. Distinct domain from the
+/// program leaf so a prover can't substitute one for the other.
+fn blinding_leaf_hash(bytes: &[u8; 32]) -> [u8; 32] {
+    let mut t = Transcript::new(b"flamevm.merkle.leaf.v1");
+    t.append_message(b"blinding", bytes);
     let mut h = [0u8; 32];
     t.challenge_bytes(b"hash", &mut h);
     h
