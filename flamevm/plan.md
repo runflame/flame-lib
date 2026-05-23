@@ -664,9 +664,11 @@ so the deferred work is explicit):
   elegant for stack-manipulation of witnesses, but the side-channel
   works fine for Phase 11's `alloc`-only witness path and avoids
   rewriting ~50 dispatch arms.
-- 11.5 (Prover + Verifier): **shipped** in `delegates.rs`. Both wrap
-  the bulletproofs CS clients; `Prover::prove(pc_gens, program,
-  header, gas, mem)` returns `(bytecode, proof, result, sigs)`;
+- 11.5 (Prover + Verifier): **shipped** as `prover.rs` and
+  `verifier.rs` (mirroring zkvm's file split; `vm.rs` remains the
+  common `Delegate`-trait home). Both wrap the bulletproofs CS
+  clients; `Prover::prove(pc_gens, program, header, gas, mem)`
+  returns `(bytecode, proof, result, sigs)`;
   `Verifier::verify(pc_gens, bytecode, proof, header, gas, mem)`
   returns `(result, sigs)` after `r1cs::Verifier::verify` accepts.
 - 11.6 (CS opcodes): **partial** — `0x5c alloc` and `0x5d expr` are
@@ -694,12 +696,17 @@ so the deferred work is explicit):
   `alloc(witness)`, `expr()`, `add()`, `mul()`, `eq()`, `neg()`,
   `verify()`, `raw(bytes)`. `to_bytecode()` and `to_witnesses()`
   for prover-side authoring.
-- `flamevm/src/delegates.rs` — `Prover<'g>` and `Verifier`, both
-  implementing the `Delegate` trait. `Prover::new(pc_gens,
-  witnesses)`; `Prover::into_proof()` consumes self to emit
-  `R1CSProof`. `Verifier::verify_proof(proof, pc_gens)` does the
-  CS-side verification. Public entry points `Prover::prove(…)` and
-  `Verifier::verify(…)` glue the VM run with the proof step.
+- `flamevm/src/prover.rs` — `Prover<'g>` implementing the
+  `Delegate` trait. `Prover::new(pc_gens, witnesses)`;
+  `Prover::into_proof()` consumes self to emit `R1CSProof`. Public
+  entry point `Prover::prove(…)` glues the VM run with the proof
+  step.
+- `flamevm/src/verifier.rs` — `Verifier` implementing the
+  `Delegate` trait. `Verifier::verify_proof(proof, pc_gens)`
+  consumes self to perform CS-side verification. Public entry point
+  `Verifier::verify(…)` glues the VM run with the proof check.
+  Mirrors zkvm's file split (`prover.rs` + `verifier.rs`, sharing
+  `vm.rs`'s `Delegate` trait).
 - `flamevm/src/vm.rs`:
   - `Delegate::next_alloc_witness()` added (default returns `None`).
   - `try_external_overload` dispatch layer routes Expression /
@@ -1056,7 +1063,9 @@ arms but most are mechanical (rename `op` field unpacks).
 
 ##### 11.5 — Real `Prover` and `Verifier` Delegate impls
 
-**Scope**: add `flamevm/src/delegates.rs` with:
+**Scope**: add `flamevm/src/prover.rs` and `flamevm/src/verifier.rs`
+(mirroring zkvm's file split; `vm.rs` keeps the common `Delegate`
+trait) with:
 
 ```rust
 pub struct Prover<'g> {
