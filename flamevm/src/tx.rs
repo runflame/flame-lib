@@ -1,4 +1,5 @@
 use bulletproofs::r1cs::R1CSProof;
+use curve25519_dalek::ristretto::CompressedRistretto;
 use merkle::{Hash, MerkleItem, MerkleTree};
 use musig::Signature;
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,22 @@ pub enum TxEntry {
 
     /// Output: a newly sealed cell, emitted by the `output` opcode.
     Output(crate::Cell),
+
+    /// Issuance: an asset value has just been *created* into circulation.
+    /// Carries `(qty_point, flv_point)` — Pedersen commitments to the
+    /// quantity and flavor scalars.
+    ///
+    /// For the cleartext issuance branch (`issue` with `Int253` qty),
+    /// both commitments are unblinded (blinding factor = 0). For the
+    /// encrypted branch (Phase 11/12), the commitments are the live
+    /// blinded points whose openings are proven through the constraint
+    /// system.
+    Issue(CompressedRistretto, CompressedRistretto),
+
+    /// Retirement: an asset value has been *destroyed* from circulation.
+    /// Same `(qty_point, flv_point)` shape as `Issue`. Cleartext or
+    /// encrypted symmetrically.
+    Retire(CompressedRistretto, CompressedRistretto),
     // Future variants (preserved here as comments for the historical record):
-    // Issue(...), Retire(...), Fee(u64), Send(Message), etc.
+    // Fee(u64), Send(Message), etc.
 }

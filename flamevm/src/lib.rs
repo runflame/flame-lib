@@ -20,7 +20,7 @@ pub use dict::Dict;
 pub use errors::VMError;
 pub use int253::Int253;
 pub use string::String;
-pub use token::{ClearToken, Token, WideToken};
+pub use token::{flavor_from_actor, ClearToken, Token, WideToken};
 pub use value::Value;
 
 pub use tx::{ExternalTx, InternalTx};

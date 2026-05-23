@@ -404,15 +404,15 @@ All constraint operations available on external transactions only.
 
 | Hex | Name | Stack diagram | Notes |
 | --- | --- | --- | --- |
-| 70 | amount | token → token qty flv | Returns token’s qty, then flavor. ClearToken: Ints, Token/WideToken: Points. |
-| 71 | issue | qty tag → T | Issues a ClearToken if qty is Integer, Token if qty is Point (with rangeproof). |
-| 72 | retire | token → ø | Removes token from circulation. |
-| 73 | borrow | qty flv → –T +T | Both ints: ClearToken. Any Point: WideToken/Token. If qty is point, adds 64-bit rangeproof; otherwise checks 64 range directly. |
-| 74 | merge | a b → {c 1 | a b 0} | ClearTokens only: checks flv match and adds qtys. |
-| 75 | split | a q → a’ b | ClearTokens only: creates a new ClearToken, taking `q` from `a.qty` from the input token, returning two tokens with qty=a.qty-q and b.qty=q.  |
+| 70 | amount | token → token qty flv | Peeks the top token-shaped value and pushes `(qty, flv)` above it. ClearToken: both as `Int253` (cleartext). Token: both as `Point` (the compressed commitment points; works without a live CS). WideToken: errors `TypeNotToken` until Phase 13 lands the constructor. |
+| 71 | issue | qty tag → T | Cleartext branch (`qty: Int253`): builds `ClearToken(qty, flavor_from_actor(current_actor, tag))`, emits `TxEntry::Issue(unblinded_qty, unblinded_flv)`. Encrypted branch (`qty: Point`): defers to Phase 11/12 — hard-fails `TokenRequiresCS` until the constraint-system delegate is online. Requires actor context (`OpcodeRequiresActorContext` from `ExternalRoot`); to compute a flavor without actor context use `issueflv`. |
+| 72 | retire | token → ø | Consumes a token; emits `TxEntry::Retire(qty_point, flv_point)`. ClearToken uses unblinded commitments; Token uses live commitment points. WideToken / other types: `TypeNotToken`. |
+| 73 | borrow | qty flv → –T +T | Cleartext branch (both `Int253`): pushes `(ClearToken(-qty, flv), ClearToken(qty, flv))` — the negative is non-portable bottom, the positive is portable top. Encrypted branch (any operand is `Point`): defers to Phase 12 with a 64-bit range proof on `+T` — hard-fails `TokenRequiresCS` until then. |
+| 74 | merge | a b → {c 1 | a b 0} | ClearTokens only: on flavor match, pushes `(ClearToken(a.qty+b.qty, flv), 1)`. On flavor mismatch, restores `(a, b, 0)` (soft-fail). Non-ClearToken inputs error `TypeNotClearToken`. |
+| 75 | split | a q → a’ b | ClearTokens only: returns `(ClearToken(a.qty-q, flv), ClearToken(q, flv))`. Hard-fails `TokenSplitOutOfRange` if `q < 0`, `a.qty < 0`, or `q > a.qty`. Non-ClearToken inputs error `TypeNotClearToken`. |
 | 76 | mix | anytokens... commitments… m n → values | (External) Performs merge and split of tokens, cleartokens and widetokens. |
 | 77 | decrypt | token f f’ q q’ → cleartoken | Converts token to a cleartext one by providing cleartext flavor and quantity with their blinding factors. |
-| 78 | issueflv | cid tag → int | Returns flavor identifier for the given actor ID and tag. |
+| 78 | issueflv | cid tag → int | Pops a `tag` String and a `cid` String (must be exactly 32 bytes — actor id); pushes `flavor_from_actor(cid, tag)` as `Int253`. Pure helper: no CS, no txlog effect, no actor-context requirement. Domain separator `flamevm.token.flavor.v1` (consensus-fixed). |
 
 ### Control flow
 

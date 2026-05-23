@@ -296,6 +296,40 @@ pub enum VMError {
     #[error("Malformed cell encoding")]
     MalformedCellEncoding,
 
+    /// An opcode required a top-of-stack `ClearToken` but found a
+    /// different type (encrypted Token / WideToken / non-token).
+    /// Distinct from `TypeNotToken` so scripts can distinguish "wrong
+    /// token variant" from "not a token at all".
+    #[error("Item is not a ClearToken")]
+    TypeNotClearToken,
+
+    /// An opcode required a top-of-stack `Token` but found a different
+    /// type (ClearToken / WideToken / non-token).
+    #[error("Item is not a Token")]
+    TypeNotToken,
+
+    /// `split` was asked to take more quantity from a `ClearToken` than
+    /// it holds, or to take a negative quantity, or to split from a
+    /// negative-qty source. All three are hard-fails.
+    #[error("split quantity out of range")]
+    TokenSplitOutOfRange,
+
+    /// An opcode that requires the current call frame to be associated
+    /// with an actor identity (e.g. cleartext `issue`) was invoked
+    /// from a frame whose `actor()` is `None` — `ExternalRoot` or a
+    /// bare `CellOpen` not nested in an actor call. Scripts must
+    /// either be running inside an actor's method or pass the actor
+    /// identity explicitly (use `issueflv`).
+    #[error("Opcode requires actor context")]
+    OpcodeRequiresActorContext,
+
+    /// `issue` / `retire` / `borrow` reached with an operand shape
+    /// that requires constraint-system machinery (e.g. a `Point` qty
+    /// in `issue`'s encrypted branch). The cleartext branches work in
+    /// Phase 8; the CS branches land in Phase 11/12.
+    #[error("Token opcode branch requires a live constraint system")]
+    TokenRequiresCS,
+
     // /// This error occurs when VM's anchor remains unset.
     // #[error("VM anchor is not set via `input`")]
     // AnchorMissing,

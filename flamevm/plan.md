@@ -6,7 +6,7 @@ Convention per phase: **Goal**, **Reuses** (already in `flame-lib`), **New** (to
 
 ---
 
-## Execution order (rev 2 — external-tx end-to-end before actors)
+## Execution order (rev 3 — tokens before send/CS)
 
 Phase numbers are stable across revisions; execution order changes as priorities shift. Each phase's detailed entry lives in the numerical-order list below.
 
@@ -20,19 +20,24 @@ Phase numbers are stable across revisions; execution order changes as priorities
 | 5 | Dict ops | ✅ done |
 | 6 | Hash & Merlin | ✅ done |
 | 9 | Cells, outputs, open, signtx, signrun | ✅ done |
-| 10 | **Inputs (stateless VM) + send queue + Cell wire encoding** | ⏳ in progress (input ✅; send pending) |
-| 8 | Clear tokens & issuance | ⏳ pending |
-| 11 | Constraint system bootstrap (real Prover/Verifier) | ⏳ pending |
+| 10a | Inputs (stateless VM, `input` opcode) + Cell wire encoding | ✅ done |
+| 8 | Tokens: port `Token`/`WideToken` from zkvm + clear-only opcodes | ✅ done |
+| **11** | **Constraint system bootstrap (real Prover/Verifier)** | ⏳ **next** |
 | 12 | Range proofs & constraint composition | ⏳ pending |
 | 13 | Confidential tokens, mix, decrypt | ⏳ pending |
 | 14 | Signatures (sigverify + delegate finalize) | ⏳ pending |
+| 10b | `send` opcode + send queue | ⏳ paused (revisit alongside Phase 15) |
 | 17 | Fee, finalization, full tx assembly | ⏳ pending |
 | — | ─── external tx fully functional ─── | |
 | 15 | Internal calls, load, save (the actor heart) | ⏳ pending |
 | 16 | Chain info | ⏳ pending |
 | 7 | Introspection (header, resources, identity) | ⏳ pending (depends on 15) |
 
-**Rationale for rev-2 ordering** (recorded 2026-05-23): polish the external-tx machinery end-to-end before opening the actor side. The Phase-9 upgrade to a production-quality Taproot construction (with blinded sibling leaves, optional unspendable internal key) means cells are ready to round-trip through inputs and outputs. Pulling Phase 10 (`input`) ahead of actors lets us close the input → script → output → fee → proof → TxID loop with no internal-tx machinery involved, giving a complete, fuzz-able external-tx VM. Actors land afterwards, where Model-B transactional rollback at the `call` boundary becomes the dominant new piece of machinery. Introspection (Phase 7) is last because most of its opcodes depend on actor / call structure that Phase 15 settles.
+**Rationale for rev-3 ordering** (recorded 2026-05-23, after Phase 10a landed):
+
+- *Phase 10a (input)* is complete in isolation: external txs can already consume cells and emit outputs, and the wire round-trip is fuzz-able as-is. Closing the rest of Phase 10 (the `send` opcode + send queue) couples cleanly with Phase 15 actor machinery (the receiver side), so it's paused until then to avoid building send-queue plumbing that nothing exercises end-to-end.
+- *Phase 8 (tokens)* is hoisted next because every later external-tx opcode that touches CS — `issue`, `retire`, `borrow`, `mix`, `decrypt`, `fee` — operates on `Token` / `WideToken` shapes. Porting these shapes now gives Phase 11/12/13/17 a stable target to attach CS-bound semantics to. The clear-only opcodes (`pushtoken` already lives in Phase 1; `amount` / `merge` / `split` / clear branches of `issue` / `retire` / `borrow`) carry their own value without CS plumbing.
+- *Phases 11–14* then complete the external-tx CS surface, leaving 10b (send) and 17 (fee+finalize) as the final two pieces before actors land.
 
 ---
 
@@ -321,23 +326,170 @@ Phase numbers are stable across revisions; execution order changes as priorities
 
 ---
 
-### Phase 8 — Clear tokens & issuance
+### ✅ Phase 8 — Tokens: port `Token` / `WideToken` from zkvm + clear-only opcodes (done)
 
-**Goal**: non-confidential token arithmetic + flavor binding to actor ID.
+**Goal**: bring the three token shapes into the same level of completeness already enjoyed by `Int253`, `String`, `Dict`, `Point`, `Cell`. The zkvm sources are the canonical templates:
 
-**Reuses**: `ClearToken`, `Token`, `WideToken`.
+| flamevm type | zkvm template | Phase that wires CS |
+|---|---|---|
+| `Token` | `zkvm::types::Value` (`qty: Commitment, flv: Commitment`) | Phase 11 (CS bootstrap) |
+| `WideToken` | `zkvm::types::WideValue(spacesuit::AllocatedValue)` | Phase 13 (mix / cloak / decrypt) |
+| `ClearToken` | `zkvm::types::ClearValue` (already ported as `qty: Int253, flv: Int253`) | — (cleartext; this phase) |
 
-**New**:
-- `ClearToken::merge`, `split`, `borrow`.
-- `flavor_from_actor(actor, tag) -> Int253`.
-- Issuance / retirement effects into `TxLog` (introduce `TxLog` if not present).
+**Phase 8 scope: data + cleartext opcodes only.** Encrypted constructions
+(`Token`/`WideToken` creation via `issue` with a `Point` qty, `borrow`'s
+range-proof branch, `mix`, `decrypt`, `fee`) are deferred to Phases
+11–13/17 once a real `Delegate` is online. Phase 8 *defines the shapes
+and the linear-type discipline* so the later CS phases have a stable
+attachment surface.
 
-**Opcodes**:
-- [ ] `0x70` `amount`, `0x78` `issueflv`
-- [ ] `0x71` `issue` (clear path), `0x72` `retire` (clear path), `0x73` `borrow` (clear path)
-- [ ] `0x74` `merge`, `0x75` `split`
+**Reuses (already in flame-lib)**:
+- `Commitment { Open(Box<CommitmentWitness>), Closed(CompressedRistretto) }` in `flamevm/src/constraints.rs` — both halves of the Token spec are already encodable as `Commitment`s (cleartext = unblinded open commitment; encrypted = closed point).
+- `CommitmentWitness { value: Int253, blinding: Scalar }` — prover-side witness; supports cleartext path via `Commitment::unblinded` / `blinded` / `blinded_with_factor`.
+- `spacesuit::AllocatedValue` (already a flamevm dep via the `spacesuit` path crate) — exactly the field bundle WideToken needs.
+- `spacesuit::Value { q: SignedInteger, f: Scalar }` — the cleartext-witness companion of `AllocatedValue`.
+- `Int253` — covers ClearToken's `qty` and `flv` (signed sign-magnitude).
+- `TxEntry::{Data, Input, Output}` in `tx.rs` — extend with `Issue`, `Retire` variants this phase; `Fee` is touched in Phase 17.
 
-**Tests**: flavor-mismatch merge fails; split past quantity fails; retire emits the right log entry.
+**New (data layer)**:
+
+1. **`token.rs`: replace the empty `Token {}` / `WideToken {}` stubs with full ports.**
+   - `Token { qty: Commitment, flv: Commitment }` — copies the zkvm shape verbatim. Constructors: `Token::new(qty, flv)`, plus a `Token::cleartext(qty: Int253, flv: Int253) -> Token` convenience that wraps unblinded commitments (useful for tests and the cleartext branch of `issue` / `borrow`).
+   - `WideToken(pub(crate) spacesuit::AllocatedValue)` — copies the zkvm shape verbatim. No public constructor in Phase 8; can only be reached through CS opcodes that land in Phase 11/13. Methods: `qty_var()`, `flv_var()`, `assignment()` for the future CS opcodes.
+   - `ClearToken` stays as-is (already fleshed out in Phase 1); add `merge_into(self, other) -> Result<ClearToken, (Self, ClearToken, VMError)>`, `split(self, qty: Int253) -> Result<(ClearToken, ClearToken), VMError>`, `negated() -> ClearToken` (for the clear branch of `borrow`).
+
+2. **Wire encoding (`encoding.rs`)**:
+   - `Token` (tag `0xf9` = 249 per spec.md §Encodable types) — 64-byte payload: `qty.to_point() ‖ flv.to_point()`. Decoder produces `Commitment::Closed(point)` for both halves (the wire form carries no witness). Encoder accepts both Open and Closed.
+   - `WideToken` (tag `0xfb` = 251) — non-portable; **the encoder errors** (`WriteError::InsufficientCapacity`-equivalent or a new `WriteError::NonPortable`). The decoder also errors. Phase 8 confirms WideToken cannot cross the wire and writes the test to enforce it.
+   - `ClearToken` (tag `0xfa` = 250) — same treatment as WideToken: non-portable; encoder/decoder error. (Cleartokens *do* cross the wire in spec.md's portability rules when qty ≥ 0, but only when promoted to `Token::cleartext` — explicit conversion is the design. Phase 8 confirms this by rejecting raw ClearToken encoding.)
+   - Update `read_value` so the three token tags route to dedicated `read_token` / `read_clear_token` / `read_wide_token` functions instead of the current `Ok(None)` short-circuit. (Today these tags soft-fail decoding by returning `None`; Phase 8 turns them into definite results — Ok for Token, hard error for ClearToken / WideToken.)
+   - Round-trip property tests (decode-then-re-encode-then-bit-compare) for `Token`. Hard-fail-to-encode tests for ClearToken/WideToken.
+
+3. **Value-enum portability/copyability rules** in `value.rs`:
+   - `Value::Token(_).is_portable()` — already `true`. Confirm via test.
+   - `Value::ClearToken(t).is_portable()` — already `!t.qty().is_negative()`. Confirm and extend.
+   - `Value::WideToken(_).is_portable()` — already `false`. Confirm.
+   - Linear-type discipline: all three are non-copyable (already enforced by `try_clone`). All three are non-droppable except zero-qty ClearToken (already enforced).
+   - `Value::try_eq` — same-variant Token/ClearToken/WideToken cases: ClearToken can compare cleartext; Token comparison errors `TypeNotComparable` (commitments are opaque); WideToken errors `TypeNotComparable`. Adjust the current catch-all so Token/WideToken don't accidentally compare equal.
+
+4. **`tx.rs` extension** — add two new effect variants:
+   - `TxEntry::Issue(CompressedRistretto, CompressedRistretto)` — (qty_point, flv_point). Cleartext issuance uses unblinded points; encrypted issuance (Phase 11) uses the Pedersen-committed points.
+   - `TxEntry::Retire(CompressedRistretto, CompressedRistretto)` — same shape.
+   - `Fee(u64)` remains deferred to Phase 17.
+   - These don't carry linear values, so they can derive `Clone`/`Debug`/`Serialize`/`Deserialize` (matching zkvm's TxEntry derives for non-Output variants).
+
+5. **Flavor helper** in `token.rs`:
+   - `flavor_from_actor(actor: &ActorID, tag: &String) -> Int253` — Merlin transcript over `(actor, tag)`, squeezing 64 bytes and reducing via `Scalar::from_bytes_mod_order_wide`, wrapped in `Int253::from(scalar)`. Mirrors `zkvm::Value::issue_flavor` exactly but keyed on `ActorID` instead of `Predicate` (per spec.md §Tokens row `0x78 issueflv`: "Returns flavor identifier for the given actor ID and tag.").
+   - Domain separator: `flamevm.token.flavor.v1`. Merlin-only (no SHA leakage). Consensus-fixed string per Architect's load-bearing-string convention.
+
+**New (opcode layer, clear-only)**:
+
+| Hex | Name | Stack diagram | Phase 8 coverage |
+|---|---|---|---|
+| `0x70` | `amount` | `token → token qty flv` | ClearToken: pushes `Int253` qty + flv. Token/WideToken: errors `TypeNotClearToken` in Phase 8; Phase 11 wires the Point branch. |
+| `0x71` | `issue` | `qty tag → T` | Cleartext branch only (qty is `Int253`): builds `ClearToken::new(qty, flavor_from_actor(self.actor()?, &tag_string))`, emits `TxEntry::Issue(unblinded(qty), unblinded(flv))`. `Point` qty hard-fails as `IssueRequiresCS` in Phase 8; Phase 11 wires the encrypted branch. |
+| `0x72` | `retire` | `token → ø` | ClearToken: emits `TxEntry::Retire(unblinded(qty), unblinded(flv))`, consumes the token. Token/WideToken: `TypeNotClearToken` in Phase 8; Phase 11 wires the Point branch. |
+| `0x73` | `borrow` | `qty flv → –T +T` | Clear branch only (both `Int253`): pushes `ClearToken::new(-qty, flv)` then `ClearToken::new(qty, flv)`. Encrypted branch defers to Phase 12 (needs range proof). |
+| `0x74` | `merge` | `a b → {c 1 \| a b 0}` | ClearTokens only: flavor-match → `ClearToken::merge_into`; mismatch → push `a b 0` (soft-fail). |
+| `0x75` | `split` | `a q → a' b` | ClearTokens only: `q ≤ a.qty` → split; otherwise hard-fail `TokenSplitOutOfRange`. |
+| `0x78` | `issueflv` | `cid tag → int` | Pure helper: pops actor id String + tag String, pushes `flavor_from_actor(...)` as `Int253`. No CS, no txlog effect, no actor-context requirement.
+
+(Confidential branches of `0x71/0x72/0x73`, plus `0x76 mix` and `0x77 decrypt`, stay in Phase 13.)
+
+**New error codes** (`errors.rs`):
+- `TypeNotClearToken` — `amount`/`retire`/`merge`/`split` on a non-`ClearToken` value in Phase 8.
+- `TokenSplitOutOfRange` — `split` with `q > a.qty` (hard-fail).
+- `TokenFlavorMismatch` — *if* we choose to make `merge` hard-fail instead of soft-fail; current spec text says soft-fail (`a b 0`), so this code may not be needed.
+- `IssueRequiresCS` (or reuse `ExternalOnly` / a new `TokenRequiresCS`) — `issue`/`retire`/`borrow` reached with a Point qty in Phase 8.
+- `TypeNotToken` — generic "wrong token variant" for opcodes that distinguish.
+
+**Tests** (target ~16–20 new):
+
+*Type-shape tests*:
+- `token_cleartext_constructor_packs_unblinded_commitments` — `Token::cleartext(5, 7)` produces commitments whose `assignment()` returns the original Int253s.
+- `widetoken_can_be_pattern_matched` — `Value::WideToken(_)` is reachable in match arms (smoke).
+- `cleartoken_negative_qty_is_non_portable` — `ClearToken::new(-1, 7)` flips `is_portable` to false.
+- `cleartoken_zero_qty_is_droppable` — already exists; reconfirm.
+
+*Wire-encoding tests*:
+- `token_encode_decode_roundtrip` — random 64-byte payload survives encode → decode → encode and bytes match.
+- `token_decode_rejects_truncated_payload` — 63-byte slice errors.
+- `cleartoken_encode_errors` — `write_value` on `Value::ClearToken(...)` returns `WriteError::NonPortable` (or chosen sentinel).
+- `widetoken_encode_errors` — same.
+- `cleartoken_decode_tag_errors` — feeding tag `0xfa` followed by anything errors `InvalidFormat`.
+- `widetoken_decode_tag_errors` — same for `0xfb`.
+
+*Value-enum rule tests* (parallel to existing `dict_with_token_is_noncopyable`):
+- `token_is_noncopyable_and_nondroppable`
+- `widetoken_is_noncopyable_and_nondroppable_and_nonportable`
+- `token_is_portable`
+
+*Opcode tests*:
+- `amount_pushes_cleartoken_qty_and_flv`
+- `amount_on_token_errors_in_phase8`
+- `issueflv_deterministic_for_same_inputs`
+- `issueflv_diverges_on_different_tag`
+- `issue_clear_path_emits_txlog_and_returns_cleartoken`
+- `issue_with_point_qty_errors_in_phase8`
+- `retire_clear_path_emits_txlog`
+- `borrow_clear_path_returns_neg_pos_pair`
+- `merge_same_flavor_combines_qtys`
+- `merge_flavor_mismatch_soft_fails`
+- `split_within_qty_returns_two_cleartokens`
+- `split_above_qty_hard_fails`
+
+**Order of work inside Phase 8 (delivered)**:
+
+1. ✅ **Type layer**. `Token { qty: Commitment, flv: Commitment }`, `WideToken(pub(crate) spacesuit::AllocatedValue)`, ClearToken arithmetic helpers (`merge_into` / `split` / `negated`), `flavor_from_actor` in `token.rs`.
+2. ✅ **Wire encoding**. `Token` encodes as tag `0xf9` + 32-byte qty point + 32-byte flv point; decode constructs `Commitment::Closed` for both halves. ClearToken/WideToken return `WriteError::InsufficientCapacity` on encode; tags `0xfa`/`0xfb` return `InvalidFormat` on decode.
+3. ✅ **TxEntry::{Issue, Retire}**. Both carry `(CompressedRistretto, CompressedRistretto)`. Cleartext branches use unblinded commitments; future encrypted branches will use the live commitment points.
+4. ✅ **Opcode dispatch (clear-only)**. `op_amount`, `op_issue`, `op_retire`, `op_borrow`, `op_merge`, `op_split`, `op_issueflv` handlers + dispatch wiring in `try_common`.
+
+**Tests landed** (35 new across two files, all green):
+
+*Encoding (5 in `encoding.rs`)*:
+- `read_value_cleartoken_tag_rejects` — tag `0xfa` returns `InvalidFormat`.
+- `read_value_widetoken_tag_rejects` — tag `0xfb` returns `InvalidFormat`.
+- `token_encode_decode_roundtrip` — `Token::cleartext` → 65-byte wire form → decode → re-encode → bytes match.
+- `token_decode_rejects_truncated_payload` — 63-byte payload errors `InsufficientBytes`.
+- `cleartoken_encode_errors` — `write_value` on `Value::ClearToken(...)` returns `InsufficientCapacity` and writes no bytes.
+
+*Type-shape (in `vm.rs`)*:
+- `token_cleartext_constructor_packs_unblinded_commitments`
+- `token_is_noncopyable_and_nondroppable`
+- `cleartoken_zero_qty_is_droppable`, `cleartoken_nonzero_qty_is_not_droppable`
+- `cleartoken_negative_qty_is_non_portable`, `cleartoken_positive_qty_is_portable`
+- `flavor_from_actor_is_deterministic_and_diverges_on_inputs`
+
+*ClearToken arithmetic*:
+- `cleartoken_merge_into_same_flavor_sums_qtys`
+- `cleartoken_merge_into_mismatched_flavor_returns_originals`
+- `cleartoken_split_within_qty`, `cleartoken_split_above_qty_returns_none`, `cleartoken_split_negative_q_returns_none`
+- `cleartoken_negated_flips_qty_sign`
+
+*Opcode tests*:
+- `amount_on_cleartoken_pushes_qty_and_flv`, `amount_on_token_pushes_points`, `amount_on_non_token_errors_typenottoken`
+- `issue_clear_path_emits_txlog_and_returns_cleartoken` (under `InternalRoot` with actor identity)
+- `issue_with_point_qty_errors_tokenrequirescs`
+- `issue_at_external_root_errors_actor_context`
+- `retire_cleartoken_emits_txlog`, `retire_token_emits_txlog_with_commitment_points`, `retire_non_token_errors_typenottoken`
+- `borrow_clear_path_returns_neg_pos_pair`, `borrow_with_point_errors_tokenrequirescs`
+- `merge_same_flavor_combines_qtys`, `merge_flavor_mismatch_soft_fails`
+- `split_within_qty_returns_two_cleartokens`, `split_above_qty_hard_fails`
+- `issueflv_pushes_correct_flavor`, `issueflv_rejects_non_32_byte_cid`
+
+**Deferred / out of scope**:
+- Encrypted branches of `issue` / `retire` / `borrow` (need CS — Phase 11/12).
+- `mix` / `decrypt` (need cloak gadget — Phase 13).
+- `fee` (Phase 17).
+- Token equality semantics in `eq` opcode — Phase 12 alongside Constraint composition.
+- Send queue (`0x94 send`) — Phase 10b, paused until Phase 15.
+
+**Surfaced for Architect**:
+- Confirm the `WideToken` field layout choice (wrapping `spacesuit::AllocatedValue` verbatim vs. defining a flamevm-local equivalent). zkvm's wrapper is the path of least resistance and the most efficient when wiring `mix` in Phase 13.
+- Confirm the `flavor_from_actor` domain separator string `flamevm.token.flavor.v1` and the inclusion of `tag` as a Merlin-bound message rather than appended bytes.
+- Confirm `Token::cleartext(qty, flv)` is the right name for the unblinded-commitment convenience constructor (alternatives: `Token::unblinded`, `Token::from_clear`, `Token::open_cleartext`).
+- Decide whether to introduce a unified `TokenRequiresCS` error or reuse `ExternalOnly` for the Phase-8 hard-fails on encrypted paths (mild preference for the dedicated code so internal-context vs CS-context isn't conflated).
 
 ---
 
@@ -412,11 +564,11 @@ Phase numbers are stable across revisions; execution order changes as priorities
 
 ---
 
-### Phase 10 — Inputs (stateless VM) + send queue + Cell wire encoding ⏳ **in progress**
+### ✅ Phase 10a — Inputs (stateless VM) + Cell wire encoding (done)
 
-**Goal**: external tx claims outputs; either context queues async messages. Closes the cell life-cycle by adding the on-chain wire round-trip (encode → Utreexo → decode → input).
+**Goal**: external tx claims outputs. Closes the cell life-cycle by adding the on-chain wire round-trip (encode → Utreexo → decode → input).
 
-**Reuses**: Phase-9 `Cell` / `Predicate` / `Anchor::ratchet`, `Message` type from vm.rs, list-style `Dict` encoding from Phase 5.
+**Reuses**: Phase-9 `Cell` / `Predicate` / `Anchor::ratchet`, list-style `Dict` encoding from Phase 5.
 
 **Design pivot — VM is stateless w.r.t. Utreexo.** The VM does not see or
 process Utreexo inclusion proofs. The `input` opcode consumes a
@@ -427,7 +579,7 @@ state. This keeps the VM decoupled from blockchain state and mirrors
 how zkvm structured its `input` semantics (`pop string → decode →
 push cell`), but with no Utreexo trait inside `flamevm/`.
 
-**Added (so far)**:
+**Added**:
 - **Cell wire encoding** — `Cell::encode(&self, w: &mut impl Writer)` and `Cell::decode(r: &mut impl Reader)` matching the documented list-style-Dict layout (predicate Point, anchor 32-byte String, payload list-Dict). Round-trip + canonicality tests landed.
 - **`CellID = [u8; 32]`** type alias in `cell.rs`.
 - **`TxEntry::Input(CellID)`** variant.
@@ -435,14 +587,8 @@ push cell`), but with no Utreexo trait inside `flamevm/`.
 - **External-only dispatch** — `step_external` routes `0x90` to `op_input`; `step_internal` returns `ExternalOnly` for `0x90`.
 - `VMError::ExternalOnly`, `MalformedCellEncoding`.
 
-**Still pending** (for the `send` half of this phase):
-- `op_send` pops `args… k gas bytes method addr`, builds a `Message` (with `caller` set per current frame's actor identity), accounts gas + vbytes from the calling frame, enqueues into `VM.sends`, emits `TxEntry::Send(message_handle)`.
-- `TxEntry::Send(Message)` variant.
-- `VM.sends: Vec<Message>` collector + `TxResult.sends` field.
-
 **Opcodes**:
 - [x] `0x90` `input` **[E]** — `string → cell`
-- [ ] `0x94` `send` — `args… k gas bytes method addr → ø`
 
 **Tests landed** (14 new, all green):
 - `cell_encode_decode_roundtrip` — `Cell::encode` → bytes → `Cell::decode` → identical id, anchor, predicate point, payload length.
@@ -460,7 +606,24 @@ push cell`), but with no Utreexo trait inside `flamevm/`.
 - **`external_tx_one_input_one_output_via_signtx`** — end-to-end workflow: one external tx that consumes a cell via `signtx`, drops the poured payload, emits a fresh output cell. Drives the full `step_external` dispatch + `Delegate::finalize` loop. Verifies txlog (Input → Output), TxBound deferred sig with correct verification key, anchor chain (output anchor == cell.to_anchor()), and clean exit.
 - **`external_tx_two_inputs_two_outputs_via_open`** — end-to-end workflow: two distinct cells unlocked via real Taproot `CallProof`s through `open`, then two fresh output cells emitted. Verifies the txlog ordering (Input, Input, Output, Output), payload preservation, anchor-chain ratcheting through inputs and outputs, and absence of deferred sigs (open does not record any).
 
-**Tests still pending** (for `send`):
+---
+
+### Phase 10b — `send` opcode + send queue ⏳ paused
+
+**Status**: paused per rev-3 ordering. The `send` opcode's caller-side
+plumbing is straightforward, but with no `recv`-side actor machinery in
+place (Phase 15 territory) the resulting queue has nothing to drive
+end-to-end testing. Revisit alongside Phase 15.
+
+**Pending work** (preserved for the historical record):
+- `op_send` pops `args… k gas bytes method addr`, builds a `Message` (with `caller` set per current frame's actor identity), accounts gas + vbytes from the calling frame, enqueues into `VM.sends`, emits `TxEntry::Send(message_handle)`.
+- `TxEntry::Send(Message)` variant.
+- `VM.sends: Vec<Message>` collector + `TxResult.sends` field.
+
+**Opcodes**:
+- [ ] `0x94` `send` — `args… k gas bytes method addr → ø`
+
+**Pending tests**:
 - `send` from `ExternalRoot` — message `caller = None`.
 - `send` from `InternalRoot` — message `caller = Some(actor_id)`.
 - `send` debits the `gas` + `bytes` arguments from the calling frame.
@@ -595,7 +758,7 @@ push cell`), but with no Utreexo trait inside `flamevm/`.
 
 ---
 
-## Notes on dependencies & sequencing (rev 2)
+## Notes on dependencies & sequencing (rev 3)
 
 ```
   ✅ 1 ─ 2 ─ 3 ─ 4 ─ 5 ─ 6        Phase-agnostic primitives done.
@@ -604,22 +767,26 @@ push cell`), but with no Utreexo trait inside `flamevm/`.
                 ✅ 9               Cells, outputs, open, signtx/run.
                   │
                   ▼
-                 10 ────────────── ⏳ next: Inputs + send + Cell wire encoding.
-                  │                External-tx round-trip becomes possible
-                  ▼                from this point on.
-                  8                Clear tokens & issuance — standalone arithmetic
-                  │                + flavor binding. Independent slot.
+              ✅ 10a               Inputs (stateless VM) + Cell wire encoding.
+                  │                External-tx round-trip is now reachable.
                   ▼
-                 11                CS bootstrap (real Prover/Verifier delegate impls).
-                  │
+                  8 ────────────── ⏳ next: port Token / WideToken from zkvm
+                  │                + clear-only opcodes (amount, issue/retire/
+                  │                borrow/merge/split clear paths, issueflv).
                   ▼
-                 12 ─ 13           Range proofs → Confidential tokens / mix / decrypt.
-                       │
+                 11                CS bootstrap — real Prover/Verifier delegate
+                  │                impls. First phase using a non-stub Delegate.
+                  ▼
+                 12 ─ 13           Range proofs → Confidential tokens / mix /
+                       │           decrypt. Wires CS-bound branches of Phase 8
+                       │           opcodes (encrypted issue/borrow/retire) plus
+                       ▼           new `mix` / `decrypt`.
+                      14           Signatures (finalize batch-verify of
+                       │           DeferredSigs accumulated since Phase 9).
                        ▼
-                      14           Signatures (finalize batch-verify of Deferred sigs).
-                       │
-                       ▼
-                      17           Fee + tx assembly; closes external-tx end-to-end.
+                  10b ─ 17         Send queue (parallel-ready once Phase 15
+                                   recv-side lands) + fee/finalize. Marks the
+                                   close of the external-tx surface.
 
   ─────── ▼ external tx fully functional ▼ ───────
 
@@ -633,9 +800,11 @@ Sequencing facts:
 
 - **Phases 1–6** are context-agnostic and need no proof machinery — implement and test purely through `execute_internal` against a stub registry.
 - **Phase 9** lit up the first non-trivial type system (linear cells, Taproot predicates, deferred-sig records) without needing CS or actor state.
-- **Phase 10** (next) closes the external-tx data round-trip: cells now flow from Utreexo through `input`, the script, and back through `output`. `send` populates the message queue that Phase 15 will later drain.
+- **Phase 10a** (done) closed the external-tx data round-trip on the input side: cells now flow from Utreexo into the VM via `input` and back out via `output`. The VM stays stateless w.r.t. Utreexo — the proof of inclusion lives outside.
+- **Phase 8** (next) ports `Token` / `WideToken` data shapes from zkvm (zkvm's `Value` and `WideValue`) and wires the cleartext-only opcode branches. Hoisting it ahead of CS work gives Phases 11/12/13 a stable target type to attach encrypted semantics to.
 - **Phase 11** is the first phase that needs real `Prover`/`Verifier` implementations; everything before runs against the stub `Delegate`.
 - **Phase 14** is when the `DeferredSig::TxBound` and `DeferredSig::Explicit` records from Phase 9 actually get batch-verified at finalize. Until 14, those records sit in `VM.deferred_sigs` unread.
+- **Phase 10b** (paused) lands only once Phase 15's actor-recv-side machinery is in place — there's no point queuing messages with nothing to drain them in end-to-end tests.
 - **Phase 17** is where the block-level rules from design.md §Gas land in code; everything before just records effects without enforcing block budgets. Marks the close of the external-tx surface.
 - **Phase 15** is the only phase that exercises non-trivial `ActorRegistry` semantics; until then the stub registry from phase 0 is fine.
 - **Phase 7** (introspection) was originally planned earlier but postponed to the end — most of its opcodes depend on actor / call structure that Phase 15 settles. Two header-bound opcodes (`timelock`, `version`) could land earlier in isolation if needed but are kept together for narrative.
