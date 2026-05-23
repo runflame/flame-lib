@@ -6,6 +6,36 @@ Convention per phase: **Goal**, **Reuses** (already in `flame-lib`), **New** (to
 
 ---
 
+## Execution order (rev 2 — external-tx end-to-end before actors)
+
+Phase numbers are stable across revisions; execution order changes as priorities shift. Each phase's detailed entry lives in the numerical-order list below.
+
+| # | Phase | Status |
+|---|---|---|
+| 0 | Skeleton | ✅ done |
+| 1 | Stack literals & manipulation | ✅ done |
+| 2 | Control flow & explicit return | ✅ done |
+| 3 | Int253 arithmetic, logic, size | ✅ done |
+| 4 | String ops | ✅ done |
+| 5 | Dict ops | ✅ done |
+| 6 | Hash & Merlin | ✅ done |
+| 9 | Cells, outputs, open, signtx, signrun | ✅ done |
+| 10 | **Inputs (Utreexo) + send queue + Cell wire encoding** | ⏳ **next** |
+| 8 | Clear tokens & issuance | ⏳ pending |
+| 11 | Constraint system bootstrap (real Prover/Verifier) | ⏳ pending |
+| 12 | Range proofs & constraint composition | ⏳ pending |
+| 13 | Confidential tokens, mix, decrypt | ⏳ pending |
+| 14 | Signatures (sigverify + delegate finalize) | ⏳ pending |
+| 17 | Fee, finalization, full tx assembly | ⏳ pending |
+| — | ─── external tx fully functional ─── | |
+| 15 | Internal calls, load, save (the actor heart) | ⏳ pending |
+| 16 | Chain info | ⏳ pending |
+| 7 | Introspection (header, resources, identity) | ⏳ pending (depends on 15) |
+
+**Rationale for rev-2 ordering** (recorded 2026-05-23): polish the external-tx machinery end-to-end before opening the actor side. The Phase-9 upgrade to a production-quality Taproot construction (with blinded sibling leaves, optional unspendable internal key) means cells are ready to round-trip through inputs and outputs. Pulling Phase 10 (`input`) ahead of actors lets us close the input → script → output → fee → proof → TxID loop with no internal-tx machinery involved, giving a complete, fuzz-able external-tx VM. Actors land afterwards, where Model-B transactional rollback at the `call` boundary becomes the dominant new piece of machinery. Introspection (Phase 7) is last because most of its opcodes depend on actor / call structure that Phase 15 settles.
+
+---
+
 ### ✅ Phase 0 — Skeleton (done)
 - [x] `VM`, `CallFrame`, `Run`, `CallKind`, `Delegate`, dispatch loop
 - [x] `finish_run`, `finish_call` (strict empty-stack rule)
@@ -382,23 +412,36 @@ Convention per phase: **Goal**, **Reuses** (already in `flame-lib`), **New** (to
 
 ---
 
-### Phase 10 — Inputs (Utreexo) and send queue
+### Phase 10 — Inputs (Utreexo) + send queue + Cell wire encoding ⏳ **next**
 
-**Goal**: external tx claims outputs; either context queues async messages.
+**Goal**: external tx claims outputs; either context queues async messages. Closes the cell life-cycle by adding the on-chain wire round-trip (encode → Utreexo → decode → input).
 
-**Reuses**: phase-9 cell decoding, `Message` type.
+**Reuses**: Phase-9 `Cell` / `Predicate` / `Anchor::ratchet`, `Message` type from vm.rs, list-style `Dict` encoding from Phase 5.
 
 **New**:
-- `Utreexo` trait (placeholder; real impl out of scope here).
-- `VM.sends: Vec<Message>` collector.
-- `TxResult.sends` field.
-- `VMError::ExternalOnly`.
+- **Cell wire encoding** — `Cell::encode(&self, w: &mut impl Writer)` and `Cell::decode(r: &mut impl Reader)` matching the documented list-style-Dict layout (predicate Point, anchor String, payload list-Dict). Round-trip + canonicality test.
+- `Utreexo` trait placeholder — `fn consume(&mut self, witness: &[u8]) -> Result<Cell, VMError>`. Real implementation lives outside `flamevm`.
+- `VM.sends: Vec<Message>` collector + `TxResult.sends` field.
+- `op_input` reads a String (Utreexo witness), decodes via Utreexo accessor, seeds `last_anchor` from the consumed cell, emits `TxEntry::Input(CellID)`, pushes the Cell handle.
+- `op_send` pops `args… k gas bytes method addr`, builds a `Message` (with `caller` set per current frame's actor identity), accounts gas + vbytes from the calling frame, enqueues into `VM.sends`, emits `TxEntry::Send(message_handle)`.
+- `VMError::ExternalOnly`, `MalformedCellEncoding`, `UtreexoLookupFailed`.
+- `TxEntry::Input(CellID)` and `TxEntry::Send(Message)` variants.
 
 **Opcodes**:
-- [ ] `0x90` `input` **[E]**
-- [ ] `0x94` `send`
+- [ ] `0x90` `input` **[E]** — `string → cell`
+- [ ] `0x94` `send` — `args… k gas bytes method addr → ø`
 
-**Tests**: `input` from `InternalRoot` errors; `send` from `InternalRoot` records `caller` correctly.
+**Tests** (target ~10–12):
+- Cell wire encoding round-trip (encode → bytes → decode → equal id).
+- Non-canonical cell bytes → `MalformedCellEncoding` on decode.
+- `input` from `InternalRoot` errors `ExternalOnly`.
+- `input` of a known cell pushes the handle and seeds `last_anchor` to the cell's ratcheted anchor.
+- `input` then `output` round-trip — anchor chain advances correctly.
+- `send` from `ExternalRoot` — message `caller = None`.
+- `send` from `InternalRoot` — message `caller = Some(actor_id)`.
+- `send` debits the `gas` + `bytes` arguments from the calling frame.
+- `send` stack underflow / wrong-type variants for `addr` (must be Point or whatever the address representation is), `method`, etc.
+- `send` with `gas` exceeding the caller's remaining budget → underflow / error.
 
 ---
 
@@ -528,26 +571,50 @@ Convention per phase: **Goal**, **Reuses** (already in `flame-lib`), **New** (to
 
 ---
 
-## Notes on dependencies & sequencing
+## Notes on dependencies & sequencing (rev 2)
 
 ```
-Phase 1 ── 2 ── 3 ── 4 ── 5 ── 6
-                ↓
-                7 ── 8 ── 9 ── 10
-                          ↓
-                          11 ── 12 ── 13
-                                       ↓
-                                14 ──┘    
-                                ↓
-                                15
-                                ↓
-                                16 ── 17
+  ✅ 1 ─ 2 ─ 3 ─ 4 ─ 5 ─ 6        Phase-agnostic primitives done.
+                  │
+                  ▼
+                ✅ 9               Cells, outputs, open, signtx/run.
+                  │
+                  ▼
+                 10 ────────────── ⏳ next: Inputs + send + Cell wire encoding.
+                  │                External-tx round-trip becomes possible
+                  ▼                from this point on.
+                  8                Clear tokens & issuance — standalone arithmetic
+                  │                + flavor binding. Independent slot.
+                  ▼
+                 11                CS bootstrap (real Prover/Verifier delegate impls).
+                  │
+                  ▼
+                 12 ─ 13           Range proofs → Confidential tokens / mix / decrypt.
+                       │
+                       ▼
+                      14           Signatures (finalize batch-verify of Deferred sigs).
+                       │
+                       ▼
+                      17           Fee + tx assembly; closes external-tx end-to-end.
+
+  ─────── ▼ external tx fully functional ▼ ───────
+
+                      15           Internal calls, load, save (actor heart);
+                       │           Model-B transactional rollback at call boundary.
+                       ▼
+                      16 ─ 7       Chain info, then introspection (depends on 15).
 ```
 
-- **Phases 1–7** are context-agnostic and need no proof machinery — implement and test purely through `execute_internal` against a stub registry.
-- **Phase 11** is the first phase that needs real `Prover`/`Verifier` implementations; everything before runs without them.
+Sequencing facts:
+
+- **Phases 1–6** are context-agnostic and need no proof machinery — implement and test purely through `execute_internal` against a stub registry.
+- **Phase 9** lit up the first non-trivial type system (linear cells, Taproot predicates, deferred-sig records) without needing CS or actor state.
+- **Phase 10** (next) closes the external-tx data round-trip: cells now flow from Utreexo through `input`, the script, and back through `output`. `send` populates the message queue that Phase 15 will later drain.
+- **Phase 11** is the first phase that needs real `Prover`/`Verifier` implementations; everything before runs against the stub `Delegate`.
+- **Phase 14** is when the `DeferredSig::TxBound` and `DeferredSig::Explicit` records from Phase 9 actually get batch-verified at finalize. Until 14, those records sit in `VM.deferred_sigs` unread.
+- **Phase 17** is where the block-level rules from design.md §Gas land in code; everything before just records effects without enforcing block budgets. Marks the close of the external-tx surface.
 - **Phase 15** is the only phase that exercises non-trivial `ActorRegistry` semantics; until then the stub registry from phase 0 is fine.
-- **Phase 17** is where the block-level rules from design.md §Gas land in code; everything before just records effects without enforcing block budgets.
+- **Phase 7** (introspection) was originally planned earlier but postponed to the end — most of its opcodes depend on actor / call structure that Phase 15 settles. Two header-bound opcodes (`timelock`, `version`) could land earlier in isolation if needed but are kept together for narrative.
 
 ## Quality control gates (per phase)
 
