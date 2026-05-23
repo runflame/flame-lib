@@ -151,6 +151,18 @@ pub trait Delegate {
         commitment: &CompressedRistretto,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError>;
 
+    /// Returns the next witness in the prover's queue, popping it. The
+    /// `alloc` opcode (Phase 11) calls this once per execution; the
+    /// prover delegate returns `Some(int)` for each witness it has
+    /// queued (in opcode-emission order), the verifier delegate returns
+    /// `None` (a verifier never sees witnesses). The default
+    /// implementation returns `None` — fine for delegates that don't
+    /// support witness-bearing scripts (e.g. test stubs that run pure
+    /// dispatch checks).
+    fn next_alloc_witness(&mut self) -> Option<Int253> {
+        None
+    }
+
     /// Consumes the delegate after VM execution finishes cleanly.
     ///
     /// Prover: builds the Bulletproofs proof, processes deferred sigs as
@@ -402,6 +414,30 @@ impl VM {
         Ok(vm.into_result())
     }
 
+    /// Variant of `execute_external` that returns the delegate alongside
+    /// the result, so the prover can extract its proof or the verifier
+    /// can call `verify_proof`. Skips `Delegate::finalize` — the caller
+    /// is responsible for finishing the proof-side bookkeeping.
+    ///
+    /// Phase 11 Prover/Verifier entry points use this; the original
+    /// `execute_external` stays for older paths that don't need access
+    /// to the delegate after run.
+    pub(crate) fn execute_external_keep_delegate<D: Delegate>(
+        header: TxHeader,
+        script: Vec<u8>,
+        gas_limit: u64,
+        mem_limit: u64,
+        delegate: &mut D,
+    ) -> Result<(TxResult, Vec<DeferredSig>), VMError> {
+        let mut vm = Self::new(
+            header,
+            CallFrame::new(script, CallKind::ExternalRoot, gas_limit, mem_limit, 0),
+        );
+        while vm.step_external(delegate)? {}
+        let sigs = mem::take(&mut vm.deferred_sigs);
+        Ok((vm.into_result(), sigs))
+    }
+
     /// Executes an internal transaction triggered by `message`. Resolves
     /// the target method's bytecode and the target actor's vbyte balance
     /// from `registry`; provides chain info from `block`.
@@ -451,10 +487,16 @@ impl VM {
 
     /// Executes one opcode in external context. Returns `Ok(true)` to
     /// keep running, `Ok(false)` to stop (entire tx finished).
-    fn step_external<D: Delegate>(&mut self, _delegate: &mut D) -> Result<bool, VMError> {
+    fn step_external<D: Delegate>(&mut self, delegate: &mut D) -> Result<bool, VMError> {
         let Some(op) = self.current_call.current_run.next_byte() else {
             return self.finish_run();
         };
+        // Phase 11: CS-bound opcodes and Expression-overload paths run
+        // first so they can consult the delegate when the top of stack
+        // carries `Expression`/`Constraint` operands.
+        if self.try_external_overload(op, delegate)? {
+            return Ok(true);
+        }
         if self.try_common(op)? {
             return Ok(true);
         }
@@ -465,6 +507,56 @@ impl VM {
                 Ok(true)
             }
             _ => Err(VMError::UnknownOpcode(op)),
+        }
+    }
+
+    /// Tries opcodes that either (a) only make sense in external
+    /// context (`alloc`, `expr`) or (b) overload an existing common
+    /// opcode when the top-of-stack carries CS types (`add` / `eq` /
+    /// `verify` on Expression / Constraint). Returns `Ok(true)` if
+    /// handled; `Ok(false)` to fall through to `try_common`.
+    fn try_external_overload<D: Delegate>(
+        &mut self,
+        op: u8,
+        delegate: &mut D,
+    ) -> Result<bool, VMError> {
+        match op {
+            // alloc — always CS-bound.
+            0x5c => {
+                self.op_alloc(delegate)?;
+                Ok(true)
+            }
+            // expr — always CS-bound.
+            0x5d => {
+                self.op_expr(delegate)?;
+                Ok(true)
+            }
+            // add — Expression overload when either operand is non-Int253.
+            0x53 if self.top_two_have_non_int253() => {
+                self.op_add_expr()?;
+                Ok(true)
+            }
+            // neg — Expression overload when top is Expression.
+            0x52 if self.top_is_expression() => {
+                self.op_neg_expr()?;
+                Ok(true)
+            }
+            // mul — Expression overload (needs CS).
+            0x54 if self.top_two_have_non_int253() => {
+                self.op_mul_expr(delegate)?;
+                Ok(true)
+            }
+            // eq — Expression overload pushes a Constraint.
+            0x51 if self.top_two_have_non_int253() => {
+                self.op_eq_expr()?;
+                Ok(true)
+            }
+            // verify — Constraint overload (needs CS).
+            0x79 if self.top_is_constraint() => {
+                self.op_verify_constraint(delegate)?;
+                Ok(true)
+            }
+            _ => Ok(false),
         }
     }
 
@@ -2246,6 +2338,149 @@ impl VM {
             self.push_value(v);
         }
         self.enter_run(program);
+        Ok(())
+    }
+
+    // ── Phase 11: CS opcode handlers + Expression overloads ──────
+
+    /// Pops a `Variable` from the stack.
+    fn pop_variable(&mut self) -> Result<crate::Variable, VMError> {
+        match self.pop_value()? {
+            Value::Variable(v) => Ok(v),
+            _ => Err(VMError::TypeNotVariable),
+        }
+    }
+
+    /// Pops an `Expression` from the stack.
+    fn pop_expression(&mut self) -> Result<crate::Expression, VMError> {
+        match self.pop_value()? {
+            Value::Expression(e) => Ok(e),
+            _ => Err(VMError::TypeNotExpression),
+        }
+    }
+
+    /// Pops a `Constraint` from the stack.
+    fn pop_constraint(&mut self) -> Result<crate::Constraint, VMError> {
+        match self.pop_value()? {
+            Value::Constraint(c) => Ok(c),
+            _ => Err(VMError::TypeNotConstraint),
+        }
+    }
+
+    /// Pops either an `Expression` or an `Int253` (lifted to a
+    /// constant Expression). Used by Expression-overloaded
+    /// arithmetic ops where one operand may be a cleartext int.
+    fn pop_expression_or_const(&mut self) -> Result<crate::Expression, VMError> {
+        match self.pop_value()? {
+            Value::Expression(e) => Ok(e),
+            Value::Int253(i) => Ok(crate::Expression::constant(i)),
+            _ => Err(VMError::TypeNotExpression),
+        }
+    }
+
+    /// True iff the top stack value is an `Expression`.
+    fn top_is_expression(&self) -> bool {
+        matches!(self.current_call.stack.last(), Some(Value::Expression(_)))
+    }
+
+    /// True iff the top stack value is a `Constraint`.
+    fn top_is_constraint(&self) -> bool {
+        matches!(self.current_call.stack.last(), Some(Value::Constraint(_)))
+    }
+
+    /// True iff at least one of the top two values isn't an `Int253` —
+    /// i.e. the Expression-overloaded path should apply. (Both Int253
+    /// → use the original `try_common` integer path.)
+    fn top_two_have_non_int253(&self) -> bool {
+        let n = self.current_call.stack.len();
+        if n < 2 {
+            return false;
+        }
+        let a = matches!(self.current_call.stack[n - 1], Value::Int253(_));
+        let b = matches!(self.current_call.stack[n - 2], Value::Int253(_));
+        !(a && b)
+    }
+
+    /// `0x5c alloc` — allocates a low-level R1CS variable, pulling the
+    /// next witness from the prover's queue (`None` for the verifier).
+    /// Pushes `Expression::LinearCombination([(v, 1)], witness?)` so
+    /// downstream arithmetic / equality ops see a one-term Expression.
+    fn op_alloc<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        use bulletproofs::r1cs::ConstraintSystem;
+        let witness = delegate.next_alloc_witness();
+        let witness_scalar = witness.map(|i| i.to_scalar_mod_order());
+        let r1cs_var = delegate
+            .cs()
+            .allocate(witness_scalar)
+            .map_err(VMError::R1CSError)?;
+        let expr = crate::Expression::LinearCombination(
+            vec![(r1cs_var, curve25519_dalek::scalar::Scalar::one())],
+            witness,
+        );
+        self.push_value(Value::Expression(expr));
+        Ok(())
+    }
+
+    /// `0x5d expr` — `var → expr`. Pops a `Variable`, calls
+    /// `delegate.commit_variable` to allocate a CS-side variable for
+    /// the commitment, pushes a one-term Expression.
+    fn op_expr<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        use curve25519_dalek::scalar::Scalar;
+        let var = self.pop_variable()?;
+        let (_point, r1cs_var) = delegate.commit_variable(&var.commitment.to_point())?;
+        let witness = var.commitment.assignment();
+        let expr = crate::Expression::LinearCombination(
+            vec![(r1cs_var, Scalar::one())],
+            witness,
+        );
+        self.push_value(Value::Expression(expr));
+        Ok(())
+    }
+
+    /// `0x52 neg` Expression overload.
+    fn op_neg_expr(&mut self) -> Result<(), VMError> {
+        let e = self.pop_expression()?;
+        self.push_value(Value::Expression(-e));
+        Ok(())
+    }
+
+    /// `0x53 add` Expression overload. Either operand may be Int253
+    /// (constant-folded into Expression::Constant).
+    fn op_add_expr(&mut self) -> Result<(), VMError> {
+        let b = self.pop_expression_or_const()?;
+        let a = self.pop_expression_or_const()?;
+        self.push_value(Value::Expression(a + b));
+        Ok(())
+    }
+
+    /// `0x54 mul` Expression overload. Allocates a multiplier in the
+    /// CS for the non-constant case; constant-folds otherwise.
+    fn op_mul_expr<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        let b = self.pop_expression_or_const()?;
+        let a = self.pop_expression_or_const()?;
+        let product = a.multiply(b, delegate.cs());
+        self.push_value(Value::Expression(product));
+        Ok(())
+    }
+
+    /// `0x51 eq` Expression overload. Both operands as Expression →
+    /// pushes a `Constraint::eq` on top, leaving the operand expressions
+    /// consumed. This differs from the Int253 `eq` (which peeks only),
+    /// because Expression equality is a constraint to be verified later,
+    /// not an immediate boolean.
+    fn op_eq_expr(&mut self) -> Result<(), VMError> {
+        let b = self.pop_expression_or_const()?;
+        let a = self.pop_expression_or_const()?;
+        let c = crate::Constraint::eq(a, b);
+        self.push_value(Value::Constraint(c));
+        Ok(())
+    }
+
+    /// `0x79 verify` Constraint overload. Hands the constraint to the
+    /// CS so the proof commits to its truth.
+    fn op_verify_constraint<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        let c = self.pop_constraint()?;
+        c.verify(delegate.cs())?;
         Ok(())
     }
 }
@@ -6363,5 +6598,289 @@ mod tests {
             // Stub: don't actually verify a proof.
             Ok(())
         }
+    }
+
+    // ── Phase 11: Prover/Verifier end-to-end ─────────────────────
+
+    use crate::ops::Instruction;
+    use crate::program::Program;
+    use crate::{Prover, Verifier};
+    use bulletproofs::PedersenGens;
+
+    #[test]
+    fn instruction_alloc_witness_roundtrip() {
+        // Alloc(Some(7)) encodes to exactly one byte; its witness is
+        // tracked separately via the queue.
+        let p = Program::new()
+            .alloc(Some(Int253::from(7u64)))
+            .alloc(None)
+            .alloc(Some(Int253::from(3u64)));
+        let bytecode = p.to_bytecode();
+        assert_eq!(bytecode, vec![0x5c, 0x5c, 0x5c]);
+        let witnesses: Vec<_> = p.to_witnesses().into();
+        assert_eq!(witnesses.len(), 3);
+        assert!(matches!(witnesses[0], Some(_)));
+        assert!(matches!(witnesses[1], None));
+        assert!(matches!(witnesses[2], Some(_)));
+    }
+
+    #[test]
+    fn program_builder_emits_expected_bytecode() {
+        // alloc(7) alloc(3) add alloc(10) eq verify
+        let p = Program::new()
+            .alloc(Some(Int253::from(7u64)))
+            .alloc(Some(Int253::from(3u64)))
+            .add()
+            .alloc(Some(Int253::from(10u64)))
+            .eq()
+            .verify();
+        assert_eq!(
+            p.to_bytecode(),
+            vec![0x5c, 0x5c, 0x53, 0x5c, 0x51, 0x79]
+        );
+        let wits: Vec<_> = p.to_witnesses().into();
+        assert_eq!(wits.len(), 3);
+    }
+
+    /// End-to-end Phase 11: prove `alloc(7) + alloc(3) == alloc(10)`
+    /// then verify the proof. This is the bootstrap milestone — once
+    /// this works, all later CS-touching opcodes wire onto the same
+    /// machinery.
+    #[test]
+    fn prove_then_verify_alloc_arithmetic_equality() {
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            .alloc(Some(Int253::from(7u64)))
+            .alloc(Some(Int253::from(3u64)))
+            .add()
+            .alloc(Some(Int253::from(10u64)))
+            .eq()
+            .verify();
+
+        let (bytecode, proof, _result, _sigs) = Prover::prove(
+            &pc_gens,
+            program,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("prove succeeds");
+
+        // Verifier walks the same bytecode and accepts the proof.
+        let pc_gens_v = PedersenGens::default();
+        Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("verify succeeds");
+    }
+
+    #[test]
+    fn prove_succeeds_but_verify_fails_on_tampered_proof() {
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            .alloc(Some(Int253::from(7u64)))
+            .alloc(Some(Int253::from(3u64)))
+            .add()
+            .alloc(Some(Int253::from(10u64)))
+            .eq()
+            .verify();
+        let (bytecode, proof, _, _) = Prover::prove(
+            &pc_gens,
+            program,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("prove succeeds");
+
+        // Flip a byte deep in the proof body.
+        let mut proof_bytes = proof.to_bytes();
+        let last = proof_bytes.len() - 1;
+        proof_bytes[last] ^= 0x01;
+        let tampered = bulletproofs::r1cs::R1CSProof::from_bytes(&proof_bytes)
+            .expect("re-parses");
+
+        let pc_gens_v = PedersenGens::default();
+        let err = Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &tampered,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(err, VMError::InvalidR1CSProof));
+    }
+
+    #[test]
+    fn prove_fails_for_unsatisfiable_equality() {
+        // alloc(7) + alloc(3) == alloc(99) — constraint is false at
+        // witness level. Bulletproofs' Prover happily emits a proof
+        // (the constraint is unsatisfiable but the prover constructs
+        // *something*); the verifier MUST reject.
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            .alloc(Some(Int253::from(7u64)))
+            .alloc(Some(Int253::from(3u64)))
+            .add()
+            .alloc(Some(Int253::from(99u64)))
+            .eq()
+            .verify();
+        let (bytecode, proof, _, _) = Prover::prove(
+            &pc_gens,
+            program,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("prover doesn't refuse construction");
+
+        let pc_gens_v = PedersenGens::default();
+        let err = Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(err, VMError::InvalidR1CSProof));
+    }
+
+    #[test]
+    fn alloc_pushes_expression_with_witness() {
+        // Build a single-alloc program and stop after the alloc to
+        // inspect the produced Expression.
+        let pc_gens = PedersenGens::default();
+        let program = Program::new().alloc(Some(Int253::from(42u64)));
+        let bytecode = program.to_bytecode();
+        let witnesses = program.to_witnesses();
+        let mut prover = Prover::new(&pc_gens, witnesses);
+        // We bypass the public `Prover::prove` so we can inspect VM
+        // state mid-flight.
+        let kind = CallKind::ExternalRoot;
+        let mut vm = VM::new(
+            dummy_header(),
+            CallFrame::new(bytecode, kind, 1_000_000, 0, 0),
+        );
+        // One step → executes the alloc.
+        vm.step_external(&mut prover).expect("alloc step ok");
+
+        assert_eq!(vm.current_call.stack.len(), 1);
+        match &vm.current_call.stack[0] {
+            Value::Expression(crate::Expression::LinearCombination(terms, witness)) => {
+                assert_eq!(terms.len(), 1);
+                assert_eq!(*witness, Some(Int253::from(42u64)));
+            }
+            _ => panic!("expected Expression with witness"),
+        }
+    }
+
+    #[test]
+    fn prove_then_verify_alloc_multiplication() {
+        // alloc(4) alloc(5) mul alloc(20) eq verify
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            .alloc(Some(Int253::from(4u64)))
+            .alloc(Some(Int253::from(5u64)))
+            .mul()
+            .alloc(Some(Int253::from(20u64)))
+            .eq()
+            .verify();
+        let (bytecode, proof, _, _) = Prover::prove(
+            &pc_gens,
+            program,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("prove succeeds");
+
+        let pc_gens_v = PedersenGens::default();
+        Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("verify succeeds");
+    }
+
+    #[test]
+    fn prove_then_verify_alloc_with_negation() {
+        // alloc(5) neg alloc(-5) eq verify  →  -5 == -5
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            .alloc(Some(Int253::from(5u64)))
+            .neg()
+            .alloc(Some(Int253::from(-5i64)))
+            .eq()
+            .verify();
+        let (bytecode, proof, _, _) = Prover::prove(
+            &pc_gens,
+            program,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("prove succeeds");
+
+        let pc_gens_v = PedersenGens::default();
+        Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("verify succeeds");
+    }
+
+    #[test]
+    fn alloc_without_witness_works_in_verifier_path() {
+        // Verifier feeds bytecode that contains an alloc — the
+        // verifier's `next_alloc_witness` returns None, so the variable
+        // is allocated without an assignment. We can't verify a proof
+        // here (the prover has a witness), but we can check the path
+        // doesn't error before proof verification.
+        //
+        // Build a trivially-true constraint: alloc * 0 == 0.
+        // Concrete sub-test: just confirm the verifier walks an alloc
+        // opcode without erroring on the witness-missing path.
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            .alloc(Some(Int253::from(0u64)))
+            .alloc(Some(Int253::from(0u64)))
+            .eq()
+            .verify();
+        let (bytecode, proof, _, _) = Prover::prove(
+            &pc_gens,
+            program,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("prove succeeds");
+
+        let pc_gens_v = PedersenGens::default();
+        Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("verify succeeds");
     }
 }

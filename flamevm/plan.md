@@ -22,8 +22,8 @@ Phase numbers are stable across revisions; execution order changes as priorities
 | 9 | Cells, outputs, open, signtx, signrun | ✅ done |
 | 10a | Inputs (stateless VM, `input` opcode) + Cell wire encoding | ✅ done |
 | 8 | Tokens: port `Token`/`WideToken` from zkvm + clear-only opcodes | ✅ done |
-| **11** | **Constraint system bootstrap (real Prover/Verifier)** | ⏳ **next** |
-| 12 | Range proofs & constraint composition | ⏳ pending |
+| 11 | Constraint system bootstrap (real Prover/Verifier) | ✅ done (MVP — Phase 13 extends with rich-`String` + `commit`) |
+| **12** | **Range proofs & constraint composition** | ⏳ **next** |
 | 13 | Confidential tokens, mix, decrypt | ⏳ pending |
 | 14 | Signatures (sigverify + delegate finalize) | ⏳ pending |
 | 10b | `send` opcode + send queue | ⏳ paused (revisit alongside Phase 15) |
@@ -632,22 +632,611 @@ end-to-end testing. Revisit alongside Phase 15.
 
 ---
 
-### Phase 11 — Constraint system bootstrap (real Prover/Verifier)
+### ✅ Phase 11 — Constraint system bootstrap (real Prover/Verifier) — MVP done
 
-**Goal**: stand up real Delegate impls and the first CS-touching opcodes. After this phase, external txs can actually be proven.
+**Status**: shipped as a pragmatic MVP. The Phase-11 milestone goal —
+`alloc(7) + alloc(3) == alloc(10)` proves+verifies end-to-end — works
+through the full `Prover::prove` / `Verifier::verify` pipeline,
+backed by `bulletproofs::r1cs::Prover` / `Verifier`. Multiplication
+and negation also exercise CS round-trip. Tests at the end of this
+section list the eight concrete prove+verify cases.
 
-**Reuses**: `bulletproofs::r1cs::Prover`/`Verifier`, `constraints::{Variable, Expression, Constraint}`.
+**Pragmatic deviations from the original 8-substep plan** (documented
+so the deferred work is explicit):
 
-**New**:
-- `flamevm::delegates::Prover` — wraps `r1cs::Prover`, stores witness scalars.
-- `flamevm::delegates::Verifier` — wraps `r1cs::Verifier`, holds the proof bytes.
-- Real `Delegate::commit_variable` impls for both.
-- Dispatch overloads: `0x52 neg`, `0x53 add`, `0x54 mul`, `0x51 eq` accept `Expression` operands.
+- 11.1 (Instruction enum): **partial** — defined with the seven CS-
+  relevant variants (`Alloc`, `Expr`, `Neg`, `Add`, `Mul`, `Eq`,
+  `Verify`) plus a `Raw(Vec<u8>)` escape hatch for splicing arbitrary
+  existing bytecode into a prover Program. The full 50-variant
+  enumeration with `Instruction::parse` is **deferred** — bytecode
+  walking still goes through `Run::next_byte` for non-CS opcodes.
+- 11.2 (rich `String` enum): **deferred to Phase 13**. The current
+  flat `String { inner: Vec<u8> }` is unchanged. This means the
+  `0x5a scalar` / `0x5b commit` opcodes that need witness-bearing
+  Strings (e.g. `Commitment::Open(witness)`) are not in this phase.
+  They land alongside confidential-token machinery in Phase 13.
+- 11.3 (`Program` builder): **shipped** but minimal — fluent methods
+  for the seven Instruction variants + `raw()` escape hatch + `.to_bytecode()` and `.to_witnesses()`. No `ProgramItem` wrapper (Phase 13 adds it when the prover/verifier asymmetry crosses cell-open boundaries).
+- 11.4 (VM-loop refactor): **skipped**. The Phase-11 MVP keeps the
+  existing byte-dispatch loop intact. Witness data flows through a
+  *side-channel queue* on the Delegate (`next_alloc_witness`) rather
+  than embedded in a dispatched `Instruction`. zkvm's design is more
+  elegant for stack-manipulation of witnesses, but the side-channel
+  works fine for Phase 11's `alloc`-only witness path and avoids
+  rewriting ~50 dispatch arms.
+- 11.5 (Prover + Verifier): **shipped** in `delegates.rs`. Both wrap
+  the bulletproofs CS clients; `Prover::prove(pc_gens, program,
+  header, gas, mem)` returns `(bytecode, proof, result, sigs)`;
+  `Verifier::verify(pc_gens, bytecode, proof, header, gas, mem)`
+  returns `(result, sigs)` after `r1cs::Verifier::verify` accepts.
+- 11.6 (CS opcodes): **partial** — `0x5c alloc` and `0x5d expr` are
+  wired. `0x5a scalar` and `0x5b commit` deferred to Phase 13
+  (need rich `String`).
+- 11.7 (Expression overloads): **shipped** for `0x52 neg`, `0x53
+  add`, `0x54 mul`, `0x51 eq`, `0x79 verify`. Dispatched via the
+  new `try_external_overload` layer in `step_external`, which
+  inspects the top of stack — Expression operands route to the
+  overload, Int253 operands fall through to the existing
+  `try_common` path. Mixed Int253/Expression operands are
+  constant-folded into the Expression path.
+- 11.8 (public API): **shipped** as `Prover::prove` and
+  `Verifier::verify`. Sufficient for Phase 11 milestone; the
+  `VM::execute_external_keep_delegate` helper (in `vm.rs`) backs
+  both.
 
-**Opcodes (all [E])**:
-- [ ] `0x5a` `const`, `0x5b` `extvar`, `0x5c` `intvar`, `0x5d` `expr`
+**Added** (file-by-file):
 
-**Tests**: `const(7) + const(3) == const(10)` — prove + verify roundtrip.
+- `flamevm/src/ops.rs` — `Instruction` enum with the seven CS-
+  relevant variants plus `Raw(Vec<u8>)`. `encode()` writes the
+  opcode byte (witness discarded); `witness()` extracts the
+  per-instruction witness contribution for queue building.
+- `flamevm/src/program.rs` — `Program` builder. Fluent methods
+  `alloc(witness)`, `expr()`, `add()`, `mul()`, `eq()`, `neg()`,
+  `verify()`, `raw(bytes)`. `to_bytecode()` and `to_witnesses()`
+  for prover-side authoring.
+- `flamevm/src/delegates.rs` — `Prover<'g>` and `Verifier`, both
+  implementing the `Delegate` trait. `Prover::new(pc_gens,
+  witnesses)`; `Prover::into_proof()` consumes self to emit
+  `R1CSProof`. `Verifier::verify_proof(proof, pc_gens)` does the
+  CS-side verification. Public entry points `Prover::prove(…)` and
+  `Verifier::verify(…)` glue the VM run with the proof step.
+- `flamevm/src/vm.rs`:
+  - `Delegate::next_alloc_witness()` added (default returns `None`).
+  - `try_external_overload` dispatch layer routes Expression /
+    Constraint operands to the CS-aware paths.
+  - Helpers: `pop_variable`, `pop_expression`, `pop_constraint`,
+    `pop_expression_or_const`, `top_is_expression`,
+    `top_is_constraint`, `top_two_have_non_int253`.
+  - Handlers: `op_alloc`, `op_expr`, `op_neg_expr`, `op_add_expr`,
+    `op_mul_expr`, `op_eq_expr`, `op_verify_constraint`.
+  - `VM::execute_external_keep_delegate` — variant of
+    `execute_external` that returns the delegate-borrowed result +
+    sigs without consuming the delegate (so Prover can call
+    `into_proof` and Verifier can call `verify_proof` afterward).
+- `flamevm/src/errors.rs` — `WitnessMissing`,
+  `R1CSProofConstruction`, `InvalidR1CSProof`, `TypeNotVariable`,
+  `TypeNotExpression`, `TypeNotConstraint`.
+
+**Tests landed** (9 new, all green):
+- `instruction_alloc_witness_roundtrip` — `Alloc(Some)` encodes to
+  one byte; witness lands in the queue separately.
+- `program_builder_emits_expected_bytecode` — full
+  `alloc/alloc/add/alloc/eq/verify` program's bytecode + witness
+  queue.
+- `alloc_pushes_expression_with_witness` — single-step a Prover-run
+  alloc; resulting Expression carries the cleartext witness.
+- `prove_then_verify_alloc_arithmetic_equality` — the bootstrap
+  milestone: `alloc(7) + alloc(3) == alloc(10)` proves+verifies.
+- `prove_then_verify_alloc_multiplication` — `4 * 5 == 20`.
+- `prove_then_verify_alloc_with_negation` — `-(5) == -5`.
+- `alloc_without_witness_works_in_verifier_path` — verifier walks
+  bytecode containing alloc opcodes with `None` from its empty
+  queue.
+- `prove_succeeds_but_verify_fails_on_tampered_proof` — flip a byte
+  in the serialized proof; verifier rejects.
+- `prove_fails_for_unsatisfiable_equality` — `7 + 3 == 99`
+  constructs a proof of an unsatisfiable constraint; verifier
+  rejects.
+
+**Total**: 331 → **340 tests** (+9 new).
+
+**Deferred to later phases**:
+- Rich `String` enum + `0x5a scalar` / `0x5b commit` opcodes →
+  Phase 13 (where confidential tokens need them anyway).
+- Full Instruction-driven VM loop (zkvm's RunType-generic dispatch
+  with parsed-on-the-fly Instruction stream) — may never be
+  needed; current side-channel approach delivers the asymmetry
+  cleanly. Revisit if Phase 13 or Phase 14 hits a wall.
+- `signtx` / `signrun` deferred-sig batch verification — Phase 14.
+- TxID computation over txlog — Phase 17.
+
+**Goal**: stand up real `Prover` and `Verifier` `Delegate` impls and the
+first CS-touching opcodes. After this phase, external txs can actually
+be proven, with `const(7) + const(3) == const(10)` going through the
+full prove→encode→decode→verify cycle.
+
+This is a **structural** phase. It introduces the prover/verifier
+asymmetry that the VM has lacked since Phase 0. The architecture
+mirrors zkvm verbatim — the patterns there have been battle-tested
+and porting them avoids reinventing wheels.
+
+---
+
+#### The zkvm pattern (what we're adopting)
+
+**Two things make zkvm's Prover/Verifier separation work cleanly:**
+
+1. **`Instruction` enum + `Program` builder**. Each opcode is a
+   typed variant — `Push(String)`, `Dup(usize)`, `Alloc(Option<ScalarWitness>)`,
+   etc. The variants that carry *witness* data (notably `Alloc`)
+   hold it inline. The **bytecode form discards witness** —
+   `Instruction::Alloc(_)` encodes to just one byte; the parser
+   produces `Instruction::Alloc(None)`. The prover keeps the
+   in-memory `Program(Vec<Instruction>)` with witness slots filled;
+   the verifier sees the bytecode and parses `None` for those slots.
+2. **Witness-bearing data types pushed onto the stack**.
+   zkvm's `String` is an enum:
+
+   ```rust
+   pub enum String {
+       Opaque(Vec<u8>),       // verifier's view
+       Commitment(Box<Commitment>),  // prover's view; encodes to 32 bytes
+       Scalar(Box<ScalarWitness>),   // prover's view; encodes to 32 bytes
+       Predicate(Box<Predicate>),    // prover's view
+       // …
+   }
+   ```
+   All variants encode to the same opaque bytes. The decoder always
+   produces `Opaque`. Downcasts like `String::to_commitment` work on
+   both — returning the original witness-bearing variant when present
+   and constructing a `Commitment::Closed(point)` from opaque bytes
+   otherwise.
+
+**The Delegate trait abstracts the prover/verifier asymmetry:**
+
+```rust
+trait Delegate<CS: r1cs::RandomizableConstraintSystem> {
+    type RunType;            // ProverRun or VerifierRun
+    type BatchVerifier: BatchVerification;
+
+    // Returns the next decoded instruction (prover: pop from
+    // VecDeque<Instruction>; verifier: parse from bytecode bytes).
+    fn next_instruction(&mut self, run: &mut Self::RunType)
+        -> Result<Option<Instruction>, VMError>;
+
+    // Constructs a RunType from a ProgramItem (prover wants Program,
+    // verifier wants Bytecode).
+    fn new_run(&self, prog: ProgramItem) -> Result<Self::RunType, VMError>;
+
+    // Commits a Pedersen commitment to the CS. Prover supplies witness;
+    // verifier only has the point.
+    fn commit_variable(&mut self, com: &Commitment)
+        -> Result<(CompressedRistretto, r1cs::Variable), VMError>;
+
+    fn cs(&mut self) -> &mut CS;
+    fn batch_verifier(&mut self) -> &mut Self::BatchVerifier;
+
+    fn process_tx_signature(&mut self, pred: Predicate, contract_id: CellID)
+        -> Result<(), VMError>;
+}
+```
+
+The VM loop dispatches **on `Instruction`, not on raw bytes**:
+
+```rust
+while let Some(instr) = self.delegate.next_instruction(&mut self.current_run)? {
+    self.dispatch(instr)?;
+}
+```
+
+The prover's `next_instruction` pops from a `VecDeque<Instruction>`
+(witness still attached). The verifier's reparses from a `Vec<u8>`
+with offset. Both yield the same `Instruction` variants — only the
+witness-slot contents differ (`Some(…)` vs `None`).
+
+---
+
+#### What FlameVM has today vs. what Phase 11 builds
+
+| Piece | Today | After Phase 11 |
+|---|---|---|
+| Run type | `Run { script: Vec<u8>, pc: usize }` (single shape) | `D::RunType` — prover uses `ProverRun { program: VecDeque<Instruction> }`, verifier uses `VerifierRun { program: Vec<u8>, offset: usize }` |
+| Dispatch | `current_run.next_byte() → try_common(byte)` | `delegate.next_instruction(run) → dispatch(instr)` |
+| Bytecode parsing | inline inside each `op_*` handler (e.g., `read_u8`, `read_sub_varint`) | centralized in `Instruction::parse(reader)` |
+| Delegate | `cs()`, `commit_variable(p)`, `finalize(sigs)` | adds `RunType`, `next_instruction`, `new_run`, `BatchVerifier`, `process_tx_signature` |
+| Stub delegate | one `StubDelegate` in tests | gets a new `next_instruction` arm; real `Prover`/`Verifier` join it |
+| Witness flow | none (no CS opcodes) | inline witness slots in `Instruction` variants + rich `String` enum |
+| `String` shape | `pub struct String(Vec<u8>)` | `pub enum String { Opaque(Vec<u8>), Commitment(Box<Commitment>), Scalar(Box<Int253>), Predicate(Box<Predicate>) }` |
+| Programs are | raw `Vec<u8>` everywhere | `Program(Vec<Instruction>)` builder + `ProgramItem { Bytecode, Program }` |
+
+---
+
+#### Substeps (each shippable, each green-tests-before-merge)
+
+##### 11.1 — Define `Instruction` enum + bytecode round-trip
+
+**Scope**: add `flamevm/src/ops.rs` (new file). Define `Instruction`
+with one variant per existing opcode. Variants carry typed
+parameters (no witness yet — Phase 11.5 adds witness slots).
+Implement `Instruction::parse(&mut impl Reader)` and
+`Instruction::encode(&mut impl Writer)` over the canonical bytecode.
+
+Variants mirror FlameVM's current opcode set (and the parameter
+widths in `Run::read_u8`/`read_sub_varint`/etc.):
+
+```rust
+pub enum Instruction {
+    // Phase 1: stack literals & manipulation
+    PushSmall(u8),                   // 0x00..=0x0f
+    PushIntMagnitude { width: u8, neg: bool, mag: u128 },  // 0x10..=0x17
+    PushIntFull([u8; 32]),           // 0x18
+    PushStr(crate::String),          // 0x19
+    PushPoint([u8; 32]),             // 0x1a
+    PushToken,                       // 0x1b
+    Drop,                            // 0x1c
+    Nop,                             // 0x1d
+    Dup,                             // 0x1e
+    Roll,                            // 0x1f
+    DupK(u8),                        // 0x20..=0x2f
+    RollK(u8),                       // 0x30..=0x3f
+
+    // Phase 4: string ops
+    ReadBits, ReadInt, ReadStr, ReadPoint,
+    WriteBits, WriteInt, Append, WriteZeros,
+    BitNot, BitOr, BitAnd, BitXor, ShiftLeft, ShiftRight, Keccak256,
+
+    // Phase 3: Int253 arithmetic / logic / size
+    Abs, Eq, Neg, Add, Mul, DivMod, Mod252, Not, And, Or, Size,
+
+    // Phase 5: Dict ops
+    Dict, Put, Replace, Get, GetOpt, GetDup, First, Last, Next,
+
+    // Phase 6: hash & Merlin
+    Merlin, MerlinWrite, MerlinRead, Sha256, Sha512, Sha3,
+
+    // Phase 8: tokens (cleartext branches)
+    Amount, Issue, Retire, Borrow, Merge, Split, IssueFlv,
+
+    // Phase 2: control flow
+    Verify, Run, Loop, Switch, Return, Type, BreakK(u8),
+
+    // Phase 9: cells
+    Cell, Output, Open, Signtx, Signrun,
+
+    // Phase 10a: input (external-only)
+    Input,
+
+    // Phase 11 NEW: CS opcodes
+    Scalar,
+    Commit,
+    Alloc(Option<crate::Int253>),  // <-- witness slot
+    Expr,
+
+    // Extension / unknown opcode
+    Ext(u8),
+}
+```
+
+**Encoding**: each variant's `encode` writes the opcode byte and any
+inline parameter bytes verbatim. `parse` is the inverse, calling
+`read_u8` for the opcode and the existing parameter readers for the
+arguments. Crucially, `Alloc(Option<Int253>).encode` writes only the
+opcode byte — the witness is dropped (verifier never sees it).
+`parse` always produces `Alloc(None)`.
+
+**Tests**:
+- Round-trip every variant: build Instruction → encode → parse →
+  bytewise-identical encode again.
+- `Alloc(Some(7))` encodes to one byte; parse → `Alloc(None)`;
+  re-encode → same one byte.
+- Unknown opcode bytes parse to `Instruction::Ext(b)`.
+
+**No VM changes** — this is a pure data layer.
+
+##### 11.2 — Enrich `String` with witness-bearing variants
+
+**Scope**: convert `pub struct String(Vec<u8>)` into:
+
+```rust
+pub enum String {
+    Opaque(Vec<u8>),
+    Commitment(Box<crate::Commitment>),
+    Scalar(Box<crate::Int253>),          // (could become richer in Phase 13)
+    Predicate(Box<crate::Predicate>),
+    // Output(Box<crate::Cell>) — Phase 17 may need this; defer
+}
+```
+
+All variants encode to the same opaque bytes:
+- `Opaque(bytes)` — write bytes directly.
+- `Commitment(c)` — write `c.to_point().as_bytes()` (32 B).
+- `Scalar(i)` — write `i.to_bytes()` (32 B).
+- `Predicate(p)` — write `p.to_point().as_bytes()` (32 B).
+
+Decoder always produces `Opaque`. Downcasts work on both:
+- `String::to_commitment()` — `Opaque(bytes)` → `Commitment::Closed(read_point)`;
+  `Commitment(c)` → `*c`.
+- `String::to_scalar()` — `Opaque(bytes)` → decode as `Int253`;
+  `Scalar(i)` → `*i`.
+- `String::to_predicate()` — `Opaque(bytes)` → `Predicate::Opaque(point)`;
+  `Predicate(p)` → `*p`.
+
+This is a sizable refactor. All call sites that currently use `String::as_bytes()` need to route through an `as_bytes()` method that handles all variants. Tests that compare against literal byte vectors keep working unchanged.
+
+**Tests**:
+- `string_witness_commitment_encodes_to_point` — round-trip identity.
+- `string_witness_commitment_downcast_returns_open_form` — prover-side.
+- `string_opaque_downcast_returns_closed_form` — verifier-side.
+- Same triplet for `Scalar` and `Predicate`.
+
+##### 11.3 — `Program` + `ProgramItem` builder types
+
+**Scope**: add `flamevm/src/program.rs`. Define:
+
+```rust
+pub struct Program(Vec<Instruction>);
+
+pub enum ProgramItem {
+    Bytecode(Vec<u8>),       // verifier's view
+    Program(Program),        // prover's view
+}
+```
+
+Methods on `Program`:
+- `new() -> Program` — empty builder.
+- `parse(bytecode: &[u8]) -> Result<Program, VMError>` — parse the
+  full bytecode into a Vec of Instructions (witnesses are None).
+- `build(|p| { … }) -> Program` — closure-based builder.
+- `to_bytes(&self) -> Vec<u8>` — re-encode.
+- `to_vec(self) -> Vec<Instruction>` — into raw Vec.
+- Per-opcode fluent builders: `.push(...)`, `.drop()`, `.dup(k)`,
+  `.alloc(witness)`, `.scalar()`, `.commit()`, `.expr()`,
+  `.add()`, `.mul()`, `.eq()`, `.verify()`, … one per Instruction
+  variant.
+
+`ProgramItem::to_program()` errors if Bytecode; `to_bytecode()` errors if Program (per zkvm).
+
+**Tests**:
+- `program_builder_emits_expected_bytecode` — `Program::new().push(...).drop().to_bytes()` matches the hand-rolled bytecode.
+- `program_parse_round_trip` — bytecode → Program → bytecode bit-identical.
+- `program_with_alloc_witness_round_trips_to_bytecode_without_witness` — `Program::new().alloc(Some(7)).to_bytes()` re-parses to `Program(vec![Alloc(None)])`.
+
+##### 11.4 — VM loop refactor + `Delegate` trait extension
+
+**Scope**: thread the new pieces through the existing VM.
+
+**`Delegate` trait** (in `vm.rs`):
+```rust
+pub trait Delegate {
+    type CS: r1cs::RandomizableConstraintSystem;
+    type RunType;
+    type BatchVerifier: musig::BatchVerification;
+
+    fn next_instruction(&mut self, run: &mut Self::RunType)
+        -> Result<Option<Instruction>, VMError>;
+    fn new_run(&self, prog: ProgramItem) -> Result<Self::RunType, VMError>;
+    fn commit_variable(&mut self, com: &Commitment)
+        -> Result<(CompressedRistretto, r1cs::Variable), VMError>;
+    fn cs(&mut self) -> &mut Self::CS;
+    fn batch_verifier(&mut self) -> &mut Self::BatchVerifier;
+    fn process_tx_signature(&mut self, pred: Predicate, contract_id: CellID)
+        -> Result<(), VMError>;
+    fn finalize(self, deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError>;
+}
+```
+
+**`CallFrame.current_run`** becomes `D::RunType` (was `Run`). The
+existing `run_stack: Vec<Run>` becomes `Vec<D::RunType>`. Most
+opcode handlers that called `current_run.read_*` move that parsing
+logic into `Instruction::parse` (already done in 11.1) — the
+handlers receive typed parameters.
+
+**The dispatch loop** in `step_external` / `step_internal`:
+```rust
+fn step_external<D: Delegate>(&mut self, delegate: &mut D) -> Result<bool, VMError> {
+    let Some(instr) = delegate.next_instruction(&mut self.current_call.current_run)? else {
+        return self.finish_run();
+    };
+    self.dispatch_common(instr, delegate)?;  // or external-only dispatch
+    Ok(true)
+}
+```
+
+The old `try_common(op: u8)` becomes `dispatch_common(instr: Instruction)`. Each match arm now extracts typed params from the variant rather than calling `read_*` from the `Run`.
+
+**Existing `StubDelegate`** in tests grows the `RunType =
+VerifierRun`-style impl (so all current tests keep using bytecode).
+
+**Tests**: every existing test must remain green. New helper:
+`vm_with_bytecode` keeps working by delegating to the new
+`StubDelegate::new_run` for `ProgramItem::Bytecode(...)`.
+
+This is the biggest single sub-step. Expect to touch ~50 dispatch
+arms but most are mechanical (rename `op` field unpacks).
+
+##### 11.5 — Real `Prover` and `Verifier` Delegate impls
+
+**Scope**: add `flamevm/src/delegates.rs` with:
+
+```rust
+pub struct Prover<'g> {
+    cs: r1cs::Prover<'g, Transcript>,
+    batch: musig::BatchVerifier<rand::rngs::ThreadRng>,
+    signtx_items: Vec<(Predicate, CellID)>,
+}
+
+pub struct ProverRun {
+    program: VecDeque<Instruction>,
+}
+
+impl<'g> Delegate for Prover<'g> {
+    type CS = r1cs::Prover<'g, Transcript>;
+    type RunType = ProverRun;
+    type BatchVerifier = musig::BatchVerifier<rand::rngs::ThreadRng>;
+
+    fn next_instruction(&mut self, run: &mut ProverRun)
+        -> Result<Option<Instruction>, VMError> {
+        Ok(run.program.pop_front())
+    }
+    fn new_run(&self, prog: ProgramItem) -> Result<ProverRun, VMError> {
+        Ok(ProverRun { program: prog.to_program()?.to_vec().into() })
+    }
+    fn commit_variable(&mut self, com: &Commitment) -> Result<…> {
+        let (v, b) = com.witness().ok_or(VMError::WitnessMissing)?;
+        Ok(self.cs.commit(v.into(), b))
+    }
+    // … cs / batch_verifier / process_tx_signature / finalize
+}
+
+pub struct Verifier { … }       // mirror
+pub struct VerifierRun { program: Vec<u8>, offset: usize }
+```
+
+**Public `VM::prove(...)` / `VM::verify(...)` helpers** that wrap the
+existing `execute_external` for the two delegate kinds — taking a
+`Program` for the prover and a bytecode `Vec<u8>` + `R1CSProof` for
+the verifier.
+
+**Errors added**: `WitnessMissing` (already in zkvm's error set —
+add to `errors.rs`), `InvalidR1CSProof`, `BatchSignatureVerificationFailed`.
+
+**Tests**:
+- `prover_round_trip_trivial_program` — empty program → finalize → no proof errors, txlog as expected.
+- `verifier_rejects_random_proof_bytes` — feeding noise to `Verifier::verify` errors `InvalidR1CSProof`.
+- (No CS opcodes yet — those come in 11.6/11.7.)
+
+##### 11.6 — CS-touching opcodes
+
+**Scope**: add the four opcodes that move data between the stack
+and the constraint system.
+
+| Hex | Name | Diagram | Behavior |
+|---|---|---|---|
+| `0x5a` | `scalar` | `s → expr` | Pops a String (downcasts to `Int253` via `to_scalar`), pushes `Expression::Constant(int)`. |
+| `0x5b` | `commit` | `s → var` | Pops a String (downcasts to `Commitment` via `to_commitment`), wraps in `Variable { commitment }`. Verifier ends up with `Commitment::Closed(point)`; prover with `Open(witness)`. |
+| `0x5c` | `alloc` | `ø → expr` | Allocates a low-level R1CS variable via `delegate.cs().allocate(witness)`, where `witness` comes from `Instruction::Alloc(Option<Int253>)`. Wraps in `Expression::LinearCombination` with weight 1. |
+| `0x5d` | `expr` | `var → expr` | Pops a Variable, allocates via `commit_variable`, pushes `Expression::LinearCombination([(r1cs_var, Scalar::one())], witness?)`. |
+
+**New helpers in `vm.rs`**:
+- `pop_variable() -> Result<Variable, VMError>`
+- `pop_expression() -> Result<Expression, VMError>`
+- `variable_to_expression(var) -> Expression` (port from zkvm).
+
+**Tests**:
+- `scalar_pushes_constant_expression`
+- `commit_pops_string_pushes_variable`
+- `alloc_allocates_low_level_variable_and_pushes_expression` (prover-only — verifier path lands when 11.7's roundtrip arrives)
+- `expr_lifts_variable_to_expression`
+
+##### 11.7 — Expression-aware overloads (`neg` / `add` / `mul` / `eq` / `verify`)
+
+**Scope**: update the existing arithmetic opcodes to dispatch on
+operand type. Top of stack determines the path:
+
+- `0x52 neg` — `Int253` (existing) or `Expression` (new).
+- `0x53 add` — both `Int253` (existing); both `Expression` (new); mixed (lift the Int253 to constant Expression via `From`).
+- `0x54 mul` — same dispatch as `add`, plus `Expression::multiply` which calls into the CS for non-constant operands.
+- `0x51 eq` — `Int253` × `Int253` (existing); `Expression` × `Expression` → push `Constraint::eq(e1, e2)` (new).
+- `0x79 verify` — accept `Int253` (existing) and `Constraint` (new) via `Constraint::verify(self.delegate.cs())`.
+
+**New helpers**:
+- `pop_int253_or_expression() -> Either<Int253, Expression>`.
+- `Expression::from(Int253)`.
+
+**Tests** (all roundtrip via real Prover + Verifier):
+- `prove_then_verify_const_arithmetic` — `scalar(7) scalar(3) add scalar(10) eq verify` proves+verifies.
+- `prove_then_verify_alloc_arithmetic` — `alloc(7) alloc(3) add alloc(10) eq verify` proves+verifies.
+- `verifier_rejects_tampered_proof` — flip a byte in the proof → `InvalidR1CSProof`.
+- `verifier_rejects_unsatisfiable_program` — `scalar(7) scalar(3) add scalar(99) eq verify` fails to prove (or verify rejects).
+
+##### 11.8 — Wire up `Prover::prove(program, header) -> (bytecode, proof, txlog)` and `Verifier::verify(bytecode, proof, header) -> Result<txlog>`
+
+**Scope**: thin public-API layer over the Delegate impls. Mirrors zkvm's `Prover::build_tx` / `Verifier::verify_tx` but trimmed to what Phase 11 needs (no signature aggregation yet — that's Phase 14; no fee — Phase 17).
+
+```rust
+impl<'g> Prover<'g> {
+    pub fn prove(
+        program: Program,
+        header: TxHeader,
+        gas_limit: u64,
+        mem_limit: u64,
+        bp_gens: &BulletproofGens,
+    ) -> Result<(Vec<u8>, R1CSProof, Vec<TxEntry>), VMError>;
+}
+
+impl Verifier {
+    pub fn verify(
+        bytecode: &[u8],
+        proof: &R1CSProof,
+        header: TxHeader,
+        gas_limit: u64,
+        mem_limit: u64,
+        bp_gens: &BulletproofGens,
+    ) -> Result<Vec<TxEntry>, VMError>;
+}
+```
+
+**Tests**: end-to-end prove+verify happy-path and ≥2 negative paths.
+
+---
+
+#### What stays untouched in Phase 11
+
+- The Phase 1–10a opcode semantics. `dup`/`roll`/`pushint*`/string
+  ops/Dict ops/Cell ops all behave identically — they just receive
+  their parameters from a parsed `Instruction` instead of inline
+  reads from a `Run`.
+- The `Cell` wire encoding, `input`/`output`/`open` semantics, the
+  anchor chain. All of Phase 9 / 10a survive verbatim.
+- The Phase 8 token opcodes' cleartext branches. The encrypted
+  branches (`issue` with Point qty, `borrow` with Point operand)
+  remain `TokenRequiresCS` until Phase 12/13.
+- All existing 331 tests must remain green through the refactor.
+
+---
+
+#### Test budget for Phase 11
+
+- 11.1 — 5 tests (round-trip + Ext + Alloc-witness-erasure).
+- 11.2 — 6–9 tests (`String` enum variants ×  encode/decode/downcast).
+- 11.3 — 3 tests (`Program` builder).
+- 11.4 — ZERO new tests; 0 regressions across the existing 331.
+- 11.5 — 2 tests (trivial prover round-trip, verifier rejects noise).
+- 11.6 — 4 tests (one per CS opcode).
+- 11.7 — 4 tests (Expression overloads + prove/verify happy + negative).
+- 11.8 — 3 tests (end-to-end happy + 2 negative).
+
+**Target: ~27 new tests, ending at 331 + 27 = ~358.**
+
+---
+
+#### Risks / open questions for Architect
+
+- **`String` enrichment is invasive.** Every call site that does
+  `let bytes = s.as_bytes();` needs review — the new `String`
+  enum's `as_bytes()` must handle witness-bearing variants by
+  re-serializing through the encoder. Risk is a witness-bearing
+  String accidentally compared by `.as_bytes() ==` against an
+  Opaque counterpart at a different witness depth.
+- **`Box<Predicate>` inside `String`** creates a cycle hazard: a
+  Predicate currently holds an `Option<PredicateTree>` (witness),
+  the tree contains program bytecode, the bytecode could push a
+  String, etc. zkvm avoids the cycle because their String can't
+  contain a Program directly, only Predicate. We should adopt the
+  same restriction.
+- **Memory: `VecDeque<Instruction>` per ProverRun** can be large
+  for big programs. zkvm uses `VecDeque`; we mirror it. Future
+  optimization could use a slice-iterator if needed.
+- **Witness storage symmetry** for opcodes other than `alloc`
+  (e.g., `scalar`, `commit`) flows entirely through the rich
+  `String` enum. No additional Delegate hooks required.
+- Confirm that Phase 11 doesn't yet need `Cloak` / `Mix` / `Range`
+  variants in `Instruction` (those land in Phase 12/13). Leaving
+  them out keeps 11.1 manageable.
+- Decide whether `Instruction::PushPredicate(Box<Predicate>)` is a
+  separate variant or whether `Push(String::Predicate(...))` covers
+  it. zkvm uses the latter (everything goes through `Push(String)`),
+  which is cleaner — recommend mirroring.
 
 ---
 

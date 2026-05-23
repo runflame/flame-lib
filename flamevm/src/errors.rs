@@ -350,6 +350,42 @@ pub enum VMError {
     #[error("R1CSError returned when trying to build R1CS instance")]
     R1CSError(R1CSError),
 
+    /// The prover ran an opcode that needed witness data
+    /// (e.g. `alloc`, `commit` on the prover side) but no witness was
+    /// available in the witness side-channel. Indicates a Program built
+    /// with too few witnesses for the bytecode it produces.
+    #[error("Prover witness is missing")]
+    WitnessMissing,
+
+    /// `Prover::prove` succeeded internally but
+    /// `bulletproofs::r1cs::Prover::prove` reported a constraint-system
+    /// or proof-construction error.
+    #[error("R1CS proof construction failed")]
+    R1CSProofConstruction,
+
+    /// `Verifier::verify` reached `r1cs::Verifier::verify` with a proof
+    /// that didn't check out (tampered, wrong CS, etc.).
+    #[error("R1CS proof verification failed")]
+    InvalidR1CSProof,
+
+    /// An opcode required a top-of-stack `Variable` but found a
+    /// different type.
+    #[error("Item is not a Variable")]
+    TypeNotVariable,
+
+    /// An opcode required a top-of-stack `Expression` but found a
+    /// different type.
+    #[error("Item is not an Expression")]
+    TypeNotExpression,
+
+    /// `verify` was reached with a Constraint operand, but the
+    /// constraint cannot be enforced (cleartext false, etc.). Wraps
+    /// `CleartextConstraintFalse` for the dispatch path; left as an
+    /// alias for now since constraint dispatch shares verify's error
+    /// surface.
+    #[error("Item is not a Constraint")]
+    TypeNotConstraint,
+
     // /// This error occurs when a prover expects some witness data, but it is missing.
     // #[error("Item misses witness data.")]
     // WitnessMissing,

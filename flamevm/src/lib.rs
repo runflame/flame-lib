@@ -1,10 +1,13 @@
 mod cell;
 mod constraints;
+mod delegates;
 mod encoding;
 mod crypto;
 mod dict;
 mod errors;
 mod int253;
+mod ops;
+mod program;
 mod string;
 mod token;
 mod tx;
@@ -16,9 +19,12 @@ pub use constraints::{
     Commitment, CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,
 };
 pub use crypto::{Merlin, MultiscalarMul, Point};
+pub use delegates::{Prover, Verifier};
 pub use dict::Dict;
 pub use errors::VMError;
 pub use int253::Int253;
+pub use ops::Instruction;
+pub use program::Program;
 pub use string::String;
 pub use token::{flavor_from_actor, ClearToken, Token, WideToken};
 pub use value::Value;
