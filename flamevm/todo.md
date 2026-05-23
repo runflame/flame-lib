@@ -410,7 +410,7 @@ Spec (`0x99 signrun`): "Executes a signed program on behalf of the actor. The pr
 >
 > **Applied** — trust-model paragraph added to spec.md Discussion section: explains that the tx creator and the cell-opener are the same party (so granting full local authority to the cell's program is the same as inlining trusted code), and flags the internal-context cell-open case for future review.
 
-### 9.9 `signrun` linearity — leaked values in caller scope
+### 9.9 `signrun` linearity — leaked values in caller scope ✅ **resolved**
 
 > When `open` or `signrun` finishes, the outer script has whatever the cell program left on the stack. If the cell program creates a linear value (a `merlin`, a `Token`, etc.) and leaves it on the stack, the outer script must consume it. The caller may not know what to do with it — `StackNotClean` at frame exit.
 >
@@ -418,9 +418,11 @@ Spec (`0x99 signrun`): "Executes a signed program on behalf of the actor. The pr
 >
 > Alternative: gate the cell program's stack outputs to a declared portable shape only.
 >
-> _Architect response:_
+> _Architect response:_ caller's responsibility to consume whatever the cell program produces.
+>
+> **Applied** — no code change; status quo confirmed. Documented in spec.md (the trust-model paragraph notes that the cell author's program output shape is part of the contract a caller chose to accept).
 
-### 9.10 Multi-leaf `PredicateTree` — Phase 9 ships single-leaf only
+### 9.10 Multi-leaf `PredicateTree` ✅ **resolved**
 
 > `PredicateTree { internal_key, programs }` permits any number of programs at the type level. `merkle_root` and `callproof_for` `assert_eq!(programs.len(), 1)` and panic otherwise. The single-leaf restriction blocks any real predicate use (multiple unlock paths is the point of Taproot).
 >
@@ -430,7 +432,24 @@ Spec (`0x99 signrun`): "Executes a signed program on behalf of the actor. The pr
 >
 > Recommend (a) since "Taproot with one leaf" is essentially Schnorr-tweaked-key with no path-options — defeats the purpose.
 >
-> _Architect response:_
+> _Architect response:_ please do multi-leaf - see zkvm for reference and do like it's done there.
+>
+> **Applied** — `PredicateTree::merkle_root` now does general balanced merklization via `merkle_root_of_programs` (split at `next_power_of_two(n) / 2`, recurse, hash via existing `merkle_node_hash`/`merkle_leaf_hash` transcripts). `PredicateTree::callproof_for(index)` returns `Result<CallProof, VMError>`, building neighbors + position bits during a root-to-leaf descent and reversing to produce the leaf-to-root order `merkle_walk_up` expects. Single-leaf `assert!`s removed.
+>
+> Additional cleanup landed in the same pass (matched audit items 1.2-1.5 from the Phase-9 audit):
+>
+> - `PredicateTree::new(internal_key, programs)` introduced as the only validated constructor: errors `EmptyPredicateTree` on no programs, `InvalidPoint` on non-decompressable key. Fields demoted to `pub(crate)`; `internal_key()` / `programs()` are read-only accessors.
+> - `PredicateTree::compute_point` no longer needs `.expect()` (key validated at construction).
+> - `merkle_walk_up` now meaningfully returns `Result`: errors `MalformedCallProof` when position bits don't cover all neighbors.
+> - New `VMError` variants: `EmptyPredicateTree`, `InvalidPoint`, `ProgramIndexOutOfRange`.
+>
+> Tests landed (4 new):
+> - `predicate_tree_new_validates_inputs` — both error paths.
+> - `multi_leaf_predicate_each_program_unlocks_via_its_path` — 3-leaf tree, each leaf opens correctly via its CallProof and cell-program runs to clean stack.
+> - `multi_leaf_predicate_wrong_leaf_path_hard_fails` — forged callproof with mismatched program → `CallProofMismatch`.
+> - `callproof_for_out_of_range_index_errors` — `ProgramIndexOutOfRange`.
+>
+> Test helper `push_callproof_pieces` generalized to build a non-empty neighbors `Dict` via the `dict` opcode with `(val_i, key_i, ..., n)` push pattern.
 
 ---
 

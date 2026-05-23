@@ -181,10 +181,14 @@ pub enum VMError {
     BreakOutOfCall,
 
     /// `return k` was called with a `k` that exceeds the callee's stack
-    /// depth, or with a `k` other than `0` at the outermost frame, or
-    /// with non-`Int253` k.
+    /// depth, or with non-`Int253` k.
     #[error("Bad return arity")]
     BadReturnArity,
+
+    /// `return` invoked at the outermost call frame (no parent to receive
+    /// the return values, regardless of arity).
+    #[error("`return` at outermost frame — use `break` for early exit")]
+    ReturnAtRoot,
 
     /// `divmod` saw a zero divisor.
     #[error("Division by zero")]
@@ -264,6 +268,21 @@ pub enum VMError {
     /// not 32 bytes, etc.).
     #[error("Malformed CallProof")]
     MalformedCallProof,
+
+    /// `PredicateTree::new` was called with zero programs. A predicate
+    /// tree must commit to at least one program.
+    #[error("PredicateTree must have at least one program")]
+    EmptyPredicateTree,
+
+    /// A compressed Ristretto point failed to decompress when building a
+    /// predicate / call-proof component.
+    #[error("Invalid Ristretto point")]
+    InvalidPoint,
+
+    /// `PredicateTree::callproof_for` was called with a `program_index`
+    /// outside `0..programs.len()`.
+    #[error("Program index out of range")]
+    ProgramIndexOutOfRange,
 
     // /// This error occurs when VM's anchor remains unset.
     // #[error("VM anchor is not set via `input`")]

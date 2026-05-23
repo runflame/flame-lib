@@ -423,9 +423,9 @@ All constraint operations available on external transactions only.
 | 7b | run | str → … | Runs bitstring as a program. |
 | 7c | loop | ø → ø | Evaluates program from the beginning. |
 | 7d | switch | x a b → … | Runs program a if x is non-zero, runs b if x is zero. |
-| 7e | return | a_{k-1} … a_0 k → ø | Returns k items to the caller and finishes execution. |
+| 7e | return | a_{k-1} … a_0 k → ø | Returns k items to the caller and finishes the **current call**. Pops `k`, asserts the callee's stack contains exactly `k` items, pops the call frame, refunds leftover gas to the parent, and pushes the `k` items onto the parent's stack — all atomically. **At the outermost call frame `return` always errors regardless of `k`** (`ReturnAtRoot`): there is no parent to receive values, even an empty tuple. Scripts that want to terminate early at root use `break:0` instead. |
 | 7f | type | x → x typecode | Pushes typecode (as int) of the item on stack. |
-| 8k | break:k | ø → ø | Stops execution of current program skipping k levels within the current call. break:0: current program stops. Break out of the current call = fail. (”0 verify”) |
+| 8k | break:k | ø → ø | Stops execution of the current program and `k` more enclosing Runs. `break:0` stops only the current program. Attempting to break past the call boundary (`k` exceeds the run-stack depth) is a hard fail (`BreakOutOfCall`). When the cascade ends the entire call (e.g. `break:0` at the outermost Run of a frame), normal call-exit applies: the stack must be empty (`StackNotClean` otherwise); at root that ends the transaction cleanly. Unlike `return`, `break:0` is the safe way to short-circuit at the outermost frame: it has no recipient semantics and relies on the clean-stack invariant for correctness. |
 
 ### Actors & calls
 

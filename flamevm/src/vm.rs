@@ -1624,18 +1624,27 @@ impl VM {
     /// `0x7e` `return k` — atomic cross-frame return:
     ///
     /// 1. pop the `k` count (must be a non-negative `Int253`),
-    /// 2. assert the callee's stack has *exactly* `k` items left,
-    /// 3. pop the call frame,
-    /// 4. refund leftover gas to the parent,
-    /// 5. push the `k` items onto the parent's stack.
+    /// 2. assert there is an enclosing call frame to return into
+    ///    (otherwise `ReturnAtRoot` — see below),
+    /// 3. assert the callee's stack has *exactly* `k` items left,
+    /// 4. pop the call frame,
+    /// 5. refund leftover gas to the parent,
+    /// 6. push the `k` items onto the parent's stack.
     ///
-    /// At the outermost frame, `return 0` exits the transaction cleanly.
-    /// `return k` with `k > 0` at the outermost frame is an error
-    /// (`BadReturnArity`) — there is no parent to receive the values.
+    /// **At the outermost call frame, `return` always errors regardless
+    /// of `k`** — `return` semantically requires a recipient, and at
+    /// root there is none. Scripts that want to exit early use `break:0`
+    /// (end the current Run; if the stack is clean and the run-stack is
+    /// empty, the call exits cleanly).
     fn op_return(&mut self) -> Result<(), VMError> {
         let k_int = self.pop_int253()?;
         let k_u64 = k_int.to_u64().ok_or(VMError::BadReturnArity)?;
         let k = usize::try_from(k_u64).map_err(|_| VMError::BadReturnArity)?;
+
+        // Outermost frame: `return` has no parent. Fail regardless of `k`.
+        if self.call_stack.is_empty() {
+            return Err(VMError::ReturnAtRoot);
+        }
 
         // Strict: exactly `k` items must remain. Fewer → arity mismatch,
         // more → leftover state the script forgot about.
@@ -1652,25 +1661,13 @@ impl VM {
             .gas_limit
             .saturating_sub(self.current_call.gas_used);
 
-        if let Some(parent) = self.call_stack.pop() {
-            self.current_call = parent;
-            self.current_call.gas_limit = self
-                .current_call
-                .gas_limit
-                .saturating_add(leftover_gas);
-            self.current_call.stack.extend(return_values);
-            return Ok(());
-        }
-
-        // Outermost frame. No parent to receive values.
-        if k != 0 {
-            return Err(VMError::BadReturnArity);
-        }
-        // Signal end of execution by emptying the current Run and the
-        // run-stack. The dispatch loop will then call finish_call which
-        // sees an empty stack and exits.
-        self.current_call.run_stack.clear();
-        self.current_call.current_run.pc = self.current_call.current_run.script.len();
+        let parent = self.call_stack.pop().expect("checked non-empty above");
+        self.current_call = parent;
+        self.current_call.gas_limit = self
+            .current_call
+            .gas_limit
+            .saturating_add(leftover_gas);
+        self.current_call.stack.extend(return_values);
         Ok(())
     }
 
@@ -2565,10 +2562,14 @@ mod tests {
     // ── return (0x7e) ────────────────────────────────────────────
 
     #[test]
-    fn return_zero_at_root_exits_cleanly() {
-        // push:0, return — k=0, empty stack remaining, root frame: clean exit.
+    fn return_zero_at_root_errors() {
+        // push:0, return — root frame has no caller, so `return` errors
+        // even with k=0. Scripts that want a clean early exit use `break:0`.
         let mut vm = vm_with_script(vec![0x00, 0x7e]);
-        run_until_tx_done(&mut vm).unwrap();
+        assert!(matches!(
+            run_until_tx_done(&mut vm).unwrap_err(),
+            VMError::ReturnAtRoot
+        ));
     }
 
     #[test]
@@ -2577,29 +2578,73 @@ mod tests {
         let mut vm = vm_with_script(vec![0x07, 0x01, 0x7e]);
         assert!(matches!(
             run_until_tx_done(&mut vm).unwrap_err(),
-            VMError::BadReturnArity
+            VMError::ReturnAtRoot
         ));
     }
 
     #[test]
-    fn return_with_dirty_leftover_errors() {
-        // push:9, push:7, push:1, return — k=1, but two items below count.
-        // After popping k, stack has 2 items > k=1 → StackNotClean.
-        let mut vm = vm_with_script(vec![0x09, 0x07, 0x01, 0x7e]);
+    fn break_zero_at_root_with_clean_stack_exits_cleanly() {
+        // break:0 at root — preferred way to short-circuit cleanly.
+        let mut vm = vm_with_script(vec![0x80]);
+        run_until_tx_done(&mut vm).unwrap();
+    }
+
+    #[test]
+    fn break_zero_at_root_with_leftover_stack_errors() {
+        // push:5, break:0 — break works, but finish_call catches the leftover.
+        let mut vm = vm_with_script(vec![0x05, 0x80]);
         assert!(matches!(
             run_until_tx_done(&mut vm).unwrap_err(),
             VMError::StackNotClean
         ));
     }
 
+    /// Helper: builds a VM with a child CellOpen frame as `current_call`
+    /// and a placeholder ExternalRoot on `call_stack`. Used by the arity
+    /// / clean-stack `return` tests which need a non-root frame to
+    /// exercise the inner checks (root frame would short-circuit with
+    /// `ReturnAtRoot`).
+    fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
+        let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
+        let child_kind = CallKind::CellOpen {
+            anchor: Anchor([0u8; 32]),
+            predicate: Predicate::Opaque(CompressedRistretto([0u8; 32])),
+        };
+        let child = CallFrame::new(script, child_kind, 500, 0, 0);
+        let mut vm = VM::new(dummy_header(), parent);
+        let p = mem::replace(&mut vm.current_call, child);
+        vm.call_stack.push(p);
+        vm
+    }
+
+    #[test]
+    fn return_with_dirty_leftover_errors() {
+        // Inside a child frame: push:9, push:7, push:1, return — k=1, two
+        // items below count → StackNotClean.
+        let mut vm = vm_with_nested_child_script(vec![0x09, 0x07, 0x01, 0x7e]);
+        let err = loop {
+            match vm.step_internal() {
+                Ok(true) => continue,
+                Ok(false) => panic!("expected error"),
+                Err(e) => break e,
+            }
+        };
+        assert!(matches!(err, VMError::StackNotClean));
+    }
+
     #[test]
     fn return_too_few_items_errors() {
-        // push:5, return — k=5 (popped) but only zero items left.
-        let mut vm = vm_with_script(vec![0x05, 0x7e]);
-        assert!(matches!(
-            run_until_tx_done(&mut vm).unwrap_err(),
-            VMError::BadReturnArity
-        ));
+        // Inside a child frame: push:5, return — k=5 popped, zero items
+        // remain → BadReturnArity.
+        let mut vm = vm_with_nested_child_script(vec![0x05, 0x7e]);
+        let err = loop {
+            match vm.step_internal() {
+                Ok(true) => continue,
+                Ok(false) => panic!("expected error"),
+                Err(e) => break e,
+            }
+        };
+        assert!(matches!(err, VMError::BadReturnArity));
     }
 
     #[test]
@@ -4329,38 +4374,43 @@ mod tests {
         let secret = Scalar::from(internal_secret);
         let x_point = &secret * &RISTRETTO_BASEPOINT_TABLE;
         let internal_key = x_point.compress();
-        let tree = PredicateTree {
-            internal_key,
-            programs: vec![program.to_vec()],
-        };
-        let cp = tree.callproof_for(0);
+        let tree = PredicateTree::new(internal_key, vec![program.to_vec()]).unwrap();
+        let cp = tree.callproof_for(0).unwrap();
+        (tree, cp)
+    }
+
+    /// Helper: builds a `PredicateTree` with multiple programs and the
+    /// `CallProof` that opens the `program_index`-th one.
+    fn build_multi_leaf_predicate(
+        programs: Vec<Vec<u8>>,
+        program_index: usize,
+        internal_secret: u64,
+    ) -> (PredicateTree, CallProof) {
+        let secret = Scalar::from(internal_secret);
+        let x_point = &secret * &RISTRETTO_BASEPOINT_TABLE;
+        let internal_key = x_point.compress();
+        let tree = PredicateTree::new(internal_key, programs).unwrap();
+        let cp = tree.callproof_for(program_index).unwrap();
         (tree, cp)
     }
 
     /// Helper: appends script bytes that push a CallProof's four pieces
     /// onto the stack in the order `open` expects: internal_key (Point),
     /// neighbors (Dict), position (String), program (String).
+    ///
+    /// Builds the neighbors Dict via the `dict` opcode: for n entries,
+    /// pushes `(val_0, key_0, val_1, key_1, … , n)` then `dict`. Keys
+    /// are the indices `0..n-1`, so the resulting Dict is canonical
+    /// list-style.
     fn push_callproof_pieces(script: &mut Vec<u8>, cp: &CallProof) {
-        // internal_key as Point
         push_point_bytes(script, cp.internal_key.as_bytes());
-        // neighbors as list-style Dict of 32-byte Strings
-        for h in &cp.neighbors {
-            push_string_bytes(script, h);
+        for (i, h) in cp.neighbors.iter().enumerate() {
+            push_string_bytes(script, h); // val
+            push_small_uint(script, i as u32); // key
         }
-        // push:<n>, dict — builds the Dict from the just-pushed strings
-        // (Dict construction stack: ... val key val key ... n → dict, but
-        // we use the implicit-keys form via push_n pairs of (val, key).
-        // Each neighbor was pushed as a value; we now push key indices
-        // and a count. For Phase 9 single-leaf case, this is empty.)
-        assert!(
-            cp.neighbors.is_empty(),
-            "multi-leaf neighbors not yet exercised in tests; will land with multi-leaf Tree"
-        );
-        script.push(0x00); // push:0 (count)
+        push_small_uint(script, cp.neighbors.len() as u32);
         script.push(0x60); // dict
-        // position
         push_string_bytes(script, &cp.position);
-        // program
         push_string_bytes(script, &cp.program);
     }
 
@@ -4651,6 +4701,184 @@ mod tests {
             _ => panic!("expected Explicit on both"),
         };
         assert_eq!(m1, m2, "signrun message must be program-only");
+    }
+
+    // ── Multi-leaf PredicateTree (item 9.10) ─────────────────────
+
+    #[test]
+    fn predicate_tree_new_validates_inputs() {
+        // Empty programs → EmptyPredicateTree.
+        let secret = Scalar::from(1u64);
+        let ik = (&secret * &RISTRETTO_BASEPOINT_TABLE).compress();
+        assert!(matches!(
+            PredicateTree::new(ik, Vec::new()).unwrap_err(),
+            VMError::EmptyPredicateTree
+        ));
+        // Garbage internal_key bytes → InvalidPoint.
+        let bad = CompressedRistretto([0xff; 32]); // not a valid Ristretto point
+        assert!(matches!(
+            PredicateTree::new(bad, vec![vec![0x1d]]).unwrap_err(),
+            VMError::InvalidPoint
+        ));
+    }
+
+    #[test]
+    fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
+        // Three programs; build a CallProof for each and confirm open succeeds.
+        let programs: Vec<Vec<u8>> = vec![
+            vec![0x1c],           // drop
+            vec![0x1c, 0x1c],     // drop, drop
+            vec![0x1c, 0x1c, 0x1c], // drop, drop, drop
+        ];
+        // payload size must match the program's drop count so the cell-open
+        // run leaves an empty stack. Test each program with that exact payload.
+        for i in 0..programs.len() {
+            let (tree, cp) =
+                build_multi_leaf_predicate(programs.clone(), i, 11 + i as u64);
+            let pred_point = tree.compute_point();
+
+            // payload = i+1 copies of push:5 (so program of length i+1
+            // can drop them all and end with empty stack)
+            let payload_count = i + 1;
+            let mut script = Vec::new();
+            for _ in 0..payload_count {
+                script.push(0x05); // push:5
+            }
+            push_small_uint(&mut script, payload_count as u32);
+            push_point_bytes(&mut script, pred_point.as_bytes());
+            script.push(0x91); // cell
+            push_callproof_pieces(&mut script, &cp);
+            script.push(0x00); // k=0 args
+            script.push(0x93); // open
+            let mut vm = vm_with_script(script);
+            vm.last_anchor = Some(Anchor([0x42; 32]));
+            run_to_end(&mut vm).unwrap_or_else(|e| {
+                panic!("program index {} did not open cleanly: {:?}", i, e)
+            });
+            assert!(
+                vm.current_call.stack.is_empty(),
+                "program index {} left stack non-empty",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
+        // Build a 3-leaf tree. Construct a CallProof claiming program[0]
+        // but with the path that opens program[1]. Verification must fail.
+        let programs: Vec<Vec<u8>> = vec![
+            vec![0x1c],
+            vec![0x1c, 0x1c],
+            vec![0x1c, 0x1c, 0x1c],
+        ];
+        let (tree, valid_cp_for_1) =
+            build_multi_leaf_predicate(programs.clone(), 1, 7);
+        // Forge: use program[0]'s bytes but program[1]'s path/neighbors.
+        let forged = CallProof {
+            internal_key: valid_cp_for_1.internal_key,
+            neighbors: valid_cp_for_1.neighbors.clone(),
+            position: valid_cp_for_1.position.clone(),
+            program: programs[0].clone(),
+        };
+        let pred_point = tree.compute_point();
+
+        let mut script = vec![0x05, 0x01];
+        push_point_bytes(&mut script, pred_point.as_bytes());
+        script.push(0x91);
+        push_callproof_pieces(&mut script, &forged);
+        script.push(0x00);
+        script.push(0x93);
+        let mut vm = vm_with_script(script);
+        vm.last_anchor = Some(Anchor([0x42; 32]));
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::CallProofMismatch
+        ));
+    }
+
+    #[test]
+    fn callproof_for_out_of_range_index_errors() {
+        let secret = Scalar::from(1u64);
+        let ik = (&secret * &RISTRETTO_BASEPOINT_TABLE).compress();
+        let tree = PredicateTree::new(ik, vec![vec![0x1d], vec![0x1c]]).unwrap();
+        assert!(matches!(
+            tree.callproof_for(5).unwrap_err(),
+            VMError::ProgramIndexOutOfRange
+        ));
+    }
+
+    // ── Re-packaging guard: cells can't be sealed into other cells ───
+    //
+    // A cell's payload bytes can only return to the stack via `open`,
+    // `signtx`, or `signrun` — each of which consumes the source cell
+    // and records (open) or defers (signtx/signrun) an authorization
+    // check. There is no "transfer the cell handle into a new output"
+    // shortcut, because `Value::Cell` is non-portable and the cell
+    // construction opcodes (`cell`, `output`) reject non-portable
+    // payload items.
+
+    #[test]
+    fn output_rejects_cell_as_payload_item() {
+        // Build cell A on stack. Then try: count=1, predicate_point, output
+        //   — the output op pops pred + count + 1 payload item (cell A)
+        //     and `pop_n_portable` must reject cell A.
+        let mut script = vec![0x05, 0x01];
+        push_point_bytes(&mut script, &[0xaa; 32]);
+        script.push(0x91); // cell A → on stack
+        // Now build the outer: 1-item payload = [cell A], pred, output.
+        script.push(0x01); // count = 1
+        push_point_bytes(&mut script, &[0xbb; 32]);
+        script.push(0x92); // output
+        let mut vm = vm_with_script(script);
+        vm.last_anchor = Some(Anchor([0x42; 32]));
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::NonPortableInOutput
+        ));
+    }
+
+    #[test]
+    fn cell_opcode_rejects_cell_as_payload_item() {
+        // Symmetric protection on the `cell` construction op.
+        let mut script = vec![0x05, 0x01];
+        push_point_bytes(&mut script, &[0xaa; 32]);
+        script.push(0x91); // cell A
+        script.push(0x01); // count=1
+        push_point_bytes(&mut script, &[0xbb; 32]);
+        script.push(0x91); // cell (attempted outer)
+        let mut vm = vm_with_script(script);
+        vm.last_anchor = Some(Anchor([0x42; 32]));
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::NonPortableInOutput
+        ));
+    }
+
+    #[test]
+    fn output_rejects_dict_containing_a_cell() {
+        // Even if a script hides a cell inside a Dict and puts the Dict
+        // (otherwise portable) into the payload, the Dict's sticky
+        // portability flag rejects it.
+        //
+        //   build cell A
+        //   push key=0, push count=1, dict        // Dict { 0: cellA }
+        //   push count=1, pushpoint, output
+        let mut script = vec![0x05, 0x01];
+        push_point_bytes(&mut script, &[0xaa; 32]);
+        script.push(0x91); // cell A on stack
+        script.push(0x00); // key = 0
+        script.push(0x01); // count = 1 pair
+        script.push(0x60); // dict — pops (cellA, 0, 1) → Dict { 0: cellA }
+        script.push(0x01); // outer count = 1
+        push_point_bytes(&mut script, &[0xbb; 32]);
+        script.push(0x92); // output
+        let mut vm = vm_with_script(script);
+        vm.last_anchor = Some(Anchor([0x42; 32]));
+        assert!(matches!(
+            run_to_end(&mut vm).unwrap_err(),
+            VMError::NonPortableInOutput
+        ));
     }
 
     #[test]

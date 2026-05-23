@@ -63,14 +63,16 @@ pub enum Predicate {
 }
 
 /// Prover-side witness for a Taproot predicate.
+///
+/// The tree commits to one or more **programs** via a balanced merkle
+/// root, then Taproot-tweaks the internal key by `H(X, M)` to produce the
+/// opaque predicate point. Construction validates both `internal_key`
+/// (must decompress) and `programs` (must be non-empty); fields are
+/// `pub(crate)` to enforce that invariant.
 #[derive(Clone, Debug)]
 pub struct PredicateTree {
-    /// Internal key `X`. The full predicate point is `P = X + H(X, M)·B`.
-    pub internal_key: CompressedRistretto,
-    /// Programs at the leaves of the merkle tree. The tree is balanced
-    /// in canonical order. For Phase 9 we ship a single-leaf flavor
-    /// (`programs.len() == 1`) and extend to general trees later.
-    pub programs: Vec<Vec<u8>>,
+    pub(crate) internal_key: CompressedRistretto,
+    pub(crate) programs: Vec<Vec<u8>>,
 }
 
 impl Predicate {
@@ -122,6 +124,31 @@ impl Predicate {
 }
 
 impl PredicateTree {
+    /// Builds a validated tree. Errors if `programs` is empty or if
+    /// `internal_key` does not decompress to a valid Ristretto point.
+    pub fn new(
+        internal_key: CompressedRistretto,
+        programs: Vec<Vec<u8>>,
+    ) -> Result<PredicateTree, VMError> {
+        if programs.is_empty() {
+            return Err(VMError::EmptyPredicateTree);
+        }
+        if internal_key.decompress().is_none() {
+            return Err(VMError::InvalidPoint);
+        }
+        Ok(PredicateTree { internal_key, programs })
+    }
+
+    /// Read-only accessor for the internal key.
+    pub fn internal_key(&self) -> &CompressedRistretto {
+        &self.internal_key
+    }
+
+    /// Read-only accessor for the leaf programs.
+    pub fn programs(&self) -> &[Vec<u8>] {
+        &self.programs
+    }
+
     /// Computes the predicate's opaque point `P = X + H(X, M)·B`.
     pub fn compute_point(&self) -> CompressedRistretto {
         let root = self.merkle_root();
@@ -129,31 +156,88 @@ impl PredicateTree {
         let x_point = self
             .internal_key
             .decompress()
-            .expect("PredicateTree built from a valid Ristretto point");
+            .expect("PredicateTree::new validated the internal key");
         (x_point + &h * &RISTRETTO_BASEPOINT_TABLE).compress()
     }
 
-    /// Computes the merkle root over the leaf programs. For a single-leaf
-    /// tree, the root is the leaf hash itself.
+    /// Computes the merkle root over the leaf programs. For a single
+    /// program, the root is the leaf hash itself. For more, the tree
+    /// is balanced by repeatedly splitting at
+    /// `next_power_of_two(n) / 2` — the same convention as zkvm's
+    /// `merkle::MerkleTree`.
     pub fn merkle_root(&self) -> [u8; 32] {
-        assert!(!self.programs.is_empty(), "PredicateTree must have ≥1 leaf");
-        // Phase 9: single-leaf tree only. General balanced-tree merklization
-        // will land alongside multi-program predicates in a later pass.
-        assert_eq!(self.programs.len(), 1, "Phase 9: single-leaf trees only");
-        merkle_leaf_hash(&self.programs[0])
+        merkle_root_of_programs(&self.programs)
     }
 
     /// Builds a `CallProof` that opens the `program_index`-th leaf.
-    /// Phase 9: only `program_index == 0` is supported.
-    pub fn callproof_for(&self, program_index: usize) -> CallProof {
-        assert_eq!(program_index, 0, "Phase 9: single-leaf trees only");
-        CallProof {
+    /// Errors if `program_index >= programs.len()`.
+    ///
+    /// The returned proof's `neighbors` are leaf-to-root; `position`
+    /// is a bit-packed string where bit `i` (LSB-first within byte)
+    /// describes step `i` of the walk-up: `0` means "current hash on
+    /// left / neighbor on right", `1` means "swap".
+    pub fn callproof_for(&self, program_index: usize) -> Result<CallProof, VMError> {
+        if program_index >= self.programs.len() {
+            return Err(VMError::ProgramIndexOutOfRange);
+        }
+        // We walk root-to-leaf during construction (descending into halves)
+        // but `merkle_walk_up` consumes neighbors leaf-to-root. Push in
+        // descent order, then reverse — O(n) once vs. O(n) per insert(0).
+        let mut neighbors = Vec::new();
+        let mut bits = Vec::new();
+        let mut sublist: &[Vec<u8>] = &self.programs;
+        let mut subindex = program_index;
+        while sublist.len() >= 2 {
+            let k = sublist.len().next_power_of_two() / 2;
+            if subindex >= k {
+                // Current is in the right half; sibling is left subtree.
+                neighbors.push(merkle_root_of_programs(&sublist[..k]));
+                bits.push(1);
+                sublist = &sublist[k..];
+                subindex -= k;
+            } else {
+                neighbors.push(merkle_root_of_programs(&sublist[k..]));
+                bits.push(0);
+                sublist = &sublist[..k];
+            }
+        }
+        neighbors.reverse();
+        bits.reverse();
+        Ok(CallProof {
             internal_key: self.internal_key,
-            neighbors: Vec::new(),
-            position: Vec::new(),
-            program: self.programs[0].clone(),
+            neighbors,
+            position: pack_position_bits(&bits),
+            program: self.programs[program_index].clone(),
+        })
+    }
+}
+
+/// Balanced merkle root over an ordered list of programs. Splits at
+/// `next_power_of_two(n) / 2`. For `n = 1` the leaf hash itself is the
+/// root.
+fn merkle_root_of_programs(programs: &[Vec<u8>]) -> [u8; 32] {
+    debug_assert!(!programs.is_empty(), "merkle_root_of_programs: empty list");
+    if programs.len() == 1 {
+        merkle_leaf_hash(&programs[0])
+    } else {
+        let k = programs.len().next_power_of_two() / 2;
+        let left = merkle_root_of_programs(&programs[..k]);
+        let right = merkle_root_of_programs(&programs[k..]);
+        merkle_node_hash(&left, &right)
+    }
+}
+
+/// Packs a slice of `0`/`1` bit values into bytes, LSB-first within
+/// each byte. Trailing high bits in the last byte are zero-padded.
+fn pack_position_bits(bits: &[u8]) -> Vec<u8> {
+    let byte_count = (bits.len() + 7) / 8;
+    let mut out = vec![0u8; byte_count];
+    for (i, &b) in bits.iter().enumerate() {
+        if b & 1 != 0 {
+            out[i / 8] |= 1 << (i % 8);
         }
     }
+    out
 }
 
 // ── CallProof ────────────────────────────────────────────────────
@@ -275,12 +359,18 @@ fn merkle_node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 }
 
 /// Walks up the merkle path from a leaf hash using neighbors and a
-/// position bitstring (bit i = 0 → neighbor on right, 1 → left).
+/// position bitstring (bit i: `0` → current on left / neighbor on right,
+/// `1` → swap; LSB-first within byte). The position bitstring must
+/// cover all neighbors — more position bytes than required (up to byte
+/// alignment) is fine; fewer is a `MalformedCallProof`.
 fn merkle_walk_up(
     mut hash: [u8; 32],
     neighbors: &[[u8; 32]],
     position: &[u8],
 ) -> Result<[u8; 32], VMError> {
+    if neighbors.len() > position.len().saturating_mul(8) {
+        return Err(VMError::MalformedCallProof);
+    }
     for (i, neighbor) in neighbors.iter().enumerate() {
         let bit = get_bit(position, i);
         hash = if bit == 0 {
