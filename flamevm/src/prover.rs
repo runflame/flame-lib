@@ -89,7 +89,7 @@ impl<'g> Prover<'g> {
         let bytecode = program.to_bytecode();
         let witnesses = program.to_witnesses();
         let mut prover = Prover::new(pc_gens, witnesses);
-        let (result, sigs) = VM::execute_external_keep_delegate(
+        let (result, sigs) = VM::run_external(
             header,
             bytecode.clone(),
             gas_limit,
@@ -131,7 +131,8 @@ impl<'g> Delegate for Prover<'g> {
         // The proof is produced by `into_proof` instead — `finalize`'s
         // signature can't return the proof bytes without changing the
         // trait. [`Prover::prove`] calls `into_proof` after
-        // `VM::execute_external_keep_delegate` returns.
+        // [`VM::run_external`] returns; `finalize` here is a no-op
+        // retained only so `Prover` satisfies the `Delegate` trait.
         Ok(())
     }
 }

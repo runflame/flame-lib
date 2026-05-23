@@ -65,7 +65,7 @@ impl Verifier {
         mem_limit: u64,
     ) -> Result<(TxResult, Vec<DeferredSig>), VMError> {
         let mut verifier = Verifier::new();
-        let (result, sigs) = VM::execute_external_keep_delegate(
+        let (result, sigs) = VM::run_external(
             header,
             bytecode,
             gas_limit,
@@ -104,8 +104,10 @@ impl Delegate for Verifier {
     }
 
     fn finalize(self, _deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError> {
-        // Proof verification happens via `verify_proof` after the VM
-        // exits cleanly, mirroring the prover's `into_proof`.
+        // Proof verification happens via `verify_proof` after
+        // [`VM::run_external`] returns; `finalize` here is a no-op
+        // retained only so `Verifier` satisfies the `Delegate` trait
+        // (mirrors the symmetric stub on the prover side).
         Ok(())
     }
 }

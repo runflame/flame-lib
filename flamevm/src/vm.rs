@@ -414,15 +414,17 @@ impl VM {
         Ok(vm.into_result())
     }
 
-    /// Variant of `execute_external` that returns the delegate alongside
-    /// the result, so the prover can extract its proof or the verifier
-    /// can call `verify_proof`. Skips `Delegate::finalize` — the caller
-    /// is responsible for finishing the proof-side bookkeeping.
+    /// Runs an external transaction script to completion without
+    /// calling `Delegate::finalize`. Returns the resource summary plus
+    /// the accumulated deferred signatures; the caller (typically
+    /// [`crate::Prover::prove`] or [`crate::Verifier::verify`]) then
+    /// drives its own proof-construction or proof-verification step
+    /// against the borrowed delegate before discarding it.
     ///
-    /// Phase 11 Prover/Verifier entry points use this; the original
-    /// `execute_external` stays for older paths that don't need access
-    /// to the delegate after run.
-    pub(crate) fn execute_external_keep_delegate<D: Delegate>(
+    /// Lower-level counterpart of [`Self::execute_external`], which
+    /// consumes the delegate and finalizes it inline. Both share the
+    /// same dispatch loop; only the post-run lifecycle differs.
+    pub(crate) fn run_external<D: Delegate>(
         header: TxHeader,
         script: Vec<u8>,
         gas_limit: u64,
