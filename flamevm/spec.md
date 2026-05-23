@@ -431,16 +431,16 @@ All constraint operations available on external transactions only.
 
 | Hex | Name | Stack diagram | Notes |
 | --- | --- | --- | --- |
-| 90 | input | string → object | Consumes a Utreexo entry and materializes a cell handle (an `Object`) on the stack. |
-| 91 | object | args… k pred → object | Wraps a tuple of items into an object (a cell handle) to be satisfied during the duration of the script. |
-| 92 | output | args… k pred → ø | Wraps a tuple of portable items into an output. |
-| 93 | open | object args… k callproof → results… | Similar to a call, but opens a merkle path into a predicate. |
+| 90 | input | string → cell | Consumes a Utreexo entry and materializes a `cell` handle on the stack. |
+| 91 | cell | args… k pred → cell | Wraps a tuple of portable items into a linear `cell` handle. Consumes the VM's `last_anchor` for the new cell's anchor and advances it to the next anchor via `Cell::to_anchor()`. |
+| 92 | output | args… k pred → ø | Same construction as `cell` but emits an `Output` effect into the txlog instead of pushing the handle. |
+| 93 | open | cell internal_key neighbors position program args… k → results… | Verifies the Taproot call-proof formed by `internal_key` (a Point), `neighbors` (list-style Dict of 32-byte Strings, leaf-to-root order), `position` (String of bit-packed sides), and `program` (String) against the cell's predicate. On success, pours the cell's payload then the `k` args onto the current call's stack and enters a new Run over `program`. Cell-open is **Run-level, not Call-level**: the program shares the current call's stack, gas, memory cap, identity, and control-flow scope — `return k` from inside the opened program exits the enclosing call frame, and `break:k` past the run-stack errors `BreakOutOfCall`. Any error inside the Run hard-fails the current call. Position bits are read LSB-first within byte, zero-extended past the end; bit value `0` = current hash on left / neighbor on right, `1` = swap. |
 | 94 | send | args… k gas bytes method addr → ø | Send message; similar to call, but does not expect results. |
 | 95 | call | args… k gas bytes method addr → results… k | (Internal) Calls a method on an actor, transferring control. |
 | 96 | load | ø → dict | (Internal) Loads actor state and marks the actor for destruction (re-entry blocked until `save`). |
 | 97 | save | dict → ø | (Internal) Saves the actor state and unmarks it for destruction. |
-| 98 | signtx | obj → items… k | (External) Puts object payload on stack. Defers external transaction signature verification. |
-| 99 | signrun | obj prog sig args… m → items… k | Executes a signed program on behalf of the actor. The program may check the actor ID or anchor, or any other value, to appropriately bind the signature. |
+| 98 | signtx | cell → items… k | Pops the cell, defers a TxID-bound signature record (verification key = cell's predicate point; signature comes from the tx envelope at finalize), pours the cell's payload onto the current call's stack and pushes the count `k`. |
+| 99 | signrun | cell prog sig args… m → items… k | Records a deferred signature commitment over `prog` only (verification key = cell's predicate point; signature = the popped `sig` String, must be 64 bytes); pours the cell's payload then the `m` args onto the current call's stack; enters a new Run over `prog`. Same Run-level isolation rules as `open`. Programs bind themselves to context (anchor, actor identity, etc.) via explicit checks inside the program. |
 | 9a | timelock | ø → n {0 | 1} | Pushes timelock integer and a flag: 0 for block height, 1 for timestamp. |
 | 9b | version | ø → n | Version bits of the external transaction invoking this call. |
 | 9c | actorid | ø → string | Pushes actor ID. |
@@ -472,6 +472,10 @@ All constraint operations available on external transactions only.
 **Bit-oriented vs byte-oriented strings:** we choose byte-oriented strings as simpler and less error-prone.
 
 **Varlength encoding:** using the same CompactSize format as in Bitcoin.
+
+**Cell-open trust model.** `open` and `signrun` are Run-level — the unlocked program runs inside the caller's call frame, sharing its stack, gas, memory cap, identity, and (when called from within an actor) its actor authority. The caller is choosing to delegate full local authority to the unlocked program. This is safe in external transactions because the *creator* of the external tx is the same party choosing which cell to open and which predicate to satisfy — the program is, by construction, code the tx author has accepted by accepting the predicate. The same reasoning applies to internal-context cell-opens but with finer granularity: an actor opening a cell is granting the cell's program full access to the actor's frame. Authors of methods that accept cells from untrusted callers must therefore treat the cell's predicate as **the** authorization filter for the entire program-side authority. (Future review: tighter sandboxing for cell-opens in internal context may be desirable.)
+
+**`signrun` binding policy.** The deferred signature for `signrun` commits to the program bytes only. The program is expected to bind itself to further context (anchor, actor identity, tx-level data) by including explicit checks such as `anchor <expected> eq verify` inside the program. This shifts the binding policy into the program author's hands — flexibility at the price of footgun.
 
 ### Actor structure
 

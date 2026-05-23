@@ -70,15 +70,31 @@ impl Anchor {
 
 /// Signature check whose verification is deferred to `Delegate::finalize`.
 ///
-/// Both prover and verifier append to a `Vec<DeferredSig>` during VM
-/// execution. The delegate consumes the list at finalize and either signs
-/// the missing entries (prover) or batch-verifies them (verifier).
+/// Two flavors:
+///
+/// - **`TxBound`** — created by `signtx`. The cell-holder authorizes the
+///   *whole transaction*; the actual signature lives in the tx envelope
+///   and the message comes from the eventually-computed TxID. At
+///   finalize, the delegate aggregates all `TxBound` keys (via MuSig)
+///   and verifies the envelope signature against the TxID-bound message.
+///
+/// - **`Explicit`** — created by `signrun`. The cell-holder signed a
+///   specific program at run time; both the message (a transcript over
+///   the program bytes) and the signature are known immediately. The
+///   delegate batch-verifies them at finalize.
 #[derive(Clone, Debug)]
-pub struct DeferredSig {
-    pub verification_key: CompressedRistretto,
-    pub message: Vec<u8>,
-    /// `None` on the prover side until signing fills it in.
-    pub signature: Option<[u8; 64]>,
+pub enum DeferredSig {
+    /// Cell-holder must sign the transaction's TxID. The signature is
+    /// supplied via the tx envelope (not on the stack).
+    TxBound { verification_key: CompressedRistretto },
+
+    /// Cell-holder signed an explicit message at run time. The signature
+    /// is on the stack at the time the record is created.
+    Explicit {
+        verification_key: CompressedRistretto,
+        message: Vec<u8>,
+        signature: [u8; 64],
+    },
 }
 
 // ── Inbound message and context ──────────────────────────────────
@@ -1753,78 +1769,25 @@ impl VM {
         Ok(values)
     }
 
-    /// Decodes a `CallProof` from its stack-encoded form. The script
-    /// produces a single String holding the wire form of the proof:
-    /// internal_key (32 bytes) || position-len-varint || position-bytes
-    /// || neighbors-count-varint || neighbors-32-bytes... || program.
+    // (CallProof is now constructed from distinct stack pieces; see
+    // `callproof_from_stack_pieces` below `op_open`. The earlier packed
+    // bag-of-bytes layout was replaced per Architect's response on todo
+    // item 9.5.)
+
+    // `signtx` no longer builds a message at op-time — the TxID-bound
+    // message is constructed by the delegate at finalize, when TxID is
+    // known. See `DeferredSig::TxBound`.
+
+    /// Constructs the Merlin transcript message for `signrun`.
     ///
-    /// For Phase 9 we use a simpler tuple layout: the proof is a single
-    /// `String` whose bytes are a concatenation in a fixed order, so the
-    /// off-chain caller is responsible for assembling it. A list-style
-    /// Dict encoding will land alongside the rest of the wire-format
-    /// work; this minimal layout suffices for the Taproot mechanics and
-    /// the test surface.
-    fn decode_callproof(bytes: &[u8]) -> Result<CallProof, VMError> {
-        // Layout: 32 bytes internal_key
-        //         | 4 bytes LE u32 = position byte-length p
-        //         | p bytes position
-        //         | 4 bytes LE u32 = neighbor count n
-        //         | n × 32 bytes neighbors
-        //         | remaining bytes = program
-        if bytes.len() < 32 + 4 + 4 {
-            return Err(VMError::MalformedCallProof);
-        }
-        let mut off = 0usize;
-        let mut key_bytes = [0u8; 32];
-        key_bytes.copy_from_slice(&bytes[off..off + 32]);
-        let internal_key = CompressedRistretto(key_bytes);
-        off += 32;
-        let pos_len = {
-            let mut buf = [0u8; 4];
-            buf.copy_from_slice(&bytes[off..off + 4]);
-            u32::from_le_bytes(buf) as usize
-        };
-        off += 4;
-        if bytes.len() < off + pos_len + 4 {
-            return Err(VMError::MalformedCallProof);
-        }
-        let position = bytes[off..off + pos_len].to_vec();
-        off += pos_len;
-        let n_count = {
-            let mut buf = [0u8; 4];
-            buf.copy_from_slice(&bytes[off..off + 4]);
-            u32::from_le_bytes(buf) as usize
-        };
-        off += 4;
-        if bytes.len() < off + n_count * 32 {
-            return Err(VMError::MalformedCallProof);
-        }
-        let mut neighbors = Vec::with_capacity(n_count);
-        for _ in 0..n_count {
-            let mut h = [0u8; 32];
-            h.copy_from_slice(&bytes[off..off + 32]);
-            neighbors.push(h);
-            off += 32;
-        }
-        let program = bytes[off..].to_vec();
-        Ok(CallProof { internal_key, neighbors, position, program })
-    }
-
-    /// Constructs the Merlin transcript used by `signtx` to compute the
-    /// message that the cell-holder's signature must commit to.
-    fn signtx_message(cell: &Cell) -> Vec<u8> {
-        let mut t = Transcript::new(b"flamevm.signtx.v1");
-        t.append_message(b"cell_id", &cell.id());
-        let mut out = vec![0u8; 32];
-        t.challenge_bytes(b"msg", &mut out);
-        out
-    }
-
-    /// Constructs the Merlin transcript message for `signrun`. Binds the
-    /// signature to both the cell identity and the program bytes.
-    fn signrun_message(cell: &Cell, program: &[u8]) -> Vec<u8> {
+    /// Binds the signature to **the program bytes only**. The program is
+    /// expected to bind itself to any further context (cell anchor,
+    /// actor identity, tx anchor) by including explicit checks
+    /// (e.g. `anchor pushstr<expected> eq verify`). This pushes the
+    /// binding policy into the program author's hands rather than
+    /// pre-baking a fixed envelope; see todo item 9.2 for the rationale.
+    fn signrun_message(program: &[u8]) -> Vec<u8> {
         let mut t = Transcript::new(b"flamevm.signrun.v1");
-        t.append_message(b"cell_id", &cell.id());
         t.append_message(b"program", program);
         let mut out = vec![0u8; 32];
         t.challenge_bytes(b"msg", &mut out);
@@ -1862,20 +1825,32 @@ impl VM {
         Ok(())
     }
 
-    /// `0x93 open` — `cell args… k callproof → results…`.
-    /// Verifies the callproof against the cell's predicate, pours the
-    /// cell's payload + args onto the current frame's stack, and enters
-    /// a new Run with the unlocked program. No new call frame — the
-    /// program shares the current call's stack, gas, mem, and identity.
+    /// `0x93 open` — `cell internal_key neighbors position program args… k → results…`.
+    ///
+    /// CallProof components are passed as distinct stack values rather
+    /// than a packed blob, so scripts can compose proofs dynamically and
+    /// the existing String/Dict/Point machinery is reused for free.
+    /// On success, pours the cell's payload then the args onto the
+    /// current frame's stack and enters a new Run over the unlocked
+    /// program. No new call frame — the program shares the current
+    /// call's stack, gas, mem, and identity (Run-level cell-open).
     fn op_open(&mut self) -> Result<(), VMError> {
-        let cp_bytes = self.pop_string()?;
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
+        let program_str = self.pop_string()?;
+        let position_str = self.pop_string()?;
+        let neighbors_dict = self.pop_dict()?;
+        let internal_key_pt = self.pop_point()?;
         let cell = self.pop_cell()?;
-        // Verify callproof — hard fail if it doesn't match the predicate.
-        let cp = Self::decode_callproof(cp_bytes.as_bytes())?;
+
+        let cp = Self::callproof_from_stack_pieces(
+            internal_key_pt,
+            &neighbors_dict,
+            &position_str,
+            &program_str,
+        )?;
         let program = cell.predicate.verify_callproof(&cp)?.to_vec();
-        // Pour payload, then args.
+
         for v in cell.payload {
             self.push_value(v);
         }
@@ -1886,19 +1861,52 @@ impl VM {
         Ok(())
     }
 
+    /// Builds a `CallProof` from the four stack-popped pieces.
+    ///
+    /// `neighbors` is expected to be a list-style Dict (keys `0..n-1`)
+    /// of 32-byte String values. Any deviation → `MalformedCallProof`.
+    fn callproof_from_stack_pieces(
+        internal_key: Point,
+        neighbors: &Dict,
+        position: &String,
+        program: &String,
+    ) -> Result<CallProof, VMError> {
+        let mut n_vec = Vec::with_capacity(neighbors.len());
+        for (i, (k, v)) in neighbors.entries().enumerate() {
+            if *k != Int253::from(i as u64) {
+                return Err(VMError::MalformedCallProof);
+            }
+            match v {
+                Value::String(s) => {
+                    if s.len() != 32 {
+                        return Err(VMError::MalformedCallProof);
+                    }
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(s.as_bytes());
+                    n_vec.push(h);
+                }
+                _ => return Err(VMError::MalformedCallProof),
+            }
+        }
+        Ok(CallProof {
+            internal_key: internal_key.inner,
+            neighbors: n_vec,
+            position: position.as_bytes().to_vec(),
+            program: program.as_bytes().to_vec(),
+        })
+    }
+
     /// `0x98 signtx` — `cell → items… k`. Pops the cell, records a
-    /// deferred signature check (the cell holder must sign the tx),
-    /// then pours the cell's payload onto the current stack and pushes
-    /// the count `k` on top. No new Run, no new frame — the cell holder
+    /// **TxBound** deferred signature (the cell holder must sign the
+    /// transaction's TxID via the tx envelope; no message is built
+    /// here), pours the cell's payload onto the current stack, and
+    /// pushes the count `k`. No new Run, no new frame — the cell holder
     /// is just authorizing the existing transaction.
     fn op_signtx(&mut self) -> Result<(), VMError> {
         let cell = self.pop_cell()?;
-        let msg = Self::signtx_message(&cell);
         let k = cell.payload.len();
-        self.deferred_sigs.push(DeferredSig {
+        self.deferred_sigs.push(DeferredSig::TxBound {
             verification_key: cell.predicate.verification_key(),
-            message: msg,
-            signature: None,
         });
         for v in cell.payload {
             self.push_value(v);
@@ -1907,10 +1915,13 @@ impl VM {
         Ok(())
     }
 
-    /// `0x99 signrun` — `cell prog sig args… m → items… k`. Records a
-    /// deferred signature commitment over (cell-id, program), then
-    /// behaves like `open` with the explicit program: pours payload +
-    /// args onto the current stack and enters a Run with the program.
+    /// `0x99 signrun` — `cell prog sig args… m → items… k`.
+    ///
+    /// Records an **Explicit** deferred-sig commitment over `prog` only
+    /// (the program is responsible for binding further context via
+    /// explicit checks inside its code), then pours the cell's payload
+    /// and the `m` args onto the current stack and enters a new Run
+    /// over `prog`.
     fn op_signrun(&mut self) -> Result<(), VMError> {
         let m = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(m)?;
@@ -1924,11 +1935,11 @@ impl VM {
         let mut sig = [0u8; 64];
         sig.copy_from_slice(sig_bytes);
         let program = prog_str.as_bytes().to_vec();
-        let msg = Self::signrun_message(&cell, &program);
-        self.deferred_sigs.push(DeferredSig {
+        let msg = Self::signrun_message(&program);
+        self.deferred_sigs.push(DeferredSig::Explicit {
             verification_key: cell.predicate.verification_key(),
             message: msg,
-            signature: Some(sig),
+            signature: sig,
         });
         for v in cell.payload {
             self.push_value(v);
@@ -4326,19 +4337,31 @@ mod tests {
         (tree, cp)
     }
 
-    /// Helper: serializes a `CallProof` to the wire layout expected by
-    /// `decode_callproof` (see that function for details).
-    fn encode_callproof(cp: &CallProof) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(cp.internal_key.as_bytes());
-        out.extend_from_slice(&(cp.position.len() as u32).to_le_bytes());
-        out.extend_from_slice(&cp.position);
-        out.extend_from_slice(&(cp.neighbors.len() as u32).to_le_bytes());
-        for n in &cp.neighbors {
-            out.extend_from_slice(n);
+    /// Helper: appends script bytes that push a CallProof's four pieces
+    /// onto the stack in the order `open` expects: internal_key (Point),
+    /// neighbors (Dict), position (String), program (String).
+    fn push_callproof_pieces(script: &mut Vec<u8>, cp: &CallProof) {
+        // internal_key as Point
+        push_point_bytes(script, cp.internal_key.as_bytes());
+        // neighbors as list-style Dict of 32-byte Strings
+        for h in &cp.neighbors {
+            push_string_bytes(script, h);
         }
-        out.extend_from_slice(&cp.program);
-        out
+        // push:<n>, dict — builds the Dict from the just-pushed strings
+        // (Dict construction stack: ... val key val key ... n → dict, but
+        // we use the implicit-keys form via push_n pairs of (val, key).
+        // Each neighbor was pushed as a value; we now push key indices
+        // and a count. For Phase 9 single-leaf case, this is empty.)
+        assert!(
+            cp.neighbors.is_empty(),
+            "multi-leaf neighbors not yet exercised in tests; will land with multi-leaf Tree"
+        );
+        script.push(0x00); // push:0 (count)
+        script.push(0x60); // dict
+        // position
+        push_string_bytes(script, &cp.position);
+        // program
+        push_string_bytes(script, &cp.program);
     }
 
     /// Helper: builds a script that pushes a `String` value of the given bytes.
@@ -4466,57 +4489,46 @@ mod tests {
 
     #[test]
     fn open_with_valid_callproof_runs_program() {
-        // Cell payload: push:42. Program: drop (drops the payload).
-        // After open: payload (42) is on stack, program runs drop, stack empty.
-        let payload_int: u8 = 0x05; // push:5
+        // Cell payload: 5. Program: drop. After open: payload poured to
+        // stack, program drops it → empty stack.
         let inner_program = vec![0x1c]; // drop
-        // Build the predicate from the inner program.
         let (tree, cp) = build_predicate_with_program(&inner_program, 7);
         let pred_point = tree.compute_point();
-        let cp_bytes = encode_callproof(&cp);
 
-        // Script:
-        //   push:5 (payload)
-        //   push:1 (count)
-        //   pushpoint(pred_point)
-        //   cell
-        //   push:0 (k=0 args)
-        //   pushstr(cp_bytes)
-        //   open
-        let mut script = vec![payload_int, 0x01];
+        // Script: push payload(5), push count(1), pushpoint(pred), cell,
+        //         push callproof pieces (internal_key, neighbors, pos, prog),
+        //         push k=0 (no args), open.
+        let mut script = vec![0x05, 0x01];
         push_point_bytes(&mut script, pred_point.as_bytes());
         script.push(0x91); // cell
-        script.push(0x00); // k=0 (no args)
-        push_string_bytes(&mut script, &cp_bytes);
+        push_callproof_pieces(&mut script, &cp);
+        script.push(0x00); // k=0 args
         script.push(0x93); // open
         let mut vm = vm_with_script(script);
         vm.last_anchor = Some(Anchor([0x42; 32]));
         run_to_end(&mut vm).unwrap();
-        // payload 5 was pushed onto stack, then drop ran → stack empty.
         assert!(vm.current_call.stack.is_empty());
     }
 
     #[test]
     fn open_with_wrong_program_hard_fails() {
-        // Predicate commits to one program; callproof claims a different one.
-        let real_program = vec![0x1c];     // drop
-        let fake_program = vec![0x1d];     // nop
+        // Predicate commits to `drop`; callproof claims `nop` instead.
+        let real_program = vec![0x1c];
+        let fake_program = vec![0x1d];
         let (tree, _real_cp) = build_predicate_with_program(&real_program, 7);
-        // Construct a callproof claiming fake_program under the same internal key.
         let cp = CallProof {
             internal_key: tree.internal_key,
             neighbors: Vec::new(),
             position: Vec::new(),
             program: fake_program,
         };
-        let cp_bytes = encode_callproof(&cp);
         let pred_point = tree.compute_point();
 
         let mut script = vec![0x05, 0x01];
         push_point_bytes(&mut script, pred_point.as_bytes());
         script.push(0x91);
+        push_callproof_pieces(&mut script, &cp);
         script.push(0x00);
-        push_string_bytes(&mut script, &cp_bytes);
         script.push(0x93);
         let mut vm = vm_with_script(script);
         vm.last_anchor = Some(Anchor([0x42; 32]));
@@ -4527,55 +4539,139 @@ mod tests {
     }
 
     #[test]
-    fn signtx_pours_payload_and_records_deferred_sig() {
+    fn open_passes_args_after_payload() {
+        // Cell payload: [10]. args: [20, 30]. Program: stack must end with
+        // exactly the args + payload arrangement; cleanup leaves stack
+        // empty. Inside the cell-run, stack = [10, 20, 30]. Program: drop
+        // three items.
+        let inner_program = vec![0x1c, 0x1c, 0x1c]; // drop, drop, drop
+        let (tree, cp) = build_predicate_with_program(&inner_program, 11);
+        let pred_point = tree.compute_point();
+
+        let mut script = vec![0x0a, 0x01]; // payload=10, count=1
+        push_point_bytes(&mut script, pred_point.as_bytes());
+        script.push(0x91);                  // cell
+        push_callproof_pieces(&mut script, &cp);
+        // push args 20, 30 (deepest first) and k=2
+        script.push(0x14);                  // pushint64 positive
+        script.extend_from_slice(&20u64.to_le_bytes());
+        script.push(0x14);
+        script.extend_from_slice(&30u64.to_le_bytes());
+        script.push(0x02);                  // k=2
+        script.push(0x93);                  // open
+        let mut vm = vm_with_script(script);
+        vm.last_anchor = Some(Anchor([0x42; 32]));
+        run_to_end(&mut vm).unwrap();
+        assert!(vm.current_call.stack.is_empty());
+    }
+
+    #[test]
+    fn signtx_pours_payload_and_records_txbound_sig() {
         // Build cell with payload [5, 7], then signtx.
-        let mut script = vec![0x05, 0x07, 0x02]; // payload + count=2
+        let mut script = vec![0x05, 0x07, 0x02];
         push_point_bytes(&mut script, &[0xaa; 32]);
         script.push(0x91); // cell
         script.push(0x98); // signtx
         let mut vm = vm_with_script(script);
         vm.last_anchor = Some(Anchor([0x42; 32]));
         run_to_end(&mut vm).unwrap();
-        // Stack now has [5, 7, 2 (count)].
+        // Stack now has [5, 7, count=2].
         assert_eq!(vm.current_call.stack.len(), 3);
         assert_int(&vm.current_call.stack[2], Int253::from(2u64));
-        // One DeferredSig recorded.
-        let recorded = vm.deferred_sigs.len();
-        assert_eq!(recorded, 1);
+        // Exactly one TxBound deferred sig recorded. No message, no sig
+        // bytes — those come from the tx envelope at finalize.
+        assert_eq!(vm.deferred_sigs.len(), 1);
+        match &vm.deferred_sigs[0] {
+            DeferredSig::TxBound { verification_key } => {
+                assert_eq!(verification_key.as_bytes(), &[0xaa; 32]);
+            }
+            DeferredSig::Explicit { .. } => panic!("expected TxBound, got Explicit"),
+        }
     }
 
     #[test]
-    fn signrun_runs_signed_program() {
-        // Build cell with payload [42], then signrun running the program "drop"
-        // (which drops the 42 → empty stack).
-        // The signature itself isn't verified in Phase 9 — just the structure.
+    fn signrun_records_explicit_sig_and_runs_program() {
         let prog = vec![0x1c]; // drop
         let sig_bytes = [0u8; 64];
 
-        // Script:
-        //   push:5 (payload)
-        //   push:1 (count)
-        //   pushpoint(some)
-        //   cell
-        //   pushstr(prog)
-        //   pushstr(sig)
-        //   push:0 (m=0 args)
-        //   signrun
         let mut script = vec![0x05, 0x01];
         push_point_bytes(&mut script, &[0xaa; 32]);
         script.push(0x91); // cell
         push_string_bytes(&mut script, &prog);
         push_string_bytes(&mut script, &sig_bytes);
-        script.push(0x00); // m=0
+        script.push(0x00); // m=0 args
         script.push(0x99); // signrun
         let mut vm = vm_with_script(script);
         vm.last_anchor = Some(Anchor([0x42; 32]));
         run_to_end(&mut vm).unwrap();
-        // payload (5) was pushed, then drop ran inside the open-run.
         assert!(vm.current_call.stack.is_empty());
-        // One DeferredSig recorded with the supplied signature.
         assert_eq!(vm.deferred_sigs.len(), 1);
-        assert!(vm.deferred_sigs[0].signature.is_some());
+        match &vm.deferred_sigs[0] {
+            DeferredSig::Explicit {
+                verification_key,
+                message,
+                signature,
+            } => {
+                assert_eq!(verification_key.as_bytes(), &[0xaa; 32]);
+                assert_eq!(signature, &sig_bytes);
+                // message must be the program-only Merlin transcript output.
+                assert_eq!(message.len(), 32);
+            }
+            DeferredSig::TxBound { .. } => panic!("expected Explicit, got TxBound"),
+        }
+    }
+
+    #[test]
+    fn signrun_message_binds_only_to_program_not_to_cell() {
+        // Two different cells running the same program produce
+        // identical deferred-sig messages — confirms architect's
+        // intent that signrun binds only to the program.
+        fn run_signrun(predicate_byte: u8) -> DeferredSig {
+            let prog = vec![0x1c];
+            let sig = [0u8; 64];
+            let mut script = vec![0x05, 0x01];
+            push_point_bytes(&mut script, &[predicate_byte; 32]);
+            script.push(0x91);
+            push_string_bytes(&mut script, &prog);
+            push_string_bytes(&mut script, &sig);
+            script.push(0x00);
+            script.push(0x99);
+            let mut vm = vm_with_script(script);
+            vm.last_anchor = Some(Anchor([0x42; 32]));
+            run_to_end(&mut vm).unwrap();
+            vm.deferred_sigs.into_iter().next().unwrap()
+        }
+        let s1 = run_signrun(0xaa);
+        let s2 = run_signrun(0xbb);
+        let (m1, m2) = match (&s1, &s2) {
+            (
+                DeferredSig::Explicit { message: m1, .. },
+                DeferredSig::Explicit { message: m2, .. },
+            ) => (m1.clone(), m2.clone()),
+            _ => panic!("expected Explicit on both"),
+        };
+        assert_eq!(m1, m2, "signrun message must be program-only");
+    }
+
+    #[test]
+    fn cell_id_changes_when_payload_value_changes() {
+        // Two cells with the same predicate + same anchor + same payload
+        // type-shape but different values must have different ids.
+        // Per architect response 9.3: payload bytes are bound via the
+        // canonical encoding API.
+        let pred = Predicate::Opaque(CompressedRistretto([0xaa; 32]));
+        let a = Anchor([0x42; 32]);
+        let c1 = Cell::new(
+            pred.clone(),
+            a,
+            vec![Value::Int253(Int253::from(5u64))],
+        );
+        let c2 = Cell::new(
+            pred,
+            a,
+            vec![Value::Int253(Int253::from(99u64))],
+        );
+        assert_ne!(c1.id(), c2.id());
     }
 
     #[test]

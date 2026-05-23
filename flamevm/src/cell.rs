@@ -202,27 +202,34 @@ impl Cell {
         Cell { predicate, anchor, payload }
     }
 
-    /// Computes the canonical identity hash of this cell. Used as the
-    /// source for the next anchor (via `to_anchor`) and for txlog
-    /// commitments.
+    /// Computes the canonical identity hash of this cell, via a Merlin
+    /// transcript that absorbs the opaque predicate point, the anchor,
+    /// and each payload value's **canonical wire encoding**.
     ///
-    /// The hash is bound to: opaque predicate point, anchor, and an
-    /// ordered hash chain over payload type-codes + bytes. For Phase 9
-    /// we use a Merlin transcript over the cell fields — payload
-    /// values' canonical encodings will be added when full encoding
-    /// support lands.
+    /// Anchor uniqueness across a tx (guaranteed by the ratchet chain
+    /// from inputs forward) makes cell-ids unique without needing the
+    /// payload to disambiguate; binding the payload bytes here is
+    /// belt-and-suspenders to make `id()` a true commitment to the
+    /// cell's contents — needed for protocol messages (signtx/signrun)
+    /// and for the txlog Output entry.
+    ///
+    /// Panics if a payload value's type has no canonical encoder.
+    /// All portable types (Int253, String, Dict, Point) encode today;
+    /// Token / ClearToken / WideToken encoders land in Phase 13.
     pub fn id(&self) -> [u8; 32] {
         let mut t = Transcript::new(b"flamevm.cell.id.v1");
         t.append_message(b"predicate", self.predicate.to_point().as_bytes());
         t.append_message(b"anchor", &self.anchor.0);
-        // Payload-bind via length prefix + per-item commit. Per-item
-        // commitment uses `Value::type_code` + a placeholder for the
-        // value's canonical bytes. Full canonical encoding is wired in
-        // alongside the cell wire-format work in a follow-up phase.
         let len = self.payload.len() as u64;
         t.append_message(b"payload.len", &len.to_le_bytes());
+        // Bind each payload item's canonical wire bytes. Re-use a single
+        // buffer across items; clear between writes.
+        let mut buf = Vec::new();
         for v in &self.payload {
-            t.append_message(b"payload.tag", &[v.type_code()]);
+            buf.clear();
+            crate::encoding::write_value(&mut buf, v)
+                .expect("portable payload value must have a canonical encoder");
+            t.append_message(b"payload.item", &buf);
         }
         let mut h = [0u8; 32];
         t.challenge_bytes(b"id", &mut h);

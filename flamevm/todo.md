@@ -269,3 +269,183 @@ Items most likely to surface in early integration tests (consensus-critical hash
 15. **4.4** `shiftleft/right` for `n > 256`.
 16. **5.2** `dict` duplicate-key handling.
 17. **5.3** Token portability flag (revisit in Phase 13).
+
+---
+
+## Phase 9 — Cells, opens, signatures
+
+### 9.1 `signtx` deferred-sig message — what does it commit to? ✅ **resolved**
+
+Spec (`0x98 signtx`): "Defers external transaction signature verification."
+
+> Implementation today: the deferred sig's `message` is a Merlin transcript over the cell's `id()` only:
+> ```
+> transcript = Transcript::new(b"flamevm.signtx.v1")
+> transcript.append(b"cell_id", cell.id())
+> message = transcript.challenge_bytes(b"msg", 32)
+> ```
+> No binding to the transaction (no TxID, no input/output set, no fee, nothing).
+>
+> Stakes: a `signtx` signature is portable across **any** transaction that consumes a cell with the same id. The intent ("Defers *external transaction* signature verification") strongly implies the sig should bind to the TxID, but TxID isn't known until finalize.
+>
+> Three candidates:
+> - **a)** Message = TxID. Bitcoin-`SIGHASH_ALL` style. Signer authorizes the whole tx; cell identity falls out of the input set being part of TxID.
+> - **b)** Message = TxID || cell_id. Belt-and-suspenders.
+> - **c)** Merlin transcript over (TxID, cell-id, optional tags). Most flexible; can extend.
+>
+> Decision is blocking Phase 14 (sigverify + delegate finalize): finalize must construct the same message the signer used.
+>
+> _Architect response:_ see zkvm implementation: signtx defers verification entirely and opens up payload immediately. After external tx is finalized, txid is known and VM forms a complete message over multi-key musig protocol with the txid-bound message. 
+>
+> **Applied** — `DeferredSig` refactored from a single struct into a tagged enum with `TxBound { verification_key }` and `Explicit { verification_key, message, signature }` variants. `signtx` pushes a `TxBound` record — no message is built at op-time; finalize will construct the TxID-bound message and aggregate via MuSig. `signrun` pushes `Explicit`. Test `signtx_pours_payload_and_records_txbound_sig` confirms.
+
+### 9.2 `signrun` deferred-sig message — same question ✅ **resolved**
+
+Spec (`0x99 signrun`): "Executes a signed program on behalf of the actor. The program may check the actor ID or anchor, or any other value, to appropriately bind the signature."
+
+> Implementation today:
+> ```
+> transcript = Transcript::new(b"flamevm.signrun.v1")
+> transcript.append(b"cell_id", cell.id())
+> transcript.append(b"program", program)
+> message = transcript.challenge_bytes(b"msg", 32)
+> ```
+>
+> Binds to cell-id + program. Does **not** bind to the args being passed in, nor to the TxID.
+>
+> Replay risk: a `signrun` signature is portable to any context that opens the same cell with the same program, regardless of args / actor / tx. The spec's "program may check the actor ID or anchor" puts the burden on the program author to add binding — which is real defense-in-depth but a footgun if forgotten.
+>
+> Candidates:
+> - **a)** Current (cell-id + program). Program author binds rest.
+> - **b)** + args. Most binding, but args may include non-portable values that complicate hashing.
+> - **c)** + TxID. Like 9.1 but for run.
+>
+> _Architect response:_ signrun can bind only to the program, then the program itself can be bound to the anchor or other data by exlicitly checking for it in its code. E.g. "anchor 123 eq verify" part of the program fails if the anchor does not match the hardcoded one and effectively binds the program and the signature to that exact value "123".
+>
+> **Applied** — `signrun_message(program)` now transcribes only the program bytes (cell-id removed from the binding). `op_signrun` builds the `DeferredSig::Explicit { message, ... }` from this. Test `signrun_message_binds_only_to_program_not_to_cell` confirms by running signrun against two different predicates and verifying message bytes match. Spec.md row 0x99 + Discussion section document the program-binds-context-explicitly policy.
+
+### 9.3 `Cell::id` — should it bind payload bytes? ✅ **resolved**
+
+> Implementation today: `Cell::id` is a Merlin transcript that absorbs predicate-point, anchor, payload length, and per-payload-item **type code only** — *not* the payload's canonical bytes:
+> ```
+> for v in &self.payload {
+>     t.append_message(b"payload.tag", &[v.type_code()]);
+> }
+> ```
+>
+> Two cells with the same predicate, the same anchor, and the same payload type-shape but different values produce **the same `id()`**.
+>
+> The anchor ratchet between successive outputs makes this not bite in single-tx tests (anchors differ → ids differ). It bites at any boundary where two cells happen to share an anchor (impossible inside one tx, possible with inputs in Phase 10 or with malicious cell construction).
+>
+> Stakes: `Cell::id` is the deferred-sig message anchor (9.1, 9.2), the next-anchor seed (`Cell::to_anchor`), and the txlog Output commitment. All consensus-critical.
+>
+> Mitigation: bind payload via canonical wire-encoding of each value. Blocked on full Value encoding for Token/ClearToken/WideToken (the plain-data types already encode canonically).
+>
+> _Architect response:_ do like in zkvm. Entire payload must be hashed via current encoding API. Anchor provides uniqueness, there must be no two cells with two identical anchors - that's enforced partly in VM, partly via Utreexo logic and actor queue.
+>
+> **Applied** — `Cell::id` rewritten: each payload value is encoded via `encoding::write_value` into a buffer and the bytes are absorbed into the Merlin transcript under tag `b"payload.item"`. Test `cell_id_changes_when_payload_value_changes` confirms two cells with same predicate + same anchor + different `Int253` values now have distinct ids. Phase-9 limitation: only payload values with canonical encoders (Int253, String, Dict, Point today) are supported — Token/ClearToken/WideToken/Merlin/etc. will panic in `Cell::id` until Phase 13 wires their encoders. Anchor-uniqueness invariant (no two cells with the same anchor) is the responsibility of the input/ratchet/Utreexo chain, not validated here.
+
+### 9.4 `Cell::id` vs. wire-encoding hash — one or two identities? ✅ **resolved**
+
+> Cells in Utreexo are stored as wire-encoded blobs. The natural "this cell's identity" is `H(wire-bytes)`. But `Cell::id` is currently a Merlin transcript over fields.
+>
+> Two functions for one concept ("identity of a cell") will drift apart. The choice:
+> - **a)** `Cell::id` = `H(canonical-wire-encoding)`. Utreexo and protocol commitments agree.
+> - **b)** `Cell::id` = Merlin transcript (current). Utreexo hashes the wire bytes separately. Two distinct ids.
+>
+> Architect's prior guidance: "all internal hashes via transcript". Suggests (a) with the transcript being the canonical bytes-hash. Concretely: `Cell::id` should be a transcript that absorbs the cell's wire bytes once we have the wire encoding.
+>
+> _Architect response:_ we do not hash "wire bytes". We use encoding API for two purposes: produce a blob of "wire bytes" for transmission and to recursively produce a hash via Merlin Transcript without preallocation of buffers.
+>
+> **Applied** — `Cell::id` is the single canonical identity, computed via a Merlin transcript that absorbs the encoded bytes of each payload value (currently via an intermediate `Vec<u8>` buffer; the "no preallocation" pattern — writing the encoder's output directly into the transcript via a Writer-impl wrapper — is a future optimization, tracked separately). No "wire-hash" alternative is introduced.
+
+### 9.5 `CallProof` wire layout ✅ **resolved**
+
+> Implementation today: a single `String` on the stack, decoded with a fixed-layout body:
+> ```
+> internal_key (32) || pos_len:u32_LE || position || n_count:u32_LE || neighbors × 32 || program
+> ```
+>
+> Architect's prior guidance was to "keep call proof as strings: hashes of neighbours on stack, separate string for bit-pattern position, and other data - program, pubkey". That's four separate strings on the stack (or a list-style Dict containing them), not a packed bag of bytes.
+>
+> Stakes: spec compliance + integrator UX. The list-style Dict version reuses the existing Dict encoding/decoding machinery. The current packed version is a one-off encoder.
+>
+> _Architect response:_ lets use VM values verbatim and put these parameters as distinct values on stack. We'll avoid creating a new entity with its own encoding rules, and allow for easier runtime inspection/dynamic composition this way.
+>
+> **Applied** — `open`'s stack diagram changed from `cell args… k callproof → results…` to `cell internal_key neighbors position program args… k → results…`. `op_open` now pops four distinct values (Point internal_key, Dict neighbors, String position, String program) and reconstructs the `CallProof` struct in-VM via `callproof_from_stack_pieces`. The old packed-bytes `decode_callproof` helper is removed. Spec.md row 0x93 updated; tests retargeted with a `push_callproof_pieces` test helper. New test `open_passes_args_after_payload` exercises non-zero args.
+
+### 9.6 `return` inside an opened cell program ✅ **resolved**
+
+> With Run-level (not Call-level) cell-open, `return k` inside an opened cell's program pops the **outer call frame**, not the cell-run. A cell author can write a program that calls `return 0` and silently exits the outer script at the open-point.
+>
+> Two design choices:
+> - **a)** Status quo — `return k` exits the enclosing call. Cell author has the same power as if their program were inlined. Composition footgun.
+> - **b)** Cell-run swallows `return` — treat as `break:0` of the cell-run. The outer script always continues after `open` ran the program to completion.
+>
+> _Architect response:_ option (b) would be a weird special-case. Since we treat opens as runs, the program has full access to the surrounding context, that's fine.
+>
+> **Applied** — no code change. Current Run-level semantics already match: `return k` from inside the opened program exits the enclosing call frame; `break:k` past the run-stack errors `BreakOutOfCall`. Spec.md row 0x93 description updated to spell this out explicitly.
+
+### 9.7 Position bit ordering in `CallProof` ✅ **resolved**
+
+> Implementation today: `get_bit(bits, i)` reads bit `i` as `(bits[i/8] >> (i%8)) & 1` — LSB-first within byte, zero-extended past the end. The bit value `0` means "neighbor is on the right of running hash", `1` means "on the left".
+>
+> Consensus-critical: any verifier walking the same merkle path must use the same bit convention. Currently undocumented in `spec.md`.
+>
+> Confirm convention + add to spec.md row 0x93 description.
+>
+> _Architect response:_ document explicitly, use ZkVM call proof implementation as a reference.
+>
+> **Applied** — bit-ordering convention added to spec.md row 0x93: "Position bits are read LSB-first within byte, zero-extended past the end; bit value `0` = current hash on left / neighbor on right, `1` = swap." Confirmed against zkvm's `merkle::Directions` iterator which reads `(position & 1)` LSB-first and `Side::from_bit(0) = Left`. Matches.
+
+### 9.8 Trust model in cell-open — explicit spec note? ✅ **resolved**
+
+> Run-level cell-open means the cell's program inherits the caller's full authority: same stack, same gas, same actor identity (when called from inside an actor), same memory budget, can emit outputs/sends, etc.
+>
+> This is by design under "you accepted the predicate" — but the spec doesn't say it. A contract author opening a cell from an untrusted source (which they shouldn't but might) faces unbounded blast radius.
+>
+> Add explicit text to `spec.md` near `open` / `signrun` describing the trust model.
+>
+> _Architect response:_ the creator of external transaction is the same person owning the cell, so opening as a run is totally fine. This poses problems if cells are opened in internal context, but we can review that later.
+>
+> **Applied** — trust-model paragraph added to spec.md Discussion section: explains that the tx creator and the cell-opener are the same party (so granting full local authority to the cell's program is the same as inlining trusted code), and flags the internal-context cell-open case for future review.
+
+### 9.9 `signrun` linearity — leaked values in caller scope
+
+> When `open` or `signrun` finishes, the outer script has whatever the cell program left on the stack. If the cell program creates a linear value (a `merlin`, a `Token`, etc.) and leaves it on the stack, the outer script must consume it. The caller may not know what to do with it — `StackNotClean` at frame exit.
+>
+> Status quo: caller's responsibility to consume whatever the cell program produces. Cell authors should leave a documented return shape.
+>
+> Alternative: gate the cell program's stack outputs to a declared portable shape only.
+>
+> _Architect response:_
+
+### 9.10 Multi-leaf `PredicateTree` — Phase 9 ships single-leaf only
+
+> `PredicateTree { internal_key, programs }` permits any number of programs at the type level. `merkle_root` and `callproof_for` `assert_eq!(programs.len(), 1)` and panic otherwise. The single-leaf restriction blocks any real predicate use (multiple unlock paths is the point of Taproot).
+>
+> Either:
+> - **a)** Ship general balanced merklization now (small extension; ~30 LOC + tests).
+> - **b)** Keep single-leaf for Phase 9, ship multi-leaf in a follow-up.
+>
+> Recommend (a) since "Taproot with one leaf" is essentially Schnorr-tweaked-key with no path-options — defeats the purpose.
+>
+> _Architect response:_
+
+---
+
+## Suggested processing order (Phase 9 items)
+
+Blocking for downstream phases:
+- **9.1 + 9.2** — sig messages. Phase 14 (sigverify + delegate finalize) needs these locked.
+- **9.3 + 9.4** — `Cell::id` semantics. Phase 10 (inputs) needs the input → Utreexo round-trip pinned.
+
+Spec-only fixes (no design tension):
+- **9.5** — CallProof wire layout. Re-encode as Dict-of-strings or keep packed.
+- **9.7** — position bit-ordering in spec.md.
+- **9.8** — trust-model note in spec.md.
+
+Design calls with implementation impact:
+- **9.6** — `return` inside cell-open.
+- **9.9** — linearity-leak through cell-open.
+- **9.10** — multi-leaf predicate trees.
