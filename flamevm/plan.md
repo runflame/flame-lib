@@ -20,7 +20,7 @@ Phase numbers are stable across revisions; execution order changes as priorities
 | 5 | Dict ops | ✅ done |
 | 6 | Hash & Merlin | ✅ done |
 | 9 | Cells, outputs, open, signtx, signrun | ✅ done |
-| 10 | **Inputs (Utreexo) + send queue + Cell wire encoding** | ⏳ **next** |
+| 10 | **Inputs (stateless VM) + send queue + Cell wire encoding** | ⏳ in progress (input ✅; send pending) |
 | 8 | Clear tokens & issuance | ⏳ pending |
 | 11 | Constraint system bootstrap (real Prover/Verifier) | ⏳ pending |
 | 12 | Range proofs & constraint composition | ⏳ pending |
@@ -412,35 +412,59 @@ Phase numbers are stable across revisions; execution order changes as priorities
 
 ---
 
-### Phase 10 — Inputs (Utreexo) + send queue + Cell wire encoding ⏳ **next**
+### Phase 10 — Inputs (stateless VM) + send queue + Cell wire encoding ⏳ **in progress**
 
 **Goal**: external tx claims outputs; either context queues async messages. Closes the cell life-cycle by adding the on-chain wire round-trip (encode → Utreexo → decode → input).
 
 **Reuses**: Phase-9 `Cell` / `Predicate` / `Anchor::ratchet`, `Message` type from vm.rs, list-style `Dict` encoding from Phase 5.
 
-**New**:
-- **Cell wire encoding** — `Cell::encode(&self, w: &mut impl Writer)` and `Cell::decode(r: &mut impl Reader)` matching the documented list-style-Dict layout (predicate Point, anchor String, payload list-Dict). Round-trip + canonicality test.
-- `Utreexo` trait placeholder — `fn consume(&mut self, witness: &[u8]) -> Result<Cell, VMError>`. Real implementation lives outside `flamevm`.
-- `VM.sends: Vec<Message>` collector + `TxResult.sends` field.
-- `op_input` reads a String (Utreexo witness), decodes via Utreexo accessor, seeds `last_anchor` from the consumed cell, emits `TxEntry::Input(CellID)`, pushes the Cell handle.
+**Design pivot — VM is stateless w.r.t. Utreexo.** The VM does not see or
+process Utreexo inclusion proofs. The `input` opcode consumes a
+*canonically encoded cell* (a `String` on the stack) on the script's
+authority and emits a `TxEntry::Input(cell_id)` effect. The outer
+verifier cross-checks the txlog's Input ids against actual Utreexo
+state. This keeps the VM decoupled from blockchain state and mirrors
+how zkvm structured its `input` semantics (`pop string → decode →
+push cell`), but with no Utreexo trait inside `flamevm/`.
+
+**Added (so far)**:
+- **Cell wire encoding** — `Cell::encode(&self, w: &mut impl Writer)` and `Cell::decode(r: &mut impl Reader)` matching the documented list-style-Dict layout (predicate Point, anchor 32-byte String, payload list-Dict). Round-trip + canonicality tests landed.
+- **`CellID = [u8; 32]`** type alias in `cell.rs`.
+- **`TxEntry::Input(CellID)`** variant.
+- **`op_input`** — pops a String, decodes via `Cell::decode`, errors `MalformedCellEncoding` on trailing bytes or bad shape, seeds `last_anchor` from `Cell::to_anchor()`, emits `TxEntry::Input(cell_id)`, pushes the Cell handle.
+- **External-only dispatch** — `step_external` routes `0x90` to `op_input`; `step_internal` returns `ExternalOnly` for `0x90`.
+- `VMError::ExternalOnly`, `MalformedCellEncoding`.
+
+**Still pending** (for the `send` half of this phase):
 - `op_send` pops `args… k gas bytes method addr`, builds a `Message` (with `caller` set per current frame's actor identity), accounts gas + vbytes from the calling frame, enqueues into `VM.sends`, emits `TxEntry::Send(message_handle)`.
-- `VMError::ExternalOnly`, `MalformedCellEncoding`, `UtreexoLookupFailed`.
-- `TxEntry::Input(CellID)` and `TxEntry::Send(Message)` variants.
+- `TxEntry::Send(Message)` variant.
+- `VM.sends: Vec<Message>` collector + `TxResult.sends` field.
 
 **Opcodes**:
-- [ ] `0x90` `input` **[E]** — `string → cell`
+- [x] `0x90` `input` **[E]** — `string → cell`
 - [ ] `0x94` `send` — `args… k gas bytes method addr → ø`
 
-**Tests** (target ~10–12):
-- Cell wire encoding round-trip (encode → bytes → decode → equal id).
-- Non-canonical cell bytes → `MalformedCellEncoding` on decode.
-- `input` from `InternalRoot` errors `ExternalOnly`.
-- `input` of a known cell pushes the handle and seeds `last_anchor` to the cell's ratcheted anchor.
-- `input` then `output` round-trip — anchor chain advances correctly.
+**Tests landed** (14 new, all green):
+- `cell_encode_decode_roundtrip` — `Cell::encode` → bytes → `Cell::decode` → identical id, anchor, predicate point, payload length.
+- `cell_decode_rejects_empty_input` — empty reader → `MalformedCellEncoding`.
+- `cell_decode_rejects_wrong_outer_count` — list-Dict with arity ≠ 3 → `MalformedCellEncoding`.
+- `cell_decode_rejects_wrong_anchor_length` — anchor String ≠ 32 bytes → `MalformedCellEncoding`.
+- `cell_decode_rejects_predicate_not_a_point` — first entry not a Point → `MalformedCellEncoding`.
+- `input_pushes_cell_seeds_anchor_and_emits_txlog` — happy path: stack gets the cell, anchor seeded, txlog has `Input(id)`.
+- `input_requires_string_on_top` — non-String → `TypeNotString`.
+- `input_rejects_malformed_bytes` — garbage bytes → `MalformedCellEncoding`.
+- `input_rejects_trailing_bytes_after_cell` — encoded cell + extra byte → `MalformedCellEncoding`.
+- `input_in_internal_context_errors_external_only` — dispatch via `step_internal` → `ExternalOnly`.
+- `input_then_output_anchor_chain` — input → output advances `last_anchor` and produces a two-entry txlog.
+- `input_via_step_external_dispatch` — single-step `step_external` with `[0x90]` routes correctly.
+- **`external_tx_one_input_one_output_via_signtx`** — end-to-end workflow: one external tx that consumes a cell via `signtx`, drops the poured payload, emits a fresh output cell. Drives the full `step_external` dispatch + `Delegate::finalize` loop. Verifies txlog (Input → Output), TxBound deferred sig with correct verification key, anchor chain (output anchor == cell.to_anchor()), and clean exit.
+- **`external_tx_two_inputs_two_outputs_via_open`** — end-to-end workflow: two distinct cells unlocked via real Taproot `CallProof`s through `open`, then two fresh output cells emitted. Verifies the txlog ordering (Input, Input, Output, Output), payload preservation, anchor-chain ratcheting through inputs and outputs, and absence of deferred sigs (open does not record any).
+
+**Tests still pending** (for `send`):
 - `send` from `ExternalRoot` — message `caller = None`.
 - `send` from `InternalRoot` — message `caller = Some(actor_id)`.
 - `send` debits the `gas` + `bytes` arguments from the calling frame.
-- `send` stack underflow / wrong-type variants for `addr` (must be Point or whatever the address representation is), `method`, etc.
+- `send` stack underflow / wrong-type variants for `addr`, `method`, etc.
 - `send` with `gas` exceeding the caller's remaining budget → underflow / error.
 
 ---

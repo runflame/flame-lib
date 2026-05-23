@@ -35,10 +35,18 @@ use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
+use readerwriter::{Reader, WriteError, Writer};
 
+use crate::encoding::{read_list_prefix, read_value, write_list_prefix, write_value};
 use crate::errors::VMError;
 use crate::vm::Anchor;
-use crate::Value;
+use crate::{Point, String, Value};
+
+/// 32-byte canonical identifier of a `Cell`. Computed via Merlin
+/// transcript over the cell's canonical wire encoding (see `Cell::id`).
+/// Stored in `TxEntry::Input` to commit a consumed cell's identity
+/// without re-storing its payload.
+pub type CellID = [u8; 32];
 
 // ── Predicate ────────────────────────────────────────────────────
 
@@ -431,6 +439,87 @@ impl Cell {
     /// to `Anchor(self.id()).ratchet()`.
     pub fn to_anchor(&self) -> Anchor {
         Anchor(self.id()).ratchet()
+    }
+
+    /// Writes the canonical wire form: a list-style `Dict` with three
+    /// entries — predicate (`Point`), anchor (32-byte `String`), payload
+    /// (nested list-style `Dict` of portable values).
+    ///
+    /// Errors only if a payload value's type has no canonical encoder.
+    /// Payload portability is guaranteed by the cell-construction ops
+    /// (`cell` / `output`) which run `pop_n_portable`; this method is
+    /// not the place to re-check.
+    pub fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
+        // Outer wrapper: list-Dict with exactly 3 entries.
+        write_list_prefix(w, 3)?;
+        // Entry 0: predicate as Point value.
+        let pred_point = Point::from_compressed(self.predicate.to_point());
+        write_value(w, &Value::Point(pred_point))?;
+        // Entry 1: anchor as a 32-byte String value.
+        write_value(w, &Value::String(String::from(self.anchor.0.to_vec())))?;
+        // Entry 2: payload as a list-Dict of values (no nested Dict
+        // struct allocation — we just emit the prefix + each value).
+        write_list_prefix(w, self.payload.len())?;
+        for v in &self.payload {
+            write_value(w, v)?;
+        }
+        Ok(())
+    }
+
+    /// Reads the canonical wire form. The reader is advanced past the
+    /// cell's bytes on success. Errors with `MalformedCellEncoding` on
+    /// any deviation:
+    ///
+    /// - Outer shape is not a list-Dict of exactly 3 entries.
+    /// - Entry 0 is not a `Point`.
+    /// - Entry 1 is not a `String` of exactly 32 bytes.
+    /// - Entry 2 is not a list-style Dict, or any payload value is
+    ///   non-portable or unencodable.
+    ///
+    /// Strict canonicality: the caller is responsible for checking that
+    /// no bytes remain after the cell (the `input` opcode does this).
+    pub fn decode(r: &mut impl Reader) -> Result<Cell, VMError> {
+        let outer_count =
+            read_list_prefix(r).map_err(|_| VMError::MalformedCellEncoding)?;
+        if outer_count != 3 {
+            return Err(VMError::MalformedCellEncoding);
+        }
+
+        // Entry 0: predicate Point.
+        let predicate = match read_value(r) {
+            Ok(Some(Value::Point(p))) => Predicate::Opaque(p.inner),
+            _ => return Err(VMError::MalformedCellEncoding),
+        };
+
+        // Entry 1: anchor — 32-byte String.
+        let anchor = match read_value(r) {
+            Ok(Some(Value::String(s))) => {
+                if s.len() != 32 {
+                    return Err(VMError::MalformedCellEncoding);
+                }
+                let mut a = [0u8; 32];
+                a.copy_from_slice(s.as_bytes());
+                Anchor(a)
+            }
+            _ => return Err(VMError::MalformedCellEncoding),
+        };
+
+        // Entry 2: payload — list-Dict; read prefix and N values directly.
+        let payload_count =
+            read_list_prefix(r).map_err(|_| VMError::MalformedCellEncoding)?;
+        let mut payload = Vec::with_capacity(payload_count);
+        for _ in 0..payload_count {
+            match read_value(r) {
+                Ok(Some(v)) => {
+                    if !v.is_portable() {
+                        return Err(VMError::MalformedCellEncoding);
+                    }
+                    payload.push(v);
+                }
+                _ => return Err(VMError::MalformedCellEncoding),
+            }
+        }
+        Ok(Cell::new(predicate, anchor, payload))
     }
 }
 

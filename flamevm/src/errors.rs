@@ -284,6 +284,18 @@ pub enum VMError {
     #[error("Program index out of range")]
     ProgramIndexOutOfRange,
 
+    /// `input` was invoked outside an external transaction context.
+    /// Only external txs can consume Utreexo entries.
+    #[error("Opcode is external-context only")]
+    ExternalOnly,
+
+    /// `input` was given a String whose bytes do not decode as a
+    /// canonical wire-encoded Cell — wrong outer shape, wrong anchor
+    /// length, non-portable payload value, trailing bytes after the
+    /// cell, etc.
+    #[error("Malformed cell encoding")]
+    MalformedCellEncoding,
+
     // /// This error occurs when VM's anchor remains unset.
     // #[error("VM anchor is not set via `input`")]
     // AnchorMissing,

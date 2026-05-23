@@ -456,8 +456,14 @@ impl VM {
         if self.try_common(op)? {
             return Ok(true);
         }
-        // External-only opcodes go here (extvar, intvar, range, ...).
-        Err(VMError::UnknownOpcode(op))
+        // External-only opcodes (extvar, intvar, range, ...).
+        match op {
+            0x90 => {
+                self.op_input()?;
+                Ok(true)
+            }
+            _ => Err(VMError::UnknownOpcode(op)),
+        }
     }
 
     /// Executes one opcode in internal context. Returns `Ok(true)` to
@@ -469,8 +475,14 @@ impl VM {
         if self.try_common(op)? {
             return Ok(true);
         }
-        // Internal-only opcodes go here (call, send, load, save, ...).
-        Err(VMError::UnknownOpcode(op))
+        // Internal-only opcodes (call, send, load, save, ...).
+        match op {
+            // External-only opcodes seen here are a deterministic error so
+            // internal-context scripts surface them with the right reason
+            // code rather than the generic "unknown opcode" path.
+            0x90 => Err(VMError::ExternalOnly),
+            _ => Err(VMError::UnknownOpcode(op)),
+        }
     }
 
     /// Dispatches opcodes whose behavior is identical in both contexts.
@@ -1789,6 +1801,48 @@ impl VM {
         let mut out = vec![0u8; 32];
         t.challenge_bytes(b"msg", &mut out);
         out
+    }
+
+    // ── Phase 10: input opcode ───────────────────────────────────
+
+    /// `0x90 input` **[E]** — `string → cell`. Decodes a canonical
+    /// wire-encoded cell from `string`, pushes the resulting `Cell`
+    /// handle, seeds `last_anchor` from the cell's identity, and emits
+    /// a `TxEntry::Input(cell_id)` effect into the txlog.
+    ///
+    /// **VM is stateless w.r.t. Utreexo.** The opcode does not consult
+    /// any accumulator — the caller is expected to have validated the
+    /// supplied bytes against the Utreexo proof *outside* the VM
+    /// before invoking the script. From the VM's perspective the bytes
+    /// simply assert "this cell existed as a UTXO"; the txlog entry
+    /// commits the script's reliance on that assertion so the outer
+    /// verifier can cross-check it against Utreexo state.
+    ///
+    /// External-context only — internal transactions cannot consume
+    /// Utreexo entries (`step_internal` errors `ExternalOnly` on
+    /// `0x90`).
+    ///
+    /// Hard-fails on:
+    /// - non-`String` top of stack (`TypeNotString`),
+    /// - bytes that do not decode as a canonical cell
+    ///   (`MalformedCellEncoding`), including trailing bytes after the
+    ///   cell's last byte.
+    fn op_input(&mut self) -> Result<(), VMError> {
+        let s = self.pop_string()?;
+        let bytes = s.as_bytes();
+        let mut reader: &[u8] = bytes;
+        let cell = Cell::decode(&mut reader)?;
+        if !reader.is_empty() {
+            return Err(VMError::MalformedCellEncoding);
+        }
+        let cell_id = cell.id();
+        self.txlog.push(crate::tx::TxEntry::Input(cell_id));
+        // `Cell::to_anchor()` already ratchets, so this seeds the anchor
+        // chain at the post-ratchet point — matching zkvm's
+        // `contract_id.to_anchor().ratchet()` semantics.
+        self.last_anchor = Some(cell.to_anchor());
+        self.push_value(Value::Cell(cell));
+        Ok(())
     }
 
     // ── Phase 9: cell opcode handlers ────────────────────────────
@@ -4977,5 +5031,621 @@ mod tests {
             run_to_end(&mut vm).unwrap_err(),
             VMError::BadSignatureBytes
         ));
+    }
+
+    // ── Phase 10: input opcode ───────────────────────────────────
+
+    /// Builds a VM running `script` under `ExternalRoot`. Mirror of
+    /// `vm_with_script` for the external-context opcode tests.
+    fn vm_external_with_script(script: Vec<u8>) -> VM {
+        VM::new(
+            dummy_header(),
+            CallFrame::new(script, CallKind::ExternalRoot, 1_000_000, 0, 0),
+        )
+    }
+
+    /// Builds a wire-encoded cell as a `Vec<u8>` so tests can feed it
+    /// to the `input` opcode (which pops a `String` and decodes it).
+    fn encode_cell_to_bytes(cell: &Cell) -> Vec<u8> {
+        let mut buf = Vec::new();
+        cell.encode(&mut buf).expect("cell encodes");
+        buf
+    }
+
+    /// Builds a non-trivial test cell — opaque predicate, fixed anchor,
+    /// two-item portable payload. Used by both the round-trip and the
+    /// `input` opcode tests.
+    fn fixture_cell() -> Cell {
+        let predicate = Predicate::Opaque(CompressedRistretto([0xaa; 32]));
+        let anchor = Anchor([0x42; 32]);
+        let payload = vec![
+            Value::Int253(Int253::from(7u64)),
+            Value::String(crate::String::from(b"hello".to_vec())),
+        ];
+        Cell::new(predicate, anchor, payload)
+    }
+
+    #[test]
+    fn cell_encode_decode_roundtrip() {
+        let original = fixture_cell();
+        let bytes = encode_cell_to_bytes(&original);
+
+        // Decode and confirm equivalence by cell id (the canonical
+        // identity hash binds predicate point + anchor + payload bytes).
+        let mut reader: &[u8] = &bytes;
+        let decoded = Cell::decode(&mut reader).expect("decodes");
+        assert!(reader.is_empty(), "decoder must consume the full input");
+        assert_eq!(original.id(), decoded.id());
+        assert_eq!(original.anchor.0, decoded.anchor.0);
+        assert_eq!(
+            original.predicate.to_point().as_bytes(),
+            decoded.predicate.to_point().as_bytes()
+        );
+        assert_eq!(original.payload.len(), decoded.payload.len());
+    }
+
+    /// Helper: `Cell::decode` returns a `Cell` on success, which lacks
+    /// `Debug`. This wrapper drops the cell so tests can use the usual
+    /// `.unwrap_err()` shape on a `Debug`-able result.
+    fn decode_cell_dropping_ok(bytes: &[u8]) -> Result<(), VMError> {
+        let mut r: &[u8] = bytes;
+        match Cell::decode(&mut r) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    #[test]
+    fn cell_decode_rejects_empty_input() {
+        let err = decode_cell_dropping_ok(&[]).unwrap_err();
+        assert!(matches!(err, VMError::MalformedCellEncoding));
+    }
+
+    #[test]
+    fn cell_decode_rejects_wrong_outer_count() {
+        // Outer list-Dict with two entries instead of three (anchor +
+        // payload prefix, no predicate). Bytes are hand-rolled to make
+        // the outer prefix valid but the inner shape wrong.
+        // Outer count = 2 (immediate small list-Dict tag in the encoding).
+        // We exploit the fact that any prefix that successfully reads as
+        // a list-Dict with count != 3 must fail.
+        // Construct a real cell and then patch the outer count.
+        let mut bytes = encode_cell_to_bytes(&fixture_cell());
+        // First byte encodes the outer list-Dict prefix; just rewrite the
+        // top-level prefix byte to a list-Dict of count 2. We use the
+        // round-trip helper: build a 2-element list-Dict by hand.
+        // Simpler: replace the *whole* string with a list-Dict of count 0,
+        // which is canonical but wrong arity.
+        bytes.clear();
+        crate::encoding::write_list_prefix(&mut bytes, 0)
+            .expect("write prefix");
+        let err = decode_cell_dropping_ok(&bytes).unwrap_err();
+        assert!(matches!(err, VMError::MalformedCellEncoding));
+    }
+
+    #[test]
+    fn cell_decode_rejects_wrong_anchor_length() {
+        // Build an outer list-Dict of 3 entries by hand: Point predicate,
+        // a String of wrong (31-byte) anchor, then an empty payload list.
+        let mut bytes = Vec::new();
+        crate::encoding::write_list_prefix(&mut bytes, 3)
+            .expect("write outer prefix");
+        crate::encoding::write_value(
+            &mut bytes,
+            &Value::Point(Point::from_bytes([0xaa; 32])),
+        )
+        .expect("write point");
+        crate::encoding::write_value(
+            &mut bytes,
+            &Value::String(crate::String::from(vec![0u8; 31])),
+        )
+        .expect("write short anchor");
+        crate::encoding::write_list_prefix(&mut bytes, 0)
+            .expect("write payload prefix");
+        let err = decode_cell_dropping_ok(&bytes).unwrap_err();
+        assert!(matches!(err, VMError::MalformedCellEncoding));
+    }
+
+    #[test]
+    fn cell_decode_rejects_predicate_not_a_point() {
+        // First entry is a String where a Point is expected.
+        let mut bytes = Vec::new();
+        crate::encoding::write_list_prefix(&mut bytes, 3)
+            .expect("write outer prefix");
+        crate::encoding::write_value(
+            &mut bytes,
+            &Value::String(crate::String::from(vec![0u8; 32])),
+        )
+        .expect("write wrong predicate");
+        crate::encoding::write_value(
+            &mut bytes,
+            &Value::String(crate::String::from(vec![0u8; 32])),
+        )
+        .expect("write anchor");
+        crate::encoding::write_list_prefix(&mut bytes, 0)
+            .expect("write payload prefix");
+        let err = decode_cell_dropping_ok(&bytes).unwrap_err();
+        assert!(matches!(err, VMError::MalformedCellEncoding));
+    }
+
+    #[test]
+    fn input_pushes_cell_seeds_anchor_and_emits_txlog() {
+        let cell = fixture_cell();
+        let expected_id = cell.id();
+        let expected_anchor = cell.to_anchor();
+        let bytes = encode_cell_to_bytes(&cell);
+
+        // Build an ExternalRoot VM with the wire bytes on the stack as a String.
+        let mut vm = vm_external_with_script(Vec::new());
+        vm.push_value(Value::String(crate::String::from(bytes)));
+        vm.op_input().expect("input succeeds");
+
+        // Top of stack is the decoded Cell.
+        assert_eq!(vm.current_call.stack.len(), 1);
+        match &vm.current_call.stack[0] {
+            Value::Cell(c) => {
+                assert_eq!(c.id(), expected_id);
+            }
+            other => panic!("expected Cell on stack, got {}", value_kind(other)),
+        }
+
+        // last_anchor seeded to the cell's ratcheted anchor.
+        assert_eq!(vm.last_anchor.expect("anchor seeded").0, expected_anchor.0);
+
+        // Txlog has exactly one Input entry committing the cell id.
+        assert_eq!(vm.txlog.len(), 1);
+        match &vm.txlog[0] {
+            crate::tx::TxEntry::Input(id) => assert_eq!(*id, expected_id),
+            _ => panic!("expected TxEntry::Input"),
+        }
+    }
+
+    #[test]
+    fn input_requires_string_on_top() {
+        // Non-String top → TypeNotString. (Use an Int253.)
+        let mut vm = vm_external_with_script(Vec::new());
+        vm.push_value(Value::Int253(Int253::from(7u64)));
+        let err = vm.op_input().unwrap_err();
+        assert!(matches!(err, VMError::TypeNotString));
+    }
+
+    #[test]
+    fn input_rejects_malformed_bytes() {
+        // Random non-canonical bytes on the stack.
+        let mut vm = vm_external_with_script(Vec::new());
+        vm.push_value(Value::String(crate::String::from(vec![0xffu8; 8])));
+        let err = vm.op_input().unwrap_err();
+        assert!(matches!(err, VMError::MalformedCellEncoding));
+    }
+
+    #[test]
+    fn input_rejects_trailing_bytes_after_cell() {
+        // Append a stray byte after a canonical encoding so the inner
+        // reader leaves bytes unread → MalformedCellEncoding.
+        let cell = fixture_cell();
+        let mut bytes = encode_cell_to_bytes(&cell);
+        bytes.push(0x00); // trailing garbage
+
+        let mut vm = vm_external_with_script(Vec::new());
+        vm.push_value(Value::String(crate::String::from(bytes)));
+        let err = vm.op_input().unwrap_err();
+        assert!(matches!(err, VMError::MalformedCellEncoding));
+    }
+
+    #[test]
+    fn input_in_internal_context_errors_external_only() {
+        // Drive `0x90` through `step_internal` — dispatch must surface
+        // `ExternalOnly` because internal transactions cannot consume
+        // Utreexo entries.
+        let mut vm = vm_with_script(vec![0x90]);
+        // Even with a well-formed string on the stack, internal context
+        // rejects the opcode before any decoding happens.
+        let cell_bytes = encode_cell_to_bytes(&fixture_cell());
+        vm.push_value(Value::String(crate::String::from(cell_bytes)));
+        let err = vm.step_internal().unwrap_err();
+        assert!(matches!(err, VMError::ExternalOnly));
+    }
+
+    #[test]
+    fn input_then_output_anchor_chain() {
+        // Round-trip: input a cell, then output a new cell whose anchor
+        // is derived from the consumed cell. Confirms `last_anchor` is
+        // wired through `input` so a subsequent `output` doesn't need an
+        // external seed.
+        let cell = fixture_cell();
+        let bytes = encode_cell_to_bytes(&cell);
+        let expected_anchor_after_input = cell.to_anchor();
+
+        let mut vm = vm_external_with_script(Vec::new());
+
+        // Step 1: feed cell bytes into op_input.
+        vm.push_value(Value::String(crate::String::from(bytes)));
+        vm.op_input().expect("input ok");
+        // Stack: [Cell]. last_anchor: Some(ratcheted anchor from input).
+        assert_eq!(
+            vm.last_anchor.expect("anchor").0,
+            expected_anchor_after_input.0
+        );
+
+        // The consumed cell's handle is still on the stack. For a stand-alone
+        // anchor-chain test we don't care about authorizing it — drop it
+        // directly so we can exercise `op_output` against the seeded anchor.
+        let _consumed = vm.pop_cell().expect("pop cell handle");
+
+        // Step 2: build an output through the real op_output handler.
+        // Stack pre-output: [payload(5), count(1), predicate(Point)].
+        vm.push_value(Value::Int253(Int253::from(5u64)));
+        vm.push_value(Value::Int253(Int253::from(1u64)));
+        vm.push_value(Value::Point(Point::from_bytes([0xbb; 32])));
+        vm.op_output().expect("output ok");
+
+        // Txlog now has: Input(consumed_id), Output(new_cell).
+        assert_eq!(vm.txlog.len(), 2);
+        match &vm.txlog[0] {
+            crate::tx::TxEntry::Input(_) => {}
+            _ => panic!("first entry must be Input"),
+        }
+        match &vm.txlog[1] {
+            crate::tx::TxEntry::Output(_) => {}
+            _ => panic!("second entry must be Output"),
+        }
+        // last_anchor advanced again past the output cell.
+        assert_ne!(
+            vm.last_anchor.expect("anchor").0,
+            expected_anchor_after_input.0
+        );
+    }
+
+    #[test]
+    fn input_via_step_external_dispatch() {
+        // Build a one-byte external script `[0x90]` and dispatch a single
+        // step through `step_external` to confirm 0x90 routes to op_input.
+        // Use a stub delegate that never actually runs (we only step once,
+        // and the input opcode does not consult the delegate).
+        let cell = fixture_cell();
+        let expected_id = cell.id();
+        let bytes = encode_cell_to_bytes(&cell);
+
+        let mut vm = vm_external_with_script(vec![0x90]);
+        vm.push_value(Value::String(crate::String::from(bytes)));
+
+        let mut delegate = StubDelegate::new();
+        let cont = vm.step_external(&mut delegate).expect("step ok");
+        assert!(cont, "still running (script not exhausted)");
+
+        // Stack now has the decoded cell; txlog has the Input entry.
+        match &vm.current_call.stack[0] {
+            Value::Cell(c) => assert_eq!(c.id(), expected_id),
+            other => panic!("expected Cell, got {}", value_kind(other)),
+        }
+        assert_eq!(vm.txlog.len(), 1);
+        match &vm.txlog[0] {
+            crate::tx::TxEntry::Input(id) => assert_eq!(*id, expected_id),
+            _ => panic!("expected TxEntry::Input"),
+        }
+    }
+
+    // ── Phase 10: end-to-end external-tx workflow ───────────────
+    //
+    // The tests below assemble small but complete external-tx programs
+    // — input → authorize → output — and drive them through the full
+    // `step_external` dispatch loop plus `Delegate::finalize`. They are
+    // the first tests that exercise the VM's external-context API as a
+    // unit and serve as ground truth for the Phase-10 cell life-cycle.
+
+    /// Drives `script` through `step_external` to completion using a
+    /// `StubDelegate`, returns the resulting VM (so the test can inspect
+    /// txlog, deferred_sigs, last_anchor, etc.). Mirrors the body of
+    /// `VM::execute_external` minus the `into_result()` consumption.
+    fn run_external_workflow(script: Vec<u8>) -> VM {
+        let mut vm = VM::new(
+            dummy_header(),
+            CallFrame::new(script, CallKind::ExternalRoot, 1_000_000, 0, 0),
+        );
+        let mut delegate = StubDelegate::new();
+        while vm.step_external(&mut delegate).expect("step_external ok") {}
+        // Finalize accepts whatever sigs we accumulated (stub does nothing).
+        let sigs = std::mem::replace(&mut vm.deferred_sigs, Vec::new());
+        // Keep a copy in the VM for the test to inspect.
+        let sigs_copy: Vec<DeferredSig> = sigs.iter().cloned().collect();
+        delegate.finalize(sigs).expect("finalize ok");
+        vm.deferred_sigs = sigs_copy;
+        vm
+    }
+
+    #[test]
+    fn external_tx_one_input_one_output_via_signtx() {
+        // ── Scenario ─────────────────────────────────────────────
+        // A single external transaction consumes one cell (authorized
+        // via signtx — the cell holder signs the whole tx via the
+        // envelope) and emits a single fresh cell.
+        //
+        // Cell life-cycle traced end-to-end:
+        //   bytes  → input  → cell on stack → signtx (deferred sig +
+        //   payload poured) → drop payload → push fresh payload →
+        //   output → TxEntry::Output → finalize.
+
+        // 1. Construct the input cell, capture its identity, encode it.
+        let input_cell = fixture_cell();
+        let input_id = input_cell.id();
+        let input_predicate_point =
+            input_cell.predicate.to_point();
+        let input_anchor_post = input_cell.to_anchor();
+        let input_bytes = encode_cell_to_bytes(&input_cell);
+
+        // 2. Assemble the script.
+        //
+        // Stack diagram (top of stack on the right):
+        //   pushstr <bytes>       []                  → [String]
+        //   input                 [String]            → [Cell]
+        //   signtx                [Cell]              → [Int253(7), String, Int253(2)]
+        //                          (payload + count poured; TxBound recorded)
+        //   drop                  [..7, "hello", 2]   → [..7, "hello"]
+        //   drop                  [..7, "hello"]      → [..7]
+        //   drop                  [..7]               → []
+        //   push:42               []                  → [Int253(42)]
+        //   push:1                [Int253(42)]        → [Int253(42), Int253(1)]
+        //   pushpoint <P_out>     [..1]               → [..1, Point]
+        //   output                [..Point]           → []  (Output effect emitted)
+        let mut script = Vec::new();
+        push_string_bytes(&mut script, &input_bytes);
+        script.push(0x90); // input
+        script.push(0x98); // signtx
+        script.push(0x1c); // drop count
+        script.push(0x1c); // drop "hello"
+        script.push(0x1c); // drop 7
+        script.push(0x10); // pushint8 positive
+        script.push(42);
+        script.push(0x01); // count = 1
+        let out_pred_bytes = [0xbb; 32];
+        push_point_bytes(&mut script, &out_pred_bytes);
+        script.push(0x92); // output
+
+        // 3. Run through `step_external` to completion + finalize.
+        let vm = run_external_workflow(script);
+
+        // 4. Assertions on the final VM state.
+
+        // 4a. Clean exit: stack must be empty.
+        assert!(
+            vm.current_call.stack.is_empty(),
+            "leftover stack at end of tx: {:?}",
+            vm.current_call.stack.len()
+        );
+
+        // 4b. Txlog has exactly two entries in order: Input(cell_in_id),
+        //     Output(cell_out).
+        assert_eq!(vm.txlog.len(), 2, "expected Input + Output txlog");
+        match &vm.txlog[0] {
+            crate::tx::TxEntry::Input(id) => assert_eq!(*id, input_id),
+            _ => panic!("txlog[0] must be Input"),
+        }
+        let output_cell_anchor = match &vm.txlog[1] {
+            crate::tx::TxEntry::Output(c) => {
+                // Output payload was [Int253(42)].
+                assert_eq!(c.payload.len(), 1);
+                match &c.payload[0] {
+                    Value::Int253(i) => assert_eq!(*i, Int253::from(42u64)),
+                    _ => panic!("output payload[0] must be Int253(42)"),
+                }
+                // Output predicate is the point we pushed.
+                assert_eq!(
+                    c.predicate.to_point().as_bytes(),
+                    &out_pred_bytes
+                );
+                c.anchor
+            }
+            _ => panic!("txlog[1] must be Output"),
+        };
+
+        // 4c. Anchor chain: the output's anchor is the post-input anchor
+        //     (i.e. cell_in.to_anchor()), since no other cell was created
+        //     between input and output.
+        assert_eq!(output_cell_anchor.0, input_anchor_post.0);
+
+        // 4d. Deferred sigs: exactly one TxBound entry, with verification
+        //     key matching the input cell's predicate point.
+        assert_eq!(vm.deferred_sigs.len(), 1);
+        match &vm.deferred_sigs[0] {
+            DeferredSig::TxBound { verification_key } => {
+                assert_eq!(
+                    verification_key.as_bytes(),
+                    input_predicate_point.as_bytes()
+                );
+            }
+            DeferredSig::Explicit { .. } => {
+                panic!("expected TxBound, got Explicit")
+            }
+        }
+
+        // 4e. last_anchor has advanced past the output cell's own
+        //     ratcheted anchor (so a hypothetical subsequent output
+        //     would land at a different anchor).
+        assert!(vm.last_anchor.is_some());
+        assert_ne!(vm.last_anchor.unwrap().0, output_cell_anchor.0);
+    }
+
+    #[test]
+    fn external_tx_two_inputs_two_outputs_via_open() {
+        // ── Scenario ─────────────────────────────────────────────
+        // External tx consumes two distinct cells via `open` (each
+        // unlocked by a valid Taproot CallProof against its predicate
+        // tree), then emits two fresh output cells. No `signtx` /
+        // `signrun` here, so `deferred_sigs` stays empty.
+        //
+        // Each input cell's program is `drop` — it consumes the single
+        // payload item the cell-open pours onto the stack.
+
+        let prog = vec![0x1c]; // drop
+
+        // ── Cell 1 ────────────────────────────────────────────────
+        let (tree1, cp1) = build_predicate_with_program(&prog, 11);
+        let cell1 = Cell::new(
+            Predicate::Opaque(tree1.compute_point()),
+            Anchor([0xa1; 32]),
+            vec![Value::Int253(Int253::from(11u64))],
+        );
+        let cell1_id = cell1.id();
+        let cell1_bytes = encode_cell_to_bytes(&cell1);
+
+        // ── Cell 2 ────────────────────────────────────────────────
+        let (tree2, cp2) = build_predicate_with_program(&prog, 22);
+        let cell2 = Cell::new(
+            Predicate::Opaque(tree2.compute_point()),
+            Anchor([0xa2; 32]),
+            vec![Value::Int253(Int253::from(22u64))],
+        );
+        let cell2_id = cell2.id();
+        let cell2_anchor_post = cell2.to_anchor();
+        let cell2_bytes = encode_cell_to_bytes(&cell2);
+
+        // ── Script ────────────────────────────────────────────────
+        //
+        //   ┌─── consume cell 1 ─────────────────────────────────┐
+        //   │ pushstr <cell1_bytes>                              │
+        //   │ input                — pops String → pushes Cell1  │
+        //   │ <callproof1 pieces>                                │
+        //   │ push:0               — k = 0 args                  │
+        //   │ open                 — verifies cp1, pours [11],   │
+        //   │                       enters Run over `drop`;      │
+        //   │                       inner Run pops the 11        │
+        //   └────────────────────────────────────────────────────┘
+        //   ┌─── consume cell 2 ─────────────────────────────────┐
+        //   │ pushstr <cell2_bytes>                              │
+        //   │ input                                              │
+        //   │ <callproof2 pieces>                                │
+        //   │ push:0                                             │
+        //   │ open                                               │
+        //   └────────────────────────────────────────────────────┘
+        //   ┌─── emit output 1 ──────────────────────────────────┐
+        //   │ push:9   push:1   pushpoint <P_out1>   output      │
+        //   └────────────────────────────────────────────────────┘
+        //   ┌─── emit output 2 ──────────────────────────────────┐
+        //   │ push:10  push:1   pushpoint <P_out2>   output      │
+        //   └────────────────────────────────────────────────────┘
+        let mut script = Vec::new();
+
+        // Consume cell 1
+        push_string_bytes(&mut script, &cell1_bytes);
+        script.push(0x90); // input
+        push_callproof_pieces(&mut script, &cp1);
+        script.push(0x00); // k = 0 args
+        script.push(0x93); // open
+
+        // Consume cell 2
+        push_string_bytes(&mut script, &cell2_bytes);
+        script.push(0x90); // input
+        push_callproof_pieces(&mut script, &cp2);
+        script.push(0x00); // k = 0 args
+        script.push(0x93); // open
+
+        // Emit output 1
+        script.push(0x09); // push:9
+        script.push(0x01); // count = 1
+        let out1_pred_bytes = [0xc1; 32];
+        push_point_bytes(&mut script, &out1_pred_bytes);
+        script.push(0x92); // output
+
+        // Emit output 2
+        script.push(0x0a); // push:10
+        script.push(0x01); // count = 1
+        let out2_pred_bytes = [0xc2; 32];
+        push_point_bytes(&mut script, &out2_pred_bytes);
+        script.push(0x92); // output
+
+        // ── Run + assert ─────────────────────────────────────────
+        let vm = run_external_workflow(script);
+
+        // Clean stack.
+        assert!(vm.current_call.stack.is_empty());
+
+        // Txlog: 2 × Input, 2 × Output, in that order.
+        assert_eq!(vm.txlog.len(), 4, "expected 2 inputs + 2 outputs");
+        match &vm.txlog[0] {
+            crate::tx::TxEntry::Input(id) => assert_eq!(*id, cell1_id),
+            _ => panic!("txlog[0] must be Input(cell1)"),
+        }
+        match &vm.txlog[1] {
+            crate::tx::TxEntry::Input(id) => assert_eq!(*id, cell2_id),
+            _ => panic!("txlog[1] must be Input(cell2)"),
+        }
+        let (out1, out2) = match (&vm.txlog[2], &vm.txlog[3]) {
+            (
+                crate::tx::TxEntry::Output(o1),
+                crate::tx::TxEntry::Output(o2),
+            ) => (o1, o2),
+            _ => panic!("txlog[2..4] must be Output entries"),
+        };
+
+        // Output 1's payload is [Int253(9)], predicate matches what we
+        // pushed.
+        assert_eq!(out1.payload.len(), 1);
+        match &out1.payload[0] {
+            Value::Int253(i) => assert_eq!(*i, Int253::from(9u64)),
+            _ => panic!("out1.payload[0] must be Int253(9)"),
+        }
+        assert_eq!(out1.predicate.to_point().as_bytes(), &out1_pred_bytes);
+        assert_eq!(out2.payload.len(), 1);
+        match &out2.payload[0] {
+            Value::Int253(i) => assert_eq!(*i, Int253::from(10u64)),
+            _ => panic!("out2.payload[0] must be Int253(10)"),
+        }
+        assert_eq!(out2.predicate.to_point().as_bytes(), &out2_pred_bytes);
+
+        // Anchor chain:
+        //   - cell1 input ratchets last_anchor → cell1.to_anchor()
+        //   - cell2 input overwrites last_anchor → cell2.to_anchor()
+        //   - output1 consumes last_anchor → out1.anchor == cell2.to_anchor()
+        //   - output1 ratchets → out1.to_anchor()
+        //   - output2 consumes last_anchor → out2.anchor == out1.to_anchor()
+        //   - output2 ratchets → final last_anchor
+        assert_eq!(out1.anchor.0, cell2_anchor_post.0);
+        assert_eq!(out2.anchor.0, out1.to_anchor().0);
+        assert_ne!(out1.anchor.0, out2.anchor.0);
+        let final_anchor = vm.last_anchor.expect("anchor set after output 2");
+        assert_eq!(final_anchor.0, out2.to_anchor().0);
+
+        // No `signtx` / `signrun` were used → no deferred sigs.
+        assert!(
+            vm.deferred_sigs.is_empty(),
+            "open does not record deferred sigs"
+        );
+    }
+
+    /// Test-only `Delegate` impl backed by `r1cs::Verifier`. None of its
+    /// methods are exercised by the Phase-10 tests; it exists purely so
+    /// `step_external` is satisfiable.
+    struct StubDelegate {
+        cs: bulletproofs::r1cs::Verifier<merlin::Transcript>,
+    }
+
+    impl StubDelegate {
+        fn new() -> Self {
+            Self {
+                cs: bulletproofs::r1cs::Verifier::new(
+                    merlin::Transcript::new(b"flamevm.test.stub"),
+                ),
+            }
+        }
+    }
+
+    impl Delegate for StubDelegate {
+        type CS = bulletproofs::r1cs::Verifier<merlin::Transcript>;
+
+        fn cs(&mut self) -> &mut Self::CS {
+            &mut self.cs
+        }
+
+        fn commit_variable(
+            &mut self,
+            _commitment: &CompressedRistretto,
+        ) -> Result<(CompressedRistretto, bulletproofs::r1cs::Variable), VMError> {
+            unreachable!("StubDelegate::commit_variable should not be called in Phase-10 tests");
+        }
+
+        fn finalize(self, _deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError> {
+            // Stub: don't actually verify a proof.
+            Ok(())
+        }
     }
 }

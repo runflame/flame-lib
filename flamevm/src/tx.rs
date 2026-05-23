@@ -43,8 +43,14 @@ pub enum TxEntry {
     /// Plain data entry created by `log` instruction. Contains arbitrary binary string.
     Data(Vec<u8>),
 
+    /// Input: a consumed cell's identity. Emitted by `input` (external-only).
+    /// Commits the cell that the transaction has consumed without re-storing
+    /// the payload — the existence of the cell is independently asserted by
+    /// the Utreexo proof outside the VM.
+    Input(crate::cell::CellID),
+
     /// Output: a newly sealed cell, emitted by the `output` opcode.
     Output(crate::Cell),
     // Future variants (preserved here as comments for the historical record):
-    // Input(CellID), Issue(...), Retire(...), Fee(u64), Send(Message), etc.
+    // Issue(...), Retire(...), Fee(u64), Send(Message), etc.
 }
