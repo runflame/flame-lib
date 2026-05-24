@@ -8,13 +8,16 @@ use super::test_helpers::*;
 use crate::{ActorID, ActorRegistry, ActorState, MemRegistry, MethodKey, RECV_METHOD_KEY};
 
 /// Helper: deploys an actor whose `recv` method runs `script`.
+/// Derives the actor's id from the script bytes (treats `script`
+/// as a stand-in for the constructor — real deployments would
+/// hash the actual constructor that produces this state).
 fn deploy_recv(reg: &mut MemRegistry, script: Vec<u8>, vbytes: u64) -> ActorID {
     let mut state = ActorState::new();
     state.public.insert(
         *RECV_METHOD_KEY.as_int(),
-        Value::String(String::from(script)),
+        Value::String(String::from(script.clone())),
     );
-    let id = ActorID::canonical_from_initial_state(&state);
+    let id = ActorID::Hash(ActorID::Constructor(script).to_hash());
     reg.deploy(id.clone(), state, vbytes, 0).expect("deploy");
     id
 }
@@ -148,15 +151,12 @@ fn call_emits_txentry_call_with_pre_state_root_and_anchor() {
 #[test]
 fn direct_self_call_rejected_as_reentrancy() {
     let mut reg = MemRegistry::new();
-    // Deploy a placeholder so we can compute its canonical id,
-    // then re-deploy after computing the script that targets it.
-    // Easier: deploy with a no-op `recv` first, then update.
     let mut state = ActorState::new();
     state.public.insert(
         *RECV_METHOD_KEY.as_int(),
         Value::String(String::from(b"\x1d".to_vec())),
     );
-    let id = ActorID::canonical_from_initial_state(&state);
+    let id = ActorID::Hash([0xa1; 32]);
     reg.deploy(id.clone(), state, 10_000, 0).expect("deploy");
 
     // Now run a self-call from a fresh VM in id's actor context.
@@ -178,15 +178,16 @@ fn direct_self_call_rejected_as_reentrancy() {
 fn indirect_cycle_rejected_as_reentrancy() {
     let mut reg = MemRegistry::new();
     // Build A and B. A → B; B re-calls A. The re-entrancy detection
-    // fires inside B's call attempt.
-    // Two-phase deploy: deploy A and B with no-op recvs to get ids,
-    // then overwrite their state with the real scripts.
+    // fires inside B's call attempt. Two-phase setup: deploy A and
+    // B with no-op recvs first, then overwrite B's recv to call A.
+    let a_id = ActorID::Hash([0xaa; 32]);
+    let b_id = ActorID::Hash([0xbb; 32]);
+
     let mut a_state = ActorState::new();
     a_state.public.insert(
         *RECV_METHOD_KEY.as_int(),
         Value::String(String::from(b"\x1d".to_vec())),
     );
-    let a_id = ActorID::canonical_from_initial_state(&a_state);
     reg.deploy(a_id.clone(), a_state, 100_000, 0).expect("deploy A");
 
     let mut b_state = ActorState::new();
@@ -194,12 +195,6 @@ fn indirect_cycle_rejected_as_reentrancy() {
         *RECV_METHOD_KEY.as_int(),
         Value::String(String::from(b"\x1d".to_vec())),
     );
-    // Marker in private so B's canonical id differs from A's.
-    b_state.private.insert(
-        Int253::from(0u64),
-        Value::String(String::from(b"B".to_vec())),
-    );
-    let b_id = ActorID::canonical_from_initial_state(&b_state);
     reg.deploy(b_id.clone(), b_state, 100_000, 0).expect("deploy B");
 
     // Now overwrite B's recv to call A (re-entry into the chain root).

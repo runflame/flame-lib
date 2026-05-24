@@ -17,9 +17,11 @@ fn deploy_with_recv(reg: &mut MemRegistry, recv: Vec<u8>, vbytes: u64, height: u
     let mut state = ActorState::new();
     state.public.insert(
         *RECV_METHOD_KEY.as_int(),
-        Value::String(String::from(recv)),
+        Value::String(String::from(recv.clone())),
     );
-    let id = ActorID::canonical_from_initial_state(&state);
+    // Derive the id from the recv bytes (stand-in for the
+    // real constructor that would deploy this state).
+    let id = ActorID::Hash(ActorID::Constructor(recv).to_hash());
     reg.deploy(id.clone(), state, vbytes, height).expect("deploy");
     id
 }

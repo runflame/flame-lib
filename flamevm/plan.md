@@ -218,16 +218,22 @@ into the codebase (all queued for ADR backfill in Phase 38 —
 `0010-actor-data-model`, `0011-send-id-and-internal-txid`,
 `0012-load-save-reentry-lock`):
 
-- **Q1**: actor-id hash domain = `b"flamevm.actorid"`.
+- **Q1**: actor-id hash domain = `b"flamevm.actorid"`. The id is
+  the hash of the *constructor script*; both `ActorID::Hash(h)`
+  and `ActorID::Constructor(bytes)` are two views of the same
+  identity (`h == H(bytes)`), and the registry canonicalizes on
+  the 32-byte hash so callers can pass either form.
 - **Q2**: vbyte size = `wire_len(state) + 32` (the 32 covers the
   lifecycle counters).
 - **Q3**: send-failure bounce path = consensus emits an Output
   effect directly under `Message.refund_predicate`, no fresh
   sub-VM. The VM records the refund predicate and is done.
-- **Q4**: `ActorID::Constructor(bytes)` deploys transparently at
-  first delivery; consensus runs the constructor, computes
-  canonical hash from the resulting state, and re-keys the
-  registry entry.
+- **Q4**: `ActorID::Constructor(bytes)` inlines the actor's code
+  on the wire for transparent first-delivery deployment.
+  Consensus runs the constructor to produce the initial state
+  and registers under the canonical hash (which it already
+  knows: it's `H(constructor_bytes)`, computable without
+  running anything).
 - **Q5**: three IDs — External TxID (external txlog merkle root,
   known at broadcast), SendID = `Send.anchor` (deterministic at
   broadcast, identifies the future internal tx), Internal TxID

@@ -82,20 +82,23 @@ impl From<Int253> for MethodKey {
 
 // ── ActorID ──────────────────────────────────────────────────────
 
-/// Canonical actor identifier.
+/// Actor identifier. **Every actor has exactly one identity**;
+/// this enum is just two views of the *same* 32-byte hash:
 ///
-/// Two forms per `design.md`:
+/// - [`ActorID::Hash`] — the bare canonical hash. The form scripts
+///   use to address already-deployed actors (32 bytes, low overhead).
 ///
-/// - [`ActorID::Hash`] — the canonical 32-byte fingerprint of the
-///   actor's initial [`ActorState`]. Domain-separated by
-///   [`ACTOR_ID_DOMAIN`]. The form every persisted actor uses.
+/// - [`ActorID::Constructor`] — the constructor script bytes
+///   inlined. Carries the actor's full code on the wire, useful
+///   for the first send to a not-yet-deployed actor: consensus
+///   sees the script, runs it to instantiate state, and registers
+///   the actor under the same canonical id.
 ///
-/// - [`ActorID::Constructor`] — an actor that doesn't yet exist on
-///   chain. Per Q4 the constructor instantiates the state on the
-///   fly within the same transaction: the first delivery to this
-///   id runs the constructor, computes the canonical hash from the
-///   resulting `ActorState`, and the registry key flips from
-///   `Constructor(bytes) → Hash(canonical_id)`.
+/// **Equivalence invariant**: `Constructor(bytes).to_hash()` ==
+/// `Hash(h).to_hash()` whenever `h == H_{flamevm.actorid}(bytes)`.
+/// Both addresses route to the same actor; the registry
+/// canonicalizes on the hash so callers can use whichever form
+/// they have on hand.
 ///
 /// Wire form: a tag byte (`0x00` Hash, `0x01` Constructor) followed
 /// by the payload. The Hash variant's payload is a bare 32 bytes;
@@ -103,11 +106,11 @@ impl From<Int253> for MethodKey {
 /// length followed by the script bytes.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ActorID {
-    /// Canonical 32-byte hash of the initial actor state.
+    /// Canonical 32-byte hash of the constructor script.
     Hash([u8; 32]),
 
-    /// Constructor script for transparent deployment. Resolved to
-    /// [`ActorID::Hash`] on first delivery (Q4).
+    /// Constructor script bytes. Hashes to the same canonical
+    /// id as `Hash(H_{flamevm.actorid}(bytes))`.
     Constructor(Vec<u8>),
 }
 
@@ -117,18 +120,13 @@ impl ActorID {
     /// Tag value for [`ActorID::Constructor`] on the wire.
     pub const TAG_CONSTRUCTOR: u8 = 0x01;
 
-    /// Returns a 32-byte representative for this id.
+    /// Returns this id's canonical 32-byte hash. Both enum variants
+    /// resolve to the **same** value when they refer to the same
+    /// actor — that's the equivalence invariant from the type docs.
     ///
-    /// - [`ActorID::Hash`] returns the hash directly.
-    /// - [`ActorID::Constructor`] hashes the constructor bytes
-    ///   under [`ACTOR_ID_DOMAIN`] — useful as a pre-deployment
-    ///   routing seed.
-    ///
-    /// Note: `Constructor(bytes).to_hash()` does **not** equal the
-    /// post-deployment `Hash(...)` value — the latter hashes the
-    /// resulting state, not the constructor input. Use
-    /// [`ActorID::canonical_from_initial_state`] to compute the
-    /// post-deployment id.
+    /// - [`ActorID::Hash`] returns the hash directly (free).
+    /// - [`ActorID::Constructor`] hashes the bytes under
+    ///   [`ACTOR_ID_DOMAIN`].
     pub fn to_hash(&self) -> [u8; 32] {
         match self {
             ActorID::Hash(h) => *h,
@@ -142,24 +140,21 @@ impl ActorID {
         }
     }
 
-    /// Computes the canonical [`ActorID::Hash`] for a freshly
-    /// deployed actor from its initial [`ActorState`]. The hash
-    /// binds to the state's canonical wire encoding, so two
-    /// structurally equivalent states deterministically produce the
-    /// same id.
-    pub fn canonical_from_initial_state(state: &ActorState) -> Self {
-        let mut buf = Vec::new();
-        state
-            .encode(&mut buf)
-            .expect("ActorState always encodable (portable Dict)");
-        let mut t = Transcript::new(ACTOR_ID_DOMAIN);
-        t.append_message(b"state", &buf);
-        let mut h = [0u8; 32];
-        t.challenge_bytes(b"id", &mut h);
-        ActorID::Hash(h)
+    /// Returns this id in its compact `Hash` form. For
+    /// [`ActorID::Hash`] this is a cheap clone; for
+    /// [`ActorID::Constructor`] it hashes the bytes and wraps.
+    /// Use this when you want to compare ids by canonical value
+    /// without keeping the constructor bytes around.
+    pub fn to_canonical(&self) -> ActorID {
+        match self {
+            ActorID::Hash(_) => self.clone(),
+            ActorID::Constructor(_) => ActorID::Hash(self.to_hash()),
+        }
     }
 
-    /// True iff this id is already in canonical hash form.
+    /// True iff this id is in the compact (`Hash`) form. Both forms
+    /// resolve to the same canonical hash, so this is a wire-shape
+    /// query, not an identity query.
     pub fn is_resolved(&self) -> bool {
         matches!(self, ActorID::Hash(_))
     }
@@ -666,9 +661,16 @@ pub trait ActorRegistry {
 /// `BTreeMap`-backed registry implementing [`ActorRegistry`].
 /// Suitable for tests, fixtures, and the consensus crate's
 /// reference implementation before persistent storage lands.
+///
+/// **Canonical-key invariant**: storage is keyed by the canonical
+/// `[u8;32]` hash, not by the `ActorID` enum directly. Every
+/// trait method canonicalizes the inbound id via
+/// [`ActorID::to_hash`] before looking up, so callers can pass
+/// either the `Hash` or the `Constructor` variant for the same
+/// actor and reach the same entry.
 pub struct MemRegistry {
-    actors: std::collections::BTreeMap<ActorID, Actor>,
-    marks: std::collections::BTreeSet<ActorID>,
+    actors: std::collections::BTreeMap<[u8; 32], Actor>,
+    marks: std::collections::BTreeSet<[u8; 32]>,
     pool: VbytePool,
 }
 
@@ -691,12 +693,12 @@ impl MemRegistry {
     /// Mutable accessor for the actor map — used by tests to set
     /// up scenarios. Not part of the trait surface.
     pub fn actor_mut(&mut self, id: &ActorID) -> Option<&mut Actor> {
-        self.actors.get_mut(id)
+        self.actors.get_mut(&id.to_hash())
     }
 
     /// Immutable accessor for an actor record. Convenience for tests.
     pub fn actor(&self, id: &ActorID) -> Option<&Actor> {
-        self.actors.get(id)
+        self.actors.get(&id.to_hash())
     }
 }
 
@@ -710,7 +712,7 @@ impl ActorRegistry for MemRegistry {
     fn load_state(&mut self, id: &ActorID) -> Result<ActorState, VMError> {
         let actor = self
             .actors
-            .get(id)
+            .get(&id.to_hash())
             .ok_or(VMError::ActorNotFound)?;
         if actor.is_frozen() {
             return Err(VMError::ActorFrozen);
@@ -738,7 +740,7 @@ impl ActorRegistry for MemRegistry {
     ) -> Result<(), VMError> {
         let actor = self
             .actors
-            .get_mut(id)
+            .get_mut(&id.to_hash())
             .ok_or(VMError::ActorNotFound)?;
         actor.state = state;
         Ok(())
@@ -751,7 +753,7 @@ impl ActorRegistry for MemRegistry {
     ) -> Result<Vec<u8>, VMError> {
         let a = self
             .actors
-            .get(actor)
+            .get(&actor.to_hash())
             .ok_or(VMError::ActorNotFound)?;
         if a.is_frozen() {
             return Err(VMError::ActorFrozen);
@@ -766,30 +768,30 @@ impl ActorRegistry for MemRegistry {
     fn actor_vbytes(&self, actor: &ActorID) -> Result<u64, VMError> {
         let a = self
             .actors
-            .get(actor)
+            .get(&actor.to_hash())
             .ok_or(VMError::ActorNotFound)?;
         Ok(a.vbytes)
     }
 
     fn exists(&self, actor: &ActorID) -> bool {
-        self.actors.contains_key(actor)
+        self.actors.contains_key(&actor.to_hash())
     }
 
     fn mark_for_destruction(&mut self, id: &ActorID) {
-        self.marks.insert(id.clone());
+        self.marks.insert(id.to_hash());
     }
 
     fn unmark_for_destruction(&mut self, id: &ActorID) {
-        self.marks.remove(id);
+        self.marks.remove(&id.to_hash());
     }
 
     fn is_marked_for_destruction(&self, id: &ActorID) -> bool {
-        self.marks.contains(id)
+        self.marks.contains(&id.to_hash())
     }
 
     fn commit_tx_destructions(&mut self, current_height: u64) -> usize {
-        let to_clear: Vec<ActorID> =
-            self.marks.iter().cloned().collect();
+        let to_clear: Vec<[u8; 32]> =
+            self.marks.iter().copied().collect();
         let mut count = 0usize;
         for id in to_clear {
             // Drain the mark regardless of whether the actor still
@@ -811,11 +813,12 @@ impl ActorRegistry for MemRegistry {
         vbytes: u64,
         height: u64,
     ) -> Result<(), VMError> {
-        if self.actors.contains_key(&id) {
+        let key = id.to_hash();
+        if self.actors.contains_key(&key) {
             return Err(VMError::ActorAlreadyExists);
         }
         self.actors
-            .insert(id, Actor::new_active(state, vbytes, height));
+            .insert(key, Actor::new_active(state, vbytes, height));
         Ok(())
     }
 
@@ -827,7 +830,7 @@ impl ActorRegistry for MemRegistry {
     ) -> Result<(), VMError> {
         let actor = self
             .actors
-            .get_mut(id)
+            .get_mut(&id.to_hash())
             .ok_or(VMError::ActorNotFound)?;
         actor.vbytes = actor.vbytes.saturating_add(amount);
         if actor.is_frozen() {
@@ -846,8 +849,8 @@ impl ActorRegistry for MemRegistry {
         // 2) walk actors: bleed, transition, expire.
         let mut cleared: Vec<ActorID> = Vec::new();
 
-        // Collect ids first to avoid an aliased mutable iter.
-        let ids: Vec<ActorID> = self.actors.keys().cloned().collect();
+        // Collect keys first to avoid an aliased mutable iter.
+        let ids: Vec<[u8; 32]> = self.actors.keys().copied().collect();
         for id in ids {
             let actor = match self.actors.get_mut(&id) {
                 Some(a) => a,
@@ -863,7 +866,7 @@ impl ActorRegistry for MemRegistry {
                             // tick — the registry only accepts
                             // well-formed states at deploy/save, so
                             // hitting this is an invariant break.
-                            cleared.push(id.clone());
+                            cleared.push(ActorID::Hash(id));
                             continue;
                         }
                     };
@@ -887,7 +890,7 @@ impl ActorRegistry for MemRegistry {
                         // practice vbytes == 0 here, but be defensive
                         // for callers that mutated the field).
                         let recycled = actor.vbytes;
-                        cleared.push(id.clone());
+                        cleared.push(ActorID::Hash(id));
                         self.actors.remove(&id);
                         if recycled > 0 {
                             self.pool.queue_recycle(recycled, height);
@@ -945,41 +948,52 @@ mod tests {
     }
 
     #[test]
-    fn actorid_canonical_from_initial_state_is_deterministic() {
-        let s1 = ActorState::new();
-        let s2 = ActorState::new();
-        let id1 = ActorID::canonical_from_initial_state(&s1);
-        let id2 = ActorID::canonical_from_initial_state(&s2);
-        assert_eq!(id1, id2, "same state → same id");
-        assert!(matches!(id1, ActorID::Hash(_)));
-        assert!(id1.is_resolved());
+    fn actorid_constructor_hash_is_deterministic() {
+        let a = ActorID::Constructor(vec![0xde, 0xad, 0xbe, 0xef]);
+        let b = ActorID::Constructor(vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(a.to_hash(), b.to_hash(), "same bytes → same id");
     }
 
     #[test]
-    fn actorid_canonical_diverges_on_different_state() {
-        let mut s1 = ActorState::new();
-        s1.public
-            .insert(Int253::from(0u64), Value::String(String::from(b"a".to_vec())));
-        let mut s2 = ActorState::new();
-        s2.public
-            .insert(Int253::from(0u64), Value::String(String::from(b"b".to_vec())));
-        assert_ne!(
-            ActorID::canonical_from_initial_state(&s1),
-            ActorID::canonical_from_initial_state(&s2),
-            "different state → different id"
-        );
+    fn actorid_constructor_hash_diverges_on_different_bytes() {
+        let a = ActorID::Constructor(vec![0x01]);
+        let b = ActorID::Constructor(vec![0x02]);
+        assert_ne!(a.to_hash(), b.to_hash(), "different bytes → different id");
     }
 
     #[test]
-    fn actorid_constructor_to_hash_differs_from_canonical_post_deploy() {
-        // The two routes deliberately produce different hashes —
-        // constructor hashes the script bytes; canonical hashes
-        // the resulting state. Documented in the `to_hash` docstring.
-        let ctor = ActorID::Constructor(vec![0x01, 0x02, 0x03]);
-        let seed = ActorID::Hash(ctor.to_hash());
-        let post_state = ActorState::new();
-        let canonical = ActorID::canonical_from_initial_state(&post_state);
-        assert_ne!(seed, canonical);
+    fn actorid_hash_and_constructor_resolve_to_same_canonical_id() {
+        // The equivalence invariant: Hash(h) and Constructor(bytes)
+        // refer to the same actor when h = H(bytes). Both forms
+        // round-trip through `to_hash()` to the same 32 bytes.
+        let bytes = vec![0x01, 0x02, 0x03];
+        let ctor = ActorID::Constructor(bytes.clone());
+        let h = ctor.to_hash();
+        let hash_form = ActorID::Hash(h);
+        assert_eq!(ctor.to_hash(), hash_form.to_hash());
+        // `to_canonical` collapses both onto the Hash form.
+        assert_eq!(ctor.to_canonical(), hash_form);
+        assert_eq!(hash_form.to_canonical(), hash_form);
+    }
+
+    #[test]
+    fn actorid_registry_treats_both_forms_as_same_actor() {
+        // Deploy under Constructor form; look up via Hash form.
+        let mut r = MemRegistry::new();
+        let ctor_bytes = vec![0x11, 0x22, 0x33];
+        let ctor = ActorID::Constructor(ctor_bytes.clone());
+        let hash_form = ActorID::Hash(ctor.to_hash());
+
+        r.deploy(ctor.clone(), ActorState::new(), 1_000, 0)
+            .expect("deploy via Constructor");
+        // Both forms find the same entry.
+        assert!(r.exists(&ctor));
+        assert!(r.exists(&hash_form));
+        // Deploying the Hash form for the same id collides.
+        let err = r
+            .deploy(hash_form, ActorState::new(), 1_000, 0)
+            .expect_err("collide");
+        assert!(matches!(err, VMError::ActorAlreadyExists));
     }
 
     #[test]
@@ -1226,11 +1240,18 @@ mod tests {
         s
     }
 
+    /// Test helper: returns an arbitrary canonical id (real
+    /// deployments derive it from the constructor; tests don't
+    /// have constructors so we hand-pick the bytes).
+    fn fixture_id(seed: u8) -> ActorID {
+        ActorID::Hash([seed; 32])
+    }
+
     #[test]
     fn memregistry_deploy_load_roundtrip() {
         let mut r = MemRegistry::new();
         let s = fixture_state();
-        let id = ActorID::canonical_from_initial_state(&s);
+        let id = fixture_id(0xab);
         r.deploy(id.clone(), s, 1000, 5).expect("deploy");
         let loaded = r.load_state(&id).expect("load");
         assert!(loaded.has_method(&RECV_METHOD_KEY));
