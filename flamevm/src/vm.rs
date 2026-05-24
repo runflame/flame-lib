@@ -9484,18 +9484,7 @@ let proof = proof.expect("proof set");
         //                    callproof pieces + push:0 + open. ──
         for inp in inputs {
             let (q_open, f_open) = open_commitments(inp);
-            let token =
-                crate::Token::new(q_open.clone(), f_open.clone());
-            let (tree, cp) = build_predicate_with_program(
-                &[],
-                inp.predicate_secret,
-            );
-            let pred_point = tree.compute_point();
-            let cell = Cell::new(
-                Predicate::Opaque(pred_point),
-                Anchor(inp.anchor),
-                vec![Value::Token(token)],
-            );
+            let (cell, cp) = build_input_cell(inp);
             let cell_bytes = encode_cell_to_bytes(&cell);
             // pushstr cell_bytes — opaque on both sides.
             program = program.push_str(crate::String::from(cell_bytes));
@@ -9608,10 +9597,111 @@ let proof = proof.expect("proof set");
         program
     }
 
+    /// Build the input cell + the matching `CallProof` for an input
+    /// spec. Used by both `build_confidential_nm_program` (to
+    /// produce the cell bytes pushed onto the stack) and
+    /// `assert_nm_txlog` (to compute the expected `cell_id` for the
+    /// `TxEntry::Input` assertion).
+    fn build_input_cell(inp: &NMInputSpec) -> (Cell, CallProof) {
+        let (q_open, f_open) = open_commitments(inp);
+        let token = crate::Token::new(q_open, f_open);
+        let (tree, cp) = build_predicate_with_program(
+            &[],
+            inp.predicate_secret,
+        );
+        let pred_point = tree.compute_point();
+        let cell = Cell::new(
+            Predicate::Opaque(pred_point),
+            Anchor(inp.anchor),
+            vec![Value::Token(token)],
+        );
+        (cell, cp)
+    }
+
+    /// Strong txlog assertion: every `TxEntry::Input` matches the
+    /// corresponding input cell's `id()`, every `TxEntry::Output`
+    /// has the predicate point + Token qty/flv commitment points
+    /// the spec asked for. Catches the predicate/token-pairing
+    /// inversion that a naive `txlog.len()` check would miss.
+    fn assert_nm_txlog(
+        result: &TxResult,
+        inputs: &[NMInputSpec],
+        outputs: &[NMOutputSpec],
+    ) {
+        // Length check first — keeps the messages short on shape
+        // bugs (wrong count) before walking entry-by-entry.
+        assert_eq!(
+            result.txlog.len(),
+            1 + inputs.len() + outputs.len(),
+            "txlog length must be Header + N inputs + M outputs"
+        );
+        // Header at index 0.
+        assert!(matches!(result.txlog[0], crate::tx::TxEntry::Header(_)));
+        // Inputs at [1..=N], in spec order. The cell_id check is
+        // load-bearing — it pins down predicate + anchor + payload
+        // bytes all at once.
+        for (i, inp) in inputs.iter().enumerate() {
+            let expected_id = build_input_cell(inp).0.id();
+            match &result.txlog[1 + i] {
+                crate::tx::TxEntry::Input(id) => assert_eq!(
+                    *id, expected_id,
+                    "txlog[{}] input cell_id mismatch", 1 + i
+                ),
+                _ => panic!("txlog[{}] must be Input", 1 + i),
+            }
+        }
+        // Outputs at [1+N .. 1+N+M], in spec order. We verify the
+        // predicate point AND the Token's qty/flv commitment points
+        // — this is what would have caught the
+        // predicate/token-pairing inversion fixed in the prior
+        // commit.
+        for (j, out) in outputs.iter().enumerate() {
+            let expected_pred = CompressedRistretto(out.predicate);
+            let (q_open, f_open) = open_commitments_for_output(out);
+            let idx = 1 + inputs.len() + j;
+            match &result.txlog[idx] {
+                crate::tx::TxEntry::Output(c) => {
+                    assert_eq!(
+                        c.predicate.to_point(),
+                        expected_pred,
+                        "output[{}] predicate mismatch (idx {})",
+                        j, idx
+                    );
+                    assert_eq!(
+                        c.payload.len(),
+                        1,
+                        "output[{}] payload must contain exactly 1 Token",
+                        j
+                    );
+                    match &c.payload[0] {
+                        Value::Token(t) => {
+                            assert_eq!(
+                                t.qty.to_point(),
+                                q_open.to_point(),
+                                "output[{}] qty commitment point mismatch",
+                                j
+                            );
+                            assert_eq!(
+                                t.flv.to_point(),
+                                f_open.to_point(),
+                                "output[{}] flv commitment point mismatch",
+                                j
+                            );
+                        }
+                        _ => panic!(
+                            "output[{}] payload[0] must be Token", j
+                        ),
+                    }
+                }
+                _ => panic!("txlog[{}] must be Output", idx),
+            }
+        }
+    }
+
     /// Drive the full prove-then-verify round trip for an N→M
-    /// confidential transaction and return the verifier's
-    /// `TxResult`. Panics on failure — the caller's job is to
-    /// assert on the result.
+    /// confidential transaction and assert the full txlog shape +
+    /// per-cell contents. Single entry point for every positive
+    /// matrix test.
     fn run_confidential_nm(
         inputs: &[NMInputSpec],
         outputs: &[NMOutputSpec],
@@ -9622,6 +9712,10 @@ let proof = proof.expect("proof set");
             Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
                 .expect("prove ok");
         let txid_p = prover_result.txid;
+        // The prover-side TxResult already exposes the full txlog —
+        // assert against it so any divergence between prover and
+        // verifier views is independently visible.
+        assert_nm_txlog(&prover_result, inputs, outputs);
         let TxResult { bytecode, proof, .. } = prover_result;
         let proof = proof.expect("proof set");
         let pc_gens_v = PedersenGens::default();
@@ -9636,6 +9730,10 @@ let proof = proof.expect("proof set");
         )
         .expect("verify ok");
         assert_eq!(result.txid, txid_p, "prover/verifier TxID agree");
+        // Verifier-side txlog must match exactly — Phase 18 already
+        // covers TxID determinism, but this catches any future
+        // divergence in the txlog content itself.
+        assert_nm_txlog(&result, inputs, outputs);
         result
     }
 
@@ -9644,7 +9742,7 @@ let proof = proof.expect("proof set");
     /// N=1, M=1, 1 flavor: simplest possible confidential transfer.
     #[test]
     fn confidential_1_to_1_single_flavor() {
-        let result = run_confidential_nm(
+        let _ = run_confidential_nm(
             &[NMInputSpec {
                 qty: 100,
                 flv: 7,
@@ -9661,17 +9759,12 @@ let proof = proof.expect("proof set");
                 predicate: [0xb1; 32],
             }],
         );
-        // Header + 1 Input + 1 Output.
-        assert_eq!(result.txlog.len(), 3);
-        assert!(matches!(result.txlog[0], crate::tx::TxEntry::Header(_)));
-        assert!(matches!(result.txlog[1], crate::tx::TxEntry::Input(_)));
-        assert!(matches!(result.txlog[2], crate::tx::TxEntry::Output(_)));
     }
 
     /// N=1, M=2, 1 flavor: split 10 → [4, 6].
     #[test]
     fn confidential_1_to_2_single_flavor_split() {
-        let result = run_confidential_nm(
+        let _ = run_confidential_nm(
             &[NMInputSpec {
                 qty: 10,
                 flv: 7,
@@ -9697,13 +9790,12 @@ let proof = proof.expect("proof set");
                 },
             ],
         );
-        assert_eq!(result.txlog.len(), 4); // Header + 1 In + 2 Out
     }
 
     /// N=2, M=1, 1 flavor: merge [3, 7] → 10.
     #[test]
     fn confidential_2_to_1_single_flavor_merge() {
-        let result = run_confidential_nm(
+        let _ = run_confidential_nm(
             &[
                 NMInputSpec {
                     qty: 3,
@@ -9730,14 +9822,13 @@ let proof = proof.expect("proof set");
                 predicate: [0xb1; 32],
             }],
         );
-        assert_eq!(result.txlog.len(), 4); // Header + 2 In + 1 Out
     }
 
     /// N=2, M=2, 1 flavor: 4-way shuffle / re-blind. Both sides
     /// total 12 (5+7 = 4+8).
     #[test]
     fn confidential_2_to_2_single_flavor() {
-        let result = run_confidential_nm(
+        let _ = run_confidential_nm(
             &[
                 NMInputSpec {
                     qty: 5,
@@ -9773,14 +9864,13 @@ let proof = proof.expect("proof set");
                 },
             ],
         );
-        assert_eq!(result.txlog.len(), 5); // Header + 2 In + 2 Out
     }
 
     /// N=2, M=2, 2 flavors: gold (flv=7) and silver (flv=11)
     /// balanced separately.
     #[test]
     fn confidential_2_to_2_two_flavors() {
-        let result = run_confidential_nm(
+        let _ = run_confidential_nm(
             &[
                 NMInputSpec {
                     qty: 10,
@@ -9816,13 +9906,12 @@ let proof = proof.expect("proof set");
                 },
             ],
         );
-        assert_eq!(result.txlog.len(), 5);
     }
 
     /// N=3, M=3, 2 flavors: full shuffle. Gold: 5+5 → 7+3. Silver: 8 → 8.
     #[test]
     fn confidential_3_to_3_two_flavors() {
-        let result = run_confidential_nm(
+        let _ = run_confidential_nm(
             &[
                 NMInputSpec {
                     qty: 5,
@@ -9873,7 +9962,6 @@ let proof = proof.expect("proof set");
                 },
             ],
         );
-        assert_eq!(result.txlog.len(), 7); // Header + 3 In + 3 Out
     }
 
     /// N=3, M=2, 2 flavors. Gold 10+5+0 → 15; Silver 8 → 8.
@@ -9881,7 +9969,7 @@ let proof = proof.expect("proof set");
     /// do Gold 5+5 → 10 and Silver 8 → 8 (3→2).
     #[test]
     fn confidential_3_to_2_two_flavors() {
-        let result = run_confidential_nm(
+        let _ = run_confidential_nm(
             &[
                 NMInputSpec {
                     qty: 5,
@@ -9925,13 +10013,12 @@ let proof = proof.expect("proof set");
                 },
             ],
         );
-        assert_eq!(result.txlog.len(), 6); // Header + 3 In + 2 Out
     }
 
     /// N=1, M=3, 1 flavor: split 12 → 4+4+4.
     #[test]
     fn confidential_1_to_3_single_flavor() {
-        let result = run_confidential_nm(
+        let _ = run_confidential_nm(
             &[NMInputSpec {
                 qty: 12,
                 flv: 7,
@@ -9964,13 +10051,12 @@ let proof = proof.expect("proof set");
                 },
             ],
         );
-        assert_eq!(result.txlog.len(), 5); // Header + 1 In + 3 Out
     }
 
     /// N=3, M=1, 1 flavor: merge 4+4+4 → 12.
     #[test]
     fn confidential_3_to_1_single_flavor() {
-        let result = run_confidential_nm(
+        let _ = run_confidential_nm(
             &[
                 NMInputSpec {
                     qty: 4,
@@ -10005,13 +10091,12 @@ let proof = proof.expect("proof set");
                 predicate: [0xb1; 32],
             }],
         );
-        assert_eq!(result.txlog.len(), 5); // Header + 3 In + 1 Out
     }
 
     /// N=3, M=3, 1 flavor: re-balance 1+2+3 → 2+2+2.
     #[test]
     fn confidential_3_to_3_single_flavor() {
-        let result = run_confidential_nm(
+        let _ = run_confidential_nm(
             &[
                 NMInputSpec {
                     qty: 1,
@@ -10062,14 +10147,13 @@ let proof = proof.expect("proof set");
                 },
             ],
         );
-        assert_eq!(result.txlog.len(), 7); // Header + 3 In + 3 Out
     }
 
     /// N=2, M=3, 2 flavors. Gold 10 → 4+6; Silver 8 → 8 — total
     /// 2 inputs and 3 outputs.
     #[test]
     fn confidential_2_to_3_two_flavors() {
-        let result = run_confidential_nm(
+        let _ = run_confidential_nm(
             &[
                 NMInputSpec {
                     qty: 10,
@@ -10112,7 +10196,6 @@ let proof = proof.expect("proof set");
                 },
             ],
         );
-        assert_eq!(result.txlog.len(), 6);
     }
 
     // ── Negative tests ──────────────────────────────────────────
