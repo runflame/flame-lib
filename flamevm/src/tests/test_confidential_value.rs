@@ -31,8 +31,8 @@ fn encrypted_borrow_produces_widetoken_and_token_pair() {
     let mut prover = Prover::new(&pc_gens);
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new_with_run(
-            Run::from_program(program),
+        CallFrame::new(
+            program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
             0,
@@ -97,8 +97,8 @@ fn mix_with_single_in_single_out_balances() {
     let mut prover = Prover::new(&pc_gens);
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new_with_run(
-            Run::from_program(program),
+        CallFrame::new(
+            program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
             0,

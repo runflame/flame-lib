@@ -210,84 +210,61 @@ pub trait Delegate {
 /// Multiple Runs may nest within one call (via `run` / `loop` /
 /// `switch`); each pushes onto `CallFrame.run_stack` and is resumed
 /// on `break` / `return` / end-of-program.
-pub enum Run {
-    /// Walks raw bytecode and parses Instructions on the fly.
-    Bytecode { script: Vec<u8>, pc: usize },
-    /// Walks a pre-decoded list of Instructions with witnesses
-    /// already attached (prover side).
-    Queue {
-        instructions: Vec<crate::ops::Instruction>,
-        index: usize,
-    },
+/// A single executable program slice the VM is currently walking —
+/// always a pre-decoded `Vec<Instruction>` plus a cursor.
+///
+/// Prover and verifier feed the VM through the same shape: the
+/// prover hands in instructions with their witness slots populated
+/// (`Instruction::Input(Some(_))`, `Alloc(Some(_))`, …), the
+/// verifier hands in instructions parsed from bytecode (witness
+/// slots all `None`). Nested programs (entered via `op_run`,
+/// `op_open`, etc.) decode the bytes-on-stack via `Program::parse`
+/// the same way on both sides — `String` payloads can't carry
+/// witnesses so the inner Run is always witness-free regardless of
+/// which side is running.
+pub struct Run {
+    instructions: Vec<crate::ops::Instruction>,
+    cursor: usize,
 }
 
 impl Run {
-    /// Constructs a Run that walks `script` as bytecode (verifier /
-    /// internal / nested `run`/`switch`).
-    pub fn new(script: Vec<u8>) -> Self {
-        Run::Bytecode { script, pc: 0 }
-    }
-
-    /// Constructs a Run that walks a pre-decoded Program (prover's
-    /// main program — the witness-bearing variant of [`Instruction`]
-    /// is preserved at each step).
-    pub(crate) fn from_program(program: crate::program::Program) -> Self {
-        Run::Queue {
-            instructions: program.instructions().to_vec(),
-            index: 0,
-        }
+    /// Constructs a Run from a pre-decoded instruction stream. The
+    /// verifier calls `Program::parse(&bytecode)` to produce this;
+    /// the prover passes its witness-bearing `Program` directly.
+    pub fn new(instructions: Vec<crate::ops::Instruction>) -> Self {
+        Run { instructions, cursor: 0 }
     }
 
     /// Returns the next [`Instruction`] in this Run, advancing the
-    /// cursor. `Ok(None)` at end of program.
+    /// cursor. `Ok(None)` at end of program. Result-shaped to keep
+    /// the call-site uniform with the previous bytecode-on-the-fly
+    /// parsing path — Phase-19 bytecode errors that used to surface
+    /// here now surface at `Program::parse` entry instead.
     pub(crate) fn next_instruction(
         &mut self,
     ) -> Result<Option<crate::ops::Instruction>, VMError> {
-        match self {
-            Run::Bytecode { script, pc } => {
-                if *pc >= script.len() {
-                    return Ok(None);
-                }
-                let mut slice: &[u8] = &script[*pc..];
-                let before = slice.len();
-                let instr = crate::ops::Instruction::parse(&mut slice)?;
-                *pc += before - slice.len();
-                Ok(Some(instr))
-            }
-            Run::Queue { instructions, index } => {
-                if *index >= instructions.len() {
-                    return Ok(None);
-                }
-                let instr = instructions[*index].clone();
-                *index += 1;
-                Ok(Some(instr))
-            }
+        if self.cursor >= self.instructions.len() {
+            return Ok(None);
         }
+        let instr = self.instructions[self.cursor].clone();
+        self.cursor += 1;
+        Ok(Some(instr))
     }
 
     /// True iff the Run has reached its end.
     pub(crate) fn is_finished(&self) -> bool {
-        match self {
-            Run::Bytecode { script, pc } => *pc >= script.len(),
-            Run::Queue { instructions, index } => *index >= instructions.len(),
-        }
+        self.cursor >= self.instructions.len()
     }
 
     /// Resets the cursor to the start of the Run. Used by `loop`.
     fn rewind(&mut self) {
-        match self {
-            Run::Bytecode { pc, .. } => *pc = 0,
-            Run::Queue { index, .. } => *index = 0,
-        }
+        self.cursor = 0;
     }
 
     /// Jumps the cursor past the end of the Run, so the next call to
     /// `next_instruction` returns `None`. Used by `break:k`.
     fn jump_to_end(&mut self) {
-        match self {
-            Run::Bytecode { script, pc } => *pc = script.len(),
-            Run::Queue { instructions, index } => *index = instructions.len(),
-        }
+        self.cursor = self.instructions.len();
     }
 }
 
@@ -363,28 +340,12 @@ pub struct CallFrame {
 }
 
 impl CallFrame {
+    /// Builds a fresh CallFrame whose Run walks `instructions`. The
+    /// caller has already decoded the script bytes (verifier via
+    /// `Program::parse`) or is supplying a witness-bearing Program
+    /// (prover) — either way the Run shape is the same.
     pub fn new(
-        script: Vec<u8>,
-        kind: CallKind,
-        gas_limit: u64,
-        mem_limit: u64,
-        newbytes: u64,
-    ) -> Self {
-        Self::new_with_run(
-            Run::new(script),
-            kind,
-            gas_limit,
-            mem_limit,
-            newbytes,
-        )
-    }
-
-    /// Like [`CallFrame::new`] but takes a pre-constructed [`Run`] —
-    /// used by the prover-side entry point ([`VM::run_external_program`])
-    /// which needs a `Run::Queue` over a witness-bearing Program rather
-    /// than a `Run::Bytecode` over a script slice.
-    pub fn new_with_run(
-        run: Run,
+        instructions: Vec<crate::ops::Instruction>,
         kind: CallKind,
         gas_limit: u64,
         mem_limit: u64,
@@ -392,7 +353,7 @@ impl CallFrame {
     ) -> Self {
         Self {
             stack: Vec::new(),
-            current_run: run,
+            current_run: Run::new(instructions),
             run_stack: Vec::new(),
             kind,
             gas_limit,
@@ -524,9 +485,16 @@ impl VM {
         mut delegate: D,
     ) -> Result<TxResult, VMError> {
         let bytecode = script.clone();
+        let program = crate::program::Program::parse(&script)?;
         let mut vm = Self::new(
             header,
-            CallFrame::new(script, CallKind::ExternalRoot, gas_limit, mem_limit, 0),
+            CallFrame::new(
+                program.into_instructions(),
+                CallKind::ExternalRoot,
+                gas_limit,
+                mem_limit,
+                0,
+            ),
         );
         while vm.step_external(&mut delegate)? {}
         // Finalize the delegate first (signatures, proof verification
@@ -541,37 +509,17 @@ impl VM {
         Ok(vm.into_result(bytecode, None))
     }
 
-    /// Runs an external transaction *bytecode* to completion without
-    /// calling `Delegate::finalize`. Returns the full Phase-21
-    /// [`TxResult`] (with `proof = None` — the caller, typically
-    /// [`crate::Verifier::verify`], performs the proof check and may
-    /// flip `proof` itself if desired). The verifier reads
-    /// `result.txlog` to recompute the TxID and bind it into the
-    /// R1CS transcript before `cs.verify` (Phase 18).
-    pub(crate) fn run_external<D: Delegate>(
-        header: TxHeader,
-        script: Vec<u8>,
-        gas_limit: u64,
-        mem_limit: u64,
-        delegate: &mut D,
-    ) -> Result<TxResult, VMError> {
-        let bytecode = script.clone();
-        let mut vm = Self::new(
-            header,
-            CallFrame::new(script, CallKind::ExternalRoot, gas_limit, mem_limit, 0),
-        );
-        while vm.step_external(delegate)? {}
-        Ok(vm.into_result(bytecode, None))
-    }
-
-    /// Prover-side counterpart of [`Self::run_external`]: takes a
-    /// [`crate::Program`] (witness-bearing Instructions) instead of
-    /// bytecode. The VM walks the program via `Run::Queue`, so
-    /// `Instruction::Alloc(Some(witness))` retains its witness when
-    /// dispatched. Returns the full Phase-21 [`TxResult`] without
-    /// the proof set — [`crate::Prover::prove`] attaches the proof
-    /// before returning to its caller.
-    pub(crate) fn run_external_program<D: Delegate>(
+    /// Runs an external-root program through the VM to completion
+    /// without calling `Delegate::finalize`. Single entry point for
+    /// both prover and verifier — the prover passes a `Program`
+    /// with witnesses inline, the verifier passes one decoded from
+    /// raw bytecode via `Program::parse`. Either way the VM walks
+    /// the resulting `Vec<Instruction>` through one dispatch.
+    ///
+    /// Returns the full Phase-21 [`TxResult`] (with `proof = None`
+    /// — the caller, typically [`crate::Verifier::verify`] or
+    /// [`crate::Prover::prove`], attaches the proof afterward).
+    pub(crate) fn run<D: Delegate>(
         header: TxHeader,
         program: crate::program::Program,
         gas_limit: u64,
@@ -581,8 +529,8 @@ impl VM {
         let bytecode = program.to_bytecode();
         let mut vm = Self::new(
             header,
-            CallFrame::new_with_run(
-                Run::from_program(program),
+            CallFrame::new(
+                program.into_instructions(),
                 CallKind::ExternalRoot,
                 gas_limit,
                 mem_limit,
@@ -610,9 +558,16 @@ impl VM {
             caller: message.caller,
             anchor: message.anchor,
         };
+        let program = crate::program::Program::parse(&script)?;
         let mut vm = Self::new(
             header,
-            CallFrame::new(script, kind, message.gas, mem_limit, message.vbytes),
+            CallFrame::new(
+                program.into_instructions(),
+                kind,
+                message.gas,
+                mem_limit,
+                message.vbytes,
+            ),
         );
         while vm.step_internal()? {}
         // Internal context produces no proof and no deferred sigs.
@@ -643,7 +598,7 @@ impl VM {
     /// off the result without re-running the merkle root.
     ///
     /// `bytecode` and `proof` are filled by the caller (the VM
-    /// doesn't always have the bytecode — `run_external_program`
+    /// doesn't always have the bytecode — `VM::run`
     /// walked a `Run::Queue` over `Instructions` instead of raw
     /// bytes — and the proof is constructed by the Prover after the
     /// run finishes).
@@ -1673,8 +1628,7 @@ impl VM {
     /// the run-stack, and switches to a fresh Run over the string's bytes.
     fn op_run(&mut self) -> Result<(), VMError> {
         let s = self.pop_string()?;
-        self.enter_run(s.as_bytes().to_vec());
-        Ok(())
+        self.enter_run(s.as_bytes().to_vec())
     }
 
     /// `0x7c` `loop` — resets the current Run's cursor to the start.
@@ -1693,8 +1647,7 @@ impl VM {
         let a = self.pop_string()?;
         let x = self.pop_int253()?;
         let chosen = if x.is_zero() { b } else { a };
-        self.enter_run(chosen.as_bytes().to_vec());
-        Ok(())
+        self.enter_run(chosen.as_bytes().to_vec())
     }
 
     /// `0x7e` `return k` — atomic cross-frame return:
@@ -1790,11 +1743,18 @@ impl VM {
     }
 
     /// Pushes the current Run onto the run-stack and replaces it with a
-    /// fresh Run over `script`. Used by `run` and `switch`.
-    fn enter_run(&mut self, script: Vec<u8>) {
-        let new_run = Run::new(script);
+    /// fresh Run over `script` (raw bytecode pulled off the stack
+    /// or from a CallProof leaf). The bytes are parsed into
+    /// `Vec<Instruction>` here — inner programs cannot carry
+    /// witnesses (Strings on the stack only hold bytes), so the
+    /// prover and verifier produce identical inner Runs.
+    fn enter_run(&mut self, script: Vec<u8>) -> Result<(), VMError> {
+        let instrs = crate::program::Program::parse(&script)?
+            .into_instructions();
+        let new_run = Run::new(instrs);
         let old_run = mem::replace(&mut self.current_call.current_run, new_run);
         self.current_call.run_stack.push(old_run);
+        Ok(())
     }
 
     fn op_nop(&mut self) -> Result<(), VMError> {
@@ -2281,8 +2241,7 @@ impl VM {
         for v in args {
             self.push_value(v);
         }
-        self.enter_run(program);
-        Ok(())
+        self.enter_run(program)
     }
 
     /// Builds a `CallProof` from the four stack-popped pieces.
@@ -2378,8 +2337,7 @@ impl VM {
         for v in args {
             self.push_value(v);
         }
-        self.enter_run(program);
-        Ok(())
+        self.enter_run(program)
     }
 
     // ── Phase 11: CS opcode handlers + Expression overloads ──────

@@ -34,7 +34,8 @@ fn internal_unknown_opcode_errors() {
 #[test]
 fn run_advances_through_instructions() {
     // Bytecode: push:5, drop, nop. Three Instructions, then end.
-    let mut run = Run::new(vec![0x05, 0x1c, 0x1d]);
+    let instrs = Program::parse(&[0x05, 0x1c, 0x1d]).unwrap().into_instructions();
+    let mut run = Run::new(instrs);
     use crate::ops::Instruction;
     assert!(matches!(
         run.next_instruction().unwrap(),

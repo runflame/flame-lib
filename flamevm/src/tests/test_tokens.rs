@@ -235,7 +235,10 @@ fn issue_at_external_root_errors_actor_context() {
     script.push(0x71);
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(script, CallKind::ExternalRoot, 1_000_000, 0, 0),
+        CallFrame::new(
+            Program::parse(&script).expect("parse").into_instructions(),
+            CallKind::ExternalRoot, 1_000_000, 0, 0,
+        ),
     );
     let mut delegate = make_stub_delegate();
     let err = drive_external(&mut vm, &mut delegate).unwrap_err();

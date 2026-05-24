@@ -76,7 +76,7 @@ pub(crate) fn vm_with_script(script: Vec<u8>) -> VM {
     };
     VM::new(
         dummy_header(),
-        CallFrame::new(script, kind, 1_000_000, 0, 0),
+        CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), kind, 1_000_000, 0, 0),
     )
 }
 
@@ -143,7 +143,7 @@ pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
         anchor: Anchor([0u8; 32]),
         predicate: Predicate::Opaque(CompressedRistretto([0u8; 32])),
     };
-    let child = CallFrame::new(script, child_kind, 500, 0, 0);
+    let child = CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), child_kind, 500, 0, 0);
     let mut vm = VM::new(dummy_header(), parent);
     let p = mem::replace(&mut vm.current_call, child);
     vm.call_stack.push(p);
@@ -317,7 +317,7 @@ pub(crate) fn vm_internal_with_actor(script: Vec<u8>, actor: ActorID) -> VM {
     };
     VM::new(
         dummy_header(),
-        CallFrame::new(script, kind, 1_000_000, 0, 0),
+        CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), kind, 1_000_000, 0, 0),
     )
 }
 
@@ -346,7 +346,7 @@ pub(crate) fn drive_external(
 pub(crate) fn vm_external_with_script(script: Vec<u8>) -> VM {
     VM::new(
         dummy_header(),
-        CallFrame::new(script, CallKind::ExternalRoot, 1_000_000, 0, 0),
+        CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), CallKind::ExternalRoot, 1_000_000, 0, 0),
     )
 }
 
@@ -397,7 +397,7 @@ pub(crate) fn decode_cell_dropping_ok(bytes: &[u8]) -> Result<(), VMError> {
 pub(crate) fn run_external_workflow(script: Vec<u8>) -> VM {
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(script, CallKind::ExternalRoot, 1_000_000, 0, 0),
+        CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), CallKind::ExternalRoot, 1_000_000, 0, 0),
     );
     let mut delegate = StubDelegate::new();
     while vm.step_external(&mut delegate).expect("step_external ok") {}
@@ -468,8 +468,8 @@ pub(crate) fn run_external_steps<'g>(
 ) -> (VM, Prover<'g>) {
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new_with_run(
-            Run::from_program(program),
+        CallFrame::new(
+            program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
             0,

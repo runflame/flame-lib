@@ -229,7 +229,10 @@ fn return_transfers_values_to_parent() {
         anchor: Anchor([0u8; 32]),
         predicate: Predicate::Opaque(CompressedRistretto([0u8; 32])),
     };
-    let child_frame = CallFrame::new(child_script, child_kind, 500, 0, 0);
+    let child_frame = CallFrame::new(
+        Program::parse(&child_script).expect("parse").into_instructions(),
+        child_kind, 500, 0, 0,
+    );
     let mut vm = VM::new(dummy_header(), parent_frame);
     let initial_parent = mem::replace(&mut vm.current_call, child_frame);
     vm.call_stack.push(initial_parent);

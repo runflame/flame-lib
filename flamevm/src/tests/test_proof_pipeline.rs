@@ -173,8 +173,8 @@ fn alloc_pushes_expression_with_witness() {
     let kind = CallKind::ExternalRoot;
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new_with_run(
-            Run::from_program(program),
+        CallFrame::new(
+            program.into_instructions(),
             kind,
             1_000_000,
             0,
@@ -540,8 +540,8 @@ fn phase21_total_fee_flows_through_to_txresult() {
         .fee();
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new_with_run(
-            Run::from_program(program),
+        CallFrame::new(
+            program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
             0,

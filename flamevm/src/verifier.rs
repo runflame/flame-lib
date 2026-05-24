@@ -100,9 +100,13 @@ impl Verifier {
         txbound_signature: Option<musig::Signature>,
     ) -> Result<TxResult, VMError> {
         let mut verifier = Verifier::new();
-        let result = VM::run_external(
+        // Verifier-side: parse the wire bytecode into the canonical
+        // witness-free Program. Both sides feed `VM::run` through
+        // the same shape.
+        let program = crate::program::Program::parse(&bytecode)?;
+        let result = VM::run(
             header,
-            bytecode,
+            program,
             gas_limit,
             mem_limit,
             &mut verifier,
@@ -213,7 +217,7 @@ impl Delegate for Verifier {
 
     fn finalize(self, _deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError> {
         // Proof verification happens via `verify_proof` after
-        // [`VM::run_external`] returns; `finalize` here is a no-op
+        // [`VM::run`] returns; `finalize` here is a no-op
         // retained only so `Verifier` satisfies the `Delegate` trait
         // (mirrors the symmetric stub on the prover side).
         Ok(())

@@ -69,6 +69,14 @@ impl Program {
         &self.instructions
     }
 
+    /// Consumes the Program and returns the underlying
+    /// `Vec<Instruction>` — what the VM walks. The Run constructor
+    /// takes this directly; both prover and verifier feed the VM
+    /// through this single path.
+    pub fn into_instructions(self) -> Vec<Instruction> {
+        self.instructions
+    }
+
     /// Appends an arbitrary `Instruction`. Used by the fluent builder
     /// methods and by callers that want to inject typed variants
     /// directly.

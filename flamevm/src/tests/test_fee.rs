@@ -75,8 +75,8 @@ fn phase19_op_fee_rejects_negative_qty() {
     // Run all 3 instructions; the third (fee) must error.
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new_with_run(
-            Run::from_program(program),
+        CallFrame::new(
+            program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
             0,
@@ -99,8 +99,8 @@ fn phase19_op_fee_rejects_qty_over_cap() {
     let program = Program::new().push_int(over).push_int(0u64).fee();
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new_with_run(
-            Run::from_program(program),
+        CallFrame::new(
+            program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
             0,
@@ -134,8 +134,8 @@ fn phase19_op_fee_rejects_aggregate_over_cap() {
         .fee();
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new_with_run(
-            Run::from_program(program),
+        CallFrame::new(
+            program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
             0,

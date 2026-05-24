@@ -73,23 +73,23 @@ fn pushint_full_roundtrip() {
 
 #[test]
 fn pushint_full_rejects_negative_zero() {
-    // sign bit set, magnitude zero: -0, not representable
+    // sign bit set, magnitude zero: -0, not representable. Parse-time
+    // failure now (Program::parse happens at VM entry, not lazily
+    // during dispatch).
     let mut bytes = [0u8; 32];
     bytes[31] = 0x80;
     let mut script = vec![0x18];
     script.extend_from_slice(&bytes);
-    let mut vm = vm_with_script(script);
-    let err = run_to_end(&mut vm).unwrap_err();
+    let err = Program::parse(&script).unwrap_err();
     assert!(matches!(err, VMError::InvalidInt253Encoding));
 }
 
 #[test]
 fn pushint8_at_end_of_script_errors() {
-    let mut vm = vm_with_script(vec![0x10]);
-    assert!(matches!(
-        run_to_end(&mut vm).unwrap_err(),
-        VMError::UnexpectedEndOfScript
-    ));
+    // Bare `pushint8` opcode (0x10) with no immediate byte — fails
+    // at parse time.
+    let err = Program::parse(&[0x10]).unwrap_err();
+    assert!(matches!(err, VMError::UnexpectedEndOfScript));
 }
 
 // ── pushstr (0x19) ───────────────────────────────────────────
@@ -108,12 +108,10 @@ fn pushstr_immediate_length() {
 
 #[test]
 fn pushstr_short_input_errors() {
-    let script = vec![0x19, 0x00, 0x04, b'a']; // length says 4, only 1 byte
-    let mut vm = vm_with_script(script);
-    assert!(matches!(
-        run_to_end(&mut vm).unwrap_err(),
-        VMError::UnexpectedEndOfScript
-    ));
+    // length says 4, only 1 byte present — fails at parse time.
+    let script = vec![0x19, 0x00, 0x04, b'a'];
+    let err = Program::parse(&script).unwrap_err();
+    assert!(matches!(err, VMError::UnexpectedEndOfScript));
 }
 
 // ── pushpoint (0x1a) ─────────────────────────────────────────

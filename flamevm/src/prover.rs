@@ -101,10 +101,10 @@ impl<'g> Prover<'g> {
     ) -> Result<TxResult, VMError> {
         let mut prover = Prover::new(pc_gens);
         // Run the VM but receive the result without the proof set —
-        // we'll fold it in after the R1CS prove. `run_external_program`
-        // populates `result.bytecode` from `program.to_bytecode()`
-        // before consuming the program.
-        let mut result = VM::run_external_program(
+        // we'll fold it in after the R1CS prove. `VM::run` consumes
+        // the witness-bearing Program and stores its bytecode form on
+        // the returned TxResult.
+        let mut result = VM::run(
             header,
             program,
             gas_limit,
