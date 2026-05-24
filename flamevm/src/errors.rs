@@ -456,4 +456,17 @@ pub enum VMError {
     /// `WideToken`, not as the recorded fee amount.
     #[error("fee qty must be non-negative")]
     FeeQtyNegative,
+
+    /// Phase 22: the prover-side witness queue passed to
+    /// `Instruction::Input` doesn't have one `TokenWitness` per
+    /// `Value::Token` entry in the decoded cell's payload.
+    #[error("input witness count does not match cell payload Token count")]
+    WitnessCountMismatch,
+
+    /// Phase 22: a `TokenWitness`'s `Commitment::Open` point doesn't
+    /// match the decoded cell's `Commitment::Closed` point. The
+    /// prover passed a witness for the wrong commitment — fail
+    /// loudly so the bug is caught at test time.
+    #[error("input witness commitment point does not match cell payload")]
+    WitnessPointMismatch,
 }

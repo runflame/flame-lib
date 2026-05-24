@@ -15,6 +15,7 @@ mod tx;
 mod value;
 mod verifier;
 mod vm;
+mod witness;
 
 pub use cell::{CallProof, Cell, Predicate, PredicateTree};
 pub use constraints::{
@@ -32,6 +33,7 @@ pub use string::String;
 pub use token::{flavor_from_actor, ClearToken, Token, WideToken};
 pub use value::Value;
 pub use verifier::Verifier;
+pub use witness::{InputWitnesses, TokenWitness};
 
 pub use tx::{ExternalTx, InternalTx};
 pub use vm::VM;

@@ -31,8 +31,8 @@ what's left to build.
 | 19 | `op_fee` + `CheckedFee` accumulator                                | ✅      |
 | 20 | TxBound multi-sig batch verification                               | ✅      |
 | 21 | `TxResult` shape + finalize return values                          | ✅      |
-| 22 | Input-cell witness re-attachment (`Instruction::Input(witness)`)   | ⏳      |
-| 23 | Confidential N→M end-to-end test harness                           | ⏳      |
+| 22 | Input-cell witness re-attachment (`Instruction::Input(witness)`)   | ✅      |
+| 23 | Confidential N→M end-to-end test harness                           | ✅      |
 | 24 | `ActorState` + `ActorRegistry` (real, not stub)                    | ⏳      |
 | 25 | `op_load` + `op_save`                                              | ⏳      |
 | 26 | `op_call` + frame creation                                         | ⏳      |
@@ -50,9 +50,15 @@ what's left to build.
 | 38 | spec.md + design.md sync + ADR backfill                            | ⏳      |
 | 39 | End-to-end integration tests                                       | ⏳      |
 
-**21 of 39 complete (54 %).** Total test count: 417 passing; build
+**23 of 39 complete (59 %).** Total test count: 437 passing; build
 clean; 4 leftover compiler warnings, all targeted by Phases 24 / 26
 / 27 / 35.
+
+The confidential N→M transaction test harness (Phase 23) exercises
+13 shapes end-to-end through `Prover::prove` → `Verifier::verify`:
+- 1→1 / 1→2 / 1→3 / 2→1 / 2→2 / 2→3 / 3→1 / 3→2 / 3→3 (single flavor)
+- 2→2 / 3→2 / 2→3 / 3→3 (two flavors)
+- 2 negative tests: imbalance rejected, flavor mismatch rejected
 
 ### Gas + memory accounting is deferred
 
@@ -100,12 +106,13 @@ size the cap.
 | 19 | `op_fee` + `CheckedFee`                            | 14    | `0x7a fee` allocates WideToken debt; `MAX_FEE = 2²⁴` per-tx cap. `TxEntry::Fee(u64)`. |
 | 20 | TxBound multi-sig batch verification               | 7     | `DeferredSig::TxBound { vk, cell_id }`. `verify_multi_batched` against `flamevm.signtx.v1` transcript bound to TxID. |
 | 21 | `TxResult` shape                                   | 4     | Unified return: `{ txid, txlog, total_fee, gas_used, vbytes_used, bytecode, proof, deferred_sigs, sends }`. |
+| 22 | Input-cell witness re-attachment                   | 7     | `Instruction::Input(Option<Box<InputWitnesses>>)`. Prover-side re-attaches `Commitment::Open` post-decode; point-equality check guards prover bugs. |
+| 23 | Confidential N→M test harness                      | 13    | Full input→open→mix→output prove/verify round-trip. Matrix: N∈{1,2,3} × M∈{1,2,3} × {1,2 flavors} + 2 negatives. |
 
 ## Known wiring gap
 
 | Area | Gap | Severity | Targeted in phase |
 |---|---|---|---|
-| Input-cell Token witnesses | `Cell::decode` produces `Commitment::Closed` for every Token payload entry. Prover-side `op_input` therefore loses witnesses for cell payloads, so `mix` over confidential inputs fails `WitnessMissing` in `commit_variable`. | High | 22 |
 | Encrypted `issue` | Spec says `qty: Point → Token`. Current code errors `TokenRequiresCS`. Needs architect ADR on actor-context-vs-CS-context. | Medium | 33 |
 | `String::as_bytes` panic on witness variants | Sharp edge — documented but no CI lint. | Low | 38 (doc) |
 | `decrypt` uses default `PedersenGens` only | Future multi-gens use would need parameterization. | Low | (deferred) |
@@ -133,7 +140,7 @@ size the cap.
 
 | Topic | Blocking phase | Notes |
 |---|---|---|
-| Input-cell witness encoding | 22 | Prover-side `Instruction::Input(Option<Box<InputWitnesses>>)` carries per-Token witness scalars; verifier-side parses to `None`. Mirrors `Alloc(Option<Int253>)` pattern. ADR captures the design rationale + non-malleability check (point-equality assertion). |
+| Input-cell witness encoding | — (resolved Phase 22) | Implemented as `Instruction::Input(Option<Box<InputWitnesses>>)`; verifier-side parses to `None`. ADR pending in Phase 38 housekeeping. |
 | Encrypted `issue` semantics | 33 | Variable-only, Predicate-as-issuer, internal-only, or explicit-cid? |
 | Extension tag (255) policy | 37 | Reject vs reserve for soft-fork. Currently rejects. |
 | Refund predicate execution context | 32 | Fresh micro-VM vs recoverable sub-call? |
@@ -622,7 +629,7 @@ its phase:
 | Concurrency (external parallel, internal serial) | ⏳ Consensus crate; VM hooks in 36 | 36 |
 | Block resource pools (4:1) | ⏳ Pending | 36 |
 | Bitcoin coupling (chain-info opcodes) | ⏳ Pending | 31 |
-| Confidential N→M transfers | ⏳ Pending — needs witness re-attachment | 22 + 23 |
+| Confidential N→M transfers | ✅ Done | 22 + 23 |
 
 **Open structural questions** from design.md:
 - BFT family / stake / finality / validator rotation — consensus

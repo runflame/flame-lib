@@ -335,9 +335,16 @@ pub enum Instruction {
     /// `break:k` (0x80..=0x8f) — `k` ∈ 0..=15.
     BreakK(u8),
 
-    // ── Phase 9/10: Cell + I/O ─────────────────────────────────────
+    // ── Phase 9/10/22: Cell + I/O ──────────────────────────────────
     /// `input` (0x90) — external-only.
-    Input,
+    ///
+    /// The optional inner [`crate::witness::InputWitnesses`] carries
+    /// prover-side commitment witnesses for any `Token` entries in
+    /// the consumed cell's payload (Phase 22). Verifier-side parsing
+    /// always reconstructs `Input(None)`; the witness never crosses
+    /// the wire. `Box` keeps the enum tag cheap when witness is
+    /// `None`. Same shape as `Alloc(Option<Int253>)`.
+    Input(Option<Box<crate::witness::InputWitnesses>>),
     /// `cell` (0x91).
     Cell,
     /// `output` (0x92).
@@ -453,7 +460,9 @@ impl Instruction {
                 debug_assert!(*k <= 0x0f, "BreakK arg must fit in 4 bits");
                 out.push(OP_BREAKK_BASE + (*k & 0x0f));
             }
-            Instruction::Input => out.push(OP_INPUT),
+            // Witness (if any) never crosses the wire — prover-side
+            // only. Encoded form is the bare opcode byte.
+            Instruction::Input(_) => out.push(OP_INPUT),
             Instruction::Cell => out.push(OP_CELL),
             Instruction::Output => out.push(OP_OUTPUT),
             Instruction::Open => out.push(OP_OPEN),
@@ -580,7 +589,7 @@ impl Instruction {
             OP_BREAKK_BASE..=OP_BREAKK_MAX => {
                 Ok(Instruction::BreakK(byte - OP_BREAKK_BASE))
             }
-            OP_INPUT => Ok(Instruction::Input),
+            OP_INPUT => Ok(Instruction::Input(None)),
             OP_CELL => Ok(Instruction::Cell),
             OP_OUTPUT => Ok(Instruction::Output),
             OP_OPEN => Ok(Instruction::Open),
@@ -878,7 +887,7 @@ mod tests {
             Instruction::IssueFlv,
             Instruction::Verify,
             Instruction::Return,
-            Instruction::Input,
+            Instruction::Input(None),
             Instruction::Cell,
             Instruction::Signtx,
             Instruction::Signrun,

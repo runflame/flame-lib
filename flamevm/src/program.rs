@@ -313,7 +313,26 @@ impl Program {
 
     // ── Phase 9/10: Cell + I/O ───────────────────────────────────
 
-    pub fn input(mut self) -> Self { self.instructions.push(Instruction::Input); self }
+    /// `input` (0x90), no prover witness — fine for cell payloads
+    /// that contain no `Token` entries, or for verifier-side
+    /// program reconstruction.
+    pub fn input(mut self) -> Self {
+        self.instructions.push(Instruction::Input(None));
+        self
+    }
+
+    /// `input` (0x90) with a prover-side witness queue. Phase 22 —
+    /// required when the consumed cell's payload contains any
+    /// `Token` entries that participate in a downstream `mix` (the
+    /// witnesses re-attach `Commitment::Open` after decode).
+    pub fn input_with_witnesses(
+        mut self,
+        witnesses: crate::witness::InputWitnesses,
+    ) -> Self {
+        self.instructions
+            .push(Instruction::Input(Some(Box::new(witnesses))));
+        self
+    }
     pub fn cell(mut self) -> Self { self.instructions.push(Instruction::Cell); self }
     pub fn output(mut self) -> Self { self.instructions.push(Instruction::Output); self }
     pub fn open(mut self) -> Self { self.instructions.push(Instruction::Open); self }

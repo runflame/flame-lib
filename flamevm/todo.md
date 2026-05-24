@@ -468,3 +468,73 @@ Design calls with implementation impact:
 - **9.6** — `return` inside cell-open.
 - **9.9** — linearity-leak through cell-open.
 - **9.10** — multi-leaf predicate trees.
+
+---
+
+## Cross-cutting — Gas calibration
+
+Open questions surfaced while drafting the opcode-pricing strategy. All four block construction of the first calibration harness; nothing downstream of "first measurable gas value" can land until they're settled.
+
+> **Proposed resolution:** ADR 0009 — "Gas calibration strategy" (status: proposed). Picks one answer per G.1–G.4 plus the cross-cutting methodology (criterion + iai-callgrind, marginal-difference programs, two-metric take-worse rule, single lane for v0, per-PR iai gate, per-release criterion recalibration on a containerized AWS `c7i.large` reference). Architect-response slots below remain empty until the ADR is accepted (or modified) by the human Architect.
+
+### G.1 Reference machine for calibration
+
+> Calibration produces wall-clock numbers; those numbers are meaningless without a fixed reference machine. Every gas value is relative to that one box, and the choice locks in the absolute throughput of the network.
+>
+> Implementation today: none — no calibration harness exists yet.
+>
+> Stakes: too powerful a reference and weak nodes can't keep up; too weak and the chain is throttled below what production nodes can deliver. Cloud reference is reproducible but binds us to a vendor's hardware roadmap; bare-metal is durable but harder to share.
+>
+> Candidates:
+> - **a)** Pinned AWS instance (e.g. `c7i.large`) with documented kernel/governor settings. Reproducible by anyone with an AWS account.
+> - **b)** Specific bare-metal box (CPU model + freq + kernel + governor). Most durable; hardest to reproduce.
+> - **c)** "Synthetic reference" — declare a fixed wall-clock budget per block; each node calibrates locally and prices its own gas, with a consensus floor.
+>
+> _Architect response:_ 
+
+### G.2 Gas unit anchor
+
+> What does "1 gas" mean in absolute terms on the reference machine?
+>
+> Implementation today: none.
+>
+> Stakes: too coarse (1 gas = 1 μs) and cheap opcodes like `dup`/`pop` can't be priced below 1 gas, so fee structure skews toward overcharging trivial ops. Too fine (1 gas = 1 ns) and numbers grow unwieldy, risking overflow at block-budget scale and noisy regression signals at the per-opcode scale.
+>
+> Default proposal: **1 gas = 100 ns** on the reference machine. Puts `dup`/`pop` at ~1–2 gas, typical arithmetic at 1–20 gas, heavy ZK ops at 10k–100k gas, with comfortable headroom against `u64` block budgets.
+>
+> _Architect response:_ _(empty until filled in)_
+
+### G.3 One lane (compute-gas) or two (compute + bytes-touched)?
+
+> Cell load and string-touching opcodes are I/O-dominant, not compute-dominant. Pricing them on the same axis as `add` either over- or under-charges, depending on which extreme dominates calibration.
+>
+> Implementation today: none.
+>
+> Stakes: single lane is simpler and matches Ethereum's gas model — every cost folds into one number, one block budget. Two lanes (compute-gas + bytes-touched) gives a more honest model but adds protocol surface (two block budgets, two fee axes, more places for adversarial skew).
+>
+> The 4× arena cap already bounds *transient memory size*; this question is about pricing the *cost of touching* memory and cells, not whether the allocation fits.
+>
+> _Architect response:_ _(empty until filled in)_
+
+### G.4 Block compute budget
+
+> Calibration is only meaningful relative to a per-block compute budget. The budget sets target throughput and bounds worst-case validation time on the reference machine.
+>
+> Implementation today: none.
+>
+> Stakes: too high and slow nodes fall behind / get partitioned; too low and the chain underuses available hardware. Needs to leave room for networking, signature aggregation, Utreexo updates, and slack for cache-cold paths.
+>
+> Default proposal: target **~200 ms of reference-CPU time per block** for opcode execution, with the remaining block interval reserved for everything else (gossip, finalization, persistence, slow-node margin).
+>
+> _Architect response:_ _(empty until filled in)_
+
+---
+
+## Suggested processing order (Gas calibration items)
+
+All four are blocking; the natural order is:
+
+1. **G.1** Reference machine — nothing else is measurable without it.
+2. **G.4** Block budget — the second anchor; defines what "expensive" means.
+3. **G.2** Gas unit — derives from (G.1, G.4) and per-opcode measurements.
+4. **G.3** Lanes — can defer briefly by pricing everything single-lane and revisiting once cell-load numbers are in hand.

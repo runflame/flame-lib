@@ -726,8 +726,10 @@ impl VM {
             I::Borrow if self.top_two_are_variables() => {
                 self.op_borrow_encrypted(delegate)
             }
-            // ── Phase 10a: external-only ──────────────────────────
-            I::Input => self.op_input(),
+            // ── Phase 10a / 22: external-only ─────────────────────
+            // Phase 22: `Input` carries an optional prover-side witness
+            // queue. Verifier-side parse always yields `Input(None)`.
+            I::Input(w) => self.op_input(w.as_deref()),
             // ── Phase 19: fee — external-only (CS allocation) ─────
             I::Fee => self.op_fee(delegate),
             // ── Everything else → common dispatch ─────────────────
@@ -741,7 +743,7 @@ impl VM {
     fn dispatch_internal(&mut self, instr: crate::ops::Instruction) -> Result<(), VMError> {
         use crate::ops::Instruction as I;
         match instr {
-            I::Input
+            I::Input(_)
             | I::Alloc(_)
             | I::Expr
             | I::Range
@@ -851,7 +853,7 @@ impl VM {
             I::Signtx => self.op_signtx(),
             I::Signrun => self.op_signrun(),
             // ── Context-only — caller should have intercepted ─────
-            I::Input
+            I::Input(_)
             | I::Alloc(_)
             | I::Expr
             | I::Range
@@ -2104,13 +2106,47 @@ impl VM {
     /// - bytes that do not decode as a canonical cell
     ///   (`MalformedCellEncoding`), including trailing bytes after the
     ///   cell's last byte.
-    fn op_input(&mut self) -> Result<(), VMError> {
+    /// `0x90 input` — `string → cell`. **[E]** external-only.
+    ///
+    /// Decodes a wire-encoded `Cell` from a `String` on top of the
+    /// stack and pushes the resulting `Cell` handle. Emits
+    /// `TxEntry::Input(cell.id())` and seeds the VM's anchor chain
+    /// at the cell's ratcheted post-anchor.
+    ///
+    /// `witness` (Phase 22) is `Some` on the prover side when the
+    /// consumed cell's payload contains any `Token` entries that
+    /// participate in a downstream `mix`. On the wire, witnesses
+    /// don't exist — `Cell::decode` always rebuilds Tokens as
+    /// `Commitment::Closed(point)`. The prover-side witness queue
+    /// pairs each Token entry with its Open `(value, blinding)` so
+    /// `value_to_allocated` can later call
+    /// `r1cs::Prover::commit(value, blinding)` instead of bailing
+    /// `WitnessMissing`.
+    ///
+    /// Witness validation:
+    /// - The witness queue length must equal the number of `Token`
+    ///   entries in the decoded payload (`WitnessCountMismatch`).
+    /// - Each Open commitment's compressed point must equal the
+    ///   decoded Closed commitment's point
+    ///   (`WitnessPointMismatch`). This guards against a buggy
+    ///   prover passing the wrong blinding factor (the resulting
+    ///   proof would silently fail R1CS otherwise).
+    fn op_input(
+        &mut self,
+        witness: Option<&crate::witness::InputWitnesses>,
+    ) -> Result<(), VMError> {
         let s = self.pop_string()?;
         let bytes = s.as_bytes();
         let mut reader: &[u8] = bytes;
-        let cell = Cell::decode(&mut reader)?;
+        let mut cell = Cell::decode(&mut reader)?;
         if !reader.is_empty() {
             return Err(VMError::MalformedCellEncoding);
+        }
+        // Phase 22: re-attach prover-side witnesses to Token payload
+        // entries. Verifier-side this branch is dormant (witness is
+        // None), so the payload retains its decoded Closed Tokens.
+        if let Some(w) = witness {
+            self.attach_input_witnesses(&mut cell, w)?;
         }
         let cell_id = cell.id();
         self.txlog.push(crate::tx::TxEntry::Input(cell_id));
@@ -2119,6 +2155,53 @@ impl VM {
         // `contract_id.to_anchor().ratchet()` semantics.
         self.last_anchor = Some(cell.to_anchor());
         self.push_value(Value::Cell(cell));
+        Ok(())
+    }
+
+    /// Walks `cell.payload` and swaps each `Value::Token`'s
+    /// `Commitment::Closed` for the matching `Commitment::Open`
+    /// from `witness`. Non-Token entries are passed through; the
+    /// witness queue is consumed in payload order.
+    ///
+    /// Phase 22. Errors:
+    /// - `WitnessCountMismatch` if the queue length doesn't equal
+    ///   the count of Token entries.
+    /// - `WitnessPointMismatch` if any Open commitment's
+    ///   compressed point differs from the decoded Closed point.
+    fn attach_input_witnesses(
+        &self,
+        cell: &mut Cell,
+        witness: &crate::witness::InputWitnesses,
+    ) -> Result<(), VMError> {
+        // Count Tokens to verify queue length up-front. Cheaper than
+        // discovering a mismatch mid-walk.
+        let token_count = cell
+            .payload
+            .iter()
+            .filter(|v| matches!(v, Value::Token(_)))
+            .count();
+        if witness.tokens.len() != token_count {
+            return Err(VMError::WitnessCountMismatch);
+        }
+        let mut wi = 0usize;
+        for v in cell.payload.iter_mut() {
+            if let Value::Token(t) = v {
+                let tw = &witness.tokens[wi];
+                wi += 1;
+                // Point-equality check: the witnessed Open commitment
+                // must agree with the on-wire Closed commitment.
+                // Mismatch is a prover bug — fail loudly so it's
+                // caught at test time rather than as a silent
+                // InvalidR1CSProof later.
+                if tw.qty.to_point() != t.qty.to_point()
+                    || tw.flv.to_point() != t.flv.to_point()
+                {
+                    return Err(VMError::WitnessPointMismatch);
+                }
+                t.qty = tw.qty.clone();
+                t.flv = tw.flv.clone();
+            }
+        }
         Ok(())
     }
 
@@ -6573,7 +6656,7 @@ mod tests {
         // Build an ExternalRoot VM with the wire bytes on the stack as a String.
         let mut vm = vm_external_with_script(Vec::new());
         vm.push_value(Value::String(crate::String::from(bytes)));
-        vm.op_input().expect("input succeeds");
+        vm.op_input(None).expect("input succeeds");
 
         // Top of stack is the decoded Cell.
         assert_eq!(vm.current_call.stack.len(), 1);
@@ -6601,7 +6684,7 @@ mod tests {
         // Non-String top → TypeNotString. (Use an Int253.)
         let mut vm = vm_external_with_script(Vec::new());
         vm.push_value(Value::Int253(Int253::from(7u64)));
-        let err = vm.op_input().unwrap_err();
+        let err = vm.op_input(None).unwrap_err();
         assert!(matches!(err, VMError::TypeNotString));
     }
 
@@ -6610,7 +6693,7 @@ mod tests {
         // Random non-canonical bytes on the stack.
         let mut vm = vm_external_with_script(Vec::new());
         vm.push_value(Value::String(crate::String::from(vec![0xffu8; 8])));
-        let err = vm.op_input().unwrap_err();
+        let err = vm.op_input(None).unwrap_err();
         assert!(matches!(err, VMError::MalformedCellEncoding));
     }
 
@@ -6624,7 +6707,7 @@ mod tests {
 
         let mut vm = vm_external_with_script(Vec::new());
         vm.push_value(Value::String(crate::String::from(bytes)));
-        let err = vm.op_input().unwrap_err();
+        let err = vm.op_input(None).unwrap_err();
         assert!(matches!(err, VMError::MalformedCellEncoding));
     }
 
@@ -6656,7 +6739,7 @@ mod tests {
 
         // Step 1: feed cell bytes into op_input.
         vm.push_value(Value::String(crate::String::from(bytes)));
-        vm.op_input().expect("input ok");
+        vm.op_input(None).expect("input ok");
         // Stack: [Cell]. last_anchor: Some(ratcheted anchor from input).
         assert_eq!(
             vm.last_anchor.expect("anchor").0,
@@ -9095,6 +9178,1028 @@ let proof = proof.expect("proof set");
                 assert_eq!(*cid, cell_id);
             }
             _ => panic!("expected TxBound"),
+        }
+    }
+
+    // ── Phase 22: Input witness re-attachment ───────────────────
+
+    /// Helper: build a witness-bearing cell with a single Token
+    /// payload entry. Returns the cell (with `Open` commitments —
+    /// not what's on the wire) plus the matching `InputWitnesses`
+    /// the prover passes to `input_with_witnesses`. Wire-encoding
+    /// the cell collapses the commitments to `Closed`; the witness
+    /// re-attaches them on decode.
+    fn make_token_witness_pair(
+        qty_value: u64,
+        flv_value: u64,
+        qty_blind: u64,
+        flv_blind: u64,
+    ) -> (crate::Token, crate::witness::TokenWitness) {
+        let q = crate::Commitment::blinded_with_factor(
+            Int253::from(qty_value),
+            Scalar::from(qty_blind),
+        );
+        let f = crate::Commitment::blinded_with_factor(
+            Int253::from(flv_value),
+            Scalar::from(flv_blind),
+        );
+        let token = crate::Token::new(q.clone(), f.clone());
+        let witness = crate::witness::TokenWitness { qty: q, flv: f };
+        (token, witness)
+    }
+
+    /// Single-Token cell: encode → input with witness → assert the
+    /// re-attached commitments are `Open` (witness-bearing).
+    #[test]
+    fn phase22_input_with_witness_upgrades_closed_to_open() {
+        let (token, tw) =
+            make_token_witness_pair(100, 7, 11, 13);
+        let cell = Cell::new(
+            Predicate::Opaque(CompressedRistretto([0xaa; 32])),
+            Anchor([0x42; 32]),
+            vec![Value::Token(token)],
+        );
+        let cell_bytes = encode_cell_to_bytes(&cell);
+        // Push bytes then dispatch op_input with a witness queue.
+        let mut vm = vm_external_with_script(Vec::new());
+        vm.push_value(Value::String(crate::String::from(cell_bytes)));
+        let witnesses =
+            crate::witness::InputWitnesses { tokens: vec![tw.clone()] };
+        vm.op_input(Some(&witnesses)).expect("input ok");
+        // Top of stack must be a Cell whose Token payload now carries
+        // Open commitments (witness present).
+        match &vm.current_call.stack[0] {
+            Value::Cell(c) => match &c.payload[0] {
+                Value::Token(t) => {
+                    assert!(
+                        t.qty.witness().is_some(),
+                        "qty must be Open after witness attach"
+                    );
+                    assert!(
+                        t.flv.witness().is_some(),
+                        "flv must be Open after witness attach"
+                    );
+                }
+                _ => panic!("payload[0] not Token"),
+            },
+            _ => panic!("stack[0] not Cell"),
+        }
+    }
+
+    /// No-witness branch — payload Tokens stay `Closed` (verifier
+    /// path, or prover with no commitments to recover).
+    #[test]
+    fn phase22_input_no_witness_keeps_closed() {
+        let (token, _tw) =
+            make_token_witness_pair(100, 7, 11, 13);
+        let cell = Cell::new(
+            Predicate::Opaque(CompressedRistretto([0xaa; 32])),
+            Anchor([0x42; 32]),
+            vec![Value::Token(token)],
+        );
+        let cell_bytes = encode_cell_to_bytes(&cell);
+        let mut vm = vm_external_with_script(Vec::new());
+        vm.push_value(Value::String(crate::String::from(cell_bytes)));
+        vm.op_input(None).expect("input ok");
+        match &vm.current_call.stack[0] {
+            Value::Cell(c) => match &c.payload[0] {
+                Value::Token(t) => {
+                    assert!(
+                        t.qty.witness().is_none(),
+                        "qty must be Closed without witness"
+                    );
+                }
+                _ => panic!("payload[0] not Token"),
+            },
+            _ => panic!("stack[0] not Cell"),
+        }
+    }
+
+    /// Witness queue with too few entries → `WitnessCountMismatch`.
+    #[test]
+    fn phase22_input_witness_count_too_few_rejects() {
+        let (t1, _w1) = make_token_witness_pair(10, 7, 11, 13);
+        let (t2, _w2) = make_token_witness_pair(20, 7, 14, 15);
+        let cell = Cell::new(
+            Predicate::Opaque(CompressedRistretto([0xaa; 32])),
+            Anchor([0x42; 32]),
+            vec![Value::Token(t1), Value::Token(t2)],
+        );
+        let cell_bytes = encode_cell_to_bytes(&cell);
+        let mut vm = vm_external_with_script(Vec::new());
+        vm.push_value(Value::String(crate::String::from(cell_bytes)));
+        // Pass only ONE witness for TWO tokens.
+        let (_, w_one) = make_token_witness_pair(10, 7, 11, 13);
+        let witnesses =
+            crate::witness::InputWitnesses { tokens: vec![w_one] };
+        let err = vm.op_input(Some(&witnesses)).unwrap_err();
+        assert!(matches!(err, VMError::WitnessCountMismatch));
+    }
+
+    /// Witness queue with too many entries → `WitnessCountMismatch`.
+    #[test]
+    fn phase22_input_witness_count_too_many_rejects() {
+        let (t1, _) = make_token_witness_pair(10, 7, 11, 13);
+        let cell = Cell::new(
+            Predicate::Opaque(CompressedRistretto([0xaa; 32])),
+            Anchor([0x42; 32]),
+            vec![Value::Token(t1)],
+        );
+        let cell_bytes = encode_cell_to_bytes(&cell);
+        let mut vm = vm_external_with_script(Vec::new());
+        vm.push_value(Value::String(crate::String::from(cell_bytes)));
+        let (_, w1) = make_token_witness_pair(10, 7, 11, 13);
+        let (_, w2) = make_token_witness_pair(20, 7, 14, 15);
+        // TWO witnesses for ONE token.
+        let witnesses =
+            crate::witness::InputWitnesses { tokens: vec![w1, w2] };
+        let err = vm.op_input(Some(&witnesses)).unwrap_err();
+        assert!(matches!(err, VMError::WitnessCountMismatch));
+    }
+
+    /// Witness with bogus blinding factor → `WitnessPointMismatch`.
+    /// Guards against silent CS failure later in the pipeline.
+    #[test]
+    fn phase22_input_witness_point_mismatch_rejects() {
+        let (token, _) = make_token_witness_pair(10, 7, 11, 13);
+        let cell = Cell::new(
+            Predicate::Opaque(CompressedRistretto([0xaa; 32])),
+            Anchor([0x42; 32]),
+            vec![Value::Token(token)],
+        );
+        let cell_bytes = encode_cell_to_bytes(&cell);
+        let mut vm = vm_external_with_script(Vec::new());
+        vm.push_value(Value::String(crate::String::from(cell_bytes)));
+        // Witness with DIFFERENT blinding → different point.
+        let (_, bogus_w) = make_token_witness_pair(10, 7, 999, 13);
+        let witnesses =
+            crate::witness::InputWitnesses { tokens: vec![bogus_w] };
+        let err = vm.op_input(Some(&witnesses)).unwrap_err();
+        assert!(matches!(err, VMError::WitnessPointMismatch));
+    }
+
+    /// Non-Token payload entries are passed through without
+    /// consuming the witness queue. A cell with [Int253, Token,
+    /// Int253] payload needs exactly one witness.
+    #[test]
+    fn phase22_input_witness_for_non_token_payload_skipped() {
+        let (token, witness) =
+            make_token_witness_pair(50, 9, 17, 19);
+        let cell = Cell::new(
+            Predicate::Opaque(CompressedRistretto([0xaa; 32])),
+            Anchor([0x42; 32]),
+            vec![
+                Value::Int253(Int253::from(1u64)),
+                Value::Token(token),
+                Value::Int253(Int253::from(2u64)),
+            ],
+        );
+        let cell_bytes = encode_cell_to_bytes(&cell);
+        let mut vm = vm_external_with_script(Vec::new());
+        vm.push_value(Value::String(crate::String::from(cell_bytes)));
+        let witnesses =
+            crate::witness::InputWitnesses { tokens: vec![witness] };
+        vm.op_input(Some(&witnesses)).expect("input ok");
+        match &vm.current_call.stack[0] {
+            Value::Cell(c) => {
+                assert_eq!(c.payload.len(), 3);
+                // payload[0] / payload[2] still Int253; payload[1]
+                // now witnessed Open Token.
+                assert!(matches!(c.payload[0], Value::Int253(_)));
+                match &c.payload[1] {
+                    Value::Token(t) => {
+                        assert!(t.qty.witness().is_some());
+                    }
+                    _ => panic!("payload[1] not Token"),
+                }
+                assert!(matches!(c.payload[2], Value::Int253(_)));
+            }
+            _ => panic!("stack[0] not Cell"),
+        }
+    }
+
+    /// Encoded byte for `Instruction::Input(Some(witness))` is
+    /// still just `0x90`. The witness lives prover-side only.
+    #[test]
+    fn phase22_input_with_witness_encodes_to_bare_byte() {
+        let (_, w) = make_token_witness_pair(1, 2, 3, 4);
+        let witnesses =
+            crate::witness::InputWitnesses { tokens: vec![w] };
+        let mut buf = Vec::new();
+        crate::ops::Instruction::Input(Some(Box::new(witnesses)))
+            .encode(&mut buf);
+        assert_eq!(buf, vec![0x90]);
+        // Parsing reconstructs Input(None).
+        let mut r: &[u8] = &buf;
+        let parsed = crate::ops::Instruction::parse(&mut r)
+            .expect("parses");
+        assert!(matches!(parsed, crate::ops::Instruction::Input(None)));
+    }
+
+    // ── Phase 23: Confidential N→M end-to-end test harness ──────
+    //
+    // The whole point of the VM: take N input cells whose Token
+    // payloads are confidential (Pedersen-committed qty + flv), run
+    // them through `mix` to balance against M new output cells
+    // (also confidential), and produce a single ZK proof that the
+    // verifier accepts.
+    //
+    // The script shape:
+    //
+    //   ┌── per input cell i ───────────────────────────────────┐
+    //   │  pushstr <cell_bytes_i>                                │
+    //   │  input  (with InputWitnesses_i, prover-side)           │
+    //   │  pushpoint <internal_key_i>                            │
+    //   │  <neighbors dict — empty for single-leaf trees>        │
+    //   │  pushstr <position_i>                                  │
+    //   │  pushstr <program_i (= empty)>                         │
+    //   │  push:0  (k = 0 args)                                  │
+    //   │  open   (unlocked Run is empty → payload stays)        │
+    //   └────────────────────────────────────────────────────────┘
+    //   ↓  stack now: [Token_0, Token_1, …, Token_{N-1}]
+    //
+    //   For each output j:
+    //   ┌── push the (qty, flv) commitment Strings ─────────────┐
+    //   │  pushstr <qty_open_j>                                  │
+    //   │  pushstr <flv_open_j>                                  │
+    //   └────────────────────────────────────────────────────────┘
+    //   ↓  stack: [Token_0, …, Token_{N-1},
+    //              qty_0, flv_0, qty_1, flv_1, … qty_{M-1}, flv_{M-1}]
+    //
+    //   push:M  push:N  mix
+    //   ↓  stack: [out_Token_0, out_Token_1, …, out_Token_{M-1}]
+    //
+    //   For each output j (in stack order):
+    //   ┌── wrap into output cell ──────────────────────────────┐
+    //   │  push:1            (k = 1, the Token below is payload) │
+    //   │  pushpoint <pred_j>                                    │
+    //   │  output            (emits TxEntry::Output, pops Token  │
+    //   │                     + count + pred)                    │
+    //   └────────────────────────────────────────────────────────┘
+    //   ↓  stack: empty → finish_call accepts.
+
+    /// Description of one input to the test harness.
+    #[derive(Clone)]
+    struct NMInputSpec {
+        qty: u64,
+        flv: u64,
+        /// Blinding factor for the qty commitment.
+        qty_blind: u64,
+        /// Blinding factor for the flv commitment.
+        flv_blind: u64,
+        /// Predicate-tree internal-key secret (1u64-ish; arbitrary).
+        predicate_secret: u64,
+        /// Anchor bytes for the input cell — must be unique per
+        /// cell so cell-ids don't collide.
+        anchor: [u8; 32],
+    }
+
+    /// Description of one output to the test harness.
+    #[derive(Clone)]
+    struct NMOutputSpec {
+        qty: u64,
+        flv: u64,
+        /// Blinding factor for the new qty commitment.
+        qty_blind: u64,
+        /// Blinding factor for the new flv commitment.
+        flv_blind: u64,
+        /// Predicate point bytes (opaque) for the new cell.
+        predicate: [u8; 32],
+    }
+
+    /// Builds the prover-side `Program` for the N→M script. The
+    /// `inputs` and `outputs` specs must already balance per flavor
+    /// (`mix` will fail at CS solve time otherwise — exercised
+    /// separately by the negative tests).
+    ///
+    /// Returns the prover Program (witnesses inline) — the canonical
+    /// bytecode is recovered via `program.to_bytecode()` on the
+    /// verifier side.
+    fn build_confidential_nm_program(
+        inputs: &[NMInputSpec],
+        outputs: &[NMOutputSpec],
+    ) -> Program {
+        let mut program = Program::new();
+        // ── For each input: pushstr cell-bytes + input(witness) +
+        //                    callproof pieces + push:0 + open. ──
+        for inp in inputs {
+            let (q_open, f_open) = open_commitments(inp);
+            let token =
+                crate::Token::new(q_open.clone(), f_open.clone());
+            let (tree, cp) = build_predicate_with_program(
+                &[],
+                inp.predicate_secret,
+            );
+            let pred_point = tree.compute_point();
+            let cell = Cell::new(
+                Predicate::Opaque(pred_point),
+                Anchor(inp.anchor),
+                vec![Value::Token(token)],
+            );
+            let cell_bytes = encode_cell_to_bytes(&cell);
+            // pushstr cell_bytes — opaque on both sides.
+            program = program.push_str(crate::String::from(cell_bytes));
+            // input with witness (prover-side only).
+            let witness = crate::witness::InputWitnesses {
+                tokens: vec![crate::witness::TokenWitness {
+                    qty: q_open,
+                    flv: f_open,
+                }],
+            };
+            program = program.input_with_witnesses(witness);
+            // callproof pieces.
+            program = push_callproof_to_program(program, &cp);
+            // push:0 args, open.
+            program = program.push_int(0u64).open();
+        }
+        // ── For each output: push qty commit String, push flv
+        //                    commit String (witness-bearing). ──
+        for out in outputs {
+            let (q_open, f_open) = open_commitments_for_output(out);
+            program = program
+                .push_str(crate::String::commitment(q_open))
+                .push_str(crate::String::commitment(f_open));
+        }
+        // ── push:M push:N mix. ──
+        //
+        // `op_mix` pops `n` first (top of stack), then `m`. The spec
+        // notation `m n → values` reads bottom-to-top, so the
+        // canonical push order is m then n.
+        program = program
+            .push_int(inputs.len() as u64) // m — input count
+            .push_int(outputs.len() as u64) // n — output count (top)
+            .mix();
+        // ── For each output: push:1 (k=1), pushpoint pred, output.
+        for out in outputs {
+            program = program
+                .push_int(1u64)
+                .push_point(out.predicate)
+                .output();
+        }
+        program
+    }
+
+    /// Build the Open `(qty, flv)` commitments for an input spec.
+    fn open_commitments(
+        inp: &NMInputSpec,
+    ) -> (crate::Commitment, crate::Commitment) {
+        let q = crate::Commitment::blinded_with_factor(
+            Int253::from(inp.qty),
+            Scalar::from(inp.qty_blind),
+        );
+        let f = crate::Commitment::blinded_with_factor(
+            Int253::from(inp.flv),
+            Scalar::from(inp.flv_blind),
+        );
+        (q, f)
+    }
+
+    /// Build the Open `(qty, flv)` commitments for an output spec.
+    fn open_commitments_for_output(
+        out: &NMOutputSpec,
+    ) -> (crate::Commitment, crate::Commitment) {
+        let q = crate::Commitment::blinded_with_factor(
+            Int253::from(out.qty),
+            Scalar::from(out.qty_blind),
+        );
+        let f = crate::Commitment::blinded_with_factor(
+            Int253::from(out.flv),
+            Scalar::from(out.flv_blind),
+        );
+        (q, f)
+    }
+
+    /// Like `push_callproof_pieces` but emits Instructions into a
+    /// Program (so the prover keeps witness-bearing variants).
+    fn push_callproof_to_program(
+        mut program: Program,
+        cp: &CallProof,
+    ) -> Program {
+        program = program.push_point(*cp.internal_key.as_bytes());
+        // Neighbors as a list-style Dict: for each neighbor, push
+        // (val, key); then push n, dict.
+        for (i, h) in cp.neighbors.iter().enumerate() {
+            program = program
+                .push_str(crate::String::from(h.to_vec()))
+                .push_int(i as u64);
+        }
+        program = program
+            .push_int(cp.neighbors.len() as u64)
+            .dict();
+        program = program
+            .push_str(crate::String::from(cp.position.clone()))
+            .push_str(crate::String::from(cp.program.clone()));
+        program
+    }
+
+    /// Drive the full prove-then-verify round trip for an N→M
+    /// confidential transaction and return the verifier's
+    /// `TxResult`. Panics on failure — the caller's job is to
+    /// assert on the result.
+    fn run_confidential_nm(
+        inputs: &[NMInputSpec],
+        outputs: &[NMOutputSpec],
+    ) -> TxResult {
+        let pc_gens = PedersenGens::default();
+        let program = build_confidential_nm_program(inputs, outputs);
+        let prover_result =
+            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+                .expect("prove ok");
+        let txid_p = prover_result.txid;
+        let TxResult { bytecode, proof, .. } = prover_result;
+        let proof = proof.expect("proof set");
+        let pc_gens_v = PedersenGens::default();
+        let result = Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+            None,
+        )
+        .expect("verify ok");
+        assert_eq!(result.txid, txid_p, "prover/verifier TxID agree");
+        result
+    }
+
+    // ── Positive matrix: balanced N→M transfers ─────────────────
+
+    /// N=1, M=1, 1 flavor: simplest possible confidential transfer.
+    #[test]
+    fn confidential_1_to_1_single_flavor() {
+        let result = run_confidential_nm(
+            &[NMInputSpec {
+                qty: 100,
+                flv: 7,
+                qty_blind: 11,
+                flv_blind: 13,
+                predicate_secret: 1,
+                anchor: [0xa1; 32],
+            }],
+            &[NMOutputSpec {
+                qty: 100,
+                flv: 7,
+                qty_blind: 17,
+                flv_blind: 19,
+                predicate: [0xb1; 32],
+            }],
+        );
+        // Header + 1 Input + 1 Output.
+        assert_eq!(result.txlog.len(), 3);
+        assert!(matches!(result.txlog[0], crate::tx::TxEntry::Header(_)));
+        assert!(matches!(result.txlog[1], crate::tx::TxEntry::Input(_)));
+        assert!(matches!(result.txlog[2], crate::tx::TxEntry::Output(_)));
+    }
+
+    /// N=1, M=2, 1 flavor: split 10 → [4, 6].
+    #[test]
+    fn confidential_1_to_2_single_flavor_split() {
+        let result = run_confidential_nm(
+            &[NMInputSpec {
+                qty: 10,
+                flv: 7,
+                qty_blind: 11,
+                flv_blind: 13,
+                predicate_secret: 1,
+                anchor: [0xa1; 32],
+            }],
+            &[
+                NMOutputSpec {
+                    qty: 4,
+                    flv: 7,
+                    qty_blind: 21,
+                    flv_blind: 22,
+                    predicate: [0xb1; 32],
+                },
+                NMOutputSpec {
+                    qty: 6,
+                    flv: 7,
+                    qty_blind: 31,
+                    flv_blind: 32,
+                    predicate: [0xb2; 32],
+                },
+            ],
+        );
+        assert_eq!(result.txlog.len(), 4); // Header + 1 In + 2 Out
+    }
+
+    /// N=2, M=1, 1 flavor: merge [3, 7] → 10.
+    #[test]
+    fn confidential_2_to_1_single_flavor_merge() {
+        let result = run_confidential_nm(
+            &[
+                NMInputSpec {
+                    qty: 3,
+                    flv: 7,
+                    qty_blind: 11,
+                    flv_blind: 13,
+                    predicate_secret: 1,
+                    anchor: [0xa1; 32],
+                },
+                NMInputSpec {
+                    qty: 7,
+                    flv: 7,
+                    qty_blind: 14,
+                    flv_blind: 15,
+                    predicate_secret: 2,
+                    anchor: [0xa2; 32],
+                },
+            ],
+            &[NMOutputSpec {
+                qty: 10,
+                flv: 7,
+                qty_blind: 21,
+                flv_blind: 22,
+                predicate: [0xb1; 32],
+            }],
+        );
+        assert_eq!(result.txlog.len(), 4); // Header + 2 In + 1 Out
+    }
+
+    /// N=2, M=2, 1 flavor: 4-way shuffle / re-blind. Both sides
+    /// total 12 (5+7 = 4+8).
+    #[test]
+    fn confidential_2_to_2_single_flavor() {
+        let result = run_confidential_nm(
+            &[
+                NMInputSpec {
+                    qty: 5,
+                    flv: 7,
+                    qty_blind: 11,
+                    flv_blind: 13,
+                    predicate_secret: 1,
+                    anchor: [0xa1; 32],
+                },
+                NMInputSpec {
+                    qty: 7,
+                    flv: 7,
+                    qty_blind: 14,
+                    flv_blind: 15,
+                    predicate_secret: 2,
+                    anchor: [0xa2; 32],
+                },
+            ],
+            &[
+                NMOutputSpec {
+                    qty: 4,
+                    flv: 7,
+                    qty_blind: 21,
+                    flv_blind: 22,
+                    predicate: [0xb1; 32],
+                },
+                NMOutputSpec {
+                    qty: 8,
+                    flv: 7,
+                    qty_blind: 31,
+                    flv_blind: 32,
+                    predicate: [0xb2; 32],
+                },
+            ],
+        );
+        assert_eq!(result.txlog.len(), 5); // Header + 2 In + 2 Out
+    }
+
+    /// N=2, M=2, 2 flavors: gold (flv=7) and silver (flv=11)
+    /// balanced separately.
+    #[test]
+    fn confidential_2_to_2_two_flavors() {
+        let result = run_confidential_nm(
+            &[
+                NMInputSpec {
+                    qty: 10,
+                    flv: 7,
+                    qty_blind: 11,
+                    flv_blind: 13,
+                    predicate_secret: 1,
+                    anchor: [0xa1; 32],
+                },
+                NMInputSpec {
+                    qty: 25,
+                    flv: 11,
+                    qty_blind: 14,
+                    flv_blind: 15,
+                    predicate_secret: 2,
+                    anchor: [0xa2; 32],
+                },
+            ],
+            &[
+                NMOutputSpec {
+                    qty: 10,
+                    flv: 7,
+                    qty_blind: 21,
+                    flv_blind: 22,
+                    predicate: [0xb1; 32],
+                },
+                NMOutputSpec {
+                    qty: 25,
+                    flv: 11,
+                    qty_blind: 31,
+                    flv_blind: 32,
+                    predicate: [0xb2; 32],
+                },
+            ],
+        );
+        assert_eq!(result.txlog.len(), 5);
+    }
+
+    /// N=3, M=3, 2 flavors: full shuffle. Gold: 5+5 → 7+3. Silver: 8 → 8.
+    #[test]
+    fn confidential_3_to_3_two_flavors() {
+        let result = run_confidential_nm(
+            &[
+                NMInputSpec {
+                    qty: 5,
+                    flv: 7,
+                    qty_blind: 11,
+                    flv_blind: 13,
+                    predicate_secret: 1,
+                    anchor: [0xa1; 32],
+                },
+                NMInputSpec {
+                    qty: 5,
+                    flv: 7,
+                    qty_blind: 14,
+                    flv_blind: 15,
+                    predicate_secret: 2,
+                    anchor: [0xa2; 32],
+                },
+                NMInputSpec {
+                    qty: 8,
+                    flv: 11,
+                    qty_blind: 16,
+                    flv_blind: 17,
+                    predicate_secret: 3,
+                    anchor: [0xa3; 32],
+                },
+            ],
+            &[
+                NMOutputSpec {
+                    qty: 7,
+                    flv: 7,
+                    qty_blind: 21,
+                    flv_blind: 22,
+                    predicate: [0xb1; 32],
+                },
+                NMOutputSpec {
+                    qty: 3,
+                    flv: 7,
+                    qty_blind: 31,
+                    flv_blind: 32,
+                    predicate: [0xb2; 32],
+                },
+                NMOutputSpec {
+                    qty: 8,
+                    flv: 11,
+                    qty_blind: 41,
+                    flv_blind: 42,
+                    predicate: [0xb3; 32],
+                },
+            ],
+        );
+        assert_eq!(result.txlog.len(), 7); // Header + 3 In + 3 Out
+    }
+
+    /// N=3, M=2, 2 flavors. Gold 10+5+0 → 15; Silver 8 → 8.
+    /// Wait, three inputs but only one flavor on first two... let's
+    /// do Gold 5+5 → 10 and Silver 8 → 8 (3→2).
+    #[test]
+    fn confidential_3_to_2_two_flavors() {
+        let result = run_confidential_nm(
+            &[
+                NMInputSpec {
+                    qty: 5,
+                    flv: 7,
+                    qty_blind: 11,
+                    flv_blind: 13,
+                    predicate_secret: 1,
+                    anchor: [0xa1; 32],
+                },
+                NMInputSpec {
+                    qty: 5,
+                    flv: 7,
+                    qty_blind: 14,
+                    flv_blind: 15,
+                    predicate_secret: 2,
+                    anchor: [0xa2; 32],
+                },
+                NMInputSpec {
+                    qty: 8,
+                    flv: 11,
+                    qty_blind: 16,
+                    flv_blind: 17,
+                    predicate_secret: 3,
+                    anchor: [0xa3; 32],
+                },
+            ],
+            &[
+                NMOutputSpec {
+                    qty: 10,
+                    flv: 7,
+                    qty_blind: 21,
+                    flv_blind: 22,
+                    predicate: [0xb1; 32],
+                },
+                NMOutputSpec {
+                    qty: 8,
+                    flv: 11,
+                    qty_blind: 31,
+                    flv_blind: 32,
+                    predicate: [0xb2; 32],
+                },
+            ],
+        );
+        assert_eq!(result.txlog.len(), 6); // Header + 3 In + 2 Out
+    }
+
+    /// N=1, M=3, 1 flavor: split 12 → 4+4+4.
+    #[test]
+    fn confidential_1_to_3_single_flavor() {
+        let result = run_confidential_nm(
+            &[NMInputSpec {
+                qty: 12,
+                flv: 7,
+                qty_blind: 11,
+                flv_blind: 13,
+                predicate_secret: 1,
+                anchor: [0xa1; 32],
+            }],
+            &[
+                NMOutputSpec {
+                    qty: 4,
+                    flv: 7,
+                    qty_blind: 21,
+                    flv_blind: 22,
+                    predicate: [0xb1; 32],
+                },
+                NMOutputSpec {
+                    qty: 4,
+                    flv: 7,
+                    qty_blind: 31,
+                    flv_blind: 32,
+                    predicate: [0xb2; 32],
+                },
+                NMOutputSpec {
+                    qty: 4,
+                    flv: 7,
+                    qty_blind: 41,
+                    flv_blind: 42,
+                    predicate: [0xb3; 32],
+                },
+            ],
+        );
+        assert_eq!(result.txlog.len(), 5); // Header + 1 In + 3 Out
+    }
+
+    /// N=3, M=1, 1 flavor: merge 4+4+4 → 12.
+    #[test]
+    fn confidential_3_to_1_single_flavor() {
+        let result = run_confidential_nm(
+            &[
+                NMInputSpec {
+                    qty: 4,
+                    flv: 7,
+                    qty_blind: 11,
+                    flv_blind: 13,
+                    predicate_secret: 1,
+                    anchor: [0xa1; 32],
+                },
+                NMInputSpec {
+                    qty: 4,
+                    flv: 7,
+                    qty_blind: 14,
+                    flv_blind: 15,
+                    predicate_secret: 2,
+                    anchor: [0xa2; 32],
+                },
+                NMInputSpec {
+                    qty: 4,
+                    flv: 7,
+                    qty_blind: 16,
+                    flv_blind: 17,
+                    predicate_secret: 3,
+                    anchor: [0xa3; 32],
+                },
+            ],
+            &[NMOutputSpec {
+                qty: 12,
+                flv: 7,
+                qty_blind: 21,
+                flv_blind: 22,
+                predicate: [0xb1; 32],
+            }],
+        );
+        assert_eq!(result.txlog.len(), 5); // Header + 3 In + 1 Out
+    }
+
+    /// N=3, M=3, 1 flavor: re-balance 1+2+3 → 2+2+2.
+    #[test]
+    fn confidential_3_to_3_single_flavor() {
+        let result = run_confidential_nm(
+            &[
+                NMInputSpec {
+                    qty: 1,
+                    flv: 7,
+                    qty_blind: 11,
+                    flv_blind: 13,
+                    predicate_secret: 1,
+                    anchor: [0xa1; 32],
+                },
+                NMInputSpec {
+                    qty: 2,
+                    flv: 7,
+                    qty_blind: 14,
+                    flv_blind: 15,
+                    predicate_secret: 2,
+                    anchor: [0xa2; 32],
+                },
+                NMInputSpec {
+                    qty: 3,
+                    flv: 7,
+                    qty_blind: 16,
+                    flv_blind: 17,
+                    predicate_secret: 3,
+                    anchor: [0xa3; 32],
+                },
+            ],
+            &[
+                NMOutputSpec {
+                    qty: 2,
+                    flv: 7,
+                    qty_blind: 21,
+                    flv_blind: 22,
+                    predicate: [0xb1; 32],
+                },
+                NMOutputSpec {
+                    qty: 2,
+                    flv: 7,
+                    qty_blind: 31,
+                    flv_blind: 32,
+                    predicate: [0xb2; 32],
+                },
+                NMOutputSpec {
+                    qty: 2,
+                    flv: 7,
+                    qty_blind: 41,
+                    flv_blind: 42,
+                    predicate: [0xb3; 32],
+                },
+            ],
+        );
+        assert_eq!(result.txlog.len(), 7); // Header + 3 In + 3 Out
+    }
+
+    /// N=2, M=3, 2 flavors. Gold 10 → 4+6; Silver 8 → 8 — total
+    /// 2 inputs and 3 outputs.
+    #[test]
+    fn confidential_2_to_3_two_flavors() {
+        let result = run_confidential_nm(
+            &[
+                NMInputSpec {
+                    qty: 10,
+                    flv: 7,
+                    qty_blind: 11,
+                    flv_blind: 13,
+                    predicate_secret: 1,
+                    anchor: [0xa1; 32],
+                },
+                NMInputSpec {
+                    qty: 8,
+                    flv: 11,
+                    qty_blind: 14,
+                    flv_blind: 15,
+                    predicate_secret: 2,
+                    anchor: [0xa2; 32],
+                },
+            ],
+            &[
+                NMOutputSpec {
+                    qty: 4,
+                    flv: 7,
+                    qty_blind: 21,
+                    flv_blind: 22,
+                    predicate: [0xb1; 32],
+                },
+                NMOutputSpec {
+                    qty: 6,
+                    flv: 7,
+                    qty_blind: 31,
+                    flv_blind: 32,
+                    predicate: [0xb2; 32],
+                },
+                NMOutputSpec {
+                    qty: 8,
+                    flv: 11,
+                    qty_blind: 41,
+                    flv_blind: 42,
+                    predicate: [0xb3; 32],
+                },
+            ],
+        );
+        assert_eq!(result.txlog.len(), 6);
+    }
+
+    // ── Negative tests ──────────────────────────────────────────
+
+    /// Quantity imbalance: input sum ≠ output sum within a flavor.
+    /// CS solve must fail → `R1CSError` or `InvalidR1CSProof` on
+    /// verify. The prover may either error directly or produce a
+    /// proof the verifier rejects; both are acceptable.
+    #[test]
+    fn confidential_unbalanced_inputs_rejected() {
+        let pc_gens = PedersenGens::default();
+        let inputs = vec![NMInputSpec {
+            qty: 10,
+            flv: 7,
+            qty_blind: 11,
+            flv_blind: 13,
+            predicate_secret: 1,
+            anchor: [0xa1; 32],
+        }];
+        // Output sums to 11 — imbalance.
+        let outputs = vec![NMOutputSpec {
+            qty: 11,
+            flv: 7,
+            qty_blind: 21,
+            flv_blind: 22,
+            predicate: [0xb1; 32],
+        }];
+        let program = build_confidential_nm_program(&inputs, &outputs);
+        let prove_attempt = Prover::prove(
+            &pc_gens,
+            program,
+            dummy_header(),
+            1_000_000,
+            0,
+        );
+        match prove_attempt {
+            Err(_) => { /* prover refused — good */ }
+            Ok(result) => {
+                let TxResult { bytecode, proof, .. } = result;
+                let proof = proof.expect("proof set");
+                let pc_gens_v = PedersenGens::default();
+                let err = Verifier::verify(
+                    &pc_gens_v,
+                    bytecode,
+                    &proof,
+                    dummy_header(),
+                    1_000_000,
+                    0,
+                    None,
+                )
+                .expect_err("verifier must reject imbalance");
+                assert!(matches!(err, VMError::InvalidR1CSProof));
+            }
+        }
+    }
+
+    /// Flavor mismatch: output flavor not present in inputs.
+    #[test]
+    fn confidential_flavor_mismatch_rejected() {
+        let pc_gens = PedersenGens::default();
+        let inputs = vec![NMInputSpec {
+            qty: 10,
+            flv: 7, // gold
+            qty_blind: 11,
+            flv_blind: 13,
+            predicate_secret: 1,
+            anchor: [0xa1; 32],
+        }];
+        // Output flavor is silver (11) — different from input flavor
+        // (7). CS / cloak gadget must reject.
+        let outputs = vec![NMOutputSpec {
+            qty: 10,
+            flv: 11,
+            qty_blind: 21,
+            flv_blind: 22,
+            predicate: [0xb1; 32],
+        }];
+        let program = build_confidential_nm_program(&inputs, &outputs);
+        let prove_attempt = Prover::prove(
+            &pc_gens,
+            program,
+            dummy_header(),
+            1_000_000,
+            0,
+        );
+        match prove_attempt {
+            Err(_) => { /* prover refused — good */ }
+            Ok(result) => {
+                let TxResult { bytecode, proof, .. } = result;
+                let proof = proof.expect("proof set");
+                let pc_gens_v = PedersenGens::default();
+                let err = Verifier::verify(
+                    &pc_gens_v,
+                    bytecode,
+                    &proof,
+                    dummy_header(),
+                    1_000_000,
+                    0,
+                    None,
+                )
+                .expect_err("verifier must reject flavor mismatch");
+                assert!(matches!(err, VMError::InvalidR1CSProof));
+            }
         }
     }
 }
