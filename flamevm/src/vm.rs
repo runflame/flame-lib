@@ -238,24 +238,11 @@ impl Delegate for InternalDelegate {
 
 // ── Run ──────────────────────────────────────────────────────────
 
-/// A single program being interpreted by the VM. Two shapes share a
-/// `(content, index)` skeleton:
-///
-/// - `Bytecode { script, pc }` — verifier-side and internal-context:
-///   parses one [`Instruction`] from `script[pc..]` at each step.
-/// - `Queue { instructions, index }` — prover-side: returns
-///   `instructions[index]` (with witness baked into its variant)
-///   and advances `index`.
-///
-/// Both expose [`Run::next_instruction`], so the dispatch loop is
-/// identical — the prover/verifier asymmetry lives only in how the
-/// Run is constructed. `loop` (resets the cursor to 0) and `break:k`
-/// (jumps the cursor to end) work identically for both.
-///
 /// Multiple Runs may nest within one call (via `run` / `loop` /
 /// `switch`); each pushes onto `CallFrame.run_stack` and is resumed
 /// on `break` / `return` / end-of-program.
-/// A single executable program slice the VM is currently walking —
+///
+/// A single executable script slice the VM is currently walking —
 /// always a pre-decoded `Vec<Instruction>` plus a cursor.
 ///
 /// Prover and verifier feed the VM through the same shape: the
