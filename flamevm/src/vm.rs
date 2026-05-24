@@ -9529,11 +9529,27 @@ let proof = proof.expect("proof set");
             .push_int(inputs.len() as u64) // m — input count
             .push_int(outputs.len() as u64) // n — output count (top)
             .mix();
-        // ── For each output: push:1 (k=1), pushpoint pred, output.
-        for out in outputs {
+        // ── Emit M output cells with correct predicate/token pairing.
+        //
+        // After `mix`, the stack is [O_0, O_1, …, O_{M-1}] (bottom →
+        // top, matching the `outputs[]` spec order). `op_output` pops
+        // its k=1 payload from the TOP — which would naively pair
+        // `outputs[0].predicate` with `O_{M-1}`'s commitments,
+        // reversing every multi-output transfer.
+        //
+        // Fix: for each `i` in spec order, roll `outputs[i]`'s token
+        // to the top first, then emit. The token at position
+        // `(M-1-i)` from the top is the one whose qty/flv
+        // commitments were the i-th pair pushed before `mix` — i.e.
+        // outputs[i]. `roll:0` is a no-op for the last iteration.
+        for i in 0..outputs.len() {
+            let k = outputs.len() - 1 - i;
+            if k > 0 {
+                program = program.roll_k(k as u8);
+            }
             program = program
                 .push_int(1u64)
-                .push_point(out.predicate)
+                .push_point(outputs[i].predicate)
                 .output();
         }
         program
