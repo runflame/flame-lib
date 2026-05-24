@@ -54,9 +54,13 @@ impl<'g> Prover<'g> {
         let cs = r1cs::Prover::new(pc_gens, Transcript::new(b"flamevm.r1cs.v1"));
         Self {
             cs,
-            // 64 generators × 16 parties matches the zkvm bound; plenty
-            // for the trivial Phase-11 programs and gives Phase 12 room.
-            bp_gens: BulletproofGens::new(64, 16),
+            // 1024-gen single-party setup matches the zkvm test
+            // configuration (`BulletproofGens::new(256, 1)` in
+            // zkvm/tests/zkvm.rs is the lower bound; we go a bit
+            // higher to leave headroom for Phase-13 `cloak`
+            // multi-range proofs). Party capacity is 1 because R1CS
+            // proofs are single-party.
+            bp_gens: BulletproofGens::new(1024, 1),
         }
     }
 

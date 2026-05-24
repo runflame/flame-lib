@@ -558,12 +558,18 @@ impl VM {
             // ── Phase 11: CS-bound opcodes ────────────────────────
             I::Alloc(w) => self.op_alloc(w, delegate),
             I::Expr => self.op_expr(delegate),
+            // ── Phase 12: range proof ─────────────────────────────
+            I::Range => self.op_range(delegate),
             // ── Phase 11: Expression / Constraint overloads ───────
             I::Neg if self.top_is_expression() => self.op_neg_expr(),
             I::Add if self.top_two_have_non_int253() => self.op_add_expr(),
             I::Mul if self.top_two_have_non_int253() => self.op_mul_expr(delegate),
             I::Eq if self.top_two_have_non_int253() => self.op_eq_expr(),
             I::Verify if self.top_is_constraint() => self.op_verify_constraint(delegate),
+            // ── Phase 12: Constraint composition overloads ────────
+            I::Not if self.top_is_constraint() => self.op_not_constraint(),
+            I::And if self.top_two_have_constraint() => self.op_and_constraint(),
+            I::Or if self.top_two_have_constraint() => self.op_or_constraint(),
             // ── Phase 10a: external-only ──────────────────────────
             I::Input => self.op_input(),
             // ── Everything else → common dispatch ─────────────────
@@ -577,7 +583,7 @@ impl VM {
     fn dispatch_internal(&mut self, instr: crate::ops::Instruction) -> Result<(), VMError> {
         use crate::ops::Instruction as I;
         match instr {
-            I::Input | I::Alloc(_) | I::Expr => Err(VMError::ExternalOnly),
+            I::Input | I::Alloc(_) | I::Expr | I::Range => Err(VMError::ExternalOnly),
             other => self.dispatch_common(other),
         }
     }
@@ -678,7 +684,7 @@ impl VM {
             I::Signtx => self.op_signtx(),
             I::Signrun => self.op_signrun(),
             // ── Context-only — caller should have intercepted ─────
-            I::Input | I::Alloc(_) | I::Expr => {
+            I::Input | I::Alloc(_) | I::Expr | I::Range => {
                 // External-only instructions reach common dispatch
                 // only via internal context (where they're already
                 // intercepted) or via misdispatch. Surface a definite
@@ -2147,6 +2153,19 @@ impl VM {
         !(a && b)
     }
 
+    /// True iff at least one of the top two values is a `Constraint`.
+    /// Used by `and` / `or` overload dispatch — the cleartext Int253
+    /// path runs only when neither operand is already a Constraint.
+    fn top_two_have_constraint(&self) -> bool {
+        let n = self.current_call.stack.len();
+        if n < 2 {
+            return false;
+        }
+        let a = matches!(self.current_call.stack[n - 1], Value::Constraint(_));
+        let b = matches!(self.current_call.stack[n - 2], Value::Constraint(_));
+        a || b
+    }
+
     /// `0x5c alloc` — allocates a low-level R1CS variable. The witness
     /// comes from `Instruction::Alloc(Option<Int253>)`: `Some(i)` on
     /// the prover side (cleartext value the CS uses when proving),
@@ -2234,6 +2253,143 @@ impl VM {
         let c = self.pop_constraint()?;
         c.verify(delegate.cs())?;
         Ok(())
+    }
+
+    // ── Phase 12: range proofs + Constraint composition ──────────
+
+    /// Pops a `Constraint` if the top of the stack is one, or lifts an
+    /// `Int253` to `Constraint::Cleartext(value != 0)`. Mirrors zkvm's
+    /// pattern of accepting "constant constraints" alongside witness
+    /// constraints, leveraging the Constraint cleartext-fold to keep
+    /// the CS minimal.
+    fn pop_constraint_or_int253(&mut self) -> Result<crate::Constraint, VMError> {
+        match self.pop_value()? {
+            Value::Constraint(c) => Ok(c),
+            Value::Int253(i) => Ok(crate::Constraint::Cleartext(!i.is_zero())),
+            _ => Err(VMError::TypeNotConstraint),
+        }
+    }
+
+    /// `0x5e range` — `expr n → expr`. Pops the bit-count `n` (Int253,
+    /// must be in `[1, 64]`) and the `Expression`, adds an `n`-bit
+    /// range-proof gadget asserting `0 ≤ expr.value < 2^n`, and
+    /// pushes the Expression back unchanged so callers can continue
+    /// using it.
+    ///
+    /// For `Expression::Constant(int)`: range proof reduces to a
+    /// cleartext check (no CS work), erroring `InvalidBitrange` if
+    /// the constant doesn't fit. For `LinearCombination`: invokes
+    /// `spacesuit::range_proof` with the prover's witness (when
+    /// available) and a freshly-built `LinearCombination` over the
+    /// expression's terms.
+    fn op_range<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        use bulletproofs::r1cs::LinearCombination as LC;
+        use spacesuit::BitRange;
+
+        // Pop n (bit-count) — must be a non-negative Int253 in [1, 64].
+        let n_int = self.pop_int253()?;
+        let n_u64 = n_int.to_u64().ok_or(VMError::BitCountOutOfRange)?;
+        let n_usize = usize::try_from(n_u64).map_err(|_| VMError::BitCountOutOfRange)?;
+        if n_usize == 0 {
+            return Err(VMError::BitCountOutOfRange);
+        }
+        let bit_range = BitRange::new(n_usize).ok_or(VMError::BitCountOutOfRange)?;
+
+        let expr = self.pop_expression()?;
+
+        match &expr {
+            crate::Expression::Constant(value) => {
+                // Cleartext: the value must fit in [0, 2^n). Negative
+                // or too-large constants are caught here without
+                // touching the CS.
+                if !int_fits_in_n_bits(*value, n_usize) {
+                    return Err(VMError::InvalidBitrange);
+                }
+                self.push_value(Value::Expression(expr));
+                Ok(())
+            }
+            crate::Expression::LinearCombination(terms, assignment) => {
+                // Build the LC from the term list. zkvm uses
+                // `r1cs::LinearCombination::from_iter(terms)`.
+                let lc: LC = terms.iter().cloned().collect();
+                // Convert the witness (if present) to spacesuit's
+                // SignedInteger. Non-negative Int253s up to u64::MAX
+                // map cleanly; anything else fails the prover at
+                // gadget time via `to_u64() → None` inside
+                // spacesuit::range_proof.
+                let assignment_si = match assignment {
+                    Some(i) => Some(int253_to_signed_integer(*i)?),
+                    None => None,
+                };
+                spacesuit::range_proof(delegate.cs(), lc, assignment_si, bit_range)
+                    .map_err(VMError::R1CSError)?;
+                self.push_value(Value::Expression(expr));
+                Ok(())
+            }
+        }
+    }
+
+    /// `0x57 not` Constraint overload. Pops a Constraint, pushes its
+    /// negation.
+    fn op_not_constraint(&mut self) -> Result<(), VMError> {
+        let c = self.pop_constraint_or_int253()?;
+        self.push_value(Value::Constraint(crate::Constraint::not(c)));
+        Ok(())
+    }
+
+    /// `0x58 and` Constraint overload. Pops two Constraints (or
+    /// Int253-as-Cleartext), pushes their conjunction. Constraint
+    /// composition is purely structural — the CS is only touched when
+    /// `verify` is called on the resulting Constraint.
+    fn op_and_constraint(&mut self) -> Result<(), VMError> {
+        let b = self.pop_constraint_or_int253()?;
+        let a = self.pop_constraint_or_int253()?;
+        self.push_value(Value::Constraint(crate::Constraint::and(a, b)));
+        Ok(())
+    }
+
+    /// `0x59 or` Constraint overload. Mirror of `and`.
+    fn op_or_constraint(&mut self) -> Result<(), VMError> {
+        let b = self.pop_constraint_or_int253()?;
+        let a = self.pop_constraint_or_int253()?;
+        self.push_value(Value::Constraint(crate::Constraint::or(a, b)));
+        Ok(())
+    }
+}
+
+// ── Phase 12 helpers ─────────────────────────────────────────────────
+
+/// Returns `true` iff `value` is non-negative and fits in `[0, 2^n)`.
+/// Used by `op_range` to short-circuit cleartext Expression::Constant
+/// arguments without touching the CS.
+fn int_fits_in_n_bits(value: Int253, n: usize) -> bool {
+    if value.is_negative() {
+        return false;
+    }
+    if n >= 64 {
+        // Any non-negative Int253 fits — but for n in [1, 64] this
+        // collapses to "fits in u64", which we check via to_u64().
+        return value.to_u64().is_some();
+    }
+    match value.to_u64() {
+        Some(v) => v < (1u64 << n),
+        None => false,
+    }
+}
+
+/// Converts an `Int253` witness into a `spacesuit::SignedInteger` if it
+/// fits the [-(2^64), 2^64] range spacesuit operates over. Out-of-range
+/// witnesses on the prover side error `InvalidBitrange` here (the
+/// `range_proof` gadget itself would reject the assignment downstream,
+/// but failing early gives a clearer error code).
+fn int253_to_signed_integer(value: Int253) -> Result<spacesuit::SignedInteger, VMError> {
+    if value.is_negative() {
+        let mag = value.abs();
+        let mag_u64 = mag.to_u64().ok_or(VMError::InvalidBitrange)?;
+        Ok(-spacesuit::SignedInteger::from(mag_u64))
+    } else {
+        let v = value.to_u64().ok_or(VMError::InvalidBitrange)?;
+        Ok(spacesuit::SignedInteger::from(v))
     }
 }
 
@@ -6652,5 +6808,288 @@ mod tests {
             0,
         )
         .expect("verify succeeds");
+    }
+
+    // ── Phase 12: range proofs + Constraint composition ──────────
+
+    #[test]
+    fn range_proof_accepts_in_range_value() {
+        // alloc(42) push:64 range — 42 fits in 64 bits.
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            .alloc(Some(Int253::from(42u64)))
+            .push_int(64u64)
+            .range()
+            // Constrain that the same alloc equals 42 to close the proof
+            // with a non-trivial constraint (so verification has
+            // something to check beyond the range gadget).
+            .alloc(Some(Int253::from(42u64)))
+            .eq()
+            .verify();
+        let (bytecode, proof, _, _) =
+            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+                .expect("prove succeeds");
+        let pc_gens_v = PedersenGens::default();
+        Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("verify succeeds");
+    }
+
+    #[test]
+    fn range_proof_rejects_out_of_range_value() {
+        // alloc(2^9) push:8 range — 512 does NOT fit in 8 bits, so the
+        // prover-side range_proof gadget rejects the witness or the
+        // verifier rejects the proof.
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            .alloc(Some(Int253::from(512u64)))
+            .push_int(8u64)
+            .range()
+            .alloc(Some(Int253::from(512u64)))
+            .eq()
+            .verify();
+        let result = Prover::prove(
+            &pc_gens,
+            program,
+            dummy_header(),
+            1_000_000,
+            0,
+        );
+        // The prover may succeed (constructs a proof with bad witness)
+        // and the verifier rejects, OR the prover errors directly.
+        // Either way, the full pipeline must reject. Cover both
+        // outcomes for robustness.
+        match result {
+            Err(_) => {
+                // Prover refused — good.
+            }
+            Ok((bytecode, proof, _, _)) => {
+                let pc_gens_v = PedersenGens::default();
+                let err = Verifier::verify(
+                    &pc_gens_v,
+                    bytecode,
+                    &proof,
+                    dummy_header(),
+                    1_000_000,
+                    0,
+                )
+                .expect_err("verifier must reject out-of-range proof");
+                assert!(matches!(err, VMError::InvalidR1CSProof));
+            }
+        }
+    }
+
+    #[test]
+    fn range_proof_constant_in_range_skips_cs() {
+        // push:7 (constant Expression after no alloc), but we don't
+        // have a way to get an Expression::Constant onto the stack
+        // without `scalar` (Phase 13). Skip this until Phase 13.
+        //
+        // For now exercise `range` only via alloc-produced Expressions.
+    }
+
+    #[test]
+    fn range_bit_count_zero_rejected() {
+        // push:0 — zero-bit range proof is degenerate, rejected at the
+        // opcode level.
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            .alloc(Some(Int253::from(0u64)))
+            .push_int(0u64)
+            .range()
+            .alloc(Some(Int253::from(0u64)))
+            .eq()
+            .verify();
+        let err = Prover::prove(
+            &pc_gens,
+            program,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(err, VMError::BitCountOutOfRange));
+    }
+
+    #[test]
+    fn range_bit_count_above_64_rejected() {
+        // push:65 — bit count exceeds BitRange::max() (64).
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            .alloc(Some(Int253::from(1u64)))
+            .push_int(65u64)
+            .range()
+            .alloc(Some(Int253::from(1u64)))
+            .eq()
+            .verify();
+        let err = Prover::prove(
+            &pc_gens,
+            program,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(err, VMError::BitCountOutOfRange));
+    }
+
+    #[test]
+    fn constraint_and_overload_combines_two_constraints() {
+        // (alloc(7) == alloc(7)) AND (alloc(3) == alloc(3))
+        //   → Constraint composition — verify succeeds (both true).
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            // Constraint 1: alloc(7) == alloc(7) — pushes Constraint
+            .alloc(Some(Int253::from(7u64)))
+            .alloc(Some(Int253::from(7u64)))
+            .eq()
+            // Constraint 2: alloc(3) == alloc(3) — pushes Constraint
+            .alloc(Some(Int253::from(3u64)))
+            .alloc(Some(Int253::from(3u64)))
+            .eq()
+            // AND the two Constraints
+            .and()
+            .verify();
+        let (bytecode, proof, _, _) =
+            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+                .expect("prove succeeds");
+        let pc_gens_v = PedersenGens::default();
+        Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("verify succeeds");
+    }
+
+    #[test]
+    fn constraint_or_overload_combines_two_constraints() {
+        // (alloc(7) == alloc(8)) OR (alloc(3) == alloc(3))
+        //   → first is false, second is true; OR yields true. Verify ok.
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            .alloc(Some(Int253::from(7u64)))
+            .alloc(Some(Int253::from(8u64)))
+            .eq()
+            .alloc(Some(Int253::from(3u64)))
+            .alloc(Some(Int253::from(3u64)))
+            .eq()
+            .or()
+            .verify();
+        let (bytecode, proof, _, _) =
+            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+                .expect("prove succeeds");
+        let pc_gens_v = PedersenGens::default();
+        Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("verify succeeds");
+    }
+
+    #[test]
+    fn constraint_not_overload_negates_constraint() {
+        // NOT (alloc(7) == alloc(8))  → NOT false → true.
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            .alloc(Some(Int253::from(7u64)))
+            .alloc(Some(Int253::from(8u64)))
+            .eq()
+            .not()
+            .verify();
+        let (bytecode, proof, _, _) =
+            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+                .expect("prove succeeds");
+        let pc_gens_v = PedersenGens::default();
+        Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("verify succeeds");
+    }
+
+    #[test]
+    fn constraint_and_with_false_branch_rejected() {
+        // (alloc(7) == alloc(7)) AND (alloc(3) == alloc(99))
+        //   → first true, second false; AND is false. Verifier rejects.
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            .alloc(Some(Int253::from(7u64)))
+            .alloc(Some(Int253::from(7u64)))
+            .eq()
+            .alloc(Some(Int253::from(3u64)))
+            .alloc(Some(Int253::from(99u64)))
+            .eq()
+            .and()
+            .verify();
+        let (bytecode, proof, _, _) =
+            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+                .expect("prove succeeds (constructs proof of unsatisfiable constraint)");
+        let pc_gens_v = PedersenGens::default();
+        let err = Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(err, VMError::InvalidR1CSProof));
+    }
+
+    #[test]
+    fn dispatch_falls_through_to_int_path_when_no_constraint_on_top() {
+        // Pure Int253 path for `and` — must NOT route to Constraint
+        // overload when both operands are Int253. push:1 push:1 and
+        // → push:1.
+        let mut vm = vm_with_script(vec![0x01, 0x01, 0x58]); // push:1, push:1, and
+        run_to_end(&mut vm).expect("int and ok");
+        assert_eq!(vm.current_call.stack.len(), 1);
+        assert_int(&vm.current_call.stack[0], Int253::from(1u64));
+    }
+
+    #[test]
+    fn instruction_range_roundtrip() {
+        let mut buf = Vec::new();
+        crate::ops::Instruction::Range.encode(&mut buf);
+        assert_eq!(buf, vec![0x5e]);
+        let mut r: &[u8] = &buf;
+        let parsed = crate::ops::Instruction::parse(&mut r).expect("parses");
+        assert!(matches!(parsed, crate::ops::Instruction::Range));
+    }
+
+    #[test]
+    fn range_in_internal_context_errors_external_only() {
+        // Internal context dispatches `range` to ExternalOnly.
+        let mut vm = vm_with_script(vec![
+            0x10, 0x01, // pushint8(1)
+            0x10, 0x40, // pushint8(64)
+            0x5e, // range
+        ]);
+        // Push an Expression manually so dispatch_internal hits range.
+        // Actually we can't construct an Expression in internal context
+        // (alloc is ExternalOnly too). The simpler test: just step until
+        // the `range` opcode is dispatched — it should error ExternalOnly
+        // before consuming any stack operands.
+        let err = run_to_end(&mut vm).unwrap_err();
+        assert!(matches!(err, VMError::ExternalOnly));
     }
 }

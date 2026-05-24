@@ -97,6 +97,7 @@ const OP_AND: u8 = 0x58;
 const OP_OR: u8 = 0x59;
 const OP_ALLOC: u8 = 0x5c;
 const OP_EXPR: u8 = 0x5d;
+const OP_RANGE: u8 = 0x5e;
 const OP_SIZE: u8 = 0x5f;
 const OP_DICT: u8 = 0x60;
 const OP_PUT: u8 = 0x61;
@@ -230,6 +231,9 @@ pub enum Instruction {
     Alloc(Option<Int253>),
     /// `expr` (0x5d).
     Expr,
+    /// `range` (0x5e) — `expr n → expr`. Adds an `n`-bit non-negativity
+    /// range proof on the Expression (n ∈ [1, 64]; pops `n` as `Int253`).
+    Range,
 
     // ── Phase 5: Dict ops ──────────────────────────────────────────
     /// `dict` (0x60).
@@ -371,6 +375,7 @@ impl Instruction {
             Instruction::Size => out.push(OP_SIZE),
             Instruction::Alloc(_) => out.push(OP_ALLOC),
             Instruction::Expr => out.push(OP_EXPR),
+            Instruction::Range => out.push(OP_RANGE),
             Instruction::Dict => out.push(OP_DICT),
             Instruction::Put => out.push(OP_PUT),
             Instruction::Replace => out.push(OP_REPLACE),
@@ -492,6 +497,7 @@ impl Instruction {
             OP_SIZE => Ok(Instruction::Size),
             OP_ALLOC => Ok(Instruction::Alloc(None)),
             OP_EXPR => Ok(Instruction::Expr),
+            OP_RANGE => Ok(Instruction::Range),
             OP_DICT => Ok(Instruction::Dict),
             OP_PUT => Ok(Instruction::Put),
             OP_REPLACE => Ok(Instruction::Replace),
@@ -843,10 +849,10 @@ mod tests {
 
     #[test]
     fn ext_opcode_for_unknown_bytes() {
-        // 0x1c..0x1f are used, but 0x4f / 0x5a / 0x5b / 0x5e are unused
-        // gaps in the current spec. (0x5a and 0x5b are reserved for
-        // future `scalar` / `commit` opcodes.)
-        let unused = [0x4f, 0x5a, 0x5b, 0x5e, 0x6f, 0x76, 0x77, 0x7a, 0x9a, 0xff];
+        // 0x1c..0x1f are used; 0x4f / 0x5a / 0x5b are unused gaps in the
+        // current spec. (0x5a and 0x5b are reserved for future
+        // `scalar` / `commit` opcodes; Phase 12 wires 0x5e `range`.)
+        let unused = [0x4f, 0x5a, 0x5b, 0x6f, 0x76, 0x77, 0x7a, 0x9a, 0xff];
         for b in unused {
             let mut r: &[u8] = &[b];
             let parsed = Instruction::parse(&mut r).expect("parses");

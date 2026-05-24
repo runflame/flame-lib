@@ -36,7 +36,11 @@ impl Verifier {
         let cs = r1cs::Verifier::new(Transcript::new(b"flamevm.r1cs.v1"));
         Self {
             cs,
-            bp_gens: BulletproofGens::new(64, 16),
+            // MUST match the prover's bp_gens shape exactly — any
+            // divergence silently invalidates every proof. See
+            // `prover.rs::Prover::new` for the rationale on
+            // `(1024, 1)`.
+            bp_gens: BulletproofGens::new(1024, 1),
         }
     }
 

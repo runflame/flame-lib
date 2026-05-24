@@ -23,8 +23,8 @@ Phase numbers are stable across revisions; execution order changes as priorities
 | 10a | Inputs (stateless VM, `input` opcode) + Cell wire encoding | ✅ done |
 | 8 | Tokens: port `Token`/`WideToken` from zkvm + clear-only opcodes | ✅ done |
 | 11 | Constraint system bootstrap (real Prover/Verifier) | ✅ done (MVP — Phase 13 extends with rich-`String` + `commit`) |
-| **12** | **Range proofs & constraint composition** | ⏳ **next** |
-| 13 | Confidential tokens, mix, decrypt | ⏳ pending |
+| 12 | Range proofs & constraint composition | ✅ done |
+| **13** | **Confidential tokens, mix, decrypt** | ⏳ **next** |
 | 14 | Signatures (sigverify + delegate finalize) | ⏳ pending |
 | 10b | `send` opcode + send queue | ⏳ paused (revisit alongside Phase 15) |
 | 17 | Fee, finalization, full tx assembly | ⏳ pending |
@@ -1257,18 +1257,80 @@ impl Verifier {
 
 ---
 
-### Phase 12 — Range proofs & constraint composition
+### ✅ Phase 12 — Range proofs & constraint composition (done)
 
-**Goal**: bit-range constraints and constraint algebra.
+**Status**: shipped. The `range` opcode wires
+`spacesuit::range_proof` into the dispatch layer; `not` / `and` /
+`or` grow Constraint-aware overloads via the same
+`dispatch_external` stack-peek pattern Phase 11 introduced for
+Expression overloads.
 
-**Reuses**: `spacesuit::range_proof`, `Constraint::{and, or, not, verify}`.
+**Architectural choices** (zkvm-aligned):
 
-**New**: overloads for `0x57 not`, `0x58 and`, `0x59 or` on `Constraint`; range proof gadget invocation.
+- `range` pops `(expr, n)` and pushes `expr` back unchanged — matches
+  the spec row `expr n → expr`. Differs from zkvm's fixed
+  `BitRange::max()` (64) by letting the script choose `n ∈ [1, 64]`.
+  Bit count below 1 or above 64 → `BitCountOutOfRange`.
+- For `Expression::Constant`, the gadget short-circuits with a
+  cleartext bound check (`InvalidBitrange` on overflow). Mirrors
+  zkvm's `Constant.in_range()` path.
+- For `LinearCombination`, builds an `r1cs::LinearCombination` from
+  the term list and invokes `spacesuit::range_proof(cs, lc,
+  Option<SignedInteger>, BitRange)`. Witness conversion via
+  `int253_to_signed_integer` errors `InvalidBitrange` if the
+  prover's witness can't fit in `i65`.
+- `not` / `and` / `or` overloads use `pop_constraint_or_int253`
+  which lifts cleartext Int253 operands to `Constraint::Cleartext`
+  (zkvm doesn't have this lift since their opcodes are
+  Constraint-only — FlameVM's spec allows both via stack-peek).
+- `bp_gens` bumped to `(1024, 1)` matching zkvm's test-config
+  rationale: single-party R1CS proofs need enough generators to
+  cover all multipliers (a 64-bit range proof alone uses 64).
 
-**Opcodes (all [E])**: 
-- [ ] `0x5e` `range`
+**Added**:
 
-**Tests**: in-range witness verifies; out-of-range value fails verification.
+- `Instruction::Range` variant (`ops.rs`), encode = `0x5e` byte,
+  parse from byte 0x5e. Roundtrip-tested.
+- `Program::range()` fluent builder method.
+- `VM::op_range(delegate)` handler.
+- `VM::op_not_constraint`, `op_and_constraint`, `op_or_constraint`
+  + helper `pop_constraint_or_int253`.
+- `VM::top_two_have_constraint` stack-peek helper.
+- `dispatch_external` arms for `Range` and `Not`/`And`/`Or`
+  Constraint overloads.
+- `dispatch_internal` + `dispatch_common` route `Range` to
+  `ExternalOnly` (CS-only).
+- `VMError::InvalidBitrange`.
+- `flamevm/src/vm.rs` helpers `int_fits_in_n_bits` and
+  `int253_to_signed_integer`.
+- `Prover::new` / `Verifier::new` bump `BulletproofGens` from
+  `(64, 16)` to `(1024, 1)` — required for 64-bit range proofs.
+
+**Opcodes**:
+- [x] `0x5e` `range`
+- [x] `0x57 not` Constraint overload
+- [x] `0x58 and` Constraint overload
+- [x] `0x59 or` Constraint overload
+
+**Tests landed** (12 new, all green):
+- `range_proof_accepts_in_range_value` — `alloc(42); push:64;
+  range; eq; verify` proves+verifies.
+- `range_proof_rejects_out_of_range_value` — `alloc(512); push:8;
+  range` either fails to prove or verifier rejects.
+- `range_bit_count_zero_rejected`, `range_bit_count_above_64_rejected`.
+- `constraint_and_overload_combines_two_constraints`.
+- `constraint_or_overload_combines_two_constraints`.
+- `constraint_not_overload_negates_constraint`.
+- `constraint_and_with_false_branch_rejected` (verifier rejects
+  the unsatisfiable composition).
+- `dispatch_falls_through_to_int_path_when_no_constraint_on_top`
+  (verifies the stack-peek dispatch doesn't grab pure-Int253 cases).
+- `instruction_range_roundtrip`.
+- `range_in_internal_context_errors_external_only`.
+- `range_proof_constant_in_range_skips_cs` (placeholder, full
+  coverage waits for Phase 13's `scalar` opcode).
+
+**Total**: 349 → **361 tests** (+12 new).
 
 ---
 

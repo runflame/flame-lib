@@ -214,6 +214,14 @@ impl Program {
         self
     }
 
+    /// `range` (0x5e) — `expr n → expr`. Adds an n-bit range proof
+    /// (n ∈ [1, 64]; popped as `Int253` from the stack). The
+    /// Expression is consumed and pushed back unchanged.
+    pub fn range(mut self) -> Self {
+        self.instructions.push(Instruction::Range);
+        self
+    }
+
     // ── Phase 5: Dict ops ────────────────────────────────────────
 
     pub fn dict(mut self) -> Self { self.instructions.push(Instruction::Dict); self }

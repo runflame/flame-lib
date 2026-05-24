@@ -390,9 +390,12 @@ pub enum VMError {
     // #[error("Item misses witness data.")]
     // WitnessMissing,
 
-    // /// This error occurs when we supply a number not in the range [1,64]
-    // #[error("Bitrange for rangeproof is not between 1 and 64")]
-    // InvalidBitrange,
+    /// `range` was reached with a cleartext `Expression::Constant`
+    /// that doesn't fit in `[0, 2^n)`. The cleartext branch
+    /// short-circuits without touching the CS, so this is a definite
+    /// hard fail rather than a deferred proof-construction error.
+    #[error("Value out of bit-range for rangeproof")]
+    InvalidBitrange,
 
     // /// This error occurs when a Merkle proof of inclusion is invalid.
     // #[error("Invalid Merkle proof.")]

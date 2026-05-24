@@ -370,7 +370,7 @@ All constraint operations available on external transactions only.
 | 5b | extvar | point → var | Allocates an external variable based on a Pedersen commitment. |
 | 5c | intvar | ø → var | Allocates an internal variable in CS (non-committed via PC). |
 | 5d | expr | var → expr | Converts variable into an expression. |
-| 5e | range | expr n → expr | Adds an n-bit constraint to a CS. n in [1, 64]. |
+| 5e | range | expr n → expr | **[E]** Pops bit count `n: Int253` (must be in `[1, 64]`) and an `Expression`. For `Expression::Constant`, asserts the constant fits in `[0, 2ⁿ)` (cleartext check, no CS work). For `Expression::LinearCombination`, adds a bulletproofs range-proof gadget asserting `0 ≤ expr.value < 2ⁿ`. The Expression is pushed back unchanged. Hard-fails `BitCountOutOfRange` if `n ∉ [1, 64]`, `InvalidBitrange` on cleartext overflow, `R1CSError` on CS-construction failure. |
 | 5f | size | x → x n | (Internal+External) Returns length of string in bytes, or struct’s number of entries. |
 
 ### Dicts
