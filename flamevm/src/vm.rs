@@ -9490,10 +9490,10 @@ let proof = proof.expect("proof set");
         qty_blind: u64,
         /// Blinding factor for the flv commitment.
         flv_blind: u64,
-        /// Predicate-tree internal-key secret (1u64-ish; arbitrary).
-        predicate_secret: u64,
         /// Anchor bytes for the input cell — must be unique per
-        /// cell so cell-ids don't collide.
+        /// cell so cell-ids don't collide. Cell identity also
+        /// commits the predicate and payload, but anchor uniqueness
+        /// is the simplest way to keep distinct cells distinct.
         anchor: [u8; 32],
     }
 
@@ -9645,13 +9645,23 @@ let proof = proof.expect("proof set");
     /// produce the cell bytes pushed onto the stack) and
     /// `assert_nm_txlog` (to compute the expected `cell_id` for the
     /// `TxEntry::Input` assertion).
+    ///
+    /// Uses `PredicateTree::scripts_only` (NUMS-unspendable
+    /// internal key) so the cell is openable only by the empty
+    /// script leaf — never key-path. We don't need a key-spend
+    /// path here: the test scripts open every cell via callproof
+    /// + empty unlocked program. This is cleaner than the prior
+    /// "real internal key generated but never used for signing"
+    /// arrangement.
     fn build_input_cell(inp: &NMInputSpec) -> (Cell, CallProof) {
         let (q_open, f_open) = open_commitments(inp);
         let token = crate::Token::new(q_open, f_open);
-        let (tree, cp) = build_predicate_with_program(
-            &[],
-            inp.predicate_secret,
-        );
+        let tree = PredicateTree::scripts_only(
+            vec![Vec::new()],
+            TEST_BLINDING_KEY,
+        )
+        .expect("scripts_only tree builds");
+        let cp = tree.callproof_for(0).expect("callproof for leaf 0");
         let pred_point = tree.compute_point();
         let cell = Cell::new(
             Predicate::Opaque(pred_point),
@@ -9791,7 +9801,6 @@ let proof = proof.expect("proof set");
                 flv: 7,
                 qty_blind: 11,
                 flv_blind: 13,
-                predicate_secret: 1,
                 anchor: [0xa1; 32],
             }],
             &[NMOutputSpec {
@@ -9813,7 +9822,6 @@ let proof = proof.expect("proof set");
                 flv: 7,
                 qty_blind: 11,
                 flv_blind: 13,
-                predicate_secret: 1,
                 anchor: [0xa1; 32],
             }],
             &[
@@ -9845,7 +9853,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 11,
                     flv_blind: 13,
-                    predicate_secret: 1,
                     anchor: [0xa1; 32],
                 },
                 NMInputSpec {
@@ -9853,7 +9860,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 14,
                     flv_blind: 15,
-                    predicate_secret: 2,
                     anchor: [0xa2; 32],
                 },
             ],
@@ -9878,7 +9884,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 11,
                     flv_blind: 13,
-                    predicate_secret: 1,
                     anchor: [0xa1; 32],
                 },
                 NMInputSpec {
@@ -9886,7 +9891,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 14,
                     flv_blind: 15,
-                    predicate_secret: 2,
                     anchor: [0xa2; 32],
                 },
             ],
@@ -9920,7 +9924,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 11,
                     flv_blind: 13,
-                    predicate_secret: 1,
                     anchor: [0xa1; 32],
                 },
                 NMInputSpec {
@@ -9928,7 +9931,6 @@ let proof = proof.expect("proof set");
                     flv: 11,
                     qty_blind: 14,
                     flv_blind: 15,
-                    predicate_secret: 2,
                     anchor: [0xa2; 32],
                 },
             ],
@@ -9961,7 +9963,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 11,
                     flv_blind: 13,
-                    predicate_secret: 1,
                     anchor: [0xa1; 32],
                 },
                 NMInputSpec {
@@ -9969,7 +9970,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 14,
                     flv_blind: 15,
-                    predicate_secret: 2,
                     anchor: [0xa2; 32],
                 },
                 NMInputSpec {
@@ -9977,7 +9977,6 @@ let proof = proof.expect("proof set");
                     flv: 11,
                     qty_blind: 16,
                     flv_blind: 17,
-                    predicate_secret: 3,
                     anchor: [0xa3; 32],
                 },
             ],
@@ -10019,7 +10018,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 11,
                     flv_blind: 13,
-                    predicate_secret: 1,
                     anchor: [0xa1; 32],
                 },
                 NMInputSpec {
@@ -10027,7 +10025,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 14,
                     flv_blind: 15,
-                    predicate_secret: 2,
                     anchor: [0xa2; 32],
                 },
                 NMInputSpec {
@@ -10035,7 +10032,6 @@ let proof = proof.expect("proof set");
                     flv: 11,
                     qty_blind: 16,
                     flv_blind: 17,
-                    predicate_secret: 3,
                     anchor: [0xa3; 32],
                 },
             ],
@@ -10067,7 +10063,6 @@ let proof = proof.expect("proof set");
                 flv: 7,
                 qty_blind: 11,
                 flv_blind: 13,
-                predicate_secret: 1,
                 anchor: [0xa1; 32],
             }],
             &[
@@ -10106,7 +10101,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 11,
                     flv_blind: 13,
-                    predicate_secret: 1,
                     anchor: [0xa1; 32],
                 },
                 NMInputSpec {
@@ -10114,7 +10108,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 14,
                     flv_blind: 15,
-                    predicate_secret: 2,
                     anchor: [0xa2; 32],
                 },
                 NMInputSpec {
@@ -10122,7 +10115,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 16,
                     flv_blind: 17,
-                    predicate_secret: 3,
                     anchor: [0xa3; 32],
                 },
             ],
@@ -10146,7 +10138,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 11,
                     flv_blind: 13,
-                    predicate_secret: 1,
                     anchor: [0xa1; 32],
                 },
                 NMInputSpec {
@@ -10154,7 +10145,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 14,
                     flv_blind: 15,
-                    predicate_secret: 2,
                     anchor: [0xa2; 32],
                 },
                 NMInputSpec {
@@ -10162,7 +10152,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 16,
                     flv_blind: 17,
-                    predicate_secret: 3,
                     anchor: [0xa3; 32],
                 },
             ],
@@ -10203,7 +10192,6 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 11,
                     flv_blind: 13,
-                    predicate_secret: 1,
                     anchor: [0xa1; 32],
                 },
                 NMInputSpec {
@@ -10211,7 +10199,6 @@ let proof = proof.expect("proof set");
                     flv: 11,
                     qty_blind: 14,
                     flv_blind: 15,
-                    predicate_secret: 2,
                     anchor: [0xa2; 32],
                 },
             ],
@@ -10272,7 +10259,6 @@ let proof = proof.expect("proof set");
             flv: 0,
             qty_blind: 11,
             flv_blind: 13,
-            predicate_secret: 1,
             anchor: [0xa1; 32],
         };
         let (q_in, f_in) = open_commitments(&inp);
@@ -10390,7 +10376,6 @@ let proof = proof.expect("proof set");
             flv: 7,
             qty_blind: 11,
             flv_blind: 13,
-            predicate_secret: 1,
             anchor: [0xa1; 32],
         }];
         // Output sums to 11 — imbalance.
@@ -10439,7 +10424,6 @@ let proof = proof.expect("proof set");
             flv: 7, // gold
             qty_blind: 11,
             flv_blind: 13,
-            predicate_secret: 1,
             anchor: [0xa1; 32],
         }];
         // Output flavor is silver (11) — different from input flavor
