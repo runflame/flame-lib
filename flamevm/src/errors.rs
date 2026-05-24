@@ -304,6 +304,13 @@ pub enum VMError {
     #[error("Malformed ActorState")]
     MalformedActorState,
 
+    /// `Address::decode` was given bytes that don't match either
+    /// known wire shape: wrong outer arity, unknown tag byte,
+    /// non-canonical Int253 in the tag slot, trailing bytes inside
+    /// a `dst` ActorID payload, or a negative `gas` value.
+    #[error("Malformed Address")]
+    MalformedAddress,
+
     /// An opcode required a top-of-stack `ClearToken` but found a
     /// different type (encrypted Token / WideToken / non-token).
     /// Distinct from `TypeNotToken` so scripts can distinguish "wrong
