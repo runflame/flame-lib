@@ -2395,13 +2395,18 @@ impl VM {
             &position_str,
             &program_str,
         )?;
-        let program_bytes = cell.predicate.verify_callproof(&cp)?.to_vec();
-        // The unlocked script comes from the cell's predicate tree
-        // (stored bytecode), not the stack — no witness slots
-        // could be carried even on the prover side. Parse to
-        // Instructions here.
-        let instrs = crate::program::Program::parse(&program_bytes)?
-            .into_instructions();
+        // `verify_callproof` succeeds iff `program_str`'s canonical
+        // bytes match the predicate tree's leaf (the merkle path
+        // was built from `program_str` in `callproof_from_stack_pieces`).
+        // So once it's accepted, we can use the witness-bearing
+        // `program_str.to_instructions()` instead of re-parsing the
+        // leaf bytes — the two are byte-identical, but the former
+        // preserves any `String::Script(instrs)` witness slots the
+        // prover wrapped the unlock into. Verifier-side
+        // (`String::Opaque(bytes)`) falls back to `Program::parse`,
+        // same as before.
+        let _ = cell.predicate.verify_callproof(&cp)?;
+        let instrs = program_str.to_instructions()?;
 
         for v in cell.payload {
             self.push_value(v);
@@ -2422,6 +2427,9 @@ impl VM {
         position: &String,
         program: &String,
     ) -> Result<CallProof, VMError> {
+        // Use `bytes_view` throughout — `as_bytes` panics for any
+        // witness-bearing String variant, and the prover can push
+        // any of them (e.g. `String::Script` for the unlock script).
         let mut n_vec = Vec::with_capacity(neighbors.len());
         for (i, (k, v)) in neighbors.entries().enumerate() {
             if *k != Int253::from(i as u64) {
@@ -2433,7 +2441,7 @@ impl VM {
                         return Err(VMError::MalformedCallProof);
                     }
                     let mut h = [0u8; 32];
-                    h.copy_from_slice(s.as_bytes());
+                    h.copy_from_slice(&s.bytes_view());
                     n_vec.push(h);
                 }
                 _ => return Err(VMError::MalformedCallProof),
@@ -2442,8 +2450,8 @@ impl VM {
         Ok(CallProof {
             internal_key: internal_key.inner,
             neighbors: n_vec,
-            position: position.as_bytes().to_vec(),
-            program: program.as_bytes().to_vec(),
+            position: position.bytes_view().into_owned(),
+            program: program.bytes_view().into_owned(),
         })
     }
 

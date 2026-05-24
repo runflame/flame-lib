@@ -174,6 +174,99 @@ fn open_with_wrong_program_hard_fails() {
     ));
 }
 
+/// Prover-side: the unlock script pushed as the callproof's
+/// `program` component can be a `String::Script(instrs)` carrying
+/// witnesses. `op_open` verifies the callproof against the cell's
+/// predicate (the bytes must match the leaf stored in the
+/// predicate tree), then uses `program_str.to_instructions()` so
+/// the witness slots survive into the new Run. End-to-end via
+/// Prover::prove → Verifier::verify.
+///
+/// Regression guard for the witness-erasing path that existed
+/// before `op_open` switched from re-parsing `verify_callproof`'s
+/// returned bytes to using the stack `program_str` directly.
+#[test]
+fn open_preserves_alloc_witnesses_via_script_string() {
+    // Inner unlock script with `alloc(Some(_))` witnesses.
+    let inner = Program::new()
+        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Int253::from(3u64)))
+        .add()
+        .alloc(Some(Int253::from(10u64)))
+        .eq()
+        .verify();
+    let inner_bytes = inner.to_bytecode();
+
+    // Single-leaf predicate tree whose leaf == inner_bytes. The
+    // NUMS-unspendable internal key means the only spend path is
+    // the script leaf.
+    let tree = PredicateTree::scripts_only(
+        vec![inner_bytes.clone()],
+        TEST_BLINDING_KEY,
+    )
+    .expect("scripts_only tree");
+    let cp = tree.callproof_for(0).expect("callproof for leaf 0");
+    let pred_point = tree.compute_point();
+
+    // Construct the input cell with an empty payload — the witness
+    // we care about lives in the unlock script, not the payload.
+    let cell = Cell::new(
+        Predicate::Opaque(pred_point),
+        Anchor([0xa1; 32]),
+        vec![],
+    );
+    let cell_bytes = encode_cell_to_bytes(&cell);
+
+    // Outer Program:
+    //   pushstr <cell_bytes>; input;
+    //   pushpoint <internal_key>;
+    //   for each neighbor: pushstr <h>; push:i;     // N neighbors
+    //   push:N; dict;
+    //   pushstr <position>;
+    //   push_script(inner);                          // witness-bearing
+    //   push:0; open
+    let mut outer = Program::new()
+        .push_str(String::from(cell_bytes))
+        .input()
+        .push_point(*cp.internal_key.as_bytes());
+    for (i, h) in cp.neighbors.iter().enumerate() {
+        outer = outer
+            .push_str(String::from(h.to_vec()))
+            .push_int(i as u64);
+    }
+    let outer = outer
+        .push_int(cp.neighbors.len() as u64)
+        .dict()
+        .push_str(String::from(cp.position.clone()))
+        .push_script(inner) // ← Script(instrs), witnesses intact
+        .push_int(0u64)
+        .open();
+
+    // Prover round-trip.
+    let pc_gens = bulletproofs::PedersenGens::default();
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+        .expect("prove with witness-bearing open");
+    let txid_p = result.txid;
+    let TxResult { bytecode, proof, .. } = result;
+    let proof = proof.expect("proof set");
+
+    // Verifier round-trip — same bytecode, no witnesses on the
+    // wire, parses the unlock script back to `Alloc(None)` via
+    // `String::Opaque(bytes).to_instructions()`.
+    let pc_gens_v = bulletproofs::PedersenGens::default();
+    let verified = Verifier::verify(
+        &pc_gens_v,
+        bytecode,
+        &proof,
+        dummy_header(),
+        1_000_000,
+        0,
+        None,
+    )
+    .expect("verify ok");
+    assert_eq!(verified.txid, txid_p);
+}
+
 #[test]
 fn open_passes_args_after_payload() {
     // Cell payload: [10]. args: [20, 30]. Program: stack must end with
