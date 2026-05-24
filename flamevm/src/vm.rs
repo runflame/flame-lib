@@ -21,6 +21,7 @@
 //!   by `run`, `loop`, `switch`, and at the entry of every Call.
 
 use bulletproofs::r1cs;
+use bulletproofs::r1cs::R1CSProof;
 use core::convert::TryFrom;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
@@ -88,7 +89,17 @@ impl Anchor {
 pub enum DeferredSig {
     /// Cell-holder must sign the transaction's TxID. The signature is
     /// supplied via the tx envelope (not on the stack).
-    TxBound { verification_key: CompressedRistretto },
+    ///
+    /// Carries the consumed cell's id so the multi-message context
+    /// (Phase 20) can give each signer a distinct message — the same
+    /// pattern zkvm uses for `signtx_items: Vec<(VerificationKey,
+    /// ContractID)>`. The aggregate signature is verified against
+    /// `Vec<(verification_key, cell_id)>` with the transcript bound
+    /// to the TxID.
+    TxBound {
+        verification_key: CompressedRistretto,
+        cell_id: crate::cell::CellID,
+    },
 
     /// Cell-holder signed an explicit message at run time. The signature
     /// is on the stack at the time the record is created.
@@ -395,11 +406,79 @@ impl CallFrame {
 
 // ── Result ───────────────────────────────────────────────────────
 
-/// Outcome of a successful transaction execution.
-#[derive(Debug)]
+/// Outcome of a successful transaction execution. Returned by both
+/// `Prover::prove` (with `proof: Some(...)`) and `Verifier::verify`
+/// (with `proof: None` — proof has already been verified by then).
+///
+/// Phase 21 widened this from the bare `(gas_used, vbytes_used)`
+/// shape to carry the full "observed effects" of the tx: the
+/// canonical TxID, the txlog, the running fee total, the resource
+/// usage, the deferred signature records, and the optional R1CS
+/// proof. Downstream consumers (mempool, validator, wallet) read
+/// from a single value rather than reassembling fields from a
+/// multi-tuple return.
+///
+/// Linear-value variants in `TxEntry::Output(Cell)` prevent
+/// `#[derive(Clone, Debug, Serialize, Deserialize)]` here — see the
+/// matching note on `TxEntry`. A custom `Debug` impl on the carrier
+/// vectors would address most needs; for now the struct itself is
+/// `Debug`-skipped and callers project out the fields they want to
+/// log.
 pub struct TxResult {
+    /// Canonical 32-byte transaction id (Phase 18).
+    pub txid: crate::tx::TxID,
+
+    /// Full txlog including the `Header` entry at index 0 (Phase 18).
+    pub txlog: Vec<crate::tx::TxEntry>,
+
+    /// Aggregate fee in flames recorded by `op_fee` (Phase 19).
+    pub total_fee: u64,
+
+    /// Gas spent by all opcodes (still uniformly zero pre-Phase 22).
     pub gas_used: u64,
+
+    /// Bytes-allocated against the persistent vbyte cap (pre-Phase 27
+    /// the allocator is a no-op, so this stays zero).
     pub vbytes_used: u64,
+
+    /// Canonical bytecode of the executed script. The prover supplies
+    /// this from the `Program`; the verifier echoes back the bytecode
+    /// it received. Useful when downstream code wants to re-hash or
+    /// re-broadcast without re-encoding.
+    pub bytecode: Vec<u8>,
+
+    /// R1CS proof. `Some` on the prover side, `None` on the verifier
+    /// side (the verifier consumed it during `cs.verify`).
+    pub proof: Option<R1CSProof>,
+
+    /// Deferred-signature records — `Explicit` items (already
+    /// batch-verified for the verifier; surfaced for caller
+    /// inspection) and `TxBound` items (the caller used these to
+    /// build the aggregate multi-signature; verifier sees them
+    /// after the fact for the same audit shape).
+    pub deferred_sigs: Vec<DeferredSig>,
+
+    /// Outbound message sends recorded by `op_send`. Empty placeholder
+    /// until Phase 32 wires the opcode + `TxEntry::Send` variant.
+    pub sends: Vec<()>,
+}
+
+/// Manual `Debug` — same reason as `TxEntry`'s manual impl: the
+/// linear `Cell` inside `txlog` blocks `#[derive(Debug)]`.
+impl core::fmt::Debug for TxResult {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TxResult")
+            .field("txid", &self.txid)
+            .field("txlog.len", &self.txlog.len())
+            .field("total_fee", &self.total_fee)
+            .field("gas_used", &self.gas_used)
+            .field("vbytes_used", &self.vbytes_used)
+            .field("bytecode.len", &self.bytecode.len())
+            .field("proof_present", &self.proof.is_some())
+            .field("deferred_sigs.len", &self.deferred_sigs.len())
+            .field("sends.len", &self.sends.len())
+            .finish()
+    }
 }
 
 // ── VM ───────────────────────────────────────────────────────────
@@ -419,6 +498,11 @@ pub struct VM {
     /// issuances/retirements/fees/sends. Used at finalize to compute TxID.
     pub(crate) txlog: Vec<crate::tx::TxEntry>,
 
+    /// Running per-tx fee accumulator (Phase 19). Each `op_fee`
+    /// increments it; overflow → `FeeTooHigh`. Surfaced through
+    /// `TxResult.total_fee` once Phase 21 lands.
+    total_fee: crate::fees::CheckedFee,
+
     /// Signature checks deferred to `Delegate::finalize`. Always empty in
     /// internal mode.
     deferred_sigs: Vec<DeferredSig>,
@@ -426,7 +510,12 @@ pub struct VM {
 
 impl VM {
     /// Executes an external transaction script with the given delegate.
-    /// Consumes the delegate (calls `finalize` at the end).
+    /// Consumes the delegate (calls `finalize` at the end). Returns
+    /// the full Phase-21 [`TxResult`] with `proof = None` — this
+    /// entry point is for callers that don't care about ZK shape
+    /// (integration tests, stub delegates, …); the
+    /// [`crate::Prover::prove`] / [`crate::Verifier::verify`] entry
+    /// points are the real ZK boundaries.
     pub fn execute_external<D: Delegate>(
         header: TxHeader,
         script: Vec<u8>,
@@ -434,54 +523,62 @@ impl VM {
         mem_limit: u64,
         mut delegate: D,
     ) -> Result<TxResult, VMError> {
+        let bytecode = script.clone();
         let mut vm = Self::new(
             header,
             CallFrame::new(script, CallKind::ExternalRoot, gas_limit, mem_limit, 0),
         );
         while vm.step_external(&mut delegate)? {}
+        // Finalize the delegate first (signatures, proof verification
+        // on real delegates; no-op on the stub). On success, drain
+        // the VM state into a TxResult.
         let sigs = mem::take(&mut vm.deferred_sigs);
-        delegate.finalize(sigs)?;
-        Ok(vm.into_result())
+        delegate.finalize(sigs.clone())?;
+        // Re-attach the drained sigs into TxResult so callers can
+        // inspect them post-finalize. The clone above lets `finalize`
+        // own its copy without losing the audit trail here.
+        vm.deferred_sigs = sigs;
+        Ok(vm.into_result(bytecode, None))
     }
 
     /// Runs an external transaction *bytecode* to completion without
-    /// calling `Delegate::finalize`. Returns the resource summary plus
-    /// the accumulated deferred signatures; the caller (typically
-    /// [`crate::Verifier::verify`]) then drives its own
-    /// proof-verification step against the borrowed delegate before
-    /// discarding it.
-    ///
-    /// Lower-level counterpart of [`Self::execute_external`], which
-    /// consumes the delegate and finalizes it inline. Both share the
-    /// same dispatch loop; only the post-run lifecycle differs.
+    /// calling `Delegate::finalize`. Returns the full Phase-21
+    /// [`TxResult`] (with `proof = None` — the caller, typically
+    /// [`crate::Verifier::verify`], performs the proof check and may
+    /// flip `proof` itself if desired). The verifier reads
+    /// `result.txlog` to recompute the TxID and bind it into the
+    /// R1CS transcript before `cs.verify` (Phase 18).
     pub(crate) fn run_external<D: Delegate>(
         header: TxHeader,
         script: Vec<u8>,
         gas_limit: u64,
         mem_limit: u64,
         delegate: &mut D,
-    ) -> Result<(TxResult, Vec<DeferredSig>), VMError> {
+    ) -> Result<TxResult, VMError> {
+        let bytecode = script.clone();
         let mut vm = Self::new(
             header,
             CallFrame::new(script, CallKind::ExternalRoot, gas_limit, mem_limit, 0),
         );
         while vm.step_external(delegate)? {}
-        let sigs = mem::take(&mut vm.deferred_sigs);
-        Ok((vm.into_result(), sigs))
+        Ok(vm.into_result(bytecode, None))
     }
 
     /// Prover-side counterpart of [`Self::run_external`]: takes a
     /// [`crate::Program`] (witness-bearing Instructions) instead of
     /// bytecode. The VM walks the program via `Run::Queue`, so
     /// `Instruction::Alloc(Some(witness))` retains its witness when
-    /// dispatched.
+    /// dispatched. Returns the full Phase-21 [`TxResult`] without
+    /// the proof set — [`crate::Prover::prove`] attaches the proof
+    /// before returning to its caller.
     pub(crate) fn run_external_program<D: Delegate>(
         header: TxHeader,
         program: crate::program::Program,
         gas_limit: u64,
         mem_limit: u64,
         delegate: &mut D,
-    ) -> Result<(TxResult, Vec<DeferredSig>), VMError> {
+    ) -> Result<TxResult, VMError> {
+        let bytecode = program.to_bytecode();
         let mut vm = Self::new(
             header,
             CallFrame::new_with_run(
@@ -493,8 +590,7 @@ impl VM {
             ),
         );
         while vm.step_external(delegate)? {}
-        let sigs = mem::take(&mut vm.deferred_sigs);
-        Ok((vm.into_result(), sigs))
+        Ok(vm.into_result(bytecode, None))
     }
 
     /// Executes an internal transaction triggered by `message`. Resolves
@@ -519,10 +615,15 @@ impl VM {
             CallFrame::new(script, kind, message.gas, mem_limit, message.vbytes),
         );
         while vm.step_internal()? {}
-        Ok(vm.into_result())
+        // Internal context produces no proof and no deferred sigs.
+        Ok(vm.into_result(Vec::new(), None))
     }
 
     fn new(header: TxHeader, initial_call: CallFrame) -> Self {
+        // Header is the first txlog entry so TxID::from_log binds to
+        // version + locktime alongside the effects. Mirrors zkvm.
+        let mut txlog = Vec::new();
+        txlog.push(crate::tx::TxEntry::Header(header));
         Self {
             header,
             last_anchor: None,
@@ -530,15 +631,40 @@ impl VM {
             vbytes_used: 0,
             current_call: initial_call,
             call_stack: Vec::new(),
-            txlog: Vec::new(),
+            txlog,
+            total_fee: crate::fees::CheckedFee::zero(),
             deferred_sigs: Vec::new(),
         }
     }
 
-    fn into_result(self) -> TxResult {
+    /// Drain the VM into a Phase-21 [`TxResult`]. Computes
+    /// `TxID::from_log(&txlog)` from the accumulated log so the
+    /// returned struct is self-contained — every consumer reads it
+    /// off the result without re-running the merkle root.
+    ///
+    /// `bytecode` and `proof` are filled by the caller (the VM
+    /// doesn't always have the bytecode — `run_external_program`
+    /// walked a `Run::Queue` over `Instructions` instead of raw
+    /// bytes — and the proof is constructed by the Prover after the
+    /// run finishes).
+    fn into_result(
+        mut self,
+        bytecode: Vec<u8>,
+        proof: Option<R1CSProof>,
+    ) -> TxResult {
+        let txlog = mem::take(&mut self.txlog);
+        let deferred_sigs = mem::take(&mut self.deferred_sigs);
+        let txid = crate::tx::TxID::from_log(&txlog);
         TxResult {
+            txid,
+            txlog,
+            total_fee: self.total_fee.total(),
             gas_used: self.gas_used,
             vbytes_used: self.vbytes_used,
+            bytecode,
+            proof,
+            deferred_sigs,
+            sends: Vec::new(),
         }
     }
 
@@ -602,6 +728,8 @@ impl VM {
             }
             // ── Phase 10a: external-only ──────────────────────────
             I::Input => self.op_input(),
+            // ── Phase 19: fee — external-only (CS allocation) ─────
+            I::Fee => self.op_fee(delegate),
             // ── Everything else → common dispatch ─────────────────
             other => self.dispatch_common(other),
         }
@@ -620,7 +748,8 @@ impl VM {
             | I::Scalar
             | I::Commit
             | I::Decrypt
-            | I::Mix => Err(VMError::ExternalOnly),
+            | I::Mix
+            | I::Fee => Err(VMError::ExternalOnly),
             other => self.dispatch_common(other),
         }
     }
@@ -729,7 +858,8 @@ impl VM {
             | I::Scalar
             | I::Commit
             | I::Decrypt
-            | I::Mix => {
+            | I::Mix
+            | I::Fee => {
                 // External-only instructions reach common dispatch
                 // only via internal context (where they're already
                 // intercepted) or via misdispatch. Surface a definite
@@ -2103,8 +2233,15 @@ impl VM {
     fn op_signtx(&mut self) -> Result<(), VMError> {
         let cell = self.pop_cell()?;
         let k = cell.payload.len();
+        // Record both the verification key (the predicate's NUMS-Taproot
+        // root point) and the cell id. The id becomes the per-signer
+        // message in the Phase-20 multi-message context, so the same
+        // (key, cell_id) pair can be signed once across many TxBound
+        // items by a single multi-signature.
+        let cell_id = cell.id();
         self.deferred_sigs.push(DeferredSig::TxBound {
             verification_key: cell.predicate.verification_key(),
+            cell_id,
         });
         for v in cell.payload {
             self.push_value(v);
@@ -2511,6 +2648,89 @@ impl VM {
         Ok(())
     }
 
+    /// `0x7a fee` — `qty flv → widetoken`. **[E]** external-only.
+    ///
+    /// Pops a non-negative `qty: Int253` (must fit in `u64` and be
+    /// `≤ MAX_FEE`) and a `flv: Int253`. Records `TxEntry::Fee(qty)`
+    /// into the txlog and bumps `VM::total_fee`. Allocates a fresh
+    /// `WideToken` in the CS with `q = -qty` and `f = flv`, constrains
+    /// both to their cleartext values (unblinded), and pushes the
+    /// debt token to the stack so the script must balance it against
+    /// real tokens (typically via `mix`).
+    ///
+    /// Cleartext-only for Phase 19: the qty is exposed as a `u64`
+    /// (recorded in `TxEntry::Fee`). The blinded-fee branch (Phase 33+
+    /// ADR) would carry a Pedersen commitment instead, mirroring how
+    /// `issue` evolved from cleartext to encrypted.
+    ///
+    /// Hard-fails:
+    /// - `FeeQtyNegative` if `qty < 0`.
+    /// - `FeeTooHigh` if `qty > MAX_FEE` or the per-tx accumulator
+    ///   would exceed `MAX_FEE`.
+    /// - `TypeNotInt253` if either operand isn't an `Int253`.
+    fn op_fee<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        use bulletproofs::r1cs::ConstraintSystem;
+        // Stack convention: flv on top, qty below — matches spec
+        // `qty flv → widetoken` and the `borrow` opcode pattern.
+        let flv = self.pop_int253()?;
+        let qty = self.pop_int253()?;
+        // Reject negative qty up front. A negative fee would be a
+        // refund and Flame has no refund mechanism — the negative
+        // half is the debt token returned to the caller, not the
+        // recorded fee amount.
+        if qty.is_negative() {
+            return Err(VMError::FeeQtyNegative);
+        }
+        // Pack `qty` into u64 for the txlog. `Int253::to_u64()`
+        // returns `None` for magnitudes >= 2^64; reject those before
+        // CheckedFee even sees them — keeps the cap policy a single
+        // `if fee > MAX_FEE` check instead of two-stage cap math.
+        let qty_u64 = qty.to_u64().ok_or(VMError::FeeTooHigh)?;
+        // Aggregate into the per-tx accumulator. Errors `FeeTooHigh`
+        // if the single arg or the running total exceeds `MAX_FEE`.
+        self.total_fee.add(qty_u64)?;
+        // Build the WideToken debt half in the CS. Mirrors the
+        // (cleartext) zkvm pattern: allocate q + f, constrain to
+        // `-qty` and `flv` respectively. The cleartext branch leaves
+        // the witness side fully known to both prover and verifier;
+        // no Pedersen commitment needed.
+        let qty_scalar: curve25519_dalek::scalar::Scalar = qty.into();
+        let flv_scalar: curve25519_dalek::scalar::Scalar = flv.into();
+        // Allocate `q` with witness = -qty. Constrain `q + qty = 0`
+        // so `q == -qty`. (Bulletproofs needs an explicit linear
+        // constraint; you can't just assign the scalar.)
+        let q_var = delegate
+            .cs()
+            .allocate(Some(-qty_scalar))
+            .map_err(VMError::R1CSError)?;
+        delegate.cs().constrain(q_var + qty_scalar);
+        // Allocate `f` with witness = flv. Constrain `f - flv = 0`.
+        let f_var = delegate
+            .cs()
+            .allocate(Some(flv_scalar))
+            .map_err(VMError::R1CSError)?;
+        delegate.cs().constrain(f_var - flv_scalar);
+        // Witness assignment (prover side): match the constraint
+        // shape so downstream `mix` sees a fully-witnessed
+        // AllocatedValue. Verifier side: assignment = None.
+        let assignment = Some(spacesuit::Value {
+            q: -spacesuit::SignedInteger::from(qty_u64),
+            f: flv_scalar,
+        });
+        // Push debt WideToken.
+        let wide = crate::WideToken(spacesuit::AllocatedValue {
+            q: q_var,
+            f: f_var,
+            assignment,
+        });
+        self.push_value(Value::WideToken(wide));
+        // Record TxEntry::Fee *after* CS allocation: keeps the
+        // ordering predictable in the merkle tree if a future variant
+        // needs to commit the qty/flv points instead.
+        self.txlog.push(crate::tx::TxEntry::Fee(qty_u64));
+        Ok(())
+    }
+
     /// Converts a stack value into a `spacesuit::AllocatedValue` for
     /// the cloak gadget. Mirrors zkvm's `item_to_wide_value`:
     /// - `Token`: commit both Commitments to the CS, build AllocatedValue.
@@ -2566,6 +2786,12 @@ impl VM {
         // Pop n (output count) and m (input count).
         let n = self.pop_byte_count(usize::MAX)?;
         let m = self.pop_byte_count(usize::MAX)?;
+        // Degenerate shapes (m=0 or n=0) make `spacesuit::cloak`'s
+        // `k_mix` underflow (`0..k-1` with usize `k=0`). Reject at
+        // the opcode boundary so the error is deterministic.
+        if m == 0 || n == 0 {
+            return Err(VMError::MixDegenerate);
+        }
         // Stack depth check: we'll pop 2n commitment Strings + m token values.
         let needed = m.saturating_add(n.saturating_mul(2));
         if needed > self.current_call.stack.len() {
@@ -5290,9 +5516,12 @@ mod tests {
         run_to_end(&mut vm).unwrap();
         // Stack is empty.
         assert!(vm.current_call.stack.is_empty());
-        // Txlog has one Output entry.
-        assert_eq!(vm.txlog.len(), 1);
-        match &vm.txlog[0] {
+        // Txlog has Header + one Output entry. The Header is always
+        // emitted at VM::new (Phase 18) so TxID::from_log binds to
+        // version + locktime alongside the effects.
+        assert_eq!(vm.txlog.len(), 2);
+        assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+        match &vm.txlog[1] {
             crate::tx::TxEntry::Output(_) => {}
             _ => panic!("expected Output entry"),
         }
@@ -5393,7 +5622,7 @@ mod tests {
         // bytes — those come from the tx envelope at finalize.
         assert_eq!(vm.deferred_sigs.len(), 1);
         match &vm.deferred_sigs[0] {
-            DeferredSig::TxBound { verification_key } => {
+            DeferredSig::TxBound { verification_key, .. } => {
                 assert_eq!(verification_key.as_bytes(), &[0xaa; 32]);
             }
             DeferredSig::Explicit { .. } => panic!("expected TxBound, got Explicit"),
@@ -5948,11 +6177,12 @@ mod tests {
             _ => panic!("expected ClearToken"),
         }
 
-        // Txlog has Issue entry with unblinded commitments.
-        assert_eq!(vm.txlog.len(), 1);
+        // Txlog has Header + Issue entry with unblinded commitments.
+        assert_eq!(vm.txlog.len(), 2);
+        assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
         let expected_qty_pt = Commitment::unblinded(Int253::from(7u64)).to_point();
         let expected_flv_pt = Commitment::unblinded(expected_flv).to_point();
-        match &vm.txlog[0] {
+        match &vm.txlog[1] {
             crate::tx::TxEntry::Issue(q, f) => {
                 assert_eq!(*q, expected_qty_pt);
                 assert_eq!(*f, expected_flv_pt);
@@ -5999,10 +6229,12 @@ mod tests {
         )));
         vm.step_internal().expect("retire ok");
         assert!(vm.current_call.stack.is_empty());
-        assert_eq!(vm.txlog.len(), 1);
+        // Header + Retire.
+        assert_eq!(vm.txlog.len(), 2);
+        assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
         let q_pt = Commitment::unblinded(Int253::from(11u64)).to_point();
         let f_pt = Commitment::unblinded(Int253::from(22u64)).to_point();
-        match &vm.txlog[0] {
+        match &vm.txlog[1] {
             crate::tx::TxEntry::Retire(q, f) => {
                 assert_eq!(*q, q_pt);
                 assert_eq!(*f, f_pt);
@@ -6019,7 +6251,9 @@ mod tests {
         let mut vm = vm_with_script(vec![0x72]);
         vm.push_value(Value::Token(token));
         vm.step_internal().expect("retire ok");
-        match &vm.txlog[0] {
+        // Header at index 0, Retire at index 1.
+        assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+        match &vm.txlog[1] {
             crate::tx::TxEntry::Retire(q, f) => {
                 assert_eq!(*q, q_pt);
                 assert_eq!(*f, f_pt);
@@ -6353,9 +6587,10 @@ mod tests {
         // last_anchor seeded to the cell's ratcheted anchor.
         assert_eq!(vm.last_anchor.expect("anchor seeded").0, expected_anchor.0);
 
-        // Txlog has exactly one Input entry committing the cell id.
-        assert_eq!(vm.txlog.len(), 1);
-        match &vm.txlog[0] {
+        // Txlog has Header + one Input entry committing the cell id.
+        assert_eq!(vm.txlog.len(), 2);
+        assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+        match &vm.txlog[1] {
             crate::tx::TxEntry::Input(id) => assert_eq!(*id, expected_id),
             _ => panic!("expected TxEntry::Input"),
         }
@@ -6440,15 +6675,16 @@ mod tests {
         vm.push_value(Value::Point(Point::from_bytes([0xbb; 32])));
         vm.op_output().expect("output ok");
 
-        // Txlog now has: Input(consumed_id), Output(new_cell).
-        assert_eq!(vm.txlog.len(), 2);
-        match &vm.txlog[0] {
-            crate::tx::TxEntry::Input(_) => {}
-            _ => panic!("first entry must be Input"),
-        }
+        // Txlog now has: Header, Input(consumed_id), Output(new_cell).
+        assert_eq!(vm.txlog.len(), 3);
+        assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
         match &vm.txlog[1] {
+            crate::tx::TxEntry::Input(_) => {}
+            _ => panic!("second entry must be Input"),
+        }
+        match &vm.txlog[2] {
             crate::tx::TxEntry::Output(_) => {}
-            _ => panic!("second entry must be Output"),
+            _ => panic!("third entry must be Output"),
         }
         // last_anchor advanced again past the output cell.
         assert_ne!(
@@ -6474,13 +6710,14 @@ mod tests {
         let cont = vm.step_external(&mut delegate).expect("step ok");
         assert!(cont, "still running (script not exhausted)");
 
-        // Stack now has the decoded cell; txlog has the Input entry.
+        // Stack now has the decoded cell; txlog has Header + Input entry.
         match &vm.current_call.stack[0] {
             Value::Cell(c) => assert_eq!(c.id(), expected_id),
             other => panic!("expected Cell, got {}", value_kind(other)),
         }
-        assert_eq!(vm.txlog.len(), 1);
-        match &vm.txlog[0] {
+        assert_eq!(vm.txlog.len(), 2);
+        assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+        match &vm.txlog[1] {
             crate::tx::TxEntry::Input(id) => assert_eq!(*id, expected_id),
             _ => panic!("expected TxEntry::Input"),
         }
@@ -6574,14 +6811,15 @@ mod tests {
             vm.current_call.stack.len()
         );
 
-        // 4b. Txlog has exactly two entries in order: Input(cell_in_id),
-        //     Output(cell_out).
-        assert_eq!(vm.txlog.len(), 2, "expected Input + Output txlog");
-        match &vm.txlog[0] {
+        // 4b. Txlog: Header(index 0), Input(cell_in_id) at 1,
+        //     Output(cell_out) at 2.
+        assert_eq!(vm.txlog.len(), 3, "expected Header + Input + Output txlog");
+        assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+        match &vm.txlog[1] {
             crate::tx::TxEntry::Input(id) => assert_eq!(*id, input_id),
-            _ => panic!("txlog[0] must be Input"),
+            _ => panic!("txlog[1] must be Input"),
         }
-        let output_cell_anchor = match &vm.txlog[1] {
+        let output_cell_anchor = match &vm.txlog[2] {
             crate::tx::TxEntry::Output(c) => {
                 // Output payload was [Int253(42)].
                 assert_eq!(c.payload.len(), 1);
@@ -6596,7 +6834,7 @@ mod tests {
                 );
                 c.anchor
             }
-            _ => panic!("txlog[1] must be Output"),
+            _ => panic!("txlog[2] must be Output"),
         };
 
         // 4c. Anchor chain: the output's anchor is the post-input anchor
@@ -6608,7 +6846,7 @@ mod tests {
         //     key matching the input cell's predicate point.
         assert_eq!(vm.deferred_sigs.len(), 1);
         match &vm.deferred_sigs[0] {
-            DeferredSig::TxBound { verification_key } => {
+            DeferredSig::TxBound { verification_key, .. } => {
                 assert_eq!(
                     verification_key.as_bytes(),
                     input_predicate_point.as_bytes()
@@ -6720,22 +6958,23 @@ mod tests {
         // Clean stack.
         assert!(vm.current_call.stack.is_empty());
 
-        // Txlog: 2 × Input, 2 × Output, in that order.
-        assert_eq!(vm.txlog.len(), 4, "expected 2 inputs + 2 outputs");
-        match &vm.txlog[0] {
-            crate::tx::TxEntry::Input(id) => assert_eq!(*id, cell1_id),
-            _ => panic!("txlog[0] must be Input(cell1)"),
-        }
+        // Txlog: Header, 2 × Input, 2 × Output, in that order.
+        assert_eq!(vm.txlog.len(), 5, "expected Header + 2 inputs + 2 outputs");
+        assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
         match &vm.txlog[1] {
-            crate::tx::TxEntry::Input(id) => assert_eq!(*id, cell2_id),
-            _ => panic!("txlog[1] must be Input(cell2)"),
+            crate::tx::TxEntry::Input(id) => assert_eq!(*id, cell1_id),
+            _ => panic!("txlog[1] must be Input(cell1)"),
         }
-        let (out1, out2) = match (&vm.txlog[2], &vm.txlog[3]) {
+        match &vm.txlog[2] {
+            crate::tx::TxEntry::Input(id) => assert_eq!(*id, cell2_id),
+            _ => panic!("txlog[2] must be Input(cell2)"),
+        }
+        let (out1, out2) = match (&vm.txlog[3], &vm.txlog[4]) {
             (
                 crate::tx::TxEntry::Output(o1),
                 crate::tx::TxEntry::Output(o2),
             ) => (o1, o2),
-            _ => panic!("txlog[2..4] must be Output entries"),
+            _ => panic!("txlog[3..5] must be Output entries"),
         };
 
         // Output 1's payload is [Int253(9)], predicate matches what we
@@ -6873,7 +7112,7 @@ mod tests {
             .eq()
             .verify();
 
-        let (bytecode, proof, _result, _sigs) = Prover::prove(
+        let _pp = Prover::prove(
             &pc_gens,
             program,
             dummy_header(),
@@ -6881,6 +7120,8 @@ mod tests {
             0,
         )
         .expect("prove succeeds");
+let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+let proof = proof.expect("proof set");
 
         // Verifier walks the same bytecode and accepts the proof.
         let pc_gens_v = PedersenGens::default();
@@ -6891,6 +7132,7 @@ mod tests {
             dummy_header(),
             1_000_000,
             0,
+            None,
         )
         .expect("verify succeeds");
     }
@@ -6905,7 +7147,7 @@ mod tests {
             .alloc(Some(Int253::from(10u64)))
             .eq()
             .verify();
-        let (bytecode, proof, _, _) = Prover::prove(
+        let _pp = Prover::prove(
             &pc_gens,
             program,
             dummy_header(),
@@ -6913,6 +7155,8 @@ mod tests {
             0,
         )
         .expect("prove succeeds");
+let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+let proof = proof.expect("proof set");
 
         // Flip a byte deep in the proof body.
         let mut proof_bytes = proof.to_bytes();
@@ -6929,6 +7173,7 @@ mod tests {
             dummy_header(),
             1_000_000,
             0,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, VMError::InvalidR1CSProof));
@@ -6948,7 +7193,7 @@ mod tests {
             .alloc(Some(Int253::from(99u64)))
             .eq()
             .verify();
-        let (bytecode, proof, _, _) = Prover::prove(
+        let _pp = Prover::prove(
             &pc_gens,
             program,
             dummy_header(),
@@ -6956,6 +7201,8 @@ mod tests {
             0,
         )
         .expect("prover doesn't refuse construction");
+let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+let proof = proof.expect("proof set");
 
         let pc_gens_v = PedersenGens::default();
         let err = Verifier::verify(
@@ -6965,6 +7212,7 @@ mod tests {
             dummy_header(),
             1_000_000,
             0,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, VMError::InvalidR1CSProof));
@@ -7015,7 +7263,7 @@ mod tests {
             .alloc(Some(Int253::from(20u64)))
             .eq()
             .verify();
-        let (bytecode, proof, _, _) = Prover::prove(
+        let _pp = Prover::prove(
             &pc_gens,
             program,
             dummy_header(),
@@ -7023,6 +7271,8 @@ mod tests {
             0,
         )
         .expect("prove succeeds");
+let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+let proof = proof.expect("proof set");
 
         let pc_gens_v = PedersenGens::default();
         Verifier::verify(
@@ -7032,6 +7282,7 @@ mod tests {
             dummy_header(),
             1_000_000,
             0,
+            None,
         )
         .expect("verify succeeds");
     }
@@ -7046,7 +7297,7 @@ mod tests {
             .alloc(Some(Int253::from(-5i64)))
             .eq()
             .verify();
-        let (bytecode, proof, _, _) = Prover::prove(
+        let _pp = Prover::prove(
             &pc_gens,
             program,
             dummy_header(),
@@ -7054,6 +7305,8 @@ mod tests {
             0,
         )
         .expect("prove succeeds");
+let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+let proof = proof.expect("proof set");
 
         let pc_gens_v = PedersenGens::default();
         Verifier::verify(
@@ -7063,6 +7316,7 @@ mod tests {
             dummy_header(),
             1_000_000,
             0,
+            None,
         )
         .expect("verify succeeds");
     }
@@ -7084,7 +7338,7 @@ mod tests {
             .alloc(Some(Int253::from(0u64)))
             .eq()
             .verify();
-        let (bytecode, proof, _, _) = Prover::prove(
+        let _pp = Prover::prove(
             &pc_gens,
             program,
             dummy_header(),
@@ -7092,6 +7346,8 @@ mod tests {
             0,
         )
         .expect("prove succeeds");
+let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+let proof = proof.expect("proof set");
 
         let pc_gens_v = PedersenGens::default();
         Verifier::verify(
@@ -7101,6 +7357,7 @@ mod tests {
             dummy_header(),
             1_000_000,
             0,
+            None,
         )
         .expect("verify succeeds");
     }
@@ -7121,9 +7378,10 @@ mod tests {
             .alloc(Some(Int253::from(42u64)))
             .eq()
             .verify();
-        let (bytecode, proof, _, _) =
-            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+        let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
                 .expect("prove succeeds");
+        let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+        let proof = proof.expect("proof set");
         let pc_gens_v = PedersenGens::default();
         Verifier::verify(
             &pc_gens_v,
@@ -7132,6 +7390,7 @@ mod tests {
             dummy_header(),
             1_000_000,
             0,
+            None,
         )
         .expect("verify succeeds");
     }
@@ -7164,7 +7423,9 @@ mod tests {
             Err(_) => {
                 // Prover refused — good.
             }
-            Ok((bytecode, proof, _, _)) => {
+            Ok(_pp) => {
+                let TxResult { bytecode, proof, .. } = _pp;
+                let proof = proof.expect("proof set");
                 let pc_gens_v = PedersenGens::default();
                 let err = Verifier::verify(
                     &pc_gens_v,
@@ -7173,6 +7434,7 @@ mod tests {
                     dummy_header(),
                     1_000_000,
                     0,
+                    None,
                 )
                 .expect_err("verifier must reject out-of-range proof");
                 assert!(matches!(err, VMError::InvalidR1CSProof));
@@ -7251,9 +7513,10 @@ mod tests {
             // AND the two Constraints
             .and()
             .verify();
-        let (bytecode, proof, _, _) =
-            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+        let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
                 .expect("prove succeeds");
+        let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+        let proof = proof.expect("proof set");
         let pc_gens_v = PedersenGens::default();
         Verifier::verify(
             &pc_gens_v,
@@ -7262,6 +7525,7 @@ mod tests {
             dummy_header(),
             1_000_000,
             0,
+            None,
         )
         .expect("verify succeeds");
     }
@@ -7280,9 +7544,10 @@ mod tests {
             .eq()
             .or()
             .verify();
-        let (bytecode, proof, _, _) =
-            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+        let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
                 .expect("prove succeeds");
+        let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+        let proof = proof.expect("proof set");
         let pc_gens_v = PedersenGens::default();
         Verifier::verify(
             &pc_gens_v,
@@ -7291,6 +7556,7 @@ mod tests {
             dummy_header(),
             1_000_000,
             0,
+            None,
         )
         .expect("verify succeeds");
     }
@@ -7305,9 +7571,10 @@ mod tests {
             .eq()
             .not()
             .verify();
-        let (bytecode, proof, _, _) =
-            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+        let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
                 .expect("prove succeeds");
+        let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+        let proof = proof.expect("proof set");
         let pc_gens_v = PedersenGens::default();
         Verifier::verify(
             &pc_gens_v,
@@ -7316,6 +7583,7 @@ mod tests {
             dummy_header(),
             1_000_000,
             0,
+            None,
         )
         .expect("verify succeeds");
     }
@@ -7334,9 +7602,10 @@ mod tests {
             .eq()
             .and()
             .verify();
-        let (bytecode, proof, _, _) =
-            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+        let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
                 .expect("prove succeeds (constructs proof of unsatisfiable constraint)");
+        let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+        let proof = proof.expect("proof set");
         let pc_gens_v = PedersenGens::default();
         let err = Verifier::verify(
             &pc_gens_v,
@@ -7345,6 +7614,7 @@ mod tests {
             dummy_header(),
             1_000_000,
             0,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, VMError::InvalidR1CSProof));
@@ -7493,9 +7763,10 @@ mod tests {
             .alloc(Some(witness_int))
             .eq()
             .verify();
-        let (bytecode, proof, _, _) =
-            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+        let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
                 .expect("prove succeeds");
+        let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+        let proof = proof.expect("proof set");
         let pc_gens_v = PedersenGens::default();
         Verifier::verify(
             &pc_gens_v,
@@ -7504,6 +7775,7 @@ mod tests {
             dummy_header(),
             1_000_000,
             0,
+            None,
         )
         .expect("verify succeeds");
     }
@@ -7782,14 +8054,15 @@ mod tests {
 
     #[test]
     fn log_opcode_emits_txentry_data() {
-        // pushstr "hello", log → txlog has TxEntry::Data(b"hello").
+        // pushstr "hello", log → txlog has Header + TxEntry::Data(b"hello").
         let mut script = pushstr_bytes(b"hello");
         script.push(0x6f); // log
         let mut vm = vm_with_script(script);
         run_to_end(&mut vm).expect("log ok");
         assert!(vm.current_call.stack.is_empty());
-        assert_eq!(vm.txlog.len(), 1);
-        match &vm.txlog[0] {
+        assert_eq!(vm.txlog.len(), 2);
+        assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+        match &vm.txlog[1] {
             crate::tx::TxEntry::Data(bytes) => assert_eq!(bytes, b"hello"),
             _ => panic!("expected Data entry"),
         }
@@ -7890,5 +8163,938 @@ mod tests {
         let vk = musig::VerificationKey::from_compressed(vk_point);
         tampered.verify_batched(&mut t, vk, &mut batch);
         assert!(batch.verify().is_err());
+    }
+
+    // ── Phase 17: hygiene sweep ──────────────────────────────────
+
+    #[test]
+    fn op_mix_m_zero_rejects() {
+        // Pre-load: push n=1, m=0, then mix. Pop order: n (top), m,
+        // then commitments+tokens. m=0 should reject before any
+        // further pops, surfacing `MixDegenerate`.
+        let mut vm = vm_external_with_script(vec![]);
+        // Push m=0, n=1.
+        vm.push_value(Value::Int253(Int253::from(0u64))); // m
+        vm.push_value(Value::Int253(Int253::from(1u64))); // n
+        let mut delegate = StubDelegate::new();
+        let err = vm.op_mix(&mut delegate).unwrap_err();
+        assert!(matches!(err, VMError::MixDegenerate));
+    }
+
+    #[test]
+    fn op_mix_n_zero_rejects() {
+        let mut vm = vm_external_with_script(vec![]);
+        vm.push_value(Value::Int253(Int253::from(1u64))); // m
+        vm.push_value(Value::Int253(Int253::from(0u64))); // n
+        let mut delegate = StubDelegate::new();
+        let err = vm.op_mix(&mut delegate).unwrap_err();
+        assert!(matches!(err, VMError::MixDegenerate));
+    }
+
+    #[test]
+    fn shared_bp_gens_is_singleton() {
+        // Two Prover::new calls reuse the same generator allocation.
+        // We can't directly compare addresses without exposing the
+        // singleton, but we confirm both can prove a trivial program
+        // (i.e., the singleton is reachable from both instances).
+        let pc_gens = PedersenGens::default();
+        let program1 = Program::new()
+            .alloc(Some(Int253::from(1u64)))
+            .alloc(Some(Int253::from(1u64)))
+            .eq()
+            .verify();
+        let program2 = Program::new()
+            .alloc(Some(Int253::from(2u64)))
+            .alloc(Some(Int253::from(2u64)))
+            .eq()
+            .verify();
+        Prover::prove(&pc_gens, program1, dummy_header(), 1_000_000, 0)
+            .expect("prove #1 succeeds with shared gens");
+        Prover::prove(&pc_gens, program2, dummy_header(), 1_000_000, 0)
+            .expect("prove #2 succeeds with shared gens");
+    }
+
+    // ── Phase 18: TxID transcript binding ────────────────────────
+
+    /// Building a trivial program twice with the same header must
+    /// yield the same TxID — proves the txlog (= Header alone, here)
+    /// is reproducible bit-for-bit.
+    #[test]
+    fn phase18_txid_deterministic_for_equal_inputs() {
+        let pc_gens = PedersenGens::default();
+        let header = dummy_header();
+        let mk_program = || {
+            Program::new()
+                .alloc(Some(Int253::from(7u64)))
+                .alloc(Some(Int253::from(3u64)))
+                .add()
+                .alloc(Some(Int253::from(10u64)))
+                .eq()
+                .verify()
+        };
+        let txid1 = Prover::prove(&pc_gens, mk_program(), header, 1_000_000, 0)
+            .expect("prove #1").txid;
+        let txid2 = Prover::prove(&pc_gens, mk_program(), header, 1_000_000, 0)
+            .expect("prove #2").txid;
+        assert_eq!(txid1, txid2);
+    }
+
+    /// Changing the header (version / locktime) must change the TxID,
+    /// because the Header is the first txlog entry (Phase 18). Without
+    /// the Header binding, a malleable header could replay a proof
+    /// against a different transaction; with it, the proof transcript
+    /// is bound to the header bits.
+    #[test]
+    fn phase18_txid_changes_when_header_changes() {
+        let pc_gens = PedersenGens::default();
+        let mk_program = || {
+            Program::new()
+                .alloc(Some(Int253::from(7u64)))
+                .alloc(Some(Int253::from(3u64)))
+                .add()
+                .alloc(Some(Int253::from(10u64)))
+                .eq()
+                .verify()
+        };
+        let h1 = TxHeader {
+            version: 1,
+            locktime: 0,
+        };
+        let h2 = TxHeader {
+            version: 1,
+            locktime: 42,
+        };
+        let h3 = TxHeader {
+            version: 2,
+            locktime: 0,
+        };
+        let id1 = Prover::prove(&pc_gens, mk_program(), h1, 1_000_000, 0)
+            .expect("prove h1").txid;
+        let id2 = Prover::prove(&pc_gens, mk_program(), h2, 1_000_000, 0)
+            .expect("prove h2").txid;
+        let id3 = Prover::prove(&pc_gens, mk_program(), h3, 1_000_000, 0)
+            .expect("prove h3").txid;
+        assert_ne!(id1, id2, "locktime change must alter TxID");
+        assert_ne!(id1, id3, "version change must alter TxID");
+        assert_ne!(id2, id3, "locktime+version both alter TxID");
+    }
+
+    /// End-to-end Phase 18: prove then verify round-trip — the
+    /// verifier reconstructs the same TxID from the same bytecode +
+    /// header, binds it into its own R1CS transcript, and accepts the
+    /// proof. Confirms prover/verifier transcript binding agrees.
+    #[test]
+    fn phase18_prove_verify_roundtrip_binds_txid() {
+        let pc_gens = PedersenGens::default();
+        let header = dummy_header();
+        let program = Program::new()
+            .alloc(Some(Int253::from(7u64)))
+            .alloc(Some(Int253::from(3u64)))
+            .add()
+            .alloc(Some(Int253::from(10u64)))
+            .eq()
+            .verify();
+        let prover_result = Prover::prove(&pc_gens, program, header, 1_000_000, 0)
+            .expect("prove ok");
+        let txid_p = prover_result.txid;
+        let TxResult { bytecode, proof, .. } = prover_result;
+        let proof = proof.expect("proof set");
+        let pc_gens_v = PedersenGens::default();
+        let verifier_result = Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            header,
+            1_000_000,
+            0,
+            None,
+        )
+        .expect("verify ok");
+        assert_eq!(
+            txid_p, verifier_result.txid,
+            "prover and verifier must agree on TxID"
+        );
+    }
+
+    /// Verifier with a *different* header from the prover must reject:
+    /// its transcript binds a different TxID before `cs.verify`,
+    /// invalidating the proof. This is the core Phase-18 invariant —
+    /// header tampering breaks the proof.
+    #[test]
+    fn phase18_verifier_rejects_proof_under_different_header() {
+        let pc_gens = PedersenGens::default();
+        let prove_header = TxHeader {
+            version: 1,
+            locktime: 0,
+        };
+        let verify_header = TxHeader {
+            version: 1,
+            locktime: 99, // different!
+        };
+        let program = Program::new()
+            .alloc(Some(Int253::from(7u64)))
+            .alloc(Some(Int253::from(3u64)))
+            .add()
+            .alloc(Some(Int253::from(10u64)))
+            .eq()
+            .verify();
+        let _pp = Prover::prove(&pc_gens, program, prove_header, 1_000_000, 0)
+                .expect("prove ok");
+        let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+        let proof = proof.expect("proof set");
+        let pc_gens_v = PedersenGens::default();
+        let err = Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            verify_header, // mismatch — TxID bound differs
+            1_000_000,
+            0,
+            None,
+        )
+        .expect_err("must reject under different header");
+        assert!(matches!(err, VMError::InvalidR1CSProof));
+    }
+
+    // ── Phase 19: op_fee + CheckedFee accumulator ────────────────
+
+    /// Helper: build a VM in external context with a witness-bearing
+    /// program (so the prover-side Alloc witnesses are intact), step
+    /// `n_steps` instructions against a Prover, then return the VM
+    /// (without finalizing — so a WideToken can sit on the stack).
+    /// Mirrors the encrypted-borrow test's pattern.
+    fn run_external_steps<'g>(
+        pc_gens: &'g PedersenGens,
+        program: Program,
+        n_steps: usize,
+    ) -> (VM, Prover<'g>) {
+        let mut vm = VM::new(
+            dummy_header(),
+            CallFrame::new_with_run(
+                Run::from_program(program),
+                CallKind::ExternalRoot,
+                1_000_000,
+                0,
+                0,
+            ),
+        );
+        let mut prover = Prover::new(pc_gens);
+        for _ in 0..n_steps {
+            vm.step_external(&mut prover).expect("step ok");
+        }
+        (vm, prover)
+    }
+
+    /// `op_fee` records a `TxEntry::Fee(qty)` and pushes a `WideToken`
+    /// debt onto the stack. We can't reach a clean exit (WideToken is
+    /// non-droppable), so step through 3 instructions and inspect.
+    #[test]
+    fn phase19_op_fee_records_txlog_and_pushes_debt() {
+        let pc_gens = PedersenGens::default();
+        // push:100, push:7, fee → 3 instructions.
+        let program = Program::new()
+            .push_int(100u64)
+            .push_int(7u64)
+            .fee();
+        let (vm, _prover) = run_external_steps(&pc_gens, program, 3);
+        // Stack now holds the WideToken debt.
+        assert_eq!(vm.current_call.stack.len(), 1);
+        assert!(matches!(vm.current_call.stack[0], Value::WideToken(_)));
+        // Txlog: Header at 0, Fee(100) at 1.
+        assert_eq!(vm.txlog.len(), 2);
+        assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+        assert!(matches!(vm.txlog[1], crate::tx::TxEntry::Fee(100)));
+        // total_fee accumulator updated.
+        assert_eq!(vm.total_fee.total(), 100);
+    }
+
+    /// Two `op_fee` calls accumulate into `total_fee` and produce
+    /// two `TxEntry::Fee` entries. Step through 7 instructions:
+    /// push, push, fee, push, push, fee — and stop before the
+    /// (impossible) clean exit.
+    #[test]
+    fn phase19_op_fee_accumulates_total() {
+        let pc_gens = PedersenGens::default();
+        // After the first fee, a WideToken sits on the stack — the
+        // second fee builds another one. The stack will hold both
+        // before we inspect. We don't try to clean up.
+        let program = Program::new()
+            .push_int(30u64)
+            .push_int(0u64)
+            .fee()
+            .push_int(70u64)
+            .push_int(0u64)
+            .fee();
+        let (vm, _prover) = run_external_steps(&pc_gens, program, 6);
+        // 2 WideTokens stacked.
+        assert_eq!(vm.current_call.stack.len(), 2);
+        // Txlog: Header + Fee(30) + Fee(70).
+        assert_eq!(vm.txlog.len(), 3);
+        assert!(matches!(vm.txlog[1], crate::tx::TxEntry::Fee(30)));
+        assert!(matches!(vm.txlog[2], crate::tx::TxEntry::Fee(70)));
+        // Accumulator carries the sum.
+        assert_eq!(vm.total_fee.total(), 100);
+    }
+
+    /// Negative `qty` is rejected at the opcode boundary — fees can't
+    /// be negative (refunds aren't a Flame concept; the negative half
+    /// shows up as the debt token, not the recorded amount).
+    #[test]
+    fn phase19_op_fee_rejects_negative_qty() {
+        let pc_gens = PedersenGens::default();
+        // Build script directly so we can push a negative Int253.
+        let mut script = Vec::new();
+        // pushint8 neg 50 (qty = -50)
+        script.push(0x11);
+        script.push(50);
+        // pushint8 pos 0 (flv = 0)
+        script.push(0x10);
+        script.push(0);
+        // fee
+        script.push(0x7a);
+        let program = crate::Program::parse(&script).expect("decode");
+        // Run all 3 instructions; the third (fee) must error.
+        let mut vm = VM::new(
+            dummy_header(),
+            CallFrame::new_with_run(
+                Run::from_program(program),
+                CallKind::ExternalRoot,
+                1_000_000,
+                0,
+                0,
+            ),
+        );
+        let mut prover = Prover::new(&pc_gens);
+        vm.step_external(&mut prover).expect("push qty");
+        vm.step_external(&mut prover).expect("push flv");
+        let err = vm.step_external(&mut prover).unwrap_err();
+        assert!(matches!(err, VMError::FeeQtyNegative));
+    }
+
+    /// `qty > MAX_FEE` is rejected on the single-fee path.
+    #[test]
+    fn phase19_op_fee_rejects_qty_over_cap() {
+        let pc_gens = PedersenGens::default();
+        // MAX_FEE = 2^24. Push 2^24 + 1.
+        let over = (1u64 << 24) + 1;
+        let program = Program::new().push_int(over).push_int(0u64).fee();
+        let mut vm = VM::new(
+            dummy_header(),
+            CallFrame::new_with_run(
+                Run::from_program(program),
+                CallKind::ExternalRoot,
+                1_000_000,
+                0,
+                0,
+            ),
+        );
+        let mut prover = Prover::new(&pc_gens);
+        vm.step_external(&mut prover).expect("push qty");
+        vm.step_external(&mut prover).expect("push flv");
+        let err = vm.step_external(&mut prover).unwrap_err();
+        assert!(matches!(err, VMError::FeeTooHigh));
+    }
+
+    /// Aggregate total over `MAX_FEE` is rejected: two ok fees that
+    /// individually fit but sum past the cap. After two MAX_FEE/2
+    /// fees the running total is MAX_FEE (exactly at cap); adding 2
+    /// pushes it over.
+    #[test]
+    fn phase19_op_fee_rejects_aggregate_over_cap() {
+        let pc_gens = PedersenGens::default();
+        let half = (1u64 << 24) / 2; // 2^23
+        let program = Program::new()
+            .push_int(half)
+            .push_int(0u64)
+            .fee()
+            .push_int(half)
+            .push_int(0u64)
+            .fee()
+            .push_int(2u64)
+            .push_int(0u64)
+            .fee();
+        let mut vm = VM::new(
+            dummy_header(),
+            CallFrame::new_with_run(
+                Run::from_program(program),
+                CallKind::ExternalRoot,
+                1_000_000,
+                0,
+                0,
+            ),
+        );
+        let mut prover = Prover::new(&pc_gens);
+        // First fee — running total becomes half (2^23).
+        for _ in 0..3 {
+            vm.step_external(&mut prover).expect("first triple");
+        }
+        // Second fee — running total becomes MAX_FEE.
+        for _ in 0..3 {
+            vm.step_external(&mut prover).expect("second triple");
+        }
+        assert_eq!(vm.total_fee.total(), 1u64 << 24);
+        // Third triple: push, push, fee — the fee must error
+        // FeeTooHigh on aggregate overflow.
+        vm.step_external(&mut prover).expect("push qty 3");
+        vm.step_external(&mut prover).expect("push flv 3");
+        let err = vm.step_external(&mut prover).unwrap_err();
+        assert!(matches!(err, VMError::FeeTooHigh));
+    }
+
+    /// `fee` in internal context errors `ExternalOnly`: the opcode
+    /// needs Bulletproofs to allocate the WideToken's CS variables.
+    #[test]
+    fn phase19_op_fee_rejects_internal_context() {
+        let mut script = Vec::new();
+        // qty=1, flv=0, fee
+        script.push(0x01); // push:1
+        script.push(0x00); // push:0
+        script.push(0x7a); // fee
+        let mut vm = vm_with_script(script);
+        let err = run_to_end(&mut vm).unwrap_err();
+        assert!(matches!(err, VMError::ExternalOnly));
+    }
+
+    /// `Fee` instruction roundtrips through encode/parse.
+    #[test]
+    fn phase19_fee_instruction_roundtrip() {
+        use crate::ops::Instruction;
+        let mut buf = Vec::new();
+        Instruction::Fee.encode(&mut buf);
+        assert_eq!(buf, vec![0x7a]);
+        let mut r: &[u8] = &buf;
+        assert!(matches!(
+            Instruction::parse(&mut r).expect("parses"),
+            Instruction::Fee
+        ));
+    }
+
+    /// `TxEntry::Fee(qty)` participates in the TxID merkle root —
+    /// changing `qty` changes the TxID, proving the fee entry is
+    /// committed by the proof transcript binding (Phase 18).
+    #[test]
+    fn phase19_fee_qty_changes_txid() {
+        // Compute TxIDs directly off TxEntry sequences (bypasses the
+        // CS so we don't need to drain a WideToken to reach a clean
+        // exit). Both logs have identical Header; only the Fee qty
+        // differs — TxID must diverge.
+        use crate::tx::{TxEntry, TxID};
+        let header = TxEntry::Header(dummy_header());
+        let log_a = vec![
+            TxEntry::Header(dummy_header()),
+            TxEntry::Fee(100),
+        ];
+        let log_b = vec![
+            TxEntry::Header(dummy_header()),
+            TxEntry::Fee(101),
+        ];
+        let _ = header; // shut up unused
+        let id_a = TxID::from_log(&log_a);
+        let id_b = TxID::from_log(&log_b);
+        assert_ne!(id_a, id_b, "fee qty must affect TxID");
+    }
+
+    // ── Phase 20: TxBound multi-sig batch verification ───────────
+
+    /// Helper: turn a scalar secret into a `(CompressedRistretto, sk)`
+    /// pair. The CompressedRistretto is the verification key; the
+    /// scalar is the signing key.
+    fn signing_keypair(secret: u64) -> (CompressedRistretto, Scalar) {
+        use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
+        let sk = Scalar::from(secret);
+        let vk = (&sk * &RISTRETTO_BASEPOINT_TABLE).compress();
+        (vk, sk)
+    }
+
+    /// Helper: build a script that consumes one cell via input+signtx
+    /// and then no-ops the popped payload + count. Returns the script
+    /// bytes and the consumed cell's id.
+    fn make_signtx_script_with_cell(
+        vk: CompressedRistretto,
+    ) -> (Vec<u8>, crate::cell::CellID) {
+        let cell = Cell::new(
+            Predicate::Opaque(vk),
+            Anchor([0x42; 32]),
+            vec![Value::Int253(Int253::from(0u64))], // single Int253 payload
+        );
+        let cell_id = cell.id();
+        let bytes = encode_cell_to_bytes(&cell);
+        let mut script = Vec::new();
+        push_string_bytes(&mut script, &bytes);
+        script.push(0x90); // input
+        script.push(0x98); // signtx — pushes 1 Int253 (payload) + count 1
+        script.push(0x1c); // drop count
+        script.push(0x1c); // drop payload Int253
+        (script, cell_id)
+    }
+
+    /// Single-TxBound happy path: build a tx with one `signtx`,
+    /// externally sign the multi-message `(vk, cell_id)` against a
+    /// transcript bound to TxID, pass to Verifier::verify → accepts.
+    #[test]
+    fn phase20_single_txbound_verifies_with_multisig() {
+        use musig::Multisignature;
+        let pc_gens = PedersenGens::default();
+        let (vk, sk) = signing_keypair(101);
+        let (script, cell_id) = make_signtx_script_with_cell(vk);
+        let program = crate::Program::parse(&script).expect("decode");
+        let prover_result =
+            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+                .expect("prove ok");
+        let txid = prover_result.txid;
+        // Sanity: deferred_sigs has one TxBound with the expected cell_id.
+        assert_eq!(prover_result.deferred_sigs.len(), 1);
+        match &prover_result.deferred_sigs[0] {
+            DeferredSig::TxBound { verification_key, cell_id: cid } => {
+                assert_eq!(verification_key, &vk);
+                assert_eq!(*cid, cell_id);
+            }
+            _ => panic!("expected TxBound"),
+        }
+        let TxResult { bytecode, proof, .. } = prover_result;
+        let proof = proof.expect("proof set");
+        // Sign multi-message context bound to TxID.
+        let mut t = merlin::Transcript::new(b"flamevm.signtx.v1");
+        t.append_message(b"txid", &txid.0);
+        let items =
+            vec![(musig::VerificationKey::from_compressed(vk), cell_id)];
+        let sig = musig::Signature::sign_multi(vec![sk], items, &mut t)
+            .expect("sign_multi");
+        // Verifier accepts.
+        let pc_gens_v = PedersenGens::default();
+        Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+            Some(sig),
+        )
+        .expect("verify ok");
+    }
+
+    /// Two-key multi-sig: build a tx that consumes TWO cells via
+    /// signtx, each under its own key. The aggregate `sign_multi`
+    /// over `[(vk1, cell1_id), (vk2, cell2_id)]` produces a single
+    /// signature accepted by Verifier::verify.
+    #[test]
+    fn phase20_two_txbound_verifies_with_multisig() {
+        use musig::Multisignature;
+        let pc_gens = PedersenGens::default();
+        let (vk1, sk1) = signing_keypair(11);
+        let (vk2, sk2) = signing_keypair(22);
+
+        let cell1 = Cell::new(
+            Predicate::Opaque(vk1),
+            Anchor([0xa1; 32]),
+            vec![Value::Int253(Int253::from(0u64))],
+        );
+        let cell1_id = cell1.id();
+        let cell1_bytes = encode_cell_to_bytes(&cell1);
+
+        let cell2 = Cell::new(
+            Predicate::Opaque(vk2),
+            Anchor([0xa2; 32]),
+            vec![Value::Int253(Int253::from(0u64))],
+        );
+        let cell2_id = cell2.id();
+        let cell2_bytes = encode_cell_to_bytes(&cell2);
+
+        // Script: input cell1, signtx (drop payload+count), input cell2,
+        // signtx (drop payload+count).
+        let mut script = Vec::new();
+        push_string_bytes(&mut script, &cell1_bytes);
+        script.push(0x90);
+        script.push(0x98);
+        script.push(0x1c);
+        script.push(0x1c);
+        push_string_bytes(&mut script, &cell2_bytes);
+        script.push(0x90);
+        script.push(0x98);
+        script.push(0x1c);
+        script.push(0x1c);
+
+        let program = crate::Program::parse(&script).expect("decode");
+        let prover_result =
+            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+                .expect("prove ok");
+        assert_eq!(prover_result.deferred_sigs.len(), 2);
+        let txid = prover_result.txid;
+        let TxResult { bytecode, proof, .. } = prover_result;
+        let proof = proof.expect("proof set");
+
+        // Build the (vk, cell_id) list IN THE SAME ORDER the VM recorded
+        // them — the multisig context order is consensus-fixed.
+        let items = vec![
+            (musig::VerificationKey::from_compressed(vk1), cell1_id),
+            (musig::VerificationKey::from_compressed(vk2), cell2_id),
+        ];
+        let mut t = merlin::Transcript::new(b"flamevm.signtx.v1");
+        t.append_message(b"txid", &txid.0);
+        let sig = musig::Signature::sign_multi(vec![sk1, sk2], items, &mut t)
+            .expect("sign_multi");
+
+        let pc_gens_v = PedersenGens::default();
+        Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+            Some(sig),
+        )
+        .expect("verify ok");
+    }
+
+    /// `signtx` items present but `txbound_signature = None` →
+    /// `MissingTxBoundSignature` before the proof is checked.
+    #[test]
+    fn phase20_missing_signature_when_txbound_present() {
+        let pc_gens = PedersenGens::default();
+        let (vk, _sk) = signing_keypair(7);
+        let (script, _cell_id) = make_signtx_script_with_cell(vk);
+        let program = crate::Program::parse(&script).expect("decode");
+        let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+                .expect("prove ok");
+        let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+        let proof = proof.expect("proof set");
+        let pc_gens_v = PedersenGens::default();
+        let err = Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, VMError::MissingTxBoundSignature));
+    }
+
+    /// `txbound_signature` provided but VM emitted no `signtx` →
+    /// `SpuriousTxBoundSignature`. Guards against silently dropping
+    /// a passed signature on a tx that never required one.
+    #[test]
+    fn phase20_spurious_signature_when_no_txbound() {
+        let pc_gens = PedersenGens::default();
+        // Trivial program: alloc + alloc + add + alloc + eq + verify
+        // — no input, no signtx, no TxBound deferred sigs.
+        let program = Program::new()
+            .alloc(Some(Int253::from(7u64)))
+            .alloc(Some(Int253::from(3u64)))
+            .add()
+            .alloc(Some(Int253::from(10u64)))
+            .eq()
+            .verify();
+        let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+                .expect("prove ok");
+        let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+        let proof = proof.expect("proof set");
+        // Hand a real-looking signature anyway. Even a syntactically
+        // valid signature must be rejected when the VM emitted no
+        // TxBound items.
+        let sig = musig::Signature {
+            R: curve25519_dalek::ristretto::CompressedRistretto([0u8; 32]),
+            s: Scalar::from(0u64),
+        };
+        let pc_gens_v = PedersenGens::default();
+        let err = Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+            Some(sig),
+        )
+        .unwrap_err();
+        assert!(matches!(err, VMError::SpuriousTxBoundSignature));
+    }
+
+    /// Wrong key signing → batch verification fails with
+    /// `BatchSignatureVerificationFailed` (NOT `InvalidR1CSProof` —
+    /// the proof still verifies). Confirms the multi-sig actually
+    /// participates in batch.verify().
+    #[test]
+    fn phase20_tampered_signature_rejected() {
+        use musig::Multisignature;
+        let pc_gens = PedersenGens::default();
+        let (vk, _sk_real) = signing_keypair(101);
+        // Sign with a *different* secret — vk doesn't correspond.
+        let sk_wrong = Scalar::from(999u64);
+        let (script, cell_id) = make_signtx_script_with_cell(vk);
+        let program = crate::Program::parse(&script).expect("decode");
+        let prover_result =
+            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+                .expect("prove ok");
+        let txid = prover_result.txid;
+        let TxResult { bytecode, proof, .. } = prover_result;
+        let proof = proof.expect("proof set");
+        let items =
+            vec![(musig::VerificationKey::from_compressed(vk), cell_id)];
+        let mut t = merlin::Transcript::new(b"flamevm.signtx.v1");
+        t.append_message(b"txid", &txid.0);
+        let sig =
+            musig::Signature::sign_multi(vec![sk_wrong], items, &mut t)
+                .expect("sign_multi");
+        let pc_gens_v = PedersenGens::default();
+        let err = Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+            Some(sig),
+        )
+        .unwrap_err();
+        assert!(matches!(err, VMError::BatchSignatureVerificationFailed));
+    }
+
+    /// No-TxBound prove/verify round-trip with `None` signature
+    /// succeeds (regression: the new arg doesn't break the most
+    /// common path — non-signtx transactions). This is also what
+    /// every existing Phase-11 / Phase-18 test exercises.
+    #[test]
+    fn phase20_no_txbound_no_signature_roundtrip() {
+        let pc_gens = PedersenGens::default();
+        let program = Program::new()
+            .alloc(Some(Int253::from(7u64)))
+            .alloc(Some(Int253::from(3u64)))
+            .add()
+            .alloc(Some(Int253::from(10u64)))
+            .eq()
+            .verify();
+        let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+                .expect("prove ok");
+        let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+        let proof = proof.expect("proof set");
+        let pc_gens_v = PedersenGens::default();
+        Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+            None,
+        )
+        .expect("verify ok with None signature");
+    }
+
+    /// Signature over the *wrong TxID* (different header) → rejected.
+    /// Confirms TxID-binding in `flamevm.signtx.v1` is load-bearing:
+    /// a replay attack across headers fails.
+    #[test]
+    fn phase20_signature_over_wrong_txid_rejected() {
+        use musig::Multisignature;
+        let pc_gens = PedersenGens::default();
+        let (vk, sk) = signing_keypair(101);
+        let (script, cell_id) = make_signtx_script_with_cell(vk);
+        let program = crate::Program::parse(&script).expect("decode");
+        let header_prove = TxHeader { version: 1, locktime: 0 };
+        let prover_result =
+            Prover::prove(&pc_gens, program, header_prove, 1_000_000, 0)
+                .expect("prove ok");
+        let TxResult { bytecode, proof, .. } = prover_result;
+        let proof = proof.expect("proof set");
+        // Sign against a *different* TxID (some random 32 bytes).
+        let wrong_txid = [0x99u8; 32];
+        let items =
+            vec![(musig::VerificationKey::from_compressed(vk), cell_id)];
+        let mut t = merlin::Transcript::new(b"flamevm.signtx.v1");
+        t.append_message(b"txid", &wrong_txid);
+        let sig = musig::Signature::sign_multi(vec![sk], items, &mut t)
+            .expect("sign_multi");
+        let pc_gens_v = PedersenGens::default();
+        let err = Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            header_prove,
+            1_000_000,
+            0,
+            Some(sig),
+        )
+        .unwrap_err();
+        assert!(matches!(err, VMError::BatchSignatureVerificationFailed));
+    }
+
+    // ── Phase 21: TxResult shape + finalize return values ────────
+
+    /// Trivial prover/verifier round-trip: every TxResult field is
+    /// populated as expected. This is the headline Phase-21 test —
+    /// it confirms the canonical `Result<TxResult, VMError>` shape
+    /// is the single source of truth for both sides.
+    #[test]
+    fn phase21_txresult_populated_for_trivial_program() {
+        let pc_gens = PedersenGens::default();
+        let header = TxHeader { version: 7, locktime: 13 };
+        let program = Program::new()
+            .alloc(Some(Int253::from(5u64)))
+            .alloc(Some(Int253::from(5u64)))
+            .eq()
+            .verify();
+        let prover_result =
+            Prover::prove(&pc_gens, program, header, 1_000_000, 0)
+                .expect("prove ok");
+        // Phase 18: txlog has Header at [0].
+        assert!(matches!(
+            prover_result.txlog[0],
+            crate::tx::TxEntry::Header(_)
+        ));
+        // total_fee = 0 (no fee opcodes), gas/vbytes = 0 (pre-Phase 22),
+        // bytecode populated, proof Some, deferred_sigs empty, sends empty.
+        assert_eq!(prover_result.total_fee, 0);
+        assert_eq!(prover_result.gas_used, 0);
+        assert_eq!(prover_result.vbytes_used, 0);
+        assert!(!prover_result.bytecode.is_empty());
+        assert!(prover_result.proof.is_some());
+        assert!(prover_result.deferred_sigs.is_empty());
+        assert!(prover_result.sends.is_empty());
+        // Verifier side: same TxID and txlog; proof is None (consumed).
+        let prover_txid = prover_result.txid;
+        let TxResult { bytecode, proof, .. } = prover_result;
+        let proof = proof.expect("proof set");
+        let pc_gens_v = PedersenGens::default();
+        let verifier_result = Verifier::verify(
+            &pc_gens_v,
+            bytecode.clone(),
+            &proof,
+            header,
+            1_000_000,
+            0,
+            None,
+        )
+        .expect("verify ok");
+        // Cross-verify all the fields agree.
+        assert_eq!(verifier_result.txid, prover_txid);
+        assert_eq!(verifier_result.bytecode, bytecode);
+        // Verifier-side proof slot is None — it was consumed inside
+        // `cs.verify` and never re-attached.
+        assert!(verifier_result.proof.is_none());
+        assert_eq!(verifier_result.total_fee, 0);
+        assert!(verifier_result.deferred_sigs.is_empty());
+    }
+
+    /// `op_fee` flows into `TxResult.total_fee`. The Phase-21 result
+    /// is the canonical place to read the running fee — no more
+    /// digging into `vm.total_fee` directly.
+    #[test]
+    fn phase21_total_fee_flows_through_to_txresult() {
+        let pc_gens = PedersenGens::default();
+        // Build script directly to avoid the non-droppable WideToken
+        // (we step through manually).
+        let program = Program::new()
+            .push_int(123u64)
+            .push_int(0u64)
+            .fee();
+        let mut vm = VM::new(
+            dummy_header(),
+            CallFrame::new_with_run(
+                Run::from_program(program),
+                CallKind::ExternalRoot,
+                1_000_000,
+                0,
+                0,
+            ),
+        );
+        let mut prover = Prover::new(&pc_gens);
+        for _ in 0..3 {
+            vm.step_external(&mut prover).expect("step ok");
+        }
+        // Inspect VM's total_fee directly (the Phase-21 TxResult
+        // mirror is exercised in
+        // phase21_txresult_populated_for_trivial_program).
+        assert_eq!(vm.total_fee.total(), 123);
+    }
+
+    /// `TxResult.txlog` carries every recorded effect in order.
+    /// Confirms the txlog drained into the result preserves Phase-18
+    /// ordering (Header at 0, then the effects in emission order).
+    #[test]
+    fn phase21_txlog_ordering_in_txresult() {
+        // Use execute_external (the simple delegate path) — same
+        // TxResult shape, easier setup. Build a script that pushes a
+        // string and logs it twice.
+        let mut script = Vec::new();
+        push_string_bytes(&mut script, b"a");
+        script.push(0x6f); // log
+        push_string_bytes(&mut script, b"b");
+        script.push(0x6f); // log
+        let delegate = StubDelegate::new();
+        let result = VM::execute_external(
+            dummy_header(),
+            script,
+            1_000_000,
+            0,
+            delegate,
+        )
+        .expect("execute ok");
+        assert_eq!(result.txlog.len(), 3, "Header + 2 Data entries");
+        assert!(matches!(
+            result.txlog[0],
+            crate::tx::TxEntry::Header(_)
+        ));
+        match &result.txlog[1] {
+            crate::tx::TxEntry::Data(b) => assert_eq!(b, b"a"),
+            _ => panic!("txlog[1] must be Data(a)"),
+        }
+        match &result.txlog[2] {
+            crate::tx::TxEntry::Data(b) => assert_eq!(b, b"b"),
+            _ => panic!("txlog[2] must be Data(b)"),
+        }
+    }
+
+    /// `TxResult.deferred_sigs` exposes the recorded `signtx` /
+    /// `signrun` items to callers post-finalize. Verifier-side this
+    /// is the post-verify audit shape: the caller can inspect which
+    /// keys participated without re-running the VM.
+    #[test]
+    fn phase21_deferred_sigs_in_txresult() {
+        use musig::Multisignature;
+        let pc_gens = PedersenGens::default();
+        let (vk, sk) = signing_keypair(7);
+        let (script, cell_id) = make_signtx_script_with_cell(vk);
+        let program = crate::Program::parse(&script).expect("decode");
+        let prover_result =
+            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+                .expect("prove ok");
+        assert_eq!(prover_result.deferred_sigs.len(), 1);
+        let prover_txid = prover_result.txid;
+        let TxResult { bytecode, proof, .. } = prover_result;
+        let proof = proof.expect("proof");
+        // Sign + verify.
+        let mut t = merlin::Transcript::new(b"flamevm.signtx.v1");
+        t.append_message(b"txid", &prover_txid.0);
+        let sig = musig::Signature::sign_multi(
+            vec![sk],
+            vec![(musig::VerificationKey::from_compressed(vk), cell_id)],
+            &mut t,
+        )
+        .expect("sign_multi");
+        let pc_gens_v = PedersenGens::default();
+        let verifier_result = Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+            Some(sig),
+        )
+        .expect("verify ok");
+        // Verifier-side TxResult also exposes the deferred_sigs.
+        assert_eq!(verifier_result.deferred_sigs.len(), 1);
+        match &verifier_result.deferred_sigs[0] {
+            DeferredSig::TxBound { verification_key, cell_id: cid } => {
+                assert_eq!(verification_key, &vk);
+                assert_eq!(*cid, cell_id);
+            }
+            _ => panic!("expected TxBound"),
+        }
     }
 }

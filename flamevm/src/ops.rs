@@ -127,6 +127,7 @@ const OP_MIX: u8 = 0x76;
 const OP_DECRYPT: u8 = 0x77;
 const OP_ISSUEFLV: u8 = 0x78;
 const OP_VERIFY: u8 = 0x79;
+const OP_FEE: u8 = 0x7a;
 const OP_RUN: u8 = 0x7b;
 const OP_LOOP: u8 = 0x7c;
 const OP_SWITCH: u8 = 0x7d;
@@ -317,6 +318,10 @@ pub enum Instruction {
     // ── Phase 2: control flow ──────────────────────────────────────
     /// `verify` (0x79).
     Verify,
+    /// `fee` (0x7a) — external-only. Pops `qty: Int253` (non-negative,
+    /// ≤ MAX_FEE) and `flv: Int253`, records `TxEntry::Fee(qty as u64)`,
+    /// pushes a `WideToken` debt with `q = -qty`, `f = flv`. Phase 19.
+    Fee,
     /// `run` (0x7b).
     Run,
     /// `loop` (0x7c).
@@ -438,6 +443,7 @@ impl Instruction {
             Instruction::Decrypt => out.push(OP_DECRYPT),
             Instruction::IssueFlv => out.push(OP_ISSUEFLV),
             Instruction::Verify => out.push(OP_VERIFY),
+            Instruction::Fee => out.push(OP_FEE),
             Instruction::Run => out.push(OP_RUN),
             Instruction::Loop => out.push(OP_LOOP),
             Instruction::Switch => out.push(OP_SWITCH),
@@ -565,6 +571,7 @@ impl Instruction {
             OP_DECRYPT => Ok(Instruction::Decrypt),
             OP_ISSUEFLV => Ok(Instruction::IssueFlv),
             OP_VERIFY => Ok(Instruction::Verify),
+            OP_FEE => Ok(Instruction::Fee),
             OP_RUN => Ok(Instruction::Run),
             OP_LOOP => Ok(Instruction::Loop),
             OP_SWITCH => Ok(Instruction::Switch),
@@ -893,9 +900,10 @@ mod tests {
 
     #[test]
     fn ext_opcode_for_unknown_bytes() {
-        // 0x1c..0x1f are used; 0x4f / 0x7a / 0x9a remain unused
-        // (Phase 17 wires 0x6f log; 0x7a fee is pending).
-        let unused = [0x4f, 0x7a, 0x9a, 0xff];
+        // 0x4f / 0x9a remain unused. Phase 17 wired 0x6f log; Phase 19
+        // wired 0x7a fee. 0xff is a sentinel "definitely unassigned"
+        // byte for fuzzing future extensions.
+        let unused = [0x4f, 0x9a, 0xff];
         for b in unused {
             let mut r: &[u8] = &[b];
             let parsed = Instruction::parse(&mut r).expect("parses");

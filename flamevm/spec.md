@@ -87,7 +87,9 @@ Token types: WideToken, Token, ClearToken.
 
 Constraint types: Object, Variable, Expression and Constraint.
 
-Cryptography types: Merlin transcript and MultiscalarMul evaluation.
+Cryptography types: Merlin transcript. (Batched scalar-point
+checks are not user-visible — see the note on `MultiscalarMul`
+below.)
 
 Portable types: can be stored in a UTXO or permanent storage.
 
@@ -120,7 +122,12 @@ Stack-only types (non-portable, never encoded on the wire):
 | Variable | Secret value in the constraint system, tied to a Pedersen commitment. |
 | Expression | Linear combination of variables. |
 | Constraint | Logical combination of boolean conditions. |
-| MultiscalarMul | Deferred linear combination of points (scalar-point multiplications). |
+
+Note: an earlier draft listed a `MultiscalarMul` stack-only type for
+deferred scalar-point checks. The implementation places that role on
+the delegate-internal `musig::BatchVerifier` instead (mirrors zkvm),
+so `MultiscalarMul` is no longer a user-visible type — no opcode
+produces or consumes one. The row was removed.
 
 **Encoding**
 
@@ -398,7 +405,7 @@ All constraint operations available on external transactions only.
 | 6d | sha512 | str → x | Returns a 512-bit string with sha2-512 digest of an input |
 | 6e | sha3 | str → x | Returns a 256-bit string with sha3-256 (FIPS-202) digest of an input |
 | 4e | keccak256 | str → x | Returns a 256-bit string with Keccak-256 digest of an input (Ethereum compatibility). |
-| 6f | sigverify | msg pk sig scheme → ø | Checks the signature or fails.  |
+| 6f | log | str → ø | **[E or I]** Pops a `String`, emits `TxEntry::Data(bytes)` into the txlog. Visible to the outer verifier; doesn't occupy persistent storage. Mirrors zkvm's `log` opcode (same byte). Witness-bearing String variants serialize via `to_bytes` so prover and verifier emit identical canonical bytes. (Earlier draft assigned `sigverify` to this byte; that role is now covered by the deferred-sig batch on `signtx` / `signrun` via the delegate's `BatchVerifier` — no separate opcode.) |
 
 ### Tokens
 
@@ -419,7 +426,7 @@ All constraint operations available on external transactions only.
 | Hex | Name | Stack diagram | Notes |
 | --- | --- | --- | --- |
 | 79 | verify | scalar → ø | Fails if scalar or int is zero. Otherwise pops the number off the stack. |
-| 7a | fee | qty flv → widetoken | Records a fee and returns a corresponding debt token (with negative qty). |
+| 7a | fee | qty flv → widetoken | **[E]** Pops `qty: Int253` (non-negative, must fit `u64` and be `≤ MAX_FEE = 2²⁴`) and `flv: Int253`. Emits `TxEntry::Fee(qty)` into the txlog with `qty` as a bare `u64` (cleartext fee branch). Increments the per-tx `CheckedFee` accumulator; the running total is also bounded by `MAX_FEE`. Allocates a fresh `WideToken` in the CS with `q = -qty`, `f = flv` (both cleartext-constrained) and pushes it onto the stack so the script must balance the debt against real tokens (typically via `mix`). Hard-fails `FeeQtyNegative` on a negative `qty`, `FeeTooHigh` on a `qty > MAX_FEE` or aggregate overflow, `TypeNotInt253` on a non-`Int253` operand, and `ExternalOnly` if invoked from internal context. The blinded-fee branch (encrypted `qty`) is reserved for a future phase. |
 | 7b | run | str → … | Runs bitstring as a program. |
 | 7c | loop | ø → ø | Evaluates program from the beginning. |
 | 7d | switch | x a b → … | Runs program a if x is non-zero, runs b if x is zero. |

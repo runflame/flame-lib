@@ -26,11 +26,11 @@ what's left to build.
 | 14 | Encrypted `borrow` + `mix` cloak gadget                            | ✅      |
 | 15 | Batch verifier + `Explicit` deferred sigs                          | ✅      |
 | 16 | TxID merkle root + `log` opcode                                    | ✅      |
-| 17 | Hygiene sweep + ADR housekeeping                                   | ⏳      |
-| 18 | `TxEntry::Header` + TxID transcript binding                        | ⏳      |
-| 19 | `op_fee` + `CheckedFee` accumulator                                | ⏳      |
-| 20 | TxBound multi-sig batch verification                               | ⏳      |
-| 21 | `TxResult` shape + finalize return values                          | ⏳      |
+| 17 | Hygiene sweep + ADR housekeeping                                   | ✅      |
+| 18 | `TxEntry::Header` + TxID transcript binding                        | ✅      |
+| 19 | `op_fee` + `CheckedFee` accumulator                                | ✅      |
+| 20 | TxBound multi-sig batch verification                               | ✅      |
+| 21 | `TxResult` shape + finalize return values                          | ✅      |
 | 22 | Gas-cost table + per-op charging                                   | ⏳      |
 | 23 | Block resource pools (B_par : B_ser)                               | ⏳      |
 | 24 | `ActorState` + `ActorRegistry` (real, not stub)                    | ⏳      |
@@ -47,7 +47,7 @@ what's left to build.
 | 35 | spec.md + design.md sync + ADR backfill                            | ⏳      |
 | 36 | End-to-end integration tests                                       | ⏳      |
 
-**16 of 36 complete (44 %).** Total test count: 385 passing; build
+**21 of 36 complete (58 %).** Total test count: 417 passing; build
 clean; 4 leftover compiler warnings, all targeted by Phases 24 / 26 /
 27 / 30.
 

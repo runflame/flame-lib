@@ -32,7 +32,7 @@ pub struct ExternalTx {
 pub struct InternalTx {}
 
 /// Transaction ID is a unique 32-byte identifier of a transaction effects represented by `TxLog`.
-#[derive(Copy, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TxID(pub Hash);
 
@@ -42,6 +42,11 @@ pub struct TxID(pub Hash);
 /// deriving `Clone`/`Debug`/`Serialize`/`Deserialize` here; downstream
 /// code wanting those should hash entries to bytes first or wrap.
 pub enum TxEntry {
+    /// Tx header — bound at run start as the first txlog entry so
+    /// `version` and `locktime` participate in `TxID::from_log`.
+    /// Mirrors zkvm's `TxEntry::Header(TxHeader)`.
+    Header(TxHeader),
+
     /// Plain data entry created by `log` instruction. Contains arbitrary binary string.
     Data(Vec<u8>),
 
@@ -69,8 +74,16 @@ pub enum TxEntry {
     /// Same `(qty_point, flv_point)` shape as `Issue`. Cleartext or
     /// encrypted symmetrically.
     Retire(CompressedRistretto, CompressedRistretto),
+
+    /// Fee: a transaction fee of `qty` flames recorded by `op_fee`.
+    /// Carried as a bare `u64` (no commitment) because the cleartext
+    /// branch is the only one defined for Phase 19; the matching debt
+    /// half is the `WideToken` returned to the stack. Aggregated by
+    /// `VM::total_fee` (a `CheckedFee`) into the eventual
+    /// `TxResult.total_fee`.
+    Fee(u64),
     // Future variants (preserved here as comments for the historical record):
-    // Fee(u64), Send(Message), etc.
+    // Send(Message), etc.
 }
 
 impl TxID {
@@ -83,9 +96,47 @@ impl TxID {
     }
 }
 
+/// Manual `Debug` impl — `TxEntry` cannot `#[derive(Debug)]` because
+/// the `Output(Cell)` variant carries a linear `Cell`. Prints just the
+/// variant tag (and, where cheap, an identifier) so `Result::unwrap_err`
+/// and friends compile against `Result<…, VMError>` returns that carry
+/// `Vec<TxEntry>` in their `Ok` arm.
+impl core::fmt::Debug for TxEntry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            TxEntry::Header(h) => f
+                .debug_struct("TxEntry::Header")
+                .field("version", &h.version)
+                .field("locktime", &h.locktime)
+                .finish(),
+            TxEntry::Data(bytes) => f
+                .debug_struct("TxEntry::Data")
+                .field("len", &bytes.len())
+                .finish(),
+            TxEntry::Input(id) => {
+                f.debug_tuple("TxEntry::Input").field(id).finish()
+            }
+            TxEntry::Output(_) => f.write_str("TxEntry::Output(<cell>)"),
+            TxEntry::Issue(_, _) => f.write_str("TxEntry::Issue(<qty>, <flv>)"),
+            TxEntry::Retire(_, _) => {
+                f.write_str("TxEntry::Retire(<qty>, <flv>)")
+            }
+            TxEntry::Fee(q) => {
+                f.debug_tuple("TxEntry::Fee").field(q).finish()
+            }
+        }
+    }
+}
+
 impl MerkleItem for TxEntry {
     fn commit(&self, t: &mut Transcript) {
         match self {
+            TxEntry::Header(h) => {
+                // Absorb version and locktime as little-endian u32 —
+                // matches the wire format (design.md ADR 0006).
+                t.append_message(b"tx.version", &h.version.to_le_bytes());
+                t.append_message(b"tx.locktime", &h.locktime.to_le_bytes());
+            }
             TxEntry::Data(bytes) => {
                 t.append_message(b"data", bytes);
             }
@@ -106,6 +157,12 @@ impl MerkleItem for TxEntry {
             TxEntry::Retire(qty_pt, flv_pt) => {
                 t.append_message(b"retire.qty", qty_pt.as_bytes());
                 t.append_message(b"retire.flv", flv_pt.as_bytes());
+            }
+            TxEntry::Fee(qty) => {
+                // Little-endian u64, per design.md "Wire format:
+                // little-endian everywhere". Domain tag distinguishes
+                // this from any other 8-byte append.
+                t.append_message(b"fee.qty", &qty.to_le_bytes());
             }
         }
     }

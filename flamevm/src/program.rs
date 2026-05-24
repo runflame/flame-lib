@@ -289,6 +289,10 @@ impl Program {
     // ── Phase 2: control flow ────────────────────────────────────
 
     pub fn verify(mut self) -> Self { self.instructions.push(Instruction::Verify); self }
+
+    /// `fee` (0x7a). Phase 19 — external-only.
+    pub fn fee(mut self) -> Self { self.instructions.push(Instruction::Fee); self }
+
     pub fn run(mut self) -> Self { self.instructions.push(Instruction::Run); self }
 
     /// `loop` (0x7c). Method named `loop_` because `loop` is a Rust keyword.

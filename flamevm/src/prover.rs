@@ -23,10 +23,23 @@
 //!
 //! [`Instruction::Alloc(Some(int))`]: crate::ops::Instruction::Alloc
 
-use bulletproofs::r1cs::{self, R1CSProof};
+use std::sync::OnceLock;
+
+use bulletproofs::r1cs::{self, ConstraintSystem, R1CSProof};
 use bulletproofs::{BulletproofGens, PedersenGens};
 use curve25519_dalek::ristretto::CompressedRistretto;
 use merlin::Transcript;
+
+/// Shared singleton bulletproof generators (1024 generators ×
+/// 1 party) — sized to cover Phase-12 64-bit range proofs plus
+/// Phase-13 cloak multi-range proofs with headroom. `BulletproofGens`
+/// allocation is ~16 KB; sharing across all prover/verifier
+/// instances saves that cost per tx. Same sizing for both sides —
+/// any divergence silently invalidates every proof.
+fn shared_bp_gens() -> &'static BulletproofGens {
+    static BP_GENS: OnceLock<BulletproofGens> = OnceLock::new();
+    BP_GENS.get_or_init(|| BulletproofGens::new(1024, 1))
+}
 
 use crate::errors::VMError;
 use crate::program::Program;
@@ -45,25 +58,17 @@ use crate::vm::{Delegate, DeferredSig, TxResult, VM};
 /// handles that automatically.
 pub struct Prover<'g> {
     cs: r1cs::Prover<'g, Transcript>,
-    bp_gens: BulletproofGens,
     batch: musig::BatchVerifier<rand::rngs::ThreadRng>,
 }
 
 impl<'g> Prover<'g> {
     /// Constructs a fresh prover. `pc_gens` must outlive the prover.
-    /// Allocates a fresh `BulletproofGens` sized for the expected R1CS
-    /// multipliers (Phase 11 uses a small bound; Phase 12 raises it).
+    /// Reuses the process-wide [`shared_bp_gens`] singleton to avoid
+    /// re-allocating ~16 KB of generators per prover instance.
     pub fn new(pc_gens: &'g PedersenGens) -> Self {
         let cs = r1cs::Prover::new(pc_gens, Transcript::new(b"flamevm.r1cs.v1"));
         Self {
             cs,
-            // 1024-gen single-party setup matches the zkvm test
-            // configuration (`BulletproofGens::new(256, 1)` in
-            // zkvm/tests/zkvm.rs is the lower bound; we go a bit
-            // higher to leave headroom for Phase-13 `cloak`
-            // multi-range proofs). Party capacity is 1 because R1CS
-            // proofs are single-party.
-            bp_gens: BulletproofGens::new(1024, 1),
             batch: musig::BatchVerifier::new(rand::thread_rng()),
         }
     }
@@ -73,35 +78,47 @@ impl<'g> Prover<'g> {
     /// finished cleanly.
     pub fn into_proof(self) -> Result<R1CSProof, VMError> {
         self.cs
-            .prove(&self.bp_gens)
+            .prove(shared_bp_gens())
             .map_err(|_| VMError::R1CSProofConstruction)
     }
 
-    /// Public Phase-11 entry point: runs `program` through the VM in
+    /// Public Phase-21 entry point: runs `program` through the VM in
     /// external context (with witnesses attached to each Alloc
-    /// Instruction), then emits an R1CS proof.
+    /// Instruction), computes `TxID::from_log(&txlog)`, binds it
+    /// into the R1CS transcript (Phase 18, `b"flamevm.txid"`), and
+    /// emits the proof — folded into the returned [`TxResult`].
+    /// Mirrors zkvm's `prover::Prover::build_tx`.
     ///
-    /// Returns the canonical bytecode (so the verifier has the byte
-    /// sequence to walk) plus the proof, the `TxResult`, and the
-    /// `DeferredSig`s.
+    /// Returns the full Phase-21 [`TxResult`]: `proof = Some(...)`,
+    /// `bytecode = program.to_bytecode()` (the verifier walks the
+    /// same bytes), `txid` / `txlog` / `total_fee` etc. populated.
     pub fn prove(
         pc_gens: &'g PedersenGens,
         program: Program,
         header: TxHeader,
         gas_limit: u64,
         mem_limit: u64,
-    ) -> Result<(Vec<u8>, R1CSProof, TxResult, Vec<DeferredSig>), VMError> {
-        let bytecode = program.to_bytecode();
+    ) -> Result<TxResult, VMError> {
         let mut prover = Prover::new(pc_gens);
-        let (result, sigs) = VM::run_external_program(
+        // Run the VM but receive the result without the proof set —
+        // we'll fold it in after the R1CS prove. `run_external_program`
+        // populates `result.bytecode` from `program.to_bytecode()`
+        // before consuming the program.
+        let mut result = VM::run_external_program(
             header,
             program,
             gas_limit,
             mem_limit,
             &mut prover,
         )?;
+        // Phase 18: bind the canonical TxID into the R1CS transcript so
+        // the proof commits to the full transaction effects (header +
+        // log), not just the constraint system shape. Verifier mirrors
+        // this exact step before `cs.verify`.
+        prover.cs.transcript().append_message(b"flamevm.txid", &result.txid.0);
         let proof = prover.into_proof()?;
-        Ok((bytecode, proof, result, sigs))
+        result.proof = Some(proof);
+        Ok(result)
     }
 }
 

@@ -330,17 +330,38 @@ pub enum VMError {
     #[error("Token opcode branch requires a live constraint system")]
     TokenRequiresCS,
 
+    /// `mix` was invoked with `m == 0` or `n == 0`. The underlying
+    /// `spacesuit::cloak` gadget invokes `k_mix` which underflows
+    /// when its operand list has length 0 (`0..k-1` with `k = 0`),
+    /// so we reject the degenerate shapes at the opcode boundary.
+    #[error("mix needs at least one input and one output")]
+    MixDegenerate,
+
     // /// This error occurs when VM's anchor remains unset.
     // #[error("VM anchor is not set via `input`")]
     // AnchorMissing,
 
     /// Returned from `Verifier::verify` when the deferred-signature
     /// batch check fails — at least one of the accumulated `Explicit`
-    /// (or, post-Phase-17, `TxBound`) signatures didn't verify.
-    /// Distinct from `InvalidR1CSProof`: the R1CS proof succeeded,
-    /// only the signatures failed.
+    /// or `TxBound` signatures didn't verify. Distinct from
+    /// `InvalidR1CSProof`: the R1CS proof succeeded, only the
+    /// signatures failed.
     #[error("Deferred batch signature verification failed")]
     BatchSignatureVerificationFailed,
+
+    /// `Verifier::verify` saw at least one `DeferredSig::TxBound`
+    /// item but the caller passed `None` for `txbound_signature`. A
+    /// transaction with `signtx` opcodes is unverifiable without the
+    /// aggregate multi-signature.
+    #[error("TxBound signature required but not provided")]
+    MissingTxBoundSignature,
+
+    /// `Verifier::verify` was given a `txbound_signature` but the
+    /// VM recorded no `DeferredSig::TxBound` items. The signature
+    /// would never be checked — surface the mismatch to the caller
+    /// rather than silently dropping it.
+    #[error("TxBound signature provided but no TxBound items present")]
+    SpuriousTxBoundSignature,
 
     // /// This error occurs when R1CS proof verification failed.
     // #[error("R1CS proof is invalid")]
@@ -421,7 +442,18 @@ pub enum VMError {
     #[error("Cleartext constraint is false")]
     CleartextConstraintFalse,
 
-    // /// This error occurs when tx attempts to add a fee beyond the limit.
-    // #[error("Fee is too high")]
-    // FeeTooHigh,
+    /// `fee` was given a `qty` outside `[0, CheckedFee::MAX_FEE]`, or
+    /// the running per-tx accumulator would overflow that cap when
+    /// `qty` is added. Cap chosen so that `size_bytes × fee` stays
+    /// inside `u64` even at the largest reasonable tx size — see
+    /// `fees::CheckedFee` for the policy choice.
+    #[error("Fee is too high")]
+    FeeTooHigh,
+
+    /// `fee` was given a negative `Int253` for `qty`. Fees are
+    /// non-negative by construction; the negative half of the
+    /// balance shows up as the `-qty` debt half of the returned
+    /// `WideToken`, not as the recorded fee amount.
+    #[error("fee qty must be non-negative")]
+    FeeQtyNegative,
 }
