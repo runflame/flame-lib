@@ -469,4 +469,13 @@ pub enum VMError {
     /// loudly so the bug is caught at test time.
     #[error("input witness commitment point does not match cell payload")]
     WitnessPointMismatch,
+
+    /// Phase 22: a `TokenWitness` was constructed with a
+    /// `Commitment::Closed` instead of `Commitment::Open`. The
+    /// witness path's whole job is to re-attach openings, so a
+    /// `Closed` here is a caller bug — without this check the
+    /// failure would cascade silently into `WitnessMissing` from
+    /// `commit_variable` far from the real cause.
+    #[error("input witness commitment must be Open (witness-bearing)")]
+    WitnessNotOpen,
 }

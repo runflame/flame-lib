@@ -2188,6 +2188,19 @@ impl VM {
             if let Value::Token(t) = v {
                 let tw = &witness.tokens[wi];
                 wi += 1;
+                // Both witness commitments must be `Commitment::Open`
+                // — the whole point of the witness path is to
+                // re-attach openings, so a Closed witness here is a
+                // caller bug. Without this check the silent
+                // failure cascade would be: copy Closed → Closed
+                // (no-op) → `mix` calls `commit_variable` →
+                // `commitment.witness()` → `None` →
+                // `WitnessMissing` raised far from the real cause.
+                // Fail loudly at attach time instead.
+                if tw.qty.witness().is_none() || tw.flv.witness().is_none()
+                {
+                    return Err(VMError::WitnessNotOpen);
+                }
                 // Point-equality check: the witnessed Open commitment
                 // must agree with the on-wire Closed commitment.
                 // Mismatch is a prover bug — fail loudly so it's
@@ -9336,6 +9349,36 @@ let proof = proof.expect("proof set");
             crate::witness::InputWitnesses { tokens: vec![bogus_w] };
         let err = vm.op_input(Some(&witnesses)).unwrap_err();
         assert!(matches!(err, VMError::WitnessPointMismatch));
+    }
+
+    /// `TokenWitness` built with `Commitment::Closed` (point-only)
+    /// is rejected with `WitnessNotOpen`. The witness path's job is
+    /// to re-attach openings; a Closed-only witness defeats the
+    /// purpose and would silently cascade into `WitnessMissing`
+    /// from `mix`/`commit_variable` later.
+    #[test]
+    fn phase22_input_witness_closed_commitment_rejects() {
+        let (token, _) = make_token_witness_pair(10, 7, 11, 13);
+        // Use the SAME points as the cell, but as `Closed` (no
+        // witness). The point-equality check would otherwise pass.
+        let qty_closed = crate::Commitment::Closed(token.qty.to_point());
+        let flv_closed = crate::Commitment::Closed(token.flv.to_point());
+        let cell = Cell::new(
+            Predicate::Opaque(CompressedRistretto([0xaa; 32])),
+            Anchor([0x42; 32]),
+            vec![Value::Token(token)],
+        );
+        let cell_bytes = encode_cell_to_bytes(&cell);
+        let mut vm = vm_external_with_script(Vec::new());
+        vm.push_value(Value::String(crate::String::from(cell_bytes)));
+        let bogus = crate::witness::TokenWitness {
+            qty: qty_closed,
+            flv: flv_closed,
+        };
+        let witnesses =
+            crate::witness::InputWitnesses { tokens: vec![bogus] };
+        let err = vm.op_input(Some(&witnesses)).unwrap_err();
+        assert!(matches!(err, VMError::WitnessNotOpen));
     }
 
     /// Non-Token payload entries are passed through without

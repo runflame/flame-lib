@@ -29,9 +29,18 @@
 use crate::constraints::Commitment;
 
 /// Witness scalars for a single `Token` payload entry. Both fields
-/// must be `Commitment::Open` (witness-bearing); the dispatch code
-/// asserts they decode to the same point as the cell's encoded
-/// commitments before swapping them in.
+/// **must** be `Commitment::Open` (witness-bearing). Dispatch
+/// (`attach_input_witnesses`) enforces this via
+/// [`crate::errors::VMError::WitnessNotOpen`] before the
+/// point-equality check, so a caller bug surfaces immediately
+/// rather than cascading into a far-away `WitnessMissing` from
+/// `mix`/`commit_variable`.
+///
+/// The fields are typed as `Commitment` (the parent enum) rather
+/// than a dedicated `OpenCommitment` newtype because the existing
+/// `Commitment::Open` already carries the `(Int253, Scalar)`
+/// witness pair, and the dispatch-time runtime check is sufficient
+/// — keeps the type wall thin while still being strict.
 #[derive(Clone, Debug)]
 pub struct TokenWitness {
     /// Open commitment for the Token's quantity. The `Commitment::Open`
