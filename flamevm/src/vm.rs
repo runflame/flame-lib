@@ -754,9 +754,6 @@ impl VM {
             I::ShiftRight => self.op_shift_right(),
             I::Keccak256 => self.op_keccak256(),
             // ── Int253 / polymorphic arithmetic ───────────────────
-            // Polymorphism (Int253 vs Expression vs Constraint
-            // overloads) is resolved INSIDE each handler — no
-            // dispatch-time peek. See `op_neg`, `op_add`, … in 2b.
             I::Abs => self.op_abs(),
             I::Eq => self.op_eq(delegate),
             I::Neg => self.op_neg(delegate),
