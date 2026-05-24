@@ -1,6 +1,7 @@
 mod actor;
 mod address;
 mod cell;
+mod send;
 mod constraints;
 mod encoding;
 mod crypto;
@@ -26,6 +27,7 @@ pub use actor::{
     VBYTES_PER_BLOCK, VBYTE_MATURITY_BLOCKS,
 };
 pub use address::Address;
+pub use send::{Message, SendID};
 pub use cell::{CallProof, Cell, Predicate, PredicateTree};
 pub use constraints::{
     Commitment, CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,

@@ -62,8 +62,8 @@ fn dirty_stack_at_call_exit_is_an_error() {
     let block = BlockContext { height: 0 };
     // Re-create what `execute_internal` would, but pre-load the stack.
     let kind = CallKind::InternalRoot {
-        actor: ActorID([0u8; 32]),
-        method: MethodKey(0),
+        actor: ActorID::Hash([0u8; 32]),
+        method: MethodKey::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -77,17 +77,17 @@ fn dirty_stack_at_call_exit_is_an_error() {
     assert!(matches!(err, VMError::StackNotClean));
     // Caller's perspective: nothing leaks. (Sanity — there's no parent
     // call to inspect because this is a root frame.)
-    let _ = (reg.actor_vbytes(&ActorID([0; 32])), block.height); // silence warnings
+    let _ = (reg.actor_vbytes(&ActorID::Hash([0; 32])), block.height); // silence warnings
 }
 
 #[test]
 fn callkind_actor_identity() {
     assert!(CallKind::ExternalRoot.actor().is_none());
-    let aid = ActorID([1u8; 32]);
+    let aid = ActorID::Hash([1u8; 32]);
     assert_eq!(
         CallKind::InternalRoot {
-            actor: aid,
-            method: MethodKey(0),
+            actor: aid.clone(),
+            method: MethodKey::from(0u64),
             caller: None,
             anchor: Anchor([0u8; 32]),
         }

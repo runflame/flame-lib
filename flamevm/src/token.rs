@@ -26,7 +26,7 @@ use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 
 use crate::constraints::Commitment;
-use crate::vm::ActorID;
+use crate::actor::ActorID;
 use crate::{Int253, String};
 
 // ── Token ────────────────────────────────────────────────────────
@@ -212,7 +212,11 @@ impl ClearToken {
 /// any rename is a hard fork.
 pub fn flavor_from_actor(actor: &ActorID, tag: &String) -> Int253 {
     let mut t = Transcript::new(b"flamevm.token.flavor.v1");
-    t.append_message(b"actor", &actor.0);
+    // `to_hash()` collapses both enum variants to the canonical
+    // 32-byte form; for the Hash variant it's the stored id, for
+    // the Constructor variant it's the deterministic seed (per
+    // `ActorID::to_hash` docstring).
+    t.append_message(b"actor", &actor.to_hash());
     t.append_message(b"tag", tag.as_bytes());
     let mut buf = [0u8; 64];
     t.challenge_bytes(b"flavor", &mut buf);

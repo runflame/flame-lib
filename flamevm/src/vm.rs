@@ -35,15 +35,14 @@ use crate::constraints::Commitment;
 use crate::token::flavor_from_actor;
 use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
 
+// Re-export from canonical homes so vm.rs callers (notably the
+// test helpers, which inherit `super::super::*`) keep their
+// existing import shape. The types themselves live in `actor.rs`
+// and `send.rs`; vm.rs just plumbs them.
+pub use crate::actor::{ActorID, ActorRegistry, MethodKey};
+pub use crate::send::Message;
+
 // ── Identifiers and metadata ──────────────────────────────────────
-
-/// 32-byte actor identifier (hash of initial state or constructor script).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ActorID(pub [u8; 32]);
-
-/// Method index within an actor's `public` dict.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MethodKey(pub u64);
 
 /// 32-byte anchor unique to a tx-initiated send or cell identity.
 ///
@@ -112,35 +111,14 @@ pub enum DeferredSig {
 
 // ── Inbound message and context ──────────────────────────────────
 
-/// Inbound message that triggers an internal transaction.
-pub struct Message {
-    pub target: ActorID,
-    pub method: MethodKey,
-    pub caller: Option<ActorID>,
-    pub anchor: Anchor,
-    pub payload: Vec<Value>,
-    pub gas: u64,
-    pub vbytes: u64,
-}
+// `Message`, `ActorID`, `MethodKey`, and `ActorRegistry` live in
+// `actor.rs` and `send.rs`; re-exported above for legacy import
+// paths. Only `BlockContext` (the VM-only chain-info struct) stays
+// here.
 
 /// Block-level immutable context (height, chain stats).
 pub struct BlockContext {
     pub height: u64,
-}
-
-/// Mutable handle into the live actor registry. The internal-tx VM consults
-/// this to resolve method bytecode and to read/write actor state.
-pub trait ActorRegistry {
-    /// Returns the bytecode of the given method on the given actor.
-    fn resolve_method(
-        &self,
-        actor: &ActorID,
-        method: MethodKey,
-    ) -> Result<Vec<u8>, VMError>;
-
-    /// Returns the actor's persistent vbyte balance. Used to size the
-    /// transient-memory cap (`4× persistent` per design.md).
-    fn actor_vbytes(&self, actor: &ActorID) -> Result<u64, VMError>;
 }
 
 // ── Delegate ─────────────────────────────────────────────────────
@@ -1927,7 +1905,7 @@ impl VM {
     /// Returns the current call's actor identity, or
     /// `OpcodeRequiresActorContext` if the frame has none
     /// (`ExternalRoot` or a `CellOpen` not nested in an actor call).
-    fn require_actor(&self) -> Result<&crate::vm::ActorID, VMError> {
+    fn require_actor(&self) -> Result<&ActorID, VMError> {
         self.current_call
             .kind
             .actor()
@@ -1997,7 +1975,10 @@ impl VM {
             Value::Point(_) => return Err(VMError::TokenRequiresCS),
             _ => return Err(VMError::TypeNotInt253),
         };
-        let actor = *self.require_actor()?;
+        // `ActorID` is no longer `Copy` (the Constructor form holds
+        // a Vec) — clone the borrowed id so we can drop the
+        // `require_actor` borrow before mutating `self`.
+        let actor = self.require_actor()?.clone();
         let flv = flavor_from_actor(&actor, &tag);
         let qty_commit = Commitment::unblinded(qty);
         let flv_commit = Commitment::unblinded(flv);
@@ -2132,7 +2113,11 @@ impl VM {
         }
         let mut actor_bytes = [0u8; 32];
         actor_bytes.copy_from_slice(cid_str.as_bytes());
-        let actor = crate::vm::ActorID(actor_bytes);
+        // Treat the 32-byte string as a canonical actor-id hash —
+        // the only form scripts can construct directly. Constructor
+        // form is reserved for the deploy-on-send path (Q4) and
+        // doesn't enter here.
+        let actor = ActorID::Hash(actor_bytes);
         let flv = flavor_from_actor(&actor, &tag);
         self.push_value(Value::Int253(flv));
         Ok(())

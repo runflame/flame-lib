@@ -46,6 +46,60 @@ impl ActorRegistry for StubRegistry {
     fn actor_vbytes(&self, _actor: &ActorID) -> Result<u64, VMError> {
         Ok(0)
     }
+
+    fn exists(&self, _actor: &ActorID) -> bool {
+        true
+    }
+
+    // The remaining trait methods aren't exercised by tests that
+    // pin this stub — once Units 5–8 land the affected tests
+    // construct a `MemRegistry` instead. Surface a clear panic
+    // so a future test that strays here gets an obvious error.
+    fn load_state(&mut self, _id: &ActorID) -> Result<crate::ActorState, VMError> {
+        unimplemented!("StubRegistry::load_state — use MemRegistry for state-touching tests")
+    }
+    fn save_state(
+        &mut self,
+        _id: &ActorID,
+        _state: crate::ActorState,
+    ) -> Result<(), VMError> {
+        unimplemented!("StubRegistry::save_state — use MemRegistry for state-touching tests")
+    }
+    fn mark_for_destruction(&mut self, _id: &ActorID) {
+        unimplemented!("StubRegistry::mark_for_destruction — use MemRegistry")
+    }
+    fn unmark_for_destruction(&mut self, _id: &ActorID) {
+        unimplemented!("StubRegistry::unmark_for_destruction — use MemRegistry")
+    }
+    fn is_marked_for_destruction(&self, _id: &ActorID) -> bool {
+        false
+    }
+    fn commit_tx_destructions(&mut self, _current_height: u64) -> usize {
+        0
+    }
+    fn deploy(
+        &mut self,
+        _id: ActorID,
+        _state: crate::ActorState,
+        _vbytes: u64,
+        _height: u64,
+    ) -> Result<(), VMError> {
+        unimplemented!("StubRegistry::deploy — use MemRegistry")
+    }
+    fn credit_vbytes(
+        &mut self,
+        _id: &ActorID,
+        _amount: u64,
+        _current_height: u64,
+    ) -> Result<(), VMError> {
+        unimplemented!("StubRegistry::credit_vbytes — use MemRegistry")
+    }
+    fn tick_block(&mut self, _height: u64) -> Vec<ActorID> {
+        Vec::new()
+    }
+    fn vbyte_pool(&self) -> &crate::VbytePool {
+        unimplemented!("StubRegistry::vbyte_pool — use MemRegistry")
+    }
 }
 
 pub(crate) fn dummy_header() -> TxHeader {
@@ -54,13 +108,17 @@ pub(crate) fn dummy_header() -> TxHeader {
 
 pub(crate) fn dummy_message(gas: u64) -> Message {
     Message {
-        target: ActorID([0u8; 32]),
-        method: MethodKey(0),
+        target: ActorID::Hash([0u8; 32]),
+        method: MethodKey::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
         payload: Vec::new(),
         gas,
         vbytes: 0,
+        // Test fixture: NUMS-unspendable predicate as the refund
+        // sink. No real bounce path exercised by the tests that
+        // call `dummy_message`; this just satisfies the field.
+        refund_predicate: Predicate::Opaque(Predicate::unspendable_key()),
     }
 }
 
@@ -69,8 +127,8 @@ pub(crate) fn dummy_message(gas: u64) -> Message {
 /// Builds a VM running `script` as the entry Run of an InternalRoot.
 pub(crate) fn vm_with_script(script: Vec<u8>) -> VM {
     let kind = CallKind::InternalRoot {
-        actor: ActorID([0u8; 32]),
-        method: MethodKey(0),
+        actor: ActorID::Hash([0u8; 32]),
+        method: MethodKey::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -311,7 +369,7 @@ pub(crate) fn make_cleartext_token(qty: u64, flv: u64) -> Token {
 pub(crate) fn vm_internal_with_actor(script: Vec<u8>, actor: ActorID) -> VM {
     let kind = CallKind::InternalRoot {
         actor,
-        method: MethodKey(0),
+        method: MethodKey::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };

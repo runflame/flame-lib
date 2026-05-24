@@ -53,8 +53,8 @@ fn cleartoken_positive_qty_is_portable() {
 
 #[test]
 fn flavor_from_actor_is_deterministic_and_diverges_on_inputs() {
-    let actor1 = ActorID([0x11; 32]);
-    let actor2 = ActorID([0x22; 32]);
+    let actor1 = ActorID::Hash([0x11; 32]);
+    let actor2 = ActorID::Hash([0x22; 32]);
     let tag_a = String::from(b"gold".to_vec());
     let tag_b = String::from(b"silver".to_vec());
 
@@ -181,11 +181,13 @@ fn issue_clear_path_emits_txlog_and_returns_cleartoken() {
     // Script: pushint8(7), pushstr "gold", issue.
     // Run under InternalRoot with a known actor identity so
     // `op_issue` can resolve a flavor.
-    let actor = ActorID([0x55; 32]);
+    let actor = ActorID::Hash([0x55; 32]);
     let mut script = vec![0x10, 7];
     push_string_bytes(&mut script, b"gold");
     script.push(0x71); // issue
-    let mut vm = vm_internal_with_actor(script, actor);
+    // `vm_internal_with_actor` takes ownership; clone so we can
+    // recompute the expected flavor against the same id below.
+    let mut vm = vm_internal_with_actor(script, actor.clone());
     run_to_end(&mut vm).expect("issue ok");
 
     // Stack: [ClearToken(7, flavor)].
@@ -217,7 +219,7 @@ fn issue_clear_path_emits_txlog_and_returns_cleartoken() {
 #[test]
 fn issue_with_point_qty_errors_tokenrequirescs() {
     // Pushpoint then pushstr then issue → encrypted branch (deferred).
-    let actor = ActorID([0x55; 32]);
+    let actor = ActorID::Hash([0x55; 32]);
     let mut script = vec![0x1a]; // pushpoint
     script.extend_from_slice(&[0u8; 32]);
     push_string_bytes(&mut script, b"gold");
@@ -418,7 +420,7 @@ fn issueflv_pushes_correct_flavor() {
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).expect("issueflv ok");
     let expected = test_flavor_from_actor(
-        &ActorID(actor_bytes),
+        &ActorID::Hash(actor_bytes),
         &String::from(b"gold".to_vec()),
     );
     assert_eq!(vm.current_call.stack.len(), 1);
