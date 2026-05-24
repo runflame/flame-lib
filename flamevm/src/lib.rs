@@ -20,8 +20,10 @@ mod vm;
 mod witness;
 
 pub use actor::{
-    Actor, ActorID, ActorState, MethodKey, RECV_METHOD_KEY, vbyte_size,
-    ACTOR_ID_DOMAIN, ACTOR_LIFECYCLE_OVERHEAD_VBYTES,
+    grace_window, vbyte_size, Actor, ActorID, ActorRegistry, ActorState,
+    MemRegistry, MethodKey, VbytePool, ACTOR_ID_DOMAIN,
+    ACTOR_LIFECYCLE_OVERHEAD_VBYTES, GRACE_BLOCKS_CAP, RECV_METHOD_KEY,
+    VBYTES_PER_BLOCK, VBYTE_MATURITY_BLOCKS,
 };
 pub use address::Address;
 pub use cell::{CallProof, Cell, Predicate, PredicateTree};

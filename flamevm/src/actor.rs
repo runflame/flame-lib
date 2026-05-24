@@ -434,6 +434,477 @@ pub fn vbyte_size(state: &ActorState) -> Result<u64, VMError> {
     Ok(buf.len() as u64 + ACTOR_LIFECYCLE_OVERHEAD_VBYTES)
 }
 
+// ── Lifecycle constants ───────────────────────────────────────────
+
+/// Per-block introduction of fresh vbytes into the pool. Per
+/// design.md §Resources / Storage and ADR 0004: 5000/block,
+/// adjustable up to 2× per cycle by supermajority. The constant
+/// here is the genesis value.
+pub const VBYTES_PER_BLOCK: u64 = 5000;
+
+/// Maturity delay for vbytes returning to the pool from a cleared
+/// actor. 100 blocks per design.md §Resources / Storage and ADR
+/// 0005.
+pub const VBYTE_MATURITY_BLOCKS: u64 = 100;
+
+/// Cap on the grace window in blocks (≈ six months at one
+/// block per ~6s). Per ADR 0005:
+/// `grace = min(active_blocks / 4, blocks_per_6_months)`. The
+/// "six months" interpretation is consensus-fixed; the constant
+/// here picks 2,628,000 blocks (= 6 × 30 × 24 × 60 × 60 / 6),
+/// which is the working assumption. Validators will reconcile
+/// against the actual block cadence at protocol-launch time.
+pub const GRACE_BLOCKS_CAP: u64 = 2_628_000;
+
+/// Grace-window formula. Returns the number of blocks an actor
+/// stays frozen before being cleared. Per ADR 0005:
+/// `min(active_blocks / 4, GRACE_BLOCKS_CAP)`.
+pub fn grace_window(active_blocks: u64) -> u64 {
+    let earned = active_blocks / 4;
+    earned.min(GRACE_BLOCKS_CAP)
+}
+
+// ── VbytePool ────────────────────────────────────────────────────
+
+/// Protocol-level vbyte supply. New vbytes flow in at
+/// [`VBYTES_PER_BLOCK`] per block; cleared actors' vbytes flow
+/// back via the maturity queue with a [`VBYTE_MATURITY_BLOCKS`]
+/// delay. Available vbytes are consumed by external transactions
+/// purchasing storage via fees (the consensus layer brokers that
+/// transfer; this module just tracks the pool).
+#[derive(Debug, Default)]
+pub struct VbytePool {
+    /// Vbytes currently available for purchase.
+    pub available: u64,
+
+    /// Maturity queue keyed by the block height at which the
+    /// entry becomes spendable (= clear_height + VBYTE_MATURITY_BLOCKS).
+    /// Inserted by [`VbytePool::queue_recycle`]; drained by
+    /// [`VbytePool::release_matured`].
+    pub maturing: std::collections::BTreeMap<u64, u64>,
+}
+
+impl VbytePool {
+    /// Constructs an empty pool. Real chains seed with the genesis
+    /// vbyte introduction; tests build piecewise.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Per-block introduction of fresh vbytes. Adds
+    /// [`VBYTES_PER_BLOCK`] to `available`. Called once per block
+    /// by [`MemRegistry::tick_block`] (real consensus impls do the
+    /// same).
+    pub fn introduce_block_vbytes(&mut self) {
+        self.available = self.available.saturating_add(VBYTES_PER_BLOCK);
+    }
+
+    /// Queues `amount` vbytes recycled from a cleared actor for
+    /// release at `cleared_at_height + VBYTE_MATURITY_BLOCKS`.
+    pub fn queue_recycle(&mut self, amount: u64, cleared_at_height: u64) {
+        if amount == 0 {
+            return;
+        }
+        let release_height =
+            cleared_at_height.saturating_add(VBYTE_MATURITY_BLOCKS);
+        *self.maturing.entry(release_height).or_insert(0) =
+            self.maturing
+                .get(&release_height)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(amount);
+    }
+
+    /// Releases any maturing entries whose release height has
+    /// arrived (`<= current_height`). Returns the amount released.
+    pub fn release_matured(&mut self, current_height: u64) -> u64 {
+        // Drain entries with key ≤ current_height. BTreeMap doesn't
+        // have a `drain_filter` on stable, so we split off the
+        // strictly-larger half and accumulate the remainder.
+        let upper = self.maturing.split_off(&(current_height + 1));
+        let mut total = 0u64;
+        for (_h, v) in self.maturing.iter() {
+            total = total.saturating_add(*v);
+        }
+        self.maturing = upper;
+        self.available = self.available.saturating_add(total);
+        total
+    }
+
+    /// True iff no vbytes are available or maturing.
+    pub fn is_empty(&self) -> bool {
+        self.available == 0 && self.maturing.is_empty()
+    }
+}
+
+// ── ActorRegistry trait ──────────────────────────────────────────
+
+/// Mutable handle into the live actor registry. The VM consults
+/// this from `op_load` / `op_save` / `op_call` / `op_send` (Units
+/// 5–8). The trait stays thin so a real consensus-backed
+/// implementation only needs to supply storage + the per-block
+/// tick.
+///
+/// **Re-entrancy lock semantics.** `mark_for_destruction` is the
+/// runtime enforcement of the load/save lock from
+/// `flamevm/CLAUDE.md`. `op_load` marks; `op_save` unmarks; a
+/// second `op_load` against a marked actor errors
+/// `LoadAlreadyMarked`. If a transaction commits with an actor
+/// still marked, the registry deletes the actor and recycles its
+/// vbytes via the pool — that's the "load without save = destroy"
+/// path (Q6).
+///
+/// **Lifecycle ownership.** `tick_block` is the sole transition
+/// site for ACTIVE↔FROZEN↔CLEARED + maturity. Consensus calls it
+/// once per block after applying that block's transactions.
+pub trait ActorRegistry {
+    // ── lookup ─────────────────────────────────────────────────
+
+    /// Returns a cloned snapshot of the actor's state. `op_load`
+    /// pushes this onto the stack; `op_call` uses it to resolve
+    /// the callee's method bytes without retaining a borrow.
+    fn load_state(&mut self, id: &ActorID) -> Result<ActorState, VMError>;
+
+    /// Persists `state` against `id`. Re-sizes the actor's vbyte
+    /// occupancy under the new state (the lifecycle ticker will
+    /// reconcile balance on the next block).
+    fn save_state(&mut self, id: &ActorID, state: ActorState) -> Result<(), VMError>;
+
+    /// Resolves a method's script bytes. Equivalent to
+    /// `load_state(id)?.resolve_method(method)?` but exists as a
+    /// distinct call so dispatch can skip the per-call state clone
+    /// for the common case where the callee only runs its method
+    /// (no `load`/`save`).
+    fn resolve_method(
+        &self,
+        actor: &ActorID,
+        method: MethodKey,
+    ) -> Result<Vec<u8>, VMError>;
+
+    /// Returns the actor's persistent vbyte balance. Used by the
+    /// VM driver to size the transient-memory cap (`4× persistent`
+    /// per ADR 0002).
+    fn actor_vbytes(&self, actor: &ActorID) -> Result<u64, VMError>;
+
+    /// True iff a row exists in the registry for `actor`. Used by
+    /// `op_call` / `op_send` to distinguish "actor doesn't exist"
+    /// (hard fail for direct calls; deploy path for sends via
+    /// `Constructor`) from frozen/loaded states.
+    fn exists(&self, actor: &ActorID) -> bool;
+
+    // ── re-entrancy lock + self-destruct (Q6) ──────────────────
+
+    /// Marks the actor as currently loaded. Subsequent loads error
+    /// `LoadAlreadyMarked`. Called by `op_load`.
+    fn mark_for_destruction(&mut self, id: &ActorID);
+
+    /// Clears the mark set by [`Self::mark_for_destruction`].
+    /// Called by `op_save` after a successful save.
+    fn unmark_for_destruction(&mut self, id: &ActorID);
+
+    /// True iff the actor is currently marked. Used by the
+    /// re-entrancy check and the tx-end self-destruct sweep.
+    fn is_marked_for_destruction(&self, id: &ActorID) -> bool;
+
+    /// End-of-tx hook called by the VM driver after a successful
+    /// run. Walks marks; any still-marked actor is removed and its
+    /// vbytes recycled to the pool with [`VBYTE_MATURITY_BLOCKS`]
+    /// delay. Returns the number of actors cleared (useful for
+    /// telemetry/tests). `current_height` is the height of the
+    /// containing block.
+    fn commit_tx_destructions(&mut self, current_height: u64) -> usize;
+
+    // ── deployment (Q4 — transparent on first delivery) ────────
+
+    /// Installs a freshly-deployed actor under `id`, funded with
+    /// `vbytes`, activated at `height`. Errors `ActorAlreadyExists`
+    /// if the id is already taken.
+    fn deploy(
+        &mut self,
+        id: ActorID,
+        state: ActorState,
+        vbytes: u64,
+        height: u64,
+    ) -> Result<(), VMError>;
+
+    /// Credits `amount` vbytes to `id`. If the actor was frozen,
+    /// this restores it to ACTIVE, clears `frozen_since`, and resets
+    /// `active_blocks` per ADR 0005's "top-up resets the counter".
+    /// `last_activation_height` is updated to `current_height`.
+    /// Errors `ActorNotFound` if no such actor.
+    ///
+    /// Called by the consensus side of `op_send` when delivering
+    /// a vbyte-bearing message. An empty send (no method, no args,
+    /// vbytes-only) is the dedicated transfer form per spec.md.
+    fn credit_vbytes(
+        &mut self,
+        id: &ActorID,
+        amount: u64,
+        current_height: u64,
+    ) -> Result<(), VMError>;
+
+    // ── lifecycle ──────────────────────────────────────────────
+
+    /// Per-block tick: bleed every actor's vbytes by their current
+    /// `vbyte_size`, transition ACTIVE↔FROZEN, expire FROZEN past
+    /// grace, and release matured pool entries. Called once per
+    /// block by consensus after applying transactions.
+    ///
+    /// Returns the set of `ActorID`s cleared (expired past grace)
+    /// during this tick, in deterministic order — useful for log
+    /// emission. Per design.md §Internal-transaction grace.
+    fn tick_block(&mut self, height: u64) -> Vec<ActorID>;
+
+    // ── pool ───────────────────────────────────────────────────
+
+    /// Read-only view of the protocol's vbyte pool.
+    fn vbyte_pool(&self) -> &VbytePool;
+}
+
+// ── MemRegistry (in-memory ActorRegistry, for tests) ─────────────
+
+/// `BTreeMap`-backed registry implementing [`ActorRegistry`].
+/// Suitable for tests, fixtures, and the consensus crate's
+/// reference implementation before persistent storage lands.
+pub struct MemRegistry {
+    actors: std::collections::BTreeMap<ActorID, Actor>,
+    marks: std::collections::BTreeSet<ActorID>,
+    pool: VbytePool,
+}
+
+impl MemRegistry {
+    /// Constructs an empty registry with an empty pool.
+    pub fn new() -> Self {
+        Self {
+            actors: std::collections::BTreeMap::new(),
+            marks: std::collections::BTreeSet::new(),
+            pool: VbytePool::new(),
+        }
+    }
+
+    /// Mutable accessor for the underlying pool — useful for tests
+    /// that want to seed `available` directly.
+    pub fn pool_mut(&mut self) -> &mut VbytePool {
+        &mut self.pool
+    }
+
+    /// Mutable accessor for the actor map — used by tests to set
+    /// up scenarios. Not part of the trait surface.
+    pub fn actor_mut(&mut self, id: &ActorID) -> Option<&mut Actor> {
+        self.actors.get_mut(id)
+    }
+
+    /// Immutable accessor for an actor record. Convenience for tests.
+    pub fn actor(&self, id: &ActorID) -> Option<&Actor> {
+        self.actors.get(id)
+    }
+}
+
+impl Default for MemRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ActorRegistry for MemRegistry {
+    fn load_state(&mut self, id: &ActorID) -> Result<ActorState, VMError> {
+        let actor = self
+            .actors
+            .get(id)
+            .ok_or(VMError::ActorNotFound)?;
+        if actor.is_frozen() {
+            return Err(VMError::ActorFrozen);
+        }
+        // Clone the state (Dicts implement try_clone for portable
+        // payloads; the load path requires payloads to be portable
+        // since they're being moved across the wire / VM boundary).
+        let public = actor
+            .state
+            .public
+            .try_clone()
+            .map_err(|_| VMError::MalformedActorState)?;
+        let private = actor
+            .state
+            .private
+            .try_clone()
+            .map_err(|_| VMError::MalformedActorState)?;
+        Ok(ActorState { public, private })
+    }
+
+    fn save_state(
+        &mut self,
+        id: &ActorID,
+        state: ActorState,
+    ) -> Result<(), VMError> {
+        let actor = self
+            .actors
+            .get_mut(id)
+            .ok_or(VMError::ActorNotFound)?;
+        actor.state = state;
+        Ok(())
+    }
+
+    fn resolve_method(
+        &self,
+        actor: &ActorID,
+        method: MethodKey,
+    ) -> Result<Vec<u8>, VMError> {
+        let a = self
+            .actors
+            .get(actor)
+            .ok_or(VMError::ActorNotFound)?;
+        if a.is_frozen() {
+            return Err(VMError::ActorFrozen);
+        }
+        let script = a
+            .state
+            .resolve_method(&method)
+            .ok_or(VMError::MethodNotFound)?;
+        Ok(script.to_bytes_vec())
+    }
+
+    fn actor_vbytes(&self, actor: &ActorID) -> Result<u64, VMError> {
+        let a = self
+            .actors
+            .get(actor)
+            .ok_or(VMError::ActorNotFound)?;
+        Ok(a.vbytes)
+    }
+
+    fn exists(&self, actor: &ActorID) -> bool {
+        self.actors.contains_key(actor)
+    }
+
+    fn mark_for_destruction(&mut self, id: &ActorID) {
+        self.marks.insert(id.clone());
+    }
+
+    fn unmark_for_destruction(&mut self, id: &ActorID) {
+        self.marks.remove(id);
+    }
+
+    fn is_marked_for_destruction(&self, id: &ActorID) -> bool {
+        self.marks.contains(id)
+    }
+
+    fn commit_tx_destructions(&mut self, current_height: u64) -> usize {
+        let to_clear: Vec<ActorID> =
+            self.marks.iter().cloned().collect();
+        let mut count = 0usize;
+        for id in to_clear {
+            // Drain the mark regardless of whether the actor still
+            // exists (defensive: a re-entrancy mark on a vanished
+            // actor shouldn't linger).
+            self.marks.remove(&id);
+            if let Some(actor) = self.actors.remove(&id) {
+                self.pool.queue_recycle(actor.vbytes, current_height);
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn deploy(
+        &mut self,
+        id: ActorID,
+        state: ActorState,
+        vbytes: u64,
+        height: u64,
+    ) -> Result<(), VMError> {
+        if self.actors.contains_key(&id) {
+            return Err(VMError::ActorAlreadyExists);
+        }
+        self.actors
+            .insert(id, Actor::new_active(state, vbytes, height));
+        Ok(())
+    }
+
+    fn credit_vbytes(
+        &mut self,
+        id: &ActorID,
+        amount: u64,
+        current_height: u64,
+    ) -> Result<(), VMError> {
+        let actor = self
+            .actors
+            .get_mut(id)
+            .ok_or(VMError::ActorNotFound)?;
+        actor.vbytes = actor.vbytes.saturating_add(amount);
+        if actor.is_frozen() {
+            actor.frozen_since = None;
+            actor.active_blocks = 0;
+            actor.last_activation_height = current_height;
+        }
+        Ok(())
+    }
+
+    fn tick_block(&mut self, height: u64) -> Vec<ActorID> {
+        // 1) introduce per-block vbytes + release matured.
+        self.pool.introduce_block_vbytes();
+        self.pool.release_matured(height);
+
+        // 2) walk actors: bleed, transition, expire.
+        let mut cleared: Vec<ActorID> = Vec::new();
+
+        // Collect ids first to avoid an aliased mutable iter.
+        let ids: Vec<ActorID> = self.actors.keys().cloned().collect();
+        for id in ids {
+            let actor = match self.actors.get_mut(&id) {
+                Some(a) => a,
+                None => continue,
+            };
+            match actor.frozen_since {
+                None => {
+                    // ACTIVE: bleed by current vbyte_size.
+                    let occupied = match vbyte_size(&actor.state) {
+                        Ok(n) => n,
+                        Err(_) => {
+                            // Defensive: malformed state cleared on
+                            // tick — the registry only accepts
+                            // well-formed states at deploy/save, so
+                            // hitting this is an invariant break.
+                            cleared.push(id.clone());
+                            continue;
+                        }
+                    };
+                    if actor.vbytes >= occupied {
+                        actor.vbytes -= occupied;
+                        actor.active_blocks =
+                            actor.active_blocks.saturating_add(1);
+                    } else {
+                        // Bleeding to zero — exhausted within this tick.
+                        actor.vbytes = 0;
+                    }
+                    if actor.vbytes == 0 {
+                        actor.frozen_since = Some(height);
+                    }
+                }
+                Some(frozen_at) => {
+                    // FROZEN: count elapsed; expire past grace.
+                    let elapsed = height.saturating_sub(frozen_at);
+                    if elapsed >= grace_window(actor.active_blocks) {
+                        // Clear the actor and recycle vbytes (in
+                        // practice vbytes == 0 here, but be defensive
+                        // for callers that mutated the field).
+                        let recycled = actor.vbytes;
+                        cleared.push(id.clone());
+                        self.actors.remove(&id);
+                        if recycled > 0 {
+                            self.pool.queue_recycle(recycled, height);
+                        }
+                    }
+                }
+            }
+        }
+
+        cleared
+    }
+
+    fn vbyte_pool(&self) -> &VbytePool {
+        &self.pool
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,5 +1153,289 @@ mod tests {
         assert_eq!(a.active_blocks, 0);
         assert!(!a.is_frozen());
         assert_eq!(a.frozen_since, None);
+    }
+
+    // ── VbytePool ────────────────────────────────────────────────
+
+    #[test]
+    fn vbyte_pool_introduce_adds_per_block_amount() {
+        let mut p = VbytePool::new();
+        assert_eq!(p.available, 0);
+        p.introduce_block_vbytes();
+        assert_eq!(p.available, VBYTES_PER_BLOCK);
+        p.introduce_block_vbytes();
+        assert_eq!(p.available, 2 * VBYTES_PER_BLOCK);
+    }
+
+    #[test]
+    fn vbyte_pool_queue_and_release_at_maturity() {
+        let mut p = VbytePool::new();
+        p.queue_recycle(1000, 50);
+        // Not yet mature at height 50 + 99 = 149.
+        let released = p.release_matured(149);
+        assert_eq!(released, 0);
+        assert_eq!(p.available, 0);
+        // Matures exactly at 50 + 100 = 150.
+        let released = p.release_matured(150);
+        assert_eq!(released, 1000);
+        assert_eq!(p.available, 1000);
+    }
+
+    #[test]
+    fn vbyte_pool_queue_zero_is_noop() {
+        let mut p = VbytePool::new();
+        p.queue_recycle(0, 10);
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn vbyte_pool_multiple_recycles_accumulate_per_bucket() {
+        let mut p = VbytePool::new();
+        p.queue_recycle(100, 10); // releases at 110
+        p.queue_recycle(50, 10);  // releases at 110
+        p.queue_recycle(200, 20); // releases at 120
+        let released = p.release_matured(115);
+        assert_eq!(released, 150);
+        let released = p.release_matured(120);
+        assert_eq!(released, 200);
+        assert_eq!(p.available, 350);
+    }
+
+    // ── grace_window ─────────────────────────────────────────────
+
+    #[test]
+    fn grace_window_quarters_active_blocks() {
+        assert_eq!(grace_window(0), 0);
+        assert_eq!(grace_window(4), 1);
+        assert_eq!(grace_window(100), 25);
+    }
+
+    #[test]
+    fn grace_window_capped_at_six_months() {
+        assert_eq!(grace_window(u64::MAX), GRACE_BLOCKS_CAP);
+    }
+
+    // ── MemRegistry: deploy / load / save ────────────────────────
+
+    fn fixture_state() -> ActorState {
+        let mut s = ActorState::new();
+        s.public.insert(
+            *RECV_METHOD_KEY.as_int(),
+            Value::String(String::from(b"\x1d".to_vec())), // `nop`
+        );
+        s
+    }
+
+    #[test]
+    fn memregistry_deploy_load_roundtrip() {
+        let mut r = MemRegistry::new();
+        let s = fixture_state();
+        let id = ActorID::canonical_from_initial_state(&s);
+        r.deploy(id.clone(), s, 1000, 5).expect("deploy");
+        let loaded = r.load_state(&id).expect("load");
+        assert!(loaded.has_method(&RECV_METHOD_KEY));
+        assert!(r.exists(&id));
+        assert_eq!(r.actor_vbytes(&id).expect("vbytes"), 1000);
+    }
+
+    #[test]
+    fn memregistry_deploy_collision_errors() {
+        let mut r = MemRegistry::new();
+        let id = ActorID::Hash([0u8; 32]);
+        r.deploy(id.clone(), fixture_state(), 100, 0).expect("first");
+        let err = r
+            .deploy(id, fixture_state(), 100, 0)
+            .expect_err("second must error");
+        assert!(matches!(err, VMError::ActorAlreadyExists));
+    }
+
+    #[test]
+    fn memregistry_load_unknown_id_errors() {
+        let mut r = MemRegistry::new();
+        let err = r
+            .load_state(&ActorID::Hash([0u8; 32]))
+            .expect_err("must error");
+        assert!(matches!(err, VMError::ActorNotFound));
+    }
+
+    #[test]
+    fn memregistry_save_persists_state() {
+        let mut r = MemRegistry::new();
+        let id = ActorID::Hash([1u8; 32]);
+        r.deploy(id.clone(), fixture_state(), 1000, 0).expect("deploy");
+        let mut updated = ActorState::new();
+        updated.private.insert(
+            Int253::from(99u64),
+            Value::Int253(Int253::from(7u64)),
+        );
+        r.save_state(&id, updated).expect("save");
+        let loaded = r.load_state(&id).expect("load");
+        assert_eq!(loaded.private.len(), 1);
+        assert!(!loaded.has_method(&RECV_METHOD_KEY)); // overwritten
+    }
+
+    #[test]
+    fn memregistry_resolve_method_returns_script() {
+        let mut r = MemRegistry::new();
+        let id = ActorID::Hash([2u8; 32]);
+        r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
+        let script = r.resolve_method(&id, RECV_METHOD_KEY).expect("resolve");
+        assert_eq!(script, vec![0x1d]); // `nop`
+    }
+
+    #[test]
+    fn memregistry_resolve_method_missing_errors() {
+        let mut r = MemRegistry::new();
+        let id = ActorID::Hash([3u8; 32]);
+        r.deploy(id.clone(), ActorState::new(), 100, 0).expect("deploy");
+        let err = r
+            .resolve_method(&id, MethodKey::from(42u64))
+            .expect_err("must error");
+        assert!(matches!(err, VMError::MethodNotFound));
+    }
+
+    // ── MemRegistry: marks / self-destruct ───────────────────────
+
+    #[test]
+    fn memregistry_mark_unmark_round_trip() {
+        let mut r = MemRegistry::new();
+        let id = ActorID::Hash([4u8; 32]);
+        r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
+        assert!(!r.is_marked_for_destruction(&id));
+        r.mark_for_destruction(&id);
+        assert!(r.is_marked_for_destruction(&id));
+        r.unmark_for_destruction(&id);
+        assert!(!r.is_marked_for_destruction(&id));
+    }
+
+    #[test]
+    fn memregistry_commit_tx_clears_marked_actors_and_queues_vbytes() {
+        let mut r = MemRegistry::new();
+        let id = ActorID::Hash([5u8; 32]);
+        r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
+        r.mark_for_destruction(&id);
+        let cleared = r.commit_tx_destructions(10);
+        assert_eq!(cleared, 1);
+        assert!(!r.exists(&id));
+        // Vbytes queued for release at 10 + 100.
+        assert_eq!(r.pool.maturing.get(&110).copied(), Some(100));
+    }
+
+    #[test]
+    fn memregistry_commit_tx_leaves_unmarked_actors_alone() {
+        let mut r = MemRegistry::new();
+        let id = ActorID::Hash([6u8; 32]);
+        r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
+        let cleared = r.commit_tx_destructions(10);
+        assert_eq!(cleared, 0);
+        assert!(r.exists(&id));
+    }
+
+    // ── MemRegistry: credit_vbytes / freeze recovery ─────────────
+
+    #[test]
+    fn memregistry_credit_vbytes_to_active_actor_adds_balance() {
+        let mut r = MemRegistry::new();
+        let id = ActorID::Hash([7u8; 32]);
+        r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
+        r.credit_vbytes(&id, 50, 10).expect("credit");
+        let a = r.actor(&id).expect("present");
+        assert_eq!(a.vbytes, 150);
+        assert!(!a.is_frozen());
+    }
+
+    #[test]
+    fn memregistry_credit_unfreezes_and_resets_counters() {
+        let mut r = MemRegistry::new();
+        let id = ActorID::Hash([8u8; 32]);
+        r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
+        // Manually drive into frozen state for the test.
+        {
+            let a = r.actor_mut(&id).expect("present");
+            a.vbytes = 0;
+            a.active_blocks = 50;
+            a.frozen_since = Some(20);
+        }
+        r.credit_vbytes(&id, 500, 100).expect("credit");
+        let a = r.actor(&id).expect("present");
+        assert_eq!(a.vbytes, 500);
+        assert!(!a.is_frozen());
+        assert_eq!(a.active_blocks, 0);
+        assert_eq!(a.last_activation_height, 100);
+    }
+
+    // ── MemRegistry: tick_block lifecycle ────────────────────────
+
+    #[test]
+    fn tick_block_bleeds_active_actors_and_advances_counter() {
+        let mut r = MemRegistry::new();
+        let id = ActorID::Hash([9u8; 32]);
+        // Fund well above one block's bleed (state encodes to
+        // ~40 bytes incl. lifecycle overhead).
+        r.deploy(id.clone(), fixture_state(), 10_000, 0).expect("deploy");
+        let _ = r.tick_block(1);
+        let a = r.actor(&id).expect("present");
+        assert!(a.vbytes < 10_000, "vbytes bled");
+        assert_eq!(a.active_blocks, 1);
+        assert!(!a.is_frozen());
+    }
+
+    #[test]
+    fn tick_block_freezes_on_exhaustion() {
+        let mut r = MemRegistry::new();
+        let id = ActorID::Hash([10u8; 32]);
+        r.deploy(id.clone(), fixture_state(), 10, 0).expect("deploy");
+        let _ = r.tick_block(1);
+        let a = r.actor(&id).expect("present");
+        assert_eq!(a.vbytes, 0);
+        assert!(a.is_frozen());
+        assert_eq!(a.frozen_since, Some(1));
+    }
+
+    #[test]
+    fn tick_block_expires_frozen_actor_past_grace() {
+        let mut r = MemRegistry::new();
+        let id = ActorID::Hash([11u8; 32]);
+        r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
+        // Manually set up a frozen actor with active_blocks = 4
+        // → grace = 1 block.
+        {
+            let a = r.actor_mut(&id).expect("present");
+            a.vbytes = 0;
+            a.active_blocks = 4;
+            a.frozen_since = Some(10);
+        }
+        // At height 11, elapsed = 1, grace = 1 → expire.
+        let cleared = r.tick_block(11);
+        assert_eq!(cleared, vec![id.clone()]);
+        assert!(!r.exists(&id));
+    }
+
+    #[test]
+    fn tick_block_keeps_frozen_actor_within_grace() {
+        let mut r = MemRegistry::new();
+        let id = ActorID::Hash([12u8; 32]);
+        r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
+        {
+            let a = r.actor_mut(&id).expect("present");
+            a.vbytes = 0;
+            a.active_blocks = 1000; // grace = 250 blocks
+            a.frozen_since = Some(10);
+        }
+        let cleared = r.tick_block(50);
+        assert!(cleared.is_empty());
+        assert!(r.exists(&id));
+        let a = r.actor(&id).expect("present");
+        assert!(a.is_frozen());
+    }
+
+    #[test]
+    fn tick_block_releases_matured_pool_entries() {
+        let mut r = MemRegistry::new();
+        r.pool.queue_recycle(2_000, 10);
+        // Pool starts with 0 available; tick_block introduces
+        // VBYTES_PER_BLOCK and releases the 2000 from maturity.
+        let _ = r.tick_block(110);
+        assert!(r.vbyte_pool().available >= VBYTES_PER_BLOCK + 2_000);
     }
 }

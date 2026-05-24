@@ -311,6 +311,30 @@ pub enum VMError {
     #[error("Malformed Address")]
     MalformedAddress,
 
+    /// Registry lookup for an `ActorID` that isn't present. Hard
+    /// fail for `op_call`; the `op_send` path differs (it deploys
+    /// a Constructor-form id transparently on first delivery).
+    #[error("Actor not found in registry")]
+    ActorNotFound,
+
+    /// Operation against a frozen actor — calls and loads refuse
+    /// (state preserved through the grace window per ADR 0005).
+    #[error("Actor is frozen")]
+    ActorFrozen,
+
+    /// `resolve_method` couldn't find a callable at the requested
+    /// `MethodKey` in the actor's `public` Dict, or the slot held
+    /// a non-`String` value.
+    #[error("Method not found on actor")]
+    MethodNotFound,
+
+    /// `deploy` was given an `ActorID` already present in the
+    /// registry. Treated as a hard fail rather than overwriting —
+    /// a Constructor-form deployment that collides is a protocol
+    /// invariant break.
+    #[error("Actor already exists at this id")]
+    ActorAlreadyExists,
+
     /// An opcode required a top-of-stack `ClearToken` but found a
     /// different type (encrypted Token / WideToken / non-token).
     /// Distinct from `TypeNotToken` so scripts can distinguish "wrong

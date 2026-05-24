@@ -13,7 +13,7 @@
 //! per-block message dispatcher all read from. Wire form is a
 //! tagged list-Dict, encoded by [`Address::encode`].
 
-use readerwriter::{ReadError, Reader, WriteError, Writer};
+use readerwriter::{Reader, WriteError, Writer};
 
 use crate::actor::{ActorID, MethodKey};
 use crate::cell::Predicate;
