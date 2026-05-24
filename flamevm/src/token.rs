@@ -26,7 +26,6 @@ use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 
 use crate::constraints::Commitment;
-use crate::errors::VMError;
 use crate::vm::ActorID;
 use crate::{Int253, String};
 

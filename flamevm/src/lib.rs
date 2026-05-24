@@ -24,7 +24,7 @@ pub use dict::Dict;
 pub use errors::VMError;
 pub use int253::Int253;
 pub use ops::Instruction;
-pub use program::Program;
+pub use program::{Program, ProgramItem};
 pub use prover::Prover;
 pub use string::String;
 pub use token::{flavor_from_actor, ClearToken, Token, WideToken};

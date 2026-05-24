@@ -151,18 +151,6 @@ pub trait Delegate {
         commitment: &CompressedRistretto,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError>;
 
-    /// Returns the next witness in the prover's queue, popping it. The
-    /// `alloc` opcode (Phase 11) calls this once per execution; the
-    /// prover delegate returns `Some(int)` for each witness it has
-    /// queued (in opcode-emission order), the verifier delegate returns
-    /// `None` (a verifier never sees witnesses). The default
-    /// implementation returns `None` — fine for delegates that don't
-    /// support witness-bearing scripts (e.g. test stubs that run pure
-    /// dispatch checks).
-    fn next_alloc_witness(&mut self) -> Option<Int253> {
-        None
-    }
-
     /// Consumes the delegate after VM execution finishes cleanly.
     ///
     /// Prover: builds the Bulletproofs proof, processes deferred sigs as
@@ -173,99 +161,100 @@ pub trait Delegate {
 
 // ── Run ──────────────────────────────────────────────────────────
 
-/// A single bytecode script being interpreted. Multiple runs may nest
-/// within one call (via `run`, `loop`, `switch`); each pushes onto
-/// `CallFrame.run_stack` and is resumed on `break`/`return`/end-of-script.
-pub struct Run {
-    script: Vec<u8>,
-    pc: usize,
+/// A single program being interpreted by the VM. Two shapes share a
+/// `(content, index)` skeleton:
+///
+/// - `Bytecode { script, pc }` — verifier-side and internal-context:
+///   parses one [`Instruction`] from `script[pc..]` at each step.
+/// - `Queue { instructions, index }` — prover-side: returns
+///   `instructions[index]` (with witness baked into its variant)
+///   and advances `index`.
+///
+/// Both expose [`Run::next_instruction`], so the dispatch loop is
+/// identical — the prover/verifier asymmetry lives only in how the
+/// Run is constructed. `loop` (resets the cursor to 0) and `break:k`
+/// (jumps the cursor to end) work identically for both.
+///
+/// Multiple Runs may nest within one call (via `run` / `loop` /
+/// `switch`); each pushes onto `CallFrame.run_stack` and is resumed
+/// on `break` / `return` / end-of-program.
+pub enum Run {
+    /// Walks raw bytecode and parses Instructions on the fly.
+    Bytecode { script: Vec<u8>, pc: usize },
+    /// Walks a pre-decoded list of Instructions with witnesses
+    /// already attached (prover side).
+    Queue {
+        instructions: Vec<crate::ops::Instruction>,
+        index: usize,
+    },
 }
 
 impl Run {
+    /// Constructs a Run that walks `script` as bytecode (verifier /
+    /// internal / nested `run`/`switch`).
     pub fn new(script: Vec<u8>) -> Self {
-        Self { script, pc: 0 }
+        Run::Bytecode { script, pc: 0 }
     }
 
-    /// Reads the next opcode byte and advances the program counter.
-    /// Returns `None` at end of script.
-    fn next_byte(&mut self) -> Option<u8> {
-        let b = self.script.get(self.pc).copied()?;
-        self.pc += 1;
-        Some(b)
+    /// Constructs a Run that walks a pre-decoded Program (prover's
+    /// main program — the witness-bearing variant of [`Instruction`]
+    /// is preserved at each step).
+    pub(crate) fn from_program(program: crate::program::Program) -> Self {
+        Run::Queue {
+            instructions: program.instructions().to_vec(),
+            index: 0,
+        }
     }
 
-    /// True iff PC has reached or passed the end of the script.
+    /// Returns the next [`Instruction`] in this Run, advancing the
+    /// cursor. `Ok(None)` at end of program.
+    pub(crate) fn next_instruction(
+        &mut self,
+    ) -> Result<Option<crate::ops::Instruction>, VMError> {
+        match self {
+            Run::Bytecode { script, pc } => {
+                if *pc >= script.len() {
+                    return Ok(None);
+                }
+                let mut slice: &[u8] = &script[*pc..];
+                let before = slice.len();
+                let instr = crate::ops::Instruction::parse(&mut slice)?;
+                *pc += before - slice.len();
+                Ok(Some(instr))
+            }
+            Run::Queue { instructions, index } => {
+                if *index >= instructions.len() {
+                    return Ok(None);
+                }
+                let instr = instructions[*index].clone();
+                *index += 1;
+                Ok(Some(instr))
+            }
+        }
+    }
+
+    /// True iff the Run has reached its end.
     pub(crate) fn is_finished(&self) -> bool {
-        self.pc >= self.script.len()
-    }
-
-    /// Reads one inline byte and advances PC. Errors if at end of script.
-    /// Used by opcodes that consume immediate operands (`pushint8`, etc.).
-    fn read_u8(&mut self) -> Result<u8, VMError> {
-        self.next_byte().ok_or(VMError::UnexpectedEndOfScript)
-    }
-
-    /// Reads `n` inline bytes and advances PC. Errors if fewer than `n`
-    /// bytes remain.
-    fn read_bytes(&mut self, n: usize) -> Result<&[u8], VMError> {
-        let start = self.pc;
-        let end = start.checked_add(n).ok_or(VMError::UnexpectedEndOfScript)?;
-        if end > self.script.len() {
-            return Err(VMError::UnexpectedEndOfScript);
+        match self {
+            Run::Bytecode { script, pc } => *pc >= script.len(),
+            Run::Queue { instructions, index } => *index >= instructions.len(),
         }
-        self.pc = end;
-        Ok(&self.script[start..end])
     }
 
-    /// Reads `n` ≤ 16 inline bytes as a little-endian unsigned magnitude.
-    /// `pushint8/16/64/128` use this for their magnitude operand.
-    fn read_le_uint(&mut self, n: usize) -> Result<u128, VMError> {
-        debug_assert!(n <= 16);
-        let bytes = self.read_bytes(n)?;
-        let mut acc: u128 = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            acc |= (b as u128) << (8 * i);
+    /// Resets the cursor to the start of the Run. Used by `loop`.
+    fn rewind(&mut self) {
+        match self {
+            Run::Bytecode { pc, .. } => *pc = 0,
+            Run::Queue { index, .. } => *index = 0,
         }
-        Ok(acc)
     }
 
-    /// Reads a sub-varint (the 1+payload-byte length prefix used by
-    /// `pushstr` and the wire format for dicts/strings).
-    ///
-    /// Matches the canonical sub-varint format from `encoding.rs`:
-    ///
-    /// ```text
-    /// tag 0  + 1 LE byte    → 0..=255
-    /// tag 1  + 2 LE bytes   → 256..=65_791   (value = 256 + w)
-    /// tag 2  + 4 LE bytes   → 65_792..       (value = 65_792 + w)
-    /// tag 3  + 8 LE bytes   → 4_295_033_088.. (value = 4_295_033_088 + w)
-    /// ```
-    fn read_sub_varint(&mut self) -> Result<u64, VMError> {
-        const SUBVAR_U16_BASE: u64 = 256;
-        const SUBVAR_U32_BASE: u64 = 65_792;
-        const SUBVAR_U64_BASE: u64 = 4_295_033_088;
-        let tag = self.read_u8()?;
-        match tag {
-            0 => Ok(self.read_u8()? as u64),
-            1 => {
-                let bytes = self.read_bytes(2)?;
-                let mut arr = [0u8; 2];
-                arr.copy_from_slice(bytes);
-                Ok(SUBVAR_U16_BASE + u16::from_le_bytes(arr) as u64)
-            }
-            2 => {
-                let bytes = self.read_bytes(4)?;
-                let mut arr = [0u8; 4];
-                arr.copy_from_slice(bytes);
-                Ok(SUBVAR_U32_BASE + u32::from_le_bytes(arr) as u64)
-            }
-            3 => {
-                let bytes = self.read_bytes(8)?;
-                let mut arr = [0u8; 8];
-                arr.copy_from_slice(bytes);
-                Ok(SUBVAR_U64_BASE.wrapping_add(u64::from_le_bytes(arr)))
-            }
-            _ => Err(VMError::UnexpectedEndOfScript),
+    /// Jumps the cursor past the end of the Run, so the next call to
+    /// `next_instruction` returns `None`. Used by `break:k`.
+    fn jump_to_end(&mut self) {
+        match self {
+            Run::Bytecode { script, pc } => *pc = script.len(),
+            Run::Queue { instructions, index } => *index = instructions.len(),
         }
     }
 }
@@ -349,9 +338,29 @@ impl CallFrame {
         mem_limit: u64,
         newbytes: u64,
     ) -> Self {
+        Self::new_with_run(
+            Run::new(script),
+            kind,
+            gas_limit,
+            mem_limit,
+            newbytes,
+        )
+    }
+
+    /// Like [`CallFrame::new`] but takes a pre-constructed [`Run`] —
+    /// used by the prover-side entry point ([`VM::run_external_program`])
+    /// which needs a `Run::Queue` over a witness-bearing Program rather
+    /// than a `Run::Bytecode` over a script slice.
+    pub fn new_with_run(
+        run: Run,
+        kind: CallKind,
+        gas_limit: u64,
+        mem_limit: u64,
+        newbytes: u64,
+    ) -> Self {
         Self {
             stack: Vec::new(),
-            current_run: Run::new(script),
+            current_run: run,
             run_stack: Vec::new(),
             kind,
             gas_limit,
@@ -414,12 +423,12 @@ impl VM {
         Ok(vm.into_result())
     }
 
-    /// Runs an external transaction script to completion without
+    /// Runs an external transaction *bytecode* to completion without
     /// calling `Delegate::finalize`. Returns the resource summary plus
     /// the accumulated deferred signatures; the caller (typically
-    /// [`crate::Prover::prove`] or [`crate::Verifier::verify`]) then
-    /// drives its own proof-construction or proof-verification step
-    /// against the borrowed delegate before discarding it.
+    /// [`crate::Verifier::verify`]) then drives its own
+    /// proof-verification step against the borrowed delegate before
+    /// discarding it.
     ///
     /// Lower-level counterpart of [`Self::execute_external`], which
     /// consumes the delegate and finalizes it inline. Both share the
@@ -434,6 +443,33 @@ impl VM {
         let mut vm = Self::new(
             header,
             CallFrame::new(script, CallKind::ExternalRoot, gas_limit, mem_limit, 0),
+        );
+        while vm.step_external(delegate)? {}
+        let sigs = mem::take(&mut vm.deferred_sigs);
+        Ok((vm.into_result(), sigs))
+    }
+
+    /// Prover-side counterpart of [`Self::run_external`]: takes a
+    /// [`crate::Program`] (witness-bearing Instructions) instead of
+    /// bytecode. The VM walks the program via `Run::Queue`, so
+    /// `Instruction::Alloc(Some(witness))` retains its witness when
+    /// dispatched.
+    pub(crate) fn run_external_program<D: Delegate>(
+        header: TxHeader,
+        program: crate::program::Program,
+        gas_limit: u64,
+        mem_limit: u64,
+        delegate: &mut D,
+    ) -> Result<(TxResult, Vec<DeferredSig>), VMError> {
+        let mut vm = Self::new(
+            header,
+            CallFrame::new_with_run(
+                Run::from_program(program),
+                CallKind::ExternalRoot,
+                gas_limit,
+                mem_limit,
+                0,
+            ),
         );
         while vm.step_external(delegate)? {}
         let sigs = mem::take(&mut vm.deferred_sigs);
@@ -487,419 +523,170 @@ impl VM {
 
     // ── Dispatch ─────────────────────────────────────────────────
 
-    /// Executes one opcode in external context. Returns `Ok(true)` to
-    /// keep running, `Ok(false)` to stop (entire tx finished).
+    /// Executes one [`Instruction`] in external context. Returns
+    /// `Ok(true)` to keep running, `Ok(false)` to stop (entire tx
+    /// finished).
     fn step_external<D: Delegate>(&mut self, delegate: &mut D) -> Result<bool, VMError> {
-        let Some(op) = self.current_call.current_run.next_byte() else {
+        let Some(instr) = self.current_call.current_run.next_instruction()? else {
             return self.finish_run();
         };
-        // Phase 11: CS-bound opcodes and Expression-overload paths run
-        // first so they can consult the delegate when the top of stack
-        // carries `Expression`/`Constraint` operands.
-        if self.try_external_overload(op, delegate)? {
-            return Ok(true);
-        }
-        if self.try_common(op)? {
-            return Ok(true);
-        }
-        // External-only opcodes (extvar, intvar, range, ...).
-        match op {
-            0x90 => {
-                self.op_input()?;
-                Ok(true)
-            }
-            _ => Err(VMError::UnknownOpcode(op)),
-        }
+        self.dispatch_external(instr, delegate)?;
+        Ok(true)
     }
 
-    /// Tries opcodes that either (a) only make sense in external
-    /// context (`alloc`, `expr`) or (b) overload an existing common
-    /// opcode when the top-of-stack carries CS types (`add` / `eq` /
-    /// `verify` on Expression / Constraint). Returns `Ok(true)` if
-    /// handled; `Ok(false)` to fall through to `try_common`.
-    fn try_external_overload<D: Delegate>(
-        &mut self,
-        op: u8,
-        delegate: &mut D,
-    ) -> Result<bool, VMError> {
-        match op {
-            // alloc — always CS-bound.
-            0x5c => {
-                self.op_alloc(delegate)?;
-                Ok(true)
-            }
-            // expr — always CS-bound.
-            0x5d => {
-                self.op_expr(delegate)?;
-                Ok(true)
-            }
-            // add — Expression overload when either operand is non-Int253.
-            0x53 if self.top_two_have_non_int253() => {
-                self.op_add_expr()?;
-                Ok(true)
-            }
-            // neg — Expression overload when top is Expression.
-            0x52 if self.top_is_expression() => {
-                self.op_neg_expr()?;
-                Ok(true)
-            }
-            // mul — Expression overload (needs CS).
-            0x54 if self.top_two_have_non_int253() => {
-                self.op_mul_expr(delegate)?;
-                Ok(true)
-            }
-            // eq — Expression overload pushes a Constraint.
-            0x51 if self.top_two_have_non_int253() => {
-                self.op_eq_expr()?;
-                Ok(true)
-            }
-            // verify — Constraint overload (needs CS).
-            0x79 if self.top_is_constraint() => {
-                self.op_verify_constraint(delegate)?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
-    }
-
-    /// Executes one opcode in internal context. Returns `Ok(true)` to
-    /// keep running, `Ok(false)` to stop.
+    /// Executes one [`Instruction`] in internal context.
     fn step_internal(&mut self) -> Result<bool, VMError> {
-        let Some(op) = self.current_call.current_run.next_byte() else {
+        let Some(instr) = self.current_call.current_run.next_instruction()? else {
             return self.finish_run();
         };
-        if self.try_common(op)? {
-            return Ok(true);
-        }
-        // Internal-only opcodes (call, send, load, save, ...).
-        match op {
-            // External-only opcodes seen here are a deterministic error so
-            // internal-context scripts surface them with the right reason
-            // code rather than the generic "unknown opcode" path.
-            0x90 => Err(VMError::ExternalOnly),
-            _ => Err(VMError::UnknownOpcode(op)),
+        self.dispatch_internal(instr)?;
+        Ok(true)
+    }
+
+    /// External-context dispatch. Routes CS-bound and external-only
+    /// instructions; falls through to common dispatch for the rest.
+    /// Expression / Constraint overloads of `add` / `mul` / `eq` /
+    /// `neg` / `verify` are detected via a stack-top type peek (top of
+    /// stack is an `Expression` or `Constraint`).
+    fn dispatch_external<D: Delegate>(
+        &mut self,
+        instr: crate::ops::Instruction,
+        delegate: &mut D,
+    ) -> Result<(), VMError> {
+        use crate::ops::Instruction as I;
+        match instr {
+            // ── Phase 11: CS-bound opcodes ────────────────────────
+            I::Alloc(w) => self.op_alloc(w, delegate),
+            I::Expr => self.op_expr(delegate),
+            // ── Phase 11: Expression / Constraint overloads ───────
+            I::Neg if self.top_is_expression() => self.op_neg_expr(),
+            I::Add if self.top_two_have_non_int253() => self.op_add_expr(),
+            I::Mul if self.top_two_have_non_int253() => self.op_mul_expr(delegate),
+            I::Eq if self.top_two_have_non_int253() => self.op_eq_expr(),
+            I::Verify if self.top_is_constraint() => self.op_verify_constraint(delegate),
+            // ── Phase 10a: external-only ──────────────────────────
+            I::Input => self.op_input(),
+            // ── Everything else → common dispatch ─────────────────
+            other => self.dispatch_common(other),
         }
     }
 
-    /// Dispatches opcodes whose behavior is identical in both contexts.
-    /// Returns `Ok(true)` if handled, `Ok(false)` if not (callers fall
-    /// through to context-specific dispatch), `Err` on failure.
-    fn try_common(&mut self, op: u8) -> Result<bool, VMError> {
-        match op {
-            // ── Phase 1: stack literals & manipulation ─────────────
-            // push:k — small immediate
-            0x00..=0x0f => {
-                self.push_value(Value::Int253(Int253::from(op as u64)));
-                Ok(true)
-            }
-            // pushint{8,16,64,128} — magnitude width × sign pair
-            0x10 | 0x11 => {
-                self.op_pushint_magnitude(1, op == 0x11)?;
-                Ok(true)
-            }
-            0x12 | 0x13 => {
-                self.op_pushint_magnitude(2, op == 0x13)?;
-                Ok(true)
-            }
-            0x14 | 0x15 => {
-                self.op_pushint_magnitude(8, op == 0x15)?;
-                Ok(true)
-            }
-            0x16 | 0x17 => {
-                self.op_pushint_magnitude(16, op == 0x17)?;
-                Ok(true)
-            }
-            // pushint — full 32-byte sign-magnitude
-            0x18 => {
-                self.op_pushint_full()?;
-                Ok(true)
-            }
-            0x19 => {
-                self.op_pushstr()?;
-                Ok(true)
-            }
-            0x1a => {
-                self.op_pushpoint()?;
-                Ok(true)
-            }
-            0x1b => {
-                self.op_pushtoken()?;
-                Ok(true)
-            }
-            0x1c => {
-                self.op_drop()?;
-                Ok(true)
-            }
-            0x1d => {
-                self.op_nop()?;
-                Ok(true)
-            }
-            0x1e => {
-                self.op_dup()?;
-                Ok(true)
-            }
-            0x1f => {
-                self.op_roll()?;
-                Ok(true)
-            }
-            // dup:k — k encoded in the low nibble
-            0x20..=0x2f => {
-                self.op_dup_k((op - 0x20) as usize)?;
-                Ok(true)
-            }
-            // roll:k
-            0x30..=0x3f => {
-                self.op_roll_k((op - 0x30) as usize)?;
-                Ok(true)
-            }
-            // ── Phase 4: string ops ────────────────────────────────
-            0x40 => {
-                self.op_read_bits()?;
-                Ok(true)
-            }
-            0x41 => {
-                self.op_read_int()?;
-                Ok(true)
-            }
-            0x42 => {
-                self.op_read_str()?;
-                Ok(true)
-            }
-            0x43 => {
-                self.op_read_point()?;
-                Ok(true)
-            }
-            0x44 => {
-                self.op_write_bits()?;
-                Ok(true)
-            }
-            0x45 => {
-                self.op_write_int()?;
-                Ok(true)
-            }
-            0x46 => {
-                self.op_append()?;
-                Ok(true)
-            }
-            0x47 => {
-                self.op_write_zeros()?;
-                Ok(true)
-            }
-            0x48 => {
-                self.op_bit_not()?;
-                Ok(true)
-            }
-            0x49 => {
-                self.op_bit_or()?;
-                Ok(true)
-            }
-            0x4a => {
-                self.op_bit_and()?;
-                Ok(true)
-            }
-            0x4b => {
-                self.op_bit_xor()?;
-                Ok(true)
-            }
-            0x4c => {
-                self.op_shift_left()?;
-                Ok(true)
-            }
-            0x4d => {
-                self.op_shift_right()?;
-                Ok(true)
-            }
-            0x4e => {
-                self.op_keccak256()?;
-                Ok(true)
-            }
-            // ── Phase 3: Int253 arithmetic, logic, size ────────────
-            0x50 => {
-                self.op_abs()?;
-                Ok(true)
-            }
-            0x51 => {
-                self.op_eq()?;
-                Ok(true)
-            }
-            0x52 => {
-                self.op_neg()?;
-                Ok(true)
-            }
-            0x53 => {
-                self.op_add()?;
-                Ok(true)
-            }
-            0x54 => {
-                self.op_mul()?;
-                Ok(true)
-            }
-            0x55 => {
-                self.op_divmod()?;
-                Ok(true)
-            }
-            0x56 => {
-                self.op_mod252()?;
-                Ok(true)
-            }
-            0x57 => {
-                self.op_not()?;
-                Ok(true)
-            }
-            0x58 => {
-                self.op_and()?;
-                Ok(true)
-            }
-            0x59 => {
-                self.op_or()?;
-                Ok(true)
-            }
-            0x5f => {
-                self.op_size()?;
-                Ok(true)
-            }
-            // ── Phase 5: Dict ops ──────────────────────────────────
-            0x60 => {
-                self.op_dict()?;
-                Ok(true)
-            }
-            0x61 => {
-                self.op_put()?;
-                Ok(true)
-            }
-            0x62 => {
-                self.op_replace()?;
-                Ok(true)
-            }
-            0x63 => {
-                self.op_get()?;
-                Ok(true)
-            }
-            0x64 => {
-                self.op_getopt()?;
-                Ok(true)
-            }
-            0x65 => {
-                self.op_getdup()?;
-                Ok(true)
-            }
-            0x66 => {
-                self.op_first()?;
-                Ok(true)
-            }
-            0x67 => {
-                self.op_last()?;
-                Ok(true)
-            }
-            0x68 => {
-                self.op_next()?;
-                Ok(true)
-            }
-            // ── Phase 8: token opcodes (cleartext branches) ────────
-            0x70 => {
-                self.op_amount()?;
-                Ok(true)
-            }
-            0x71 => {
-                self.op_issue()?;
-                Ok(true)
-            }
-            0x72 => {
-                self.op_retire()?;
-                Ok(true)
-            }
-            0x73 => {
-                self.op_borrow()?;
-                Ok(true)
-            }
-            0x74 => {
-                self.op_merge()?;
-                Ok(true)
-            }
-            0x75 => {
-                self.op_split()?;
-                Ok(true)
-            }
-            0x78 => {
-                self.op_issueflv()?;
-                Ok(true)
-            }
-            // ── Phase 9: cells & cell-open opcodes ─────────────────
-            0x91 => {
-                self.op_cell()?;
-                Ok(true)
-            }
-            0x92 => {
-                self.op_output()?;
-                Ok(true)
-            }
-            0x93 => {
-                self.op_open()?;
-                Ok(true)
-            }
-            0x98 => {
-                self.op_signtx()?;
-                Ok(true)
-            }
-            0x99 => {
-                self.op_signrun()?;
-                Ok(true)
-            }
-            // ── Phase 6: Hash & Merlin ─────────────────────────────
-            0x69 => {
-                self.op_merlin()?;
-                Ok(true)
-            }
-            0x6a => {
-                self.op_merlin_write()?;
-                Ok(true)
-            }
-            0x6b => {
-                self.op_merlin_read()?;
-                Ok(true)
-            }
-            0x6c => {
-                self.op_sha256()?;
-                Ok(true)
-            }
-            0x6d => {
-                self.op_sha512()?;
-                Ok(true)
-            }
-            0x6e => {
-                self.op_sha3()?;
-                Ok(true)
-            }
-            // ── Phase 2: control flow ──────────────────────────────
-            0x79 => {
-                self.op_verify()?;
-                Ok(true)
-            }
-            0x7b => {
-                self.op_run()?;
-                Ok(true)
-            }
-            0x7c => {
-                self.op_loop()?;
-                Ok(true)
-            }
-            0x7d => {
-                self.op_switch()?;
-                Ok(true)
-            }
-            0x7e => {
-                self.op_return()?;
-                Ok(true)
-            }
-            0x7f => {
-                self.op_type()?;
-                Ok(true)
-            }
-            0x80..=0x8f => {
-                self.op_break_k((op - 0x80) as usize)?;
-                Ok(true)
-            }
-            _ => Ok(false),
+    /// Internal-context dispatch. External-only instructions surface a
+    /// definite `ExternalOnly` error rather than the generic
+    /// `UnknownOpcode` path.
+    fn dispatch_internal(&mut self, instr: crate::ops::Instruction) -> Result<(), VMError> {
+        use crate::ops::Instruction as I;
+        match instr {
+            I::Input | I::Alloc(_) | I::Expr => Err(VMError::ExternalOnly),
+            other => self.dispatch_common(other),
+        }
+    }
+
+    /// Dispatches instructions whose behavior is identical in both
+    /// contexts. Unhandled instructions error `UnknownOpcode` (via
+    /// `Ext(byte)`) — internal/external dispatchers should intercept
+    /// any instruction that has context-dependent semantics before
+    /// falling through here.
+    fn dispatch_common(&mut self, instr: crate::ops::Instruction) -> Result<(), VMError> {
+        use crate::ops::Instruction as I;
+        match instr {
+            // ── Phase 1: stack literals & manipulation ────────────
+            I::PushInt(i) => {
+                self.push_value(Value::Int253(i));
+                Ok(())
+            }
+            I::PushStr(s) => {
+                self.push_value(Value::String(s));
+                Ok(())
+            }
+            I::PushPoint(bytes) => {
+                self.push_value(Value::Point(Point::from_bytes(bytes)));
+                Ok(())
+            }
+            I::PushToken => self.op_pushtoken(),
+            I::Drop => self.op_drop(),
+            I::Nop => self.op_nop(),
+            I::Dup => self.op_dup(),
+            I::Roll => self.op_roll(),
+            I::DupK(k) => self.op_dup_k(k as usize),
+            I::RollK(k) => self.op_roll_k(k as usize),
+            // ── Phase 4: string ops ───────────────────────────────
+            I::ReadBits => self.op_read_bits(),
+            I::ReadInt => self.op_read_int(),
+            I::ReadStr => self.op_read_str(),
+            I::ReadPoint => self.op_read_point(),
+            I::WriteBits => self.op_write_bits(),
+            I::WriteInt => self.op_write_int(),
+            I::Append => self.op_append(),
+            I::WriteZeros => self.op_write_zeros(),
+            I::BitNot => self.op_bit_not(),
+            I::BitOr => self.op_bit_or(),
+            I::BitAnd => self.op_bit_and(),
+            I::BitXor => self.op_bit_xor(),
+            I::ShiftLeft => self.op_shift_left(),
+            I::ShiftRight => self.op_shift_right(),
+            I::Keccak256 => self.op_keccak256(),
+            // ── Phase 3: Int253 arithmetic ────────────────────────
+            I::Abs => self.op_abs(),
+            I::Eq => self.op_eq(),
+            I::Neg => self.op_neg(),
+            I::Add => self.op_add(),
+            I::Mul => self.op_mul(),
+            I::DivMod => self.op_divmod(),
+            I::Mod252 => self.op_mod252(),
+            I::Not => self.op_not(),
+            I::And => self.op_and(),
+            I::Or => self.op_or(),
+            I::Size => self.op_size(),
+            // ── Phase 5: Dict ops ─────────────────────────────────
+            I::Dict => self.op_dict(),
+            I::Put => self.op_put(),
+            I::Replace => self.op_replace(),
+            I::Get => self.op_get(),
+            I::GetOpt => self.op_getopt(),
+            I::GetDup => self.op_getdup(),
+            I::First => self.op_first(),
+            I::Last => self.op_last(),
+            I::Next => self.op_next(),
+            // ── Phase 6: Hash & Merlin ────────────────────────────
+            I::Merlin => self.op_merlin(),
+            I::MerlinWrite => self.op_merlin_write(),
+            I::MerlinRead => self.op_merlin_read(),
+            I::Sha256 => self.op_sha256(),
+            I::Sha512 => self.op_sha512(),
+            I::Sha3 => self.op_sha3(),
+            // ── Phase 8: tokens (cleartext branches) ──────────────
+            I::Amount => self.op_amount(),
+            I::Issue => self.op_issue(),
+            I::Retire => self.op_retire(),
+            I::Borrow => self.op_borrow(),
+            I::Merge => self.op_merge(),
+            I::Split => self.op_split(),
+            I::IssueFlv => self.op_issueflv(),
+            // ── Phase 2: control flow ─────────────────────────────
+            I::Verify => self.op_verify(),
+            I::Run => self.op_run(),
+            I::Loop => self.op_loop(),
+            I::Switch => self.op_switch(),
+            I::Return => self.op_return(),
+            I::Type => self.op_type(),
+            I::BreakK(k) => self.op_break_k(k as usize),
+            // ── Phase 9: cells & cell-open ────────────────────────
+            I::Cell => self.op_cell(),
+            I::Output => self.op_output(),
+            I::Open => self.op_open(),
+            I::Signtx => self.op_signtx(),
+            I::Signrun => self.op_signrun(),
+            // ── Context-only — caller should have intercepted ─────
+            I::Input | I::Alloc(_) | I::Expr => {
+                // External-only instructions reach common dispatch
+                // only via internal context (where they're already
+                // intercepted) or via misdispatch. Surface a definite
+                // error.
+                Err(VMError::ExternalOnly)
+            }
+            // Unknown / extension opcodes.
+            I::Ext(b) => Err(VMError::UnknownOpcode(b)),
         }
     }
 
@@ -979,52 +766,10 @@ impl VM {
 
     // ── Phase 1 opcode handlers ─────────────────────────────────
 
-    /// `0x10..=0x17` `pushint{8,16,64,128}` — reads `n_bytes` little-endian
-    /// inline bytes as an unsigned magnitude, attaches the opcode-encoded
-    /// sign, pushes an `Int253`.
-    fn op_pushint_magnitude(&mut self, n_bytes: usize, negative: bool) -> Result<(), VMError> {
-        let magnitude = self.current_call.current_run.read_le_uint(n_bytes)?;
-        // All u128 values are valid scalars (well below ℓ ≈ 2²⁵²).
-        let mut scalar_bytes = [0u8; 32];
-        scalar_bytes[..16].copy_from_slice(&magnitude.to_le_bytes());
-        let scalar = Scalar::from_canonical_bytes(scalar_bytes)
-            .ok_or(VMError::InvalidInt253Encoding)?;
-        let int = Int253::from_parts(negative, scalar);
-        self.push_value(Value::Int253(int));
-        Ok(())
-    }
-
-    /// `0x18` `pushint` — reads 32 inline bytes as a canonical
-    /// sign-magnitude `Int253`.
-    fn op_pushint_full(&mut self) -> Result<(), VMError> {
-        let bytes = self.current_call.current_run.read_bytes(32)?;
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(bytes);
-        let int = Int253::from_bytes(arr).ok_or(VMError::InvalidInt253Encoding)?;
-        self.push_value(Value::Int253(int));
-        Ok(())
-    }
-
-    /// `0x19` `pushstr` — reads sub-varint length, then that many inline
-    /// bytes, pushes a `String`.
-    fn op_pushstr(&mut self) -> Result<(), VMError> {
-        let len = self.current_call.current_run.read_sub_varint()?;
-        let len = usize::try_from(len).map_err(|_| VMError::UnexpectedEndOfScript)?;
-        let bytes = self.current_call.current_run.read_bytes(len)?;
-        let s = String::from(bytes.to_vec());
-        self.push_value(Value::String(s));
-        Ok(())
-    }
-
-    /// `0x1a` `pushpoint` — reads 32 inline bytes as a compressed
-    /// Ristretto encoding (decompressability is not validated here).
-    fn op_pushpoint(&mut self) -> Result<(), VMError> {
-        let bytes = self.current_call.current_run.read_bytes(32)?;
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(bytes);
-        self.push_value(Value::Point(Point::from_bytes(arr)));
-        Ok(())
-    }
+    // `pushint`/`pushstr`/`pushpoint` are now inline in
+    // `dispatch_common`: `Instruction::parse` decodes their inline
+    // bytes into typed payloads (Int253 / String / [u8; 32]) so the
+    // handlers reduce to a single `push_value` call.
 
     /// `0x1b` `pushtoken` — `flv → token`. Pops an `Int253` flavor from
     /// the stack and pushes a zero-qty `ClearToken { qty: 0, flv }`. This
@@ -1738,11 +1483,11 @@ impl VM {
         Ok(())
     }
 
-    /// `0x7c` `loop` — resets the current Run's PC to the start.
+    /// `0x7c` `loop` — resets the current Run's cursor to the start.
     /// Without a `break`/`return` reachable from inside, this is an
     /// unbounded loop; gas metering (Phase 17) is the long-term cap.
     fn op_loop(&mut self) -> Result<(), VMError> {
-        self.current_call.current_run.pc = 0;
+        self.current_call.current_run.rewind();
         Ok(())
     }
 
@@ -1833,11 +1578,10 @@ impl VM {
         for _ in 0..k {
             self.current_call.run_stack.pop();
         }
-        // End the current Run by jumping its PC to the script end. The
+        // End the current Run by jumping its cursor to the end. The
         // dispatch loop's `finish_run` will pop the next saved Run (or
         // call `finish_call` if none).
-        let run = &mut self.current_call.current_run;
-        run.pc = run.script.len();
+        self.current_call.current_run.jump_to_end();
         Ok(())
     }
 
@@ -2403,13 +2147,19 @@ impl VM {
         !(a && b)
     }
 
-    /// `0x5c alloc` — allocates a low-level R1CS variable, pulling the
-    /// next witness from the prover's queue (`None` for the verifier).
-    /// Pushes `Expression::LinearCombination([(v, 1)], witness?)` so
+    /// `0x5c alloc` — allocates a low-level R1CS variable. The witness
+    /// comes from `Instruction::Alloc(Option<Int253>)`: `Some(i)` on
+    /// the prover side (cleartext value the CS uses when proving),
+    /// `None` on the verifier side (no assignment — the variable is
+    /// algebraically constrained later by `eq` / `verify`). Pushes
+    /// `Expression::LinearCombination([(v, 1)], witness?)` so
     /// downstream arithmetic / equality ops see a one-term Expression.
-    fn op_alloc<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+    fn op_alloc<D: Delegate>(
+        &mut self,
+        witness: Option<Int253>,
+        delegate: &mut D,
+    ) -> Result<(), VMError> {
         use bulletproofs::r1cs::ConstraintSystem;
-        let witness = delegate.next_alloc_witness();
         let witness_scalar = witness.map(|i| i.to_scalar_mod_order());
         let r1cs_var = delegate
             .cs()
@@ -2555,12 +2305,23 @@ mod tests {
     }
 
     #[test]
-    fn run_advances_pc() {
-        let mut run = Run::new(vec![0x10, 0x20, 0x30]);
-        assert_eq!(run.next_byte(), Some(0x10));
-        assert_eq!(run.next_byte(), Some(0x20));
-        assert_eq!(run.next_byte(), Some(0x30));
-        assert_eq!(run.next_byte(), None);
+    fn run_advances_through_instructions() {
+        // Bytecode: push:5, drop, nop. Three Instructions, then end.
+        let mut run = Run::new(vec![0x05, 0x1c, 0x1d]);
+        use crate::ops::Instruction;
+        assert!(matches!(
+            run.next_instruction().unwrap(),
+            Some(Instruction::PushInt(_))
+        ));
+        assert!(matches!(
+            run.next_instruction().unwrap(),
+            Some(Instruction::Drop)
+        ));
+        assert!(matches!(
+            run.next_instruction().unwrap(),
+            Some(Instruction::Nop)
+        ));
+        assert!(run.next_instruction().unwrap().is_none());
     }
 
     #[test]
@@ -3028,13 +2789,15 @@ mod tests {
     // ── loop (0x7c) ──────────────────────────────────────────────
 
     #[test]
-    fn loop_resets_pc_to_zero() {
-        // nop, loop — after nop pc=1; after loop pc=0.
+    fn loop_resets_run_cursor_to_start() {
+        // nop, loop — after `loop` the Run cursor is back at the start,
+        // so the next step parses `nop` again (not end-of-script).
         let mut vm = vm_with_script(vec![0x1d, 0x7c]);
-        vm.step_internal().unwrap();
-        assert_eq!(vm.current_call.current_run.pc, 1);
-        vm.step_internal().unwrap();
-        assert_eq!(vm.current_call.current_run.pc, 0);
+        vm.step_internal().unwrap(); // nop
+        vm.step_internal().unwrap(); // loop
+        // Cursor should be at the start: the next instruction is `nop` again.
+        let next = vm.current_call.current_run.next_instruction().unwrap();
+        assert!(matches!(next, Some(crate::ops::Instruction::Nop)));
     }
 
     // ── switch (0x7d) ────────────────────────────────────────────
@@ -6762,15 +6525,20 @@ mod tests {
         // inspect the produced Expression.
         let pc_gens = PedersenGens::default();
         let program = Program::new().alloc(Some(Int253::from(42u64)));
-        let bytecode = program.to_bytecode();
-        let witnesses = program.to_witnesses();
-        let mut prover = Prover::new(&pc_gens, witnesses);
+        let mut prover = Prover::new(&pc_gens);
         // We bypass the public `Prover::prove` so we can inspect VM
-        // state mid-flight.
+        // state mid-flight. Build a Run::Queue from the Program so the
+        // Alloc instruction's witness survives dispatch.
         let kind = CallKind::ExternalRoot;
         let mut vm = VM::new(
             dummy_header(),
-            CallFrame::new(bytecode, kind, 1_000_000, 0, 0),
+            CallFrame::new_with_run(
+                Run::from_program(program),
+                kind,
+                1_000_000,
+                0,
+                0,
+            ),
         );
         // One step → executes the alloc.
         vm.step_external(&mut prover).expect("alloc step ok");

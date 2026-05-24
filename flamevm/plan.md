@@ -632,59 +632,66 @@ end-to-end testing. Revisit alongside Phase 15.
 
 ---
 
-### ✅ Phase 11 — Constraint system bootstrap (real Prover/Verifier) — MVP done
+### ✅ Phase 11 — Constraint system bootstrap (real Prover/Verifier)
 
-**Status**: shipped as a pragmatic MVP. The Phase-11 milestone goal —
-`alloc(7) + alloc(3) == alloc(10)` proves+verifies end-to-end — works
-through the full `Prover::prove` / `Verifier::verify` pipeline,
-backed by `bulletproofs::r1cs::Prover` / `Verifier`. Multiplication
-and negation also exercise CS round-trip. Tests at the end of this
-section list the eight concrete prove+verify cases.
+**Status**: shipped. Six of the eight substeps are complete and match
+zkvm's design closely; two (rich `String`, `scalar`/`commit` opcodes)
+remain deferred to Phase 13 alongside confidential-token machinery
+that benefits from the same refactor.
 
-**Pragmatic deviations from the original 8-substep plan** (documented
-so the deferred work is explicit):
+**Substep status**:
 
-- 11.1 (Instruction enum): **partial** — defined with the seven CS-
-  relevant variants (`Alloc`, `Expr`, `Neg`, `Add`, `Mul`, `Eq`,
-  `Verify`) plus a `Raw(Vec<u8>)` escape hatch for splicing arbitrary
-  existing bytecode into a prover Program. The full 50-variant
-  enumeration with `Instruction::parse` is **deferred** — bytecode
-  walking still goes through `Run::next_byte` for non-CS opcodes.
-- 11.2 (rich `String` enum): **deferred to Phase 13**. The current
-  flat `String { inner: Vec<u8> }` is unchanged. This means the
-  `0x5a scalar` / `0x5b commit` opcodes that need witness-bearing
-  Strings (e.g. `Commitment::Open(witness)`) are not in this phase.
-  They land alongside confidential-token machinery in Phase 13.
-- 11.3 (`Program` builder): **shipped** but minimal — fluent methods
-  for the seven Instruction variants + `raw()` escape hatch + `.to_bytecode()` and `.to_witnesses()`. No `ProgramItem` wrapper (Phase 13 adds it when the prover/verifier asymmetry crosses cell-open boundaries).
-- 11.4 (VM-loop refactor): **skipped**. The Phase-11 MVP keeps the
-  existing byte-dispatch loop intact. Witness data flows through a
-  *side-channel queue* on the Delegate (`next_alloc_witness`) rather
-  than embedded in a dispatched `Instruction`. zkvm's design is more
-  elegant for stack-manipulation of witnesses, but the side-channel
-  works fine for Phase 11's `alloc`-only witness path and avoids
-  rewriting ~50 dispatch arms.
-- 11.5 (Prover + Verifier): **shipped** as `prover.rs` and
-  `verifier.rs` (mirroring zkvm's file split; `vm.rs` remains the
-  common `Delegate`-trait home). Both wrap the bulletproofs CS
-  clients; `Prover::prove(pc_gens, program, header, gas, mem)`
-  returns `(bytecode, proof, result, sigs)`;
-  `Verifier::verify(pc_gens, bytecode, proof, header, gas, mem)`
-  returns `(result, sigs)` after `r1cs::Verifier::verify` accepts.
-- 11.6 (CS opcodes): **partial** — `0x5c alloc` and `0x5d expr` are
-  wired. `0x5a scalar` and `0x5b commit` deferred to Phase 13
-  (need rich `String`).
-- 11.7 (Expression overloads): **shipped** for `0x52 neg`, `0x53
-  add`, `0x54 mul`, `0x51 eq`, `0x79 verify`. Dispatched via the
-  new `try_external_overload` layer in `step_external`, which
-  inspects the top of stack — Expression operands route to the
-  overload, Int253 operands fall through to the existing
-  `try_common` path. Mixed Int253/Expression operands are
-  constant-folded into the Expression path.
-- 11.8 (public API): **shipped** as `Prover::prove` and
-  `Verifier::verify`. Sufficient for Phase 11 milestone; the
-  `VM::execute_external_keep_delegate` helper (in `vm.rs`) backs
-  both.
+- ✅ 11.1 (Instruction enum) — full ~60-variant enum mirroring
+  zkvm's `Instruction`. Every opcode has a typed variant; `Ext(u8)`
+  catches unknown bytes for forward-compat. `PushInt(Int253)` picks
+  the narrowest opcode width canonically. `Alloc(Option<Int253>)`
+  is the sole witness-bearing variant; `encode()` discards witness.
+  `Instruction::parse` produces an `Instruction` from a `Reader`,
+  consolidating what used to live inline in `op_pushint*` /
+  `op_pushstr` / `op_pushpoint`.
+- ⏸️ 11.2 (rich `String` enum) — **deferred to Phase 13**. The
+  current flat `String { inner: Vec<u8> }` is unchanged. This means
+  the `0x5a scalar` / `0x5b commit` opcodes that need
+  witness-bearing Strings (e.g. `Commitment::Open(witness)`) are
+  not in this phase. They land alongside confidential-token
+  machinery in Phase 13.
+- ✅ 11.3 (`Program` builder) — full fluent API: one method per
+  Instruction variant (~60), `to_bytecode()`, `to_witnesses()`,
+  `parse(bytes)`, `raw_bytes(bytes)`. `ProgramItem { Bytecode,
+  Program }` wrapper added per zkvm pattern.
+- ✅ 11.4 (VM-loop refactor) — `Run` is now an enum:
+  - `Run::Bytecode { script, pc }` — verifier and internal contexts
+    parse Instructions on the fly via `Instruction::parse`.
+  - `Run::Queue { instructions, index }` — prover walks pre-decoded
+    Instructions with witnesses attached to each `Alloc`.
+  `Run::next_instruction()`, `rewind()`, `jump_to_end()` are the
+  three operations the dispatcher uses; the rest is in
+  `Instruction::parse`. The new `dispatch_common(instr)` and
+  `dispatch_external(instr, delegate)` replace the old
+  byte-matched `try_common` / `try_external_overload` —
+  context-specific instructions and Expression / Constraint
+  overloads still match in `dispatch_external` before falling
+  through. The side-channel witness queue is gone; witnesses
+  travel via `Instruction::Alloc(Option<Int253>)` straight from
+  the prover's Program.
+- ✅ 11.5 (Prover + Verifier) — `prover.rs` and `verifier.rs`
+  mirroring zkvm's file split. `Prover::prove(pc_gens, program,
+  header, gas, mem) -> (bytecode, proof, result, sigs)` runs the
+  program via the new `VM::run_external_program` (which builds a
+  `Run::Queue` from the witness-bearing Program). `Verifier::verify`
+  uses the existing `VM::run_external` (bytecode).
+- ⏸️ 11.6 (CS opcodes) — `0x5c alloc` and `0x5d expr` are wired.
+  `0x5a scalar` and `0x5b commit` deferred to Phase 13 (need rich
+  `String` so witnesses can travel on the stack through
+  `dup`/`roll`/dict ops).
+- ✅ 11.7 (Expression overloads) — `0x52 neg`, `0x53 add`, `0x54
+  mul`, `0x51 eq`, `0x79 verify` all have Expression /
+  Constraint-aware paths in `dispatch_external`. Mixed
+  Int253/Expression operands constant-fold into the Expression
+  path via `pop_expression_or_const`.
+- ✅ 11.8 (public API) — `Prover::prove` and `Verifier::verify`.
+  Lower-level helpers: `VM::run_external` (bytecode) and
+  `VM::run_external_program` (witness-bearing Program).
 
 **Added** (file-by-file):
 
@@ -745,15 +752,16 @@ so the deferred work is explicit):
   constructs a proof of an unsatisfiable constraint; verifier
   rejects.
 
-**Total**: 331 → **340 tests** (+9 new).
+**Total**: 331 → **349 tests** (+18 new across the MVP and the full
+refactor — `instruction_*`, `program_builder_*`, `prove_then_verify_*`,
+`alloc_*`, `run_advances_through_instructions`,
+`loop_resets_run_cursor_to_start`, etc.).
 
 **Deferred to later phases**:
 - Rich `String` enum + `0x5a scalar` / `0x5b commit` opcodes →
-  Phase 13 (where confidential tokens need them anyway).
-- Full Instruction-driven VM loop (zkvm's RunType-generic dispatch
-  with parsed-on-the-fly Instruction stream) — may never be
-  needed; current side-channel approach delivers the asymmetry
-  cleanly. Revisit if Phase 13 or Phase 14 hits a wall.
+  Phase 13 (where confidential tokens need them anyway). The
+  prover-side witness-on-stack pattern (push String::Commitment,
+  pop and downcast in `commit`) requires the enum refactor first.
 - `signtx` / `signrun` deferred-sig batch verification — Phase 14.
 - TxID computation over txlog — Phase 17.
 

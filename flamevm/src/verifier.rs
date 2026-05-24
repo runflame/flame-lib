@@ -10,13 +10,12 @@
 //! any divergence silently invalidates every proof. Both files
 //! consume `flamevm.r1cs.v1`.
 
-use bulletproofs::r1cs::{self, ConstraintSystem, R1CSProof};
+use bulletproofs::r1cs::{self, R1CSProof};
 use bulletproofs::{BulletproofGens, PedersenGens};
 use curve25519_dalek::ristretto::CompressedRistretto;
 use merlin::Transcript;
 
 use crate::errors::VMError;
-use crate::int253::Int253;
 use crate::tx::TxHeader;
 use crate::vm::{Delegate, DeferredSig, TxResult, VM};
 
@@ -97,10 +96,6 @@ impl Delegate for Verifier {
         // Same Phase-11 stub as the Prover — the `commit` opcode lands
         // alongside the rich `String` enum in Phase 13.
         Err(VMError::WitnessMissing)
-    }
-
-    fn next_alloc_witness(&mut self) -> Option<Int253> {
-        None // Verifier never has witness.
     }
 
     fn finalize(self, _deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError> {
