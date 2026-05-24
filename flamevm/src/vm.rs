@@ -9808,12 +9808,31 @@ let proof = proof.expect("proof set");
                 _ => panic!("txlog[{}] must be Output", idx),
             }
         }
+        // No `signtx` / `signrun` in the N→M matrix → deferred_sigs
+        // empty on both sides. No `send` yet (Phase 32) → sends empty.
+        // Pinning these guards against future opcode misroutes
+        // silently emitting spurious deferred records or send queue
+        // entries during the harness's prove/verify round-trip.
+        assert!(
+            result.deferred_sigs.is_empty(),
+            "confidential N→M matrix tests must not emit deferred sigs"
+        );
+        assert!(
+            result.sends.is_empty(),
+            "confidential N→M matrix tests must not emit sends"
+        );
     }
 
     /// Drive the full prove-then-verify round trip for an N→M
     /// confidential transaction and assert the full txlog shape +
     /// per-cell contents. Single entry point for every positive
     /// matrix test.
+    ///
+    /// `mem_limit = 0` is a placeholder: the memory allocator is a
+    /// no-op until Phase 35 wires it. Once memory charging lands,
+    /// this constant will need to be a real cap (likely something
+    /// like `4 * tx_vbytes`) — every confidential test would
+    /// otherwise hit `MemoryCapExceeded` on the first allocation.
     fn run_confidential_nm(
         inputs: &[NMInputSpec],
         outputs: &[NMOutputSpec],
