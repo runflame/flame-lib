@@ -4,7 +4,7 @@
 
 use super::test_helpers::*;
 
-// ── Phase 13: rich String + scalar / commit / decrypt ────────
+// ── rich String + scalar / commit / decrypt ────────
 
 #[test]
 fn string_witness_commitment_encodes_to_point() {

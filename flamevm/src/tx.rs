@@ -65,7 +65,7 @@ pub enum TxEntry {
     ///
     /// For the cleartext issuance branch (`issue` with `Int253` qty),
     /// both commitments are unblinded (blinding factor = 0). For the
-    /// encrypted branch (Phase 11/12), the commitments are the live
+    /// encrypted branch, the commitments are the live
     /// blinded points whose openings are proven through the constraint
     /// system.
     Issue(CompressedRistretto, CompressedRistretto),
@@ -76,11 +76,11 @@ pub enum TxEntry {
     Retire(CompressedRistretto, CompressedRistretto),
 
     /// Fee: a transaction fee of `qty` flames recorded by `op_fee`.
-    /// Carried as a bare `u64` (no commitment) because the cleartext
-    /// branch is the only one defined for Phase 19; the matching debt
-    /// half is the `WideToken` returned to the stack. Aggregated by
-    /// `VM::total_fee` (a `CheckedFee`) into the eventual
-    /// `TxResult.total_fee`.
+    /// Carried as a bare `u64` (no commitment) — the cleartext
+    /// branch is currently the only defined fee shape; the matching
+    /// debt half is the `WideToken` returned to the stack.
+    /// Aggregated by `VM::total_fee` (a `CheckedFee`) into the
+    /// eventual `TxResult.total_fee`.
     Fee(u64),
     // Future variants (preserved here as comments for the historical record):
     // Send(Message), etc.

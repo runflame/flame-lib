@@ -19,7 +19,7 @@ pub const MAX_FEE: u64 = 1 << 24;
 
 /// Per-transaction fee accumulator. Constructed at `VM::new`, mutated
 /// only by [`Self::add`] (called from `op_fee`), and surfaced through
-/// the eventual `TxResult.total_fee` (Phase 21). Carries no flavor
+/// the eventual `TxResult.total_fee`. Carries no flavor
 /// information: the flavor is recorded separately in each
 /// `TxEntry::Fee` and the matching `WideToken` returned to the
 /// stack.

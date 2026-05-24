@@ -71,9 +71,10 @@ impl Value {
             Value::Int253(_) | Value::String(_) | Value::Point(_) => true,
             Value::Dict(d) => d.is_portable(),
             Value::ClearToken(t) => !t.qty().is_negative(),
-            // `Token` is portable per design (encrypted in-range token).
-            // The struct is currently empty; once Phase 13 wires fields,
-            // every `Token` instance is portable by construction.
+            // `Token` is portable per design — every `Token`
+            // instance is range-proven non-negative at construction
+            // (via the encrypted opcode paths or `Token::cleartext`),
+            // so the portability invariant holds by construction.
             Value::Token(_) => true,
             _ => false,
         }
@@ -125,9 +126,8 @@ impl Value {
             Value::Token(_) => 249,
             Value::ClearToken(_) => 250,
             Value::WideToken(_) => 251,
-            // `Cell` reuses the wire tag previously assigned to `Object`
-            // (the value type was renamed in Phase 9; the wire-tag table
-            // stays).
+            // `Cell` carries the wire tag previously assigned to
+            // `Object` (renamed to `Cell` per ADR 0001).
             Value::Cell(_) => 252,
             Value::Merlin(_) => 253,
             // Stack-only — code TBC by Architect.

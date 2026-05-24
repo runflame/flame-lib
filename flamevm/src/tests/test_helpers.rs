@@ -64,7 +64,7 @@ pub(crate) fn dummy_message(gas: u64) -> Message {
     }
 }
 
-// ── Phase 1 helpers ──────────────────────────────────────────
+// ── helpers ──────────────────────────────────────────
 
 /// Builds a VM running `script` as the entry Run of an InternalRoot.
 pub(crate) fn vm_with_script(script: Vec<u8>) -> VM {
@@ -113,7 +113,7 @@ pub(crate) fn value_kind(v: &Value) -> &'static str {
     }
 }
 
-// ── Phase 2: control flow helpers ────────────────────────────
+// ── control flow helpers ────────────────────────────
 
 /// Runs `step_internal` until it reports the tx is done (Ok(false)).
 /// Used to exercise full programs including post-`run`/`switch`
@@ -150,7 +150,7 @@ pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
     vm
 }
 
-// ── Phase 4 ──────────────────────────────────────────────────
+// ── ──────────────────────────────────────────────────
 
 pub(crate) fn assert_str(v: &Value, expected: &[u8]) {
     match v {
@@ -191,7 +191,7 @@ pub(crate) fn writebits_bytes(value: &Int253, n_bits: usize) -> Vec<u8> {
     out
 }
 
-// ── Phase 5 ──────────────────────────────────────────────────
+// ── ──────────────────────────────────────────────────
 
 pub(crate) fn assert_dict_keys(v: &Value, expected: &[Int253]) {
     match v {
@@ -295,7 +295,7 @@ pub(crate) fn push_point_bytes(script: &mut Vec<u8>, bytes: &[u8; 32]) {
     script.extend_from_slice(bytes);
 }
 
-// ── Phase 8: tokens (port from zkvm) ─────────────────────────
+// ── tokens (port from zkvm) ─────────────────────────
 
 pub use crate::token::flavor_from_actor as test_flavor_from_actor;
 
@@ -339,7 +339,7 @@ pub(crate) fn drive_external(
     Ok(())
 }
 
-// ── Phase 10: input opcode ───────────────────────────────────
+// ── input opcode ───────────────────────────────────
 
 /// Builds a VM running `script` under `ExternalRoot`. Mirror of
 /// `vm_with_script` for the external-context opcode tests.
@@ -382,7 +382,7 @@ pub(crate) fn decode_cell_dropping_ok(bytes: &[u8]) -> Result<(), VMError> {
     }
 }
 
-// ── Phase 10: end-to-end external-tx workflow ───────────────
+// ── end-to-end external-tx workflow ───────────────
 //
 // The tests below assemble small but complete external-tx programs
 // — input → authorize → output — and drive them through the full
@@ -454,7 +454,7 @@ impl Delegate for StubDelegate {
     }
 }
 
-// ── Phase 19: op_fee + CheckedFee accumulator ────────────────
+// ── op_fee + CheckedFee accumulator ────────────────
 
 /// Helper: build a VM in external context with a witness-bearing
 /// program (so the prover-side Alloc witnesses are intact), step
@@ -483,7 +483,7 @@ pub(crate) fn run_external_steps<'g>(
     (vm, prover)
 }
 
-// ── Phase 20: TxBound multi-sig batch verification ───────────
+// ── TxBound multi-sig batch verification ───────────
 
 /// Helper: turn a scalar secret into a `(CompressedRistretto, sk)`
 /// pair. The CompressedRistretto is the verification key; the
@@ -517,7 +517,7 @@ pub(crate) fn make_signtx_script_with_cell(
     (script, cell_id)
 }
 
-// ── Phase 22: Input witness re-attachment ───────────────────
+// ── Input witness re-attachment ───────────────────
 
 /// Helper: build a witness-bearing cell with a single Token
 /// payload entry. Returns the cell (with `Open` commitments —
@@ -544,7 +544,7 @@ pub(crate) fn make_token_witness_pair(
     (token, witness)
 }
 
-// ── Phase 23: Confidential N→M end-to-end test harness ──────
+// ── Confidential N→M end-to-end test harness ──────
 //
 // The whole point of the VM: take N input cells whose Token
 // payloads are confidential (Pedersen-committed qty + flv), run
@@ -914,7 +914,7 @@ pub(crate) fn assert_nm_txlog(
         }
     }
     // No `signtx` / `signrun` in the N→M matrix → deferred_sigs
-    // empty on both sides. No `send` yet (Phase 32) → sends empty.
+    // empty on both sides. No `send` yet → sends empty.
     // Pinning these guards against future opcode misroutes
     // silently emitting spurious deferred records or send queue
     // entries during the harness's prove/verify round-trip.
@@ -933,11 +933,11 @@ pub(crate) fn assert_nm_txlog(
 /// per-cell contents. Single entry point for every positive
 /// matrix test.
 ///
-/// `mem_limit = 0` is a placeholder: the memory allocator is a
-/// no-op until Phase 35 wires it. Once memory charging lands,
-/// this constant will need to be a real cap (likely something
-/// like `4 * tx_vbytes`) — every confidential test would
-/// otherwise hit `MemoryCapExceeded` on the first allocation.
+/// `mem_limit = 0` is a placeholder: memory charging is not yet
+/// wired, so the cap is unused. Once it lands, this constant will
+/// need to be a real cap (likely something like `4 * tx_vbytes`)
+/// — every confidential test would otherwise hit
+/// `MemoryCapExceeded` on the first allocation.
 pub(crate) fn run_confidential_nm(
     inputs: &[NMInputSpec],
     outputs: &[NMOutputSpec],
@@ -966,7 +966,7 @@ pub(crate) fn run_confidential_nm(
     )
     .expect("verify ok");
     assert_eq!(result.txid, txid_p, "prover/verifier TxID agree");
-    // Verifier-side txlog must match exactly — Phase 18 already
+    // Verifier-side txlog must match exactly already
     // covers TxID determinism, but this catches any future
     // divergence in the txlog content itself.
     assert_nm_txlog(&result, inputs, outputs);

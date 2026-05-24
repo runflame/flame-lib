@@ -39,10 +39,10 @@ fn program_builder_emits_expected_bytecode() {
     assert_eq!(wits.len(), 3);
 }
 
-/// End-to-end Phase 11: prove `alloc(7) + alloc(3) == alloc(10)`
-/// then verify the proof. This is the bootstrap milestone — once
-/// this works, all later CS-touching opcodes wire onto the same
-/// machinery.
+/// End-to-end prove/verify of `alloc(7) + alloc(3) == alloc(10)`
+/// — the smallest CS-touching script that exercises the whole
+/// pipeline. Every later CS-bound opcode wires onto the same
+/// machinery, so a regression here lights up early.
 #[test]
 fn prove_then_verify_alloc_arithmetic_equality() {
     let pc_gens = PedersenGens::default();
@@ -327,7 +327,7 @@ fn shared_bp_gens_is_singleton() {
         .expect("prove #2 succeeds with shared gens");
 }
 
-// ── Phase 18: TxID transcript binding ────────────────────────
+// ── TxID transcript binding ────────────────────────
 
 /// Building a trivial program twice with the same header must
 /// yield the same TxID — proves the txlog (= Header alone, here)
@@ -353,7 +353,7 @@ fn phase18_txid_deterministic_for_equal_inputs() {
 }
 
 /// Changing the header (version / locktime) must change the TxID,
-/// because the Header is the first txlog entry (Phase 18). Without
+/// because the Header is the first txlog entry. Without
 /// the Header binding, a malleable header could replay a proof
 /// against a different transaction; with it, the proof transcript
 /// is bound to the header bits.
@@ -392,10 +392,10 @@ fn phase18_txid_changes_when_header_changes() {
     assert_ne!(id2, id3, "locktime+version both alter TxID");
 }
 
-/// End-to-end Phase 18: prove then verify round-trip — the
-/// verifier reconstructs the same TxID from the same bytecode +
-/// header, binds it into its own R1CS transcript, and accepts the
-/// proof. Confirms prover/verifier transcript binding agrees.
+/// End-to-end prove/verify round-trip: the verifier reconstructs
+/// the same TxID from the same bytecode + header, binds it into
+/// its own R1CS transcript, and accepts the proof. Confirms
+/// prover/verifier transcript binding agrees.
 #[test]
 fn phase18_prove_verify_roundtrip_binds_txid() {
     let pc_gens = PedersenGens::default();
@@ -469,7 +469,7 @@ fn phase18_verifier_rejects_proof_under_different_header() {
     assert!(matches!(err, VMError::InvalidR1CSProof));
 }
 
-// ── Phase 21: TxResult shape + finalize return values ────────
+// ── TxResult shape + finalize return values ────────
 
 /// Trivial prover/verifier round-trip: every TxResult field is
 /// populated as expected. This is the headline Phase-21 test —
@@ -487,13 +487,14 @@ fn phase21_txresult_populated_for_trivial_program() {
     let prover_result =
         Prover::prove(&pc_gens, program, header, 1_000_000, 0)
             .expect("prove ok");
-    // Phase 18: txlog has Header at [0].
+    // Txlog has Header at [0].
     assert!(matches!(
         prover_result.txlog[0],
         crate::tx::TxEntry::Header(_)
     ));
-    // total_fee = 0 (no fee opcodes), gas/vbytes = 0 (pre-Phase 22),
-    // bytecode populated, proof Some, deferred_sigs empty, sends empty.
+    // total_fee = 0 (no fee opcodes); gas/vbytes = 0 (resource
+    // accounting not wired yet); bytecode populated; proof Some;
+    // deferred_sigs empty; sends empty.
     assert_eq!(prover_result.total_fee, 0);
     assert_eq!(prover_result.gas_used, 0);
     assert_eq!(prover_result.vbytes_used, 0);

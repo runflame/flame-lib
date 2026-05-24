@@ -202,8 +202,8 @@ pub enum VMError {
     #[error("Type has no length")]
     TypeHasNoLength,
 
-    /// `eq` cannot compare these operand types (e.g., linear types in
-    /// Phase 3). Cross-type comparisons return `0` (false) and never reach
+    /// `eq` cannot compare these operand types (e.g., linear types).
+    /// Cross-type comparisons return `0` (false) and never reach
     /// this; same-type non-comparable variants do.
     #[error("Operand types are not comparable")]
     TypeNotComparable,
@@ -325,8 +325,9 @@ pub enum VMError {
 
     /// `issue` / `retire` / `borrow` reached with an operand shape
     /// that requires constraint-system machinery (e.g. a `Point` qty
-    /// in `issue`'s encrypted branch). The cleartext branches work in
-    /// Phase 8; the CS branches land in Phase 11/12.
+    /// in `issue`'s encrypted branch). Encrypted `issue` is not yet
+    /// wired; encrypted `borrow` is implemented via the `Variable`
+    /// operand pair, not via raw `Point`.
     #[error("Token opcode branch requires a live constraint system")]
     TokenRequiresCS,
 
@@ -457,21 +458,21 @@ pub enum VMError {
     #[error("fee qty must be non-negative")]
     FeeQtyNegative,
 
-    /// Phase 22: the prover-side witness queue passed to
-    /// `Instruction::Input` doesn't have one `TokenWitness` per
-    /// `Value::Token` entry in the decoded cell's payload.
+    /// The prover-side witness queue passed to `Instruction::Input`
+    /// doesn't have one `TokenWitness` per `Value::Token` entry in
+    /// the decoded cell's payload.
     #[error("input witness count does not match cell payload Token count")]
     WitnessCountMismatch,
 
-    /// Phase 22: a `TokenWitness`'s `Commitment::Open` point doesn't
-    /// match the decoded cell's `Commitment::Closed` point. The
-    /// prover passed a witness for the wrong commitment — fail
-    /// loudly so the bug is caught at test time.
+    /// A `TokenWitness`'s `Commitment::Open` point doesn't match
+    /// the decoded cell's `Commitment::Closed` point. The prover
+    /// passed a witness for the wrong commitment — fail loudly so
+    /// the bug is caught at test time.
     #[error("input witness commitment point does not match cell payload")]
     WitnessPointMismatch,
 
-    /// Phase 22: a `TokenWitness` was constructed with a
-    /// `Commitment::Closed` instead of `Commitment::Open`. The
+    /// A `TokenWitness` was constructed with a `Commitment::Closed`
+    /// instead of `Commitment::Open`. The
     /// witness path's whole job is to re-attach openings, so a
     /// `Closed` here is a caller bug — without this check the
     /// failure would cascade silently into `WitnessMissing` from

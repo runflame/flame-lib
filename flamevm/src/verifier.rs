@@ -64,24 +64,24 @@ impl Verifier {
             .map_err(|_| VMError::InvalidR1CSProof)
     }
 
-    /// Public Phase-21 entry point: runs `bytecode` through the
-    /// VM in external context, computes `TxID::from_log(&txlog)`,
-    /// binds it into the R1CS transcript (Phase 18,
-    /// `b"flamevm.txid"`), then:
-    /// 1. (Phase 14) appends each `DeferredSig::Explicit` to the batch
+    /// Public entry point: runs `bytecode` through the VM in
+    /// external context, computes `TxID::from_log(&txlog)`, binds
+    /// it into the R1CS transcript under domain `b"flamevm.txid"`,
+    /// then:
+    /// 1. appends each `DeferredSig::Explicit` to the batch
     ///    verifier via `Signature::verify_batched`.
-    /// 2. (Phase 20) if any `DeferredSig::TxBound` items were
-    ///    recorded, requires the caller to pass the aggregate
-    ///    multi-signature in `txbound_signature`, builds the
-    ///    `flamevm.signtx.v1` transcript, binds it to TxID, and adds
-    ///    the multi-message verification to the batch via
+    /// 2. if any `DeferredSig::TxBound` items were recorded,
+    ///    requires the caller to pass the aggregate multi-signature
+    ///    in `txbound_signature`, builds the `flamevm.signtx.v1`
+    ///    transcript, binds it to TxID, and adds the multi-message
+    ///    verification to the batch via
     ///    `Multisignature::verify_multi_batched`.
     /// 3. Verifies the R1CS proof.
     /// 4. Drains the batch.
     ///
-    /// Returns the Phase-21 [`TxResult`] with `proof = None` — the
-    /// proof has been verified by this point, so the caller doesn't
-    /// need to handle it. `result.txid`, `result.txlog`, and
+    /// Returns the [`TxResult`] with `proof = None` — the proof
+    /// has been verified by this point, so the caller doesn't need
+    /// to handle it. `result.txid`, `result.txlog`, and
     /// `result.deferred_sigs` are populated for downstream
     /// inspection.
     ///
@@ -111,7 +111,7 @@ impl Verifier {
             mem_limit,
             &mut verifier,
         )?;
-        // Phase 14: append each Explicit deferred sig to the batch.
+        // Append each Explicit deferred sig to the batch.
         for sig in &result.deferred_sigs {
             if let DeferredSig::Explicit {
                 verification_key,
@@ -127,19 +127,21 @@ impl Verifier {
                 starsig.verify_batched(&mut t, vk, &mut verifier.batch);
             }
         }
-        // Phase 18: bind the canonical TxID into the R1CS transcript so
-        // the proof commits to the full transaction (header + log), not
-        // just the constraint system shape. Must mirror the prover step
-        // exactly — divergence silently invalidates every proof.
+        // Bind the canonical TxID into the R1CS transcript so the
+        // proof commits to the full transaction (header + log), not
+        // just the constraint system shape. Must mirror the prover
+        // step exactly — divergence silently invalidates every
+        // proof.
         let txid = result.txid;
         verifier
             .cs
             .transcript()
             .append_message(b"flamevm.txid", &txid.0);
-        // Phase 20: collect TxBound items and add the multi-message
+        // Collect TxBound items and add the multi-message
         // verification to the batch. The transcript domain is
-        // `flamevm.signtx.v1` bound to TxID — the prover must use the
-        // same transcript when constructing the multi-signature.
+        // `flamevm.signtx.v1` bound to TxID — the prover must use
+        // the same transcript when constructing the
+        // multi-signature.
         let txbound_items: Vec<(musig::VerificationKey, [u8; 32])> = result
             .deferred_sigs
             .iter()

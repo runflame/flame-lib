@@ -4,7 +4,7 @@
 
 use super::test_helpers::*;
 
-// ── Phase 13.5: encrypted borrow + mix ───────────────────────
+// ── encrypted borrow + mix ───────────────────────
 
 #[test]
 fn encrypted_borrow_produces_widetoken_and_token_pair() {
@@ -134,7 +134,7 @@ fn cleartext_borrow_unaffected_by_overload() {
     assert_eq!(vm.current_call.stack.len(), 2);
 }
 
-// ── Phase 17: hygiene sweep ──────────────────────────────────
+// ── hygiene sweep ──────────────────────────────────
 
 #[test]
 fn op_mix_m_zero_rejects() {

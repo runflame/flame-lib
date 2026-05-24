@@ -4,7 +4,7 @@
 
 use super::test_helpers::*;
 
-// ── Phase 3 ──────────────────────────────────────────────────
+// ── ──────────────────────────────────────────────────
 
 // ── abs (0x50) ───────────────────────────────────────────────
 
@@ -192,8 +192,9 @@ fn divmod_by_zero_errors() {
 
 #[test]
 fn divmod_full_width_magnitude_succeeds() {
-    // 2^128 / 1 → d = 2^128, r = 0. Verifies the opcode now handles
-    // magnitudes beyond u64::MAX (was MagnitudeTooLarge in Phase 3).
+    // 2^128 / 1 → d = 2^128, r = 0. Regression guard against an
+    // earlier `MagnitudeTooLarge` failure on operands beyond
+    // u64::MAX.
     let mut huge = [0u8; 32];
     huge[16] = 1; // 2^128
     let mut script = vec![0x18];

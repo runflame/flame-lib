@@ -4,7 +4,7 @@
 
 use super::test_helpers::*;
 
-// ── Phase 9: anchor ratchet ──────────────────────────────────
+// ── anchor ratchet ──────────────────────────────────
 
 #[test]
 fn anchor_ratchet_changes_value_and_is_deterministic() {
@@ -113,7 +113,7 @@ fn output_opcode_emits_to_txlog_without_pushing() {
     // Stack is empty.
     assert!(vm.current_call.stack.is_empty());
     // Txlog has Header + one Output entry. The Header is always
-    // emitted at VM::new (Phase 18) so TxID::from_log binds to
+    // emitted at VM::new so TxID::from_log binds to
     // version + locktime alongside the effects.
     assert_eq!(vm.txlog.len(), 2);
     assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));

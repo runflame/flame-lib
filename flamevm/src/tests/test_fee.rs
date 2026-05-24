@@ -190,7 +190,7 @@ fn phase19_fee_instruction_roundtrip() {
 
 /// `TxEntry::Fee(qty)` participates in the TxID merkle root —
 /// changing `qty` changes the TxID, proving the fee entry is
-/// committed by the proof transcript binding (Phase 18).
+/// committed by the proof transcript binding.
 #[test]
 fn phase19_fee_qty_changes_txid() {
     // Compute TxIDs directly off TxEntry sequences (bypasses the

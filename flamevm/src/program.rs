@@ -1,9 +1,8 @@
 //! `Program` builder — assembles a sequence of [`Instruction`]s and
 //! produces both:
 //!
-//! - canonical **bytecode** that the VM walks via its byte-dispatch
-//!   loop (or its Instruction-driven dispatch once Phase 11.4 lands),
-//!   and
+//! - canonical **bytecode** that the verifier-side `Program::parse`
+//!   recovers at VM entry, and
 //! - a **witness queue** carrying the prover-side data the bytecode
 //!   doesn't contain (one entry per witness-bearing instruction, in
 //!   opcode order).
@@ -111,7 +110,7 @@ impl Program {
         self.instructions.iter().filter_map(|i| i.witness()).collect()
     }
 
-    // ── Phase 1: stack literals & manipulation ───────────────────
+    // ── stack literals & manipulation ───────────────────
 
     /// `push:k` / `pushint{8,16,64,128}` / `pushint` — encoder picks
     /// the narrowest opcode width.
@@ -174,7 +173,7 @@ impl Program {
         self
     }
 
-    // ── Phase 4: String ops ──────────────────────────────────────
+    // ── String ops ──────────────────────────────────────
 
     pub fn read_bits(mut self) -> Self { self.instructions.push(Instruction::ReadBits); self }
     pub fn read_int(mut self) -> Self { self.instructions.push(Instruction::ReadInt); self }
@@ -192,7 +191,7 @@ impl Program {
     pub fn shift_right(mut self) -> Self { self.instructions.push(Instruction::ShiftRight); self }
     pub fn keccak256(mut self) -> Self { self.instructions.push(Instruction::Keccak256); self }
 
-    // ── Phase 3: Int253 arithmetic ───────────────────────────────
+    // ── Int253 arithmetic ───────────────────────────────
 
     pub fn abs(mut self) -> Self { self.instructions.push(Instruction::Abs); self }
     pub fn eq(mut self) -> Self { self.instructions.push(Instruction::Eq); self }
@@ -206,7 +205,7 @@ impl Program {
     pub fn or(mut self) -> Self { self.instructions.push(Instruction::Or); self }
     pub fn size(mut self) -> Self { self.instructions.push(Instruction::Size); self }
 
-    // ── Phase 11: CS opcodes ─────────────────────────────────────
+    // ── CS opcodes ─────────────────────────────────────
 
     /// `alloc` (0x5c) — allocates a low-level R1CS variable. `witness`
     /// = `Some(int)` on the prover side (fills the cleartext value
@@ -244,7 +243,7 @@ impl Program {
         self
     }
 
-    // ── Phase 5: Dict ops ────────────────────────────────────────
+    // ── Dict ops ────────────────────────────────────────
 
     pub fn dict(mut self) -> Self { self.instructions.push(Instruction::Dict); self }
     pub fn put(mut self) -> Self { self.instructions.push(Instruction::Put); self }
@@ -256,7 +255,7 @@ impl Program {
     pub fn last(mut self) -> Self { self.instructions.push(Instruction::Last); self }
     pub fn next(mut self) -> Self { self.instructions.push(Instruction::Next); self }
 
-    // ── Phase 6: Merlin + SHA ────────────────────────────────────
+    // ── Merlin + SHA ────────────────────────────────────
 
     pub fn merlin(mut self) -> Self { self.instructions.push(Instruction::Merlin); self }
     pub fn merlin_write(mut self) -> Self { self.instructions.push(Instruction::MerlinWrite); self }
@@ -271,7 +270,7 @@ impl Program {
         self
     }
 
-    // ── Phase 8: Tokens ──────────────────────────────────────────
+    // ── Tokens ──────────────────────────────────────────
 
     pub fn amount(mut self) -> Self { self.instructions.push(Instruction::Amount); self }
     pub fn issue(mut self) -> Self { self.instructions.push(Instruction::Issue); self }
@@ -294,11 +293,11 @@ impl Program {
 
     pub fn issue_flv(mut self) -> Self { self.instructions.push(Instruction::IssueFlv); self }
 
-    // ── Phase 2: control flow ────────────────────────────────────
+    // ── control flow ────────────────────────────────────
 
     pub fn verify(mut self) -> Self { self.instructions.push(Instruction::Verify); self }
 
-    /// `fee` (0x7a). Phase 19 — external-only.
+    /// `fee` (0x7a) — external-only.
     pub fn fee(mut self) -> Self { self.instructions.push(Instruction::Fee); self }
 
     pub fn run(mut self) -> Self { self.instructions.push(Instruction::Run); self }
@@ -319,7 +318,7 @@ impl Program {
         self
     }
 
-    // ── Phase 9/10: Cell + I/O ───────────────────────────────────
+    // ── Cell + I/O ───────────────────────────────────
 
     /// `input` (0x90), no prover witness — fine for cell payloads
     /// that contain no `Token` entries, or for verifier-side
@@ -329,9 +328,9 @@ impl Program {
         self
     }
 
-    /// `input` (0x90) with a prover-side witness queue. Phase 22 —
-    /// required when the consumed cell's payload contains any
-    /// `Token` entries that participate in a downstream `mix` (the
+    /// `input` (0x90) with a prover-side witness queue — required
+    /// when the consumed cell's payload contains any `Token`
+    /// entries that participate in a downstream `mix` (the
     /// witnesses re-attach `Commitment::Open` after decode).
     pub fn input_with_witnesses(
         mut self,

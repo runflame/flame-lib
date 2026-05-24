@@ -1,8 +1,8 @@
 //! Variable-length binary string — the VM's universal byte-bag and
 //! witness carrier.
 //!
-//! Phase 13 enriches String from a flat byte-buffer struct to an enum
-//! with multiple "shapes":
+//! `String` is an enum with multiple "shapes" — the prover-side
+//! variants carry witness data alongside the encoded bytes:
 //!
 //! - `Opaque(Vec<u8>)` — verifier's view; arbitrary byte data.
 //! - `Commitment(Box<Commitment>)` — prover's view of a Pedersen

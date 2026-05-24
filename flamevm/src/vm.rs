@@ -91,7 +91,7 @@ pub enum DeferredSig {
     /// supplied via the tx envelope (not on the stack).
     ///
     /// Carries the consumed cell's id so the multi-message context
-    /// (Phase 20) can give each signer a distinct message — the same
+    /// can give each signer a distinct message — the same
     /// pattern zkvm uses for `signtx_items: Vec<(VerificationKey,
     /// ContractID)>`. The aggregate signature is verified against
     /// `Vec<(verification_key, cell_id)>` with the transcript bound
@@ -403,13 +403,12 @@ impl CallFrame {
 /// `Prover::prove` (with `proof: Some(...)`) and `Verifier::verify`
 /// (with `proof: None` — proof has already been verified by then).
 ///
-/// Phase 21 widened this from the bare `(gas_used, vbytes_used)`
-/// shape to carry the full "observed effects" of the tx: the
-/// canonical TxID, the txlog, the running fee total, the resource
-/// usage, the deferred signature records, and the optional R1CS
-/// proof. Downstream consumers (mempool, validator, wallet) read
-/// from a single value rather than reassembling fields from a
-/// multi-tuple return.
+/// Carries the full "observed effects" of the tx: the canonical
+/// TxID, the txlog, the running fee total, the resource usage, the
+/// deferred signature records, and the optional R1CS proof.
+/// Downstream consumers (mempool, validator, wallet) read from a
+/// single value rather than reassembling fields from a multi-tuple
+/// return.
 ///
 /// Linear-value variants in `TxEntry::Output(Cell)` prevent
 /// `#[derive(Clone, Debug, Serialize, Deserialize)]` here — see the
@@ -418,20 +417,21 @@ impl CallFrame {
 /// `Debug`-skipped and callers project out the fields they want to
 /// log.
 pub struct TxResult {
-    /// Canonical 32-byte transaction id (Phase 18).
+    /// Canonical 32-byte transaction id.
     pub txid: crate::tx::TxID,
 
-    /// Full txlog including the `Header` entry at index 0 (Phase 18).
+    /// Full txlog including the `Header` entry at index 0.
     pub txlog: Vec<crate::tx::TxEntry>,
 
-    /// Aggregate fee in flames recorded by `op_fee` (Phase 19).
+    /// Aggregate fee in flames recorded by `op_fee`.
     pub total_fee: u64,
 
-    /// Gas spent by all opcodes (still uniformly zero pre-Phase 22).
+    /// Gas spent by all opcodes. Always zero until per-opcode gas
+    /// charging is wired in.
     pub gas_used: u64,
 
-    /// Bytes-allocated against the persistent vbyte cap (pre-Phase 27
-    /// the allocator is a no-op, so this stays zero).
+    /// Bytes allocated against the persistent vbyte cap. Always zero
+    /// until the memory-cap allocator is wired in.
     pub vbytes_used: u64,
 
     /// Canonical bytecode of the executed script. The prover supplies
@@ -452,7 +452,8 @@ pub struct TxResult {
     pub deferred_sigs: Vec<DeferredSig>,
 
     /// Outbound message sends recorded by `op_send`. Empty placeholder
-    /// until Phase 32 wires the opcode + `TxEntry::Send` variant.
+    /// until the opcode and the matching `TxEntry::Send` variant are
+    /// wired in.
     pub sends: Vec<()>,
 }
 
@@ -491,9 +492,9 @@ pub struct VM {
     /// issuances/retirements/fees/sends. Used at finalize to compute TxID.
     pub(crate) txlog: Vec<crate::tx::TxEntry>,
 
-    /// Running per-tx fee accumulator (Phase 19). Each `op_fee`
-    /// increments it; overflow → `FeeTooHigh`. Surfaced through
-    /// `TxResult.total_fee` once Phase 21 lands.
+    /// Running per-tx fee accumulator. Each `op_fee` increments it;
+    /// overflow → `FeeTooHigh`. Surfaced through
+    /// `TxResult.total_fee`.
     total_fee: crate::fees::CheckedFee,
 
     /// Signature checks deferred to `Delegate::finalize`. Always empty in
@@ -897,7 +898,7 @@ impl VM {
         Ok(idx)
     }
 
-    // ── Phase 1 opcode handlers ─────────────────────────────────
+    // ── opcode handlers ─────────────────────────────────
 
     // `pushint`/`pushstr`/`pushpoint` are now inline in
     // `dispatch_common`: `Instruction::parse` decodes their inline
@@ -966,7 +967,7 @@ impl VM {
         Ok(())
     }
 
-    // ── Phase 6: Hash & Merlin ───────────────────────────────────
+    // ── Hash & Merlin ───────────────────────────────────
 
     /// Pops the top value, asserting it is a `Merlin` transcript.
     fn pop_merlin(&mut self) -> Result<Merlin, VMError> {
@@ -1059,7 +1060,7 @@ impl VM {
         Ok(())
     }
 
-    // ── Phase 5: Dict ops ────────────────────────────────────────
+    // ── Dict ops ────────────────────────────────────────
 
     /// Pops the top value, asserting it is a `Dict`.
     fn pop_dict(&mut self) -> Result<Dict, VMError> {
@@ -1227,7 +1228,7 @@ impl VM {
         Ok(())
     }
 
-    // ── Phase 4: String ops ──────────────────────────────────────
+    // ── String ops ──────────────────────────────────────
 
     /// Helper: converts a stack-popped count into a `usize` ≤ `max`.
     /// Returns `IndexOutOfRange` on overflow or above `max`.
@@ -1479,7 +1480,7 @@ impl VM {
         Ok(())
     }
 
-    // ── Phase 3: Int253 arithmetic, logic, size ──────────────────
+    // ── Int253 arithmetic, logic, size ──────────────────
 
     /// `0x50` `abs` — pops an `Int253`, pushes its magnitude (positive
     /// `Int253`), then pushes the original sign as `Int253` (`0` for
@@ -1741,7 +1742,7 @@ impl VM {
         Ok(())
     }
 
-    // ── Phase 2: control flow ────────────────────────────────────
+    // ── control flow ────────────────────────────────────
 
     /// `0x79 verify` — pop one and assert truthiness.
     ///
@@ -1777,7 +1778,7 @@ impl VM {
 
     /// `0x7c` `loop` — resets the current Run's cursor to the start.
     /// Without a `break`/`return` reachable from inside, this is an
-    /// unbounded loop; gas metering (Phase 17) is the long-term cap.
+    /// unbounded loop; gas metering is the long-term cap.
     fn op_loop(&mut self) -> Result<(), VMError> {
         self.current_call.current_run.rewind();
         Ok(())
@@ -1876,7 +1877,7 @@ impl VM {
         Ok(())
     }
 
-    // ── Phase 2 helpers ──────────────────────────────────────────
+    // ── helpers ──────────────────────────────────────────
 
     /// Pops the top value, asserting it is a `String`.
     fn pop_string(&mut self) -> Result<String, VMError> {
@@ -1905,7 +1906,7 @@ impl VM {
         Ok(())
     }
 
-    // ── Phase 8: token helpers ───────────────────────────────────
+    // ── token helpers ───────────────────────────────────
 
     /// Pops a `ClearToken` from the stack. Errors `TypeNotClearToken`
     /// for any other variant (including encrypted `Token` /
@@ -1927,7 +1928,7 @@ impl VM {
             .ok_or(VMError::OpcodeRequiresActorContext)
     }
 
-    // ── Phase 8: token opcode handlers ───────────────────────────
+    // ── token opcode handlers ───────────────────────────
 
     /// `0x70 amount` — peeks the top token-shaped value and pushes its
     /// `qty` then `flv` underneath/above it, leaving the source token
@@ -1936,8 +1937,9 @@ impl VM {
     /// - `ClearToken`: pushes both as `Int253` (cleartext).
     /// - `Token`: pushes both as `Point` (the compressed commitment
     ///   point of each component — works without a live CS).
-    /// - `WideToken`: errors `TypeNotToken` in Phase 8 (the encrypted
-    ///   intermediate isn't constructible until CS opcodes land).
+    /// - `WideToken`: errors `TypeNotToken` — the encrypted
+    ///   intermediate is produced and consumed only by CS opcodes
+    ///   and is never inspected via `amount`.
     /// - Other types: `TypeNotToken`.
     fn op_amount(&mut self) -> Result<(), VMError> {
         // The spec diagram leaves the original token on the stack and
@@ -1970,13 +1972,13 @@ impl VM {
         }
     }
 
-    /// `0x71 issue` — `qty tag → T`. Cleartext branch only in Phase 8:
-    /// pops a tag `String` and a qty `Int253`; computes the flavor
-    /// from `(current actor id, tag)`; emits `TxEntry::Issue` with the
+    /// `0x71 issue` — `qty tag → T`. Cleartext branch: pops a tag
+    /// `String` and a qty `Int253`; computes the flavor from
+    /// `(current actor id, tag)`; emits `TxEntry::Issue` with the
     /// two unblinded commitment points; pushes a fresh `ClearToken`.
     ///
-    /// Hard-fails with `TokenRequiresCS` if `qty` is a `Point`
-    /// (encrypted branch — lands in Phase 11/12). Hard-fails with
+    /// Hard-fails with `TokenRequiresCS` if `qty` is a `Point` (the
+    /// encrypted branch is not yet wired). Hard-fails with
     /// `OpcodeRequiresActorContext` if the current frame has no actor
     /// identity. Hard-fails with `TypeNotInt253` for any other qty
     /// type.
@@ -2032,15 +2034,6 @@ impl VM {
         }
     }
 
-    /// `0x73 borrow` — `qty flv → –T +T`. Cleartext branch only in
-    /// Phase 8: both operands must be `Int253`. Produces the
-    /// debit/credit `ClearToken` pair with the negative qty on the
-    /// bottom (non-portable) and the positive qty on top (portable).
-    ///
-    /// Hard-fails with `TokenRequiresCS` if either operand is a Point
-    /// (the encrypted-borrow branch with range-proof needs CS — Phase
-    /// 12). Hard-fails with `TypeNotInt253` for any other operand
-    /// type.
     /// `0x73 borrow` — pop `(qty, flv)` and produce a debit/credit
     /// pair.
     ///
@@ -2139,7 +2132,7 @@ impl VM {
         Ok(())
     }
 
-    // ── Phase 9: cell helpers ────────────────────────────────────
+    // ── cell helpers ────────────────────────────────────
 
     /// Pops a `Point` from the stack.
     fn pop_point(&mut self) -> Result<Point, VMError> {
@@ -2204,7 +2197,7 @@ impl VM {
         out
     }
 
-    // ── Phase 10: input opcode ───────────────────────────────────
+    // ── input opcode ───────────────────────────────────
 
     /// `0x90 input` **[E]** — `string → cell`. Decodes a canonical
     /// wire-encoded cell from `string`, pushes the resulting `Cell`
@@ -2235,7 +2228,7 @@ impl VM {
     /// `TxEntry::Input(cell.id())` and seeds the VM's anchor chain
     /// at the cell's ratcheted post-anchor.
     ///
-    /// `witness` (Phase 22) is `Some` on the prover side when the
+    /// `witness` is `Some` on the prover side when the
     /// consumed cell's payload contains any `Token` entries that
     /// participate in a downstream `mix`. On the wire, witnesses
     /// don't exist — `Cell::decode` always rebuilds Tokens as
@@ -2265,9 +2258,9 @@ impl VM {
         if !reader.is_empty() {
             return Err(VMError::MalformedCellEncoding);
         }
-        // Phase 22: re-attach prover-side witnesses to Token payload
-        // entries. Verifier-side this branch is dormant (witness is
-        // None), so the payload retains its decoded Closed Tokens.
+        // Re-attach prover-side witnesses to Token payload entries.
+        // Verifier-side this branch is dormant (witness is None),
+        // so the payload retains its decoded Closed Tokens.
         if let Some(w) = witness {
             self.attach_input_witnesses(&mut cell, w)?;
         }
@@ -2286,7 +2279,7 @@ impl VM {
     /// from `witness`. Non-Token entries are passed through; the
     /// witness queue is consumed in payload order.
     ///
-    /// Phase 22. Errors:
+    /// Errors:
     /// - `WitnessCountMismatch` if the queue length doesn't equal
     ///   the count of Token entries.
     /// - `WitnessPointMismatch` if any Open commitment's
@@ -2341,7 +2334,7 @@ impl VM {
         Ok(())
     }
 
-    // ── Phase 9: cell opcode handlers ────────────────────────────
+    // ── cell opcode handlers ────────────────────────────
 
     /// `0x91 cell` — `args… k pred → cell`. Builds a transient `Cell`
     /// on the stack. Predicate comes in as a `Point` (opaque); payload
@@ -2503,7 +2496,7 @@ impl VM {
         self.enter_run(program)
     }
 
-    // ── Phase 11: CS opcode handlers + Expression overloads ──────
+    // ── CS opcode handlers + Expression overloads ──────
 
     /// Pops a `Variable` from the stack.
     fn pop_variable(&mut self) -> Result<crate::Variable, VMError> {
@@ -2573,7 +2566,7 @@ impl VM {
         Ok(())
     }
 
-    // ── Phase 12: range proofs ───────────────────────────────────
+    // ── range proofs ───────────────────────────────────
 
     /// Legacy helper kept only for `op_range`'s Constraint
     /// lift-from-Int253 case. The polymorphic `and` / `or` / `not`
@@ -2647,7 +2640,7 @@ impl VM {
         }
     }
 
-    // ── Phase 13: scalar / commit / decrypt / encrypted token ops ────
+    // ── scalar / commit / decrypt / encrypted token ops ────
 
     /// `0x5a scalar` — `string → expr`. Pops a String, downcasts to
     /// `Int253` via `String::to_scalar`, pushes `Expression::Constant`.
@@ -2745,9 +2738,9 @@ impl VM {
     /// debt token to the stack so the script must balance it against
     /// real tokens (typically via `mix`).
     ///
-    /// Cleartext-only for Phase 19: the qty is exposed as a `u64`
-    /// (recorded in `TxEntry::Fee`). The blinded-fee branch (Phase 33+
-    /// ADR) would carry a Pedersen commitment instead, mirroring how
+    /// Cleartext-only: the qty is exposed as a `u64` (recorded in
+    /// `TxEntry::Fee`). A future blinded-fee branch — gated by ADR
+    /// — would carry a Pedersen commitment instead, mirroring how
     /// `issue` evolved from cleartext to encrypted.
     ///
     /// Hard-fails:
@@ -2964,7 +2957,7 @@ impl VM {
     }
 }
 
-// ── Phase 12 helpers ─────────────────────────────────────────────────
+// ── helpers ─────────────────────────────────────────────────
 
 /// Returns `true` iff `value` is non-negative and fits in `[0, 2^n)`.
 /// Used by `op_range` to short-circuit cleartext Expression::Constant

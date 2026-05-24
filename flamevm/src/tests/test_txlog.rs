@@ -4,7 +4,7 @@
 
 use super::test_helpers::*;
 
-// ── Phase 17 (partial): TxID + log opcode ────────────────────
+// ── TxID + log opcode ────────────────────
 
 #[test]
 fn log_opcode_emits_txentry_data() {

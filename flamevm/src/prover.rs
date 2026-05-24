@@ -12,14 +12,15 @@
 //! with the prover's [`crate::Program`]. The VM, when stepping through a
 //! `Run::Queue` populated from a Program, sees each Alloc with its
 //! cleartext witness intact, and binds the witness to a newly allocated
-//! R1CS variable. The verifier walks the same bytecode (via
-//! `Run::Bytecode`), where every Alloc parses to `Alloc(None)` — the
-//! variable is left unassigned and the constraint system fills it in
-//! algebraically during proof verification.
+//! R1CS variable. The verifier walks the same bytecode, where every
+//! Alloc parses to `Alloc(None)` — the variable is left unassigned
+//! and the constraint system fills it in algebraically during proof
+//! verification.
 //!
-//! `commit_variable` is reserved for the Phase-13 `commit` opcode and
-//! currently returns `WitnessMissing` (Phase 11 doesn't yet wire a
-//! rich-`String` carrier for open commitments).
+//! `commit_variable` is invoked by the `commit` opcode (and by the
+//! CS-bound branches of `borrow` / `mix`); it extracts `(value,
+//! blinding)` from the open commitment and calls
+//! `r1cs::Prover::commit(value, blinding)`.
 //!
 //! [`Instruction::Alloc(Some(int))`]: crate::ops::Instruction::Alloc
 
@@ -46,9 +47,9 @@ use crate::program::Program;
 use crate::tx::TxHeader;
 use crate::vm::{Delegate, DeferredSig, TxResult, VM};
 
-/// Phase-11 R1CS proof builder. Wraps `bulletproofs::r1cs::Prover` and
-/// a `musig::BatchVerifier` (used by deferred-sig finalization in
-/// Phase 14); owns the constraint system and the bulletproof
+/// R1CS proof builder. Wraps `bulletproofs::r1cs::Prover` and a
+/// `musig::BatchVerifier` (used by deferred-signature batching at
+/// finalize); owns the constraint system and the bulletproof
 /// generators.
 ///
 /// Lifetimes: the inner `r1cs::Prover` borrows from the `PedersenGens`
@@ -82,14 +83,14 @@ impl<'g> Prover<'g> {
             .map_err(|_| VMError::R1CSProofConstruction)
     }
 
-    /// Public Phase-21 entry point: runs `program` through the VM in
-    /// external context (with witnesses attached to each Alloc
-    /// Instruction), computes `TxID::from_log(&txlog)`, binds it
-    /// into the R1CS transcript (Phase 18, `b"flamevm.txid"`), and
-    /// emits the proof — folded into the returned [`TxResult`].
-    /// Mirrors zkvm's `prover::Prover::build_tx`.
+    /// Public entry point: runs `program` through the VM in external
+    /// context (with witnesses attached to each Alloc Instruction),
+    /// computes `TxID::from_log(&txlog)`, binds it into the R1CS
+    /// transcript under domain `b"flamevm.txid"`, and emits the
+    /// proof — folded into the returned [`TxResult`]. Mirrors
+    /// zkvm's `prover::Prover::build_tx`.
     ///
-    /// Returns the full Phase-21 [`TxResult`]: `proof = Some(...)`,
+    /// Returns the full [`TxResult`]: `proof = Some(...)`,
     /// `bytecode = program.to_bytecode()` (the verifier walks the
     /// same bytes), `txid` / `txlog` / `total_fee` etc. populated.
     pub fn prove(
@@ -111,10 +112,10 @@ impl<'g> Prover<'g> {
             mem_limit,
             &mut prover,
         )?;
-        // Phase 18: bind the canonical TxID into the R1CS transcript so
-        // the proof commits to the full transaction effects (header +
-        // log), not just the constraint system shape. Verifier mirrors
-        // this exact step before `cs.verify`.
+        // Bind the canonical TxID into the R1CS transcript so the
+        // proof commits to the full transaction effects (header +
+        // log), not just the constraint system shape. Verifier
+        // mirrors this exact step before `cs.verify`.
         prover.cs.transcript().append_message(b"flamevm.txid", &result.txid.0);
         let proof = prover.into_proof()?;
         result.proof = Some(proof);

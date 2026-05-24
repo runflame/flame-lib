@@ -138,7 +138,8 @@ impl Predicate {
     /// Verifies a `CallProof` against this predicate. On success returns
     /// the unlocked program bytes (the leaf the proof opens). On failure
     /// (path mismatch, decompression failure, etc.) returns
-    /// `VMError::CallProofMismatch` — hard error per Phase 9 model.
+    /// `VMError::CallProofMismatch` — a hard error: cell-open
+    /// failures must not be recoverable.
     pub fn verify_callproof<'a>(
         &self,
         cp: &'a CallProof,
@@ -412,9 +413,10 @@ impl Cell {
     /// cell's contents — needed for protocol messages (signtx/signrun)
     /// and for the txlog Output entry.
     ///
-    /// Panics if a payload value's type has no canonical encoder.
-    /// All portable types (Int253, String, Dict, Point) encode today;
-    /// Token / ClearToken / WideToken encoders land in Phase 13.
+    /// Panics if a payload value's type has no canonical encoder
+    /// (all portable types — Int253, String, Dict, Point, Token —
+    /// encode; non-portable types are rejected by `op_cell` /
+    /// `op_output` before reaching here).
     pub fn id(&self) -> [u8; 32] {
         let mut t = Transcript::new(b"flamevm.cell.id.v1");
         t.append_message(b"predicate", self.predicate.to_point().as_bytes());

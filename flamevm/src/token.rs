@@ -17,10 +17,10 @@
 //!                    `spacesuit::AllocatedValue` (R1CS variables + an
 //!                    optional cleartext assignment).
 //!
-//! Phase 8 lays down the *data shapes* and the cleartext opcode branches.
-//! Encrypted constructions (`Token`/`WideToken` creation via the
-//! encrypted-`issue` / `borrow` / `mix` branches) need a live constraint
-//! system and land in Phase 11/12/13.
+//! Cleartext constructions live alongside the encrypted ones — the
+//! `Token` / `ClearToken` / `WideToken` types share the same module
+//! because their opcode handlers (`issue`, `retire`, `borrow`,
+//! `merge`, `split`, `mix`, `fee`) all dispatch by stack-top type.
 
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
@@ -42,9 +42,10 @@ use crate::{Int253, String};
 /// a cell), `retire`, or `mix`/`decrypt`.
 ///
 /// Non-copyable, non-droppable. The qty is range-proven non-negative
-/// at construction time (in Phase 11/12 — Phase 8 only creates `Token`
-/// via the cleartext convenience constructor below, which trivially
-/// satisfies the range invariant).
+/// at construction time by the CS opcodes that produce a Token (the
+/// encrypted `borrow` / `mix` / `issue` branches). The cleartext
+/// convenience constructor below trivially satisfies the range
+/// invariant for cleartext-only call sites.
 #[derive(Clone, Debug)]
 pub struct Token {
     /// Pedersen commitment to the asset's quantity (≥ 0).
@@ -54,8 +55,8 @@ pub struct Token {
 }
 
 impl Token {
-    /// Builds a `Token` from already-constructed commitments. Used by
-    /// the encrypted opcode branches in Phase 11/13.
+    /// Builds a `Token` from already-constructed commitments. Used
+    /// by the encrypted opcode branches (`borrow`, `mix`).
     pub fn new(qty: Commitment, flv: Commitment) -> Self {
         Token { qty, flv }
     }
@@ -66,10 +67,10 @@ impl Token {
     /// representation that scripts can carry forward through the
     /// confidential opcodes without surfacing the cleartext.
     ///
-    /// Caller responsibility: `qty` should be non-negative. Phase 8
-    /// opcodes that create Tokens via this path (only `issue`'s
-    /// cleartext branch and tests) enforce non-negativity at the call
-    /// site; the constructor itself does not.
+    /// Caller responsibility: `qty` should be non-negative. Opcodes
+    /// that create Tokens via this path (only `issue`'s cleartext
+    /// branch and tests) enforce non-negativity at the call site;
+    /// the constructor itself does not.
     pub fn cleartext(qty: Int253, flv: Int253) -> Self {
         Token {
             qty: Commitment::unblinded(qty),
@@ -87,9 +88,9 @@ impl Token {
 /// `WideToken` is the intermediate type emitted by `borrow` (negative
 /// half), `fee`, and the intermediate steps of `mix`/`cloak`. It is
 /// **non-portable** (cannot be sealed into a cell) because its
-/// quantity is not range-proven. The CS-touching opcodes that produce
-/// or consume it land in Phase 12 (`borrow` range branch), Phase 13
-/// (`mix`/`cloak`), and Phase 17 (`fee`).
+/// quantity is not range-proven. The CS-touching opcodes that
+/// produce or consume it are `borrow` (encrypted branch),
+/// `mix`/`cloak`, and `fee`.
 ///
 /// The wrapper is `pub(crate)` over the inner `AllocatedValue` to keep
 /// the spacesuit dependency from leaking into the public API; the
@@ -98,9 +99,8 @@ impl Token {
 pub struct WideToken(pub(crate) spacesuit::AllocatedValue);
 
 impl WideToken {
-    /// Accessor for the underlying R1CS variable bundle. Used by the
-    /// CS-touching opcodes (Phase 12/13/17) and not exposed beyond the
-    /// crate.
+    /// Accessor for the underlying R1CS variable bundle. Used by
+    /// the CS-touching opcodes and not exposed beyond the crate.
     pub(crate) fn allocated(&self) -> &spacesuit::AllocatedValue {
         &self.0
     }

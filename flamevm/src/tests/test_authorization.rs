@@ -110,7 +110,7 @@ fn signrun_rejects_wrong_signature_length() {
     ));
 }
 
-// ── Phase 14: deferred-sig batch verification ────────────────
+// ── deferred-sig batch verification ────────────────
 
 #[test]
 fn signrun_explicit_sig_batch_verifies_correctly() {
@@ -119,8 +119,8 @@ fn signrun_explicit_sig_batch_verifies_correctly() {
     // the signrun-message transcript and runs it through the same
     // batch-verification logic as the verifier.
     //
-    // (Full prove+verify-via-script path stays out of scope until
-    // Phase 17 wires anchor seeding and TxID-bound TxBound sigs.)
+    // (Full prove+verify-via-script path is covered by
+    // `test_proof_pipeline`; this test isolates the batch check.)
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
     use curve25519_dalek::scalar::Scalar;
     let sk = Scalar::from(42u64);

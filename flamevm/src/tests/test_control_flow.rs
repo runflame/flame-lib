@@ -220,7 +220,8 @@ fn return_too_few_items_errors() {
 
 #[test]
 fn return_transfers_values_to_parent() {
-    // Set up a nested call manually (proper `call` lands in Phase 15).
+    // Set up a nested call manually (the `call` opcode is not yet
+    // wired — see `op_call` plan).
     // Child script: push:7, push:1, return (k=1).
     let child_script = vec![0x07, 0x01, 0x7e];
     let parent_frame =

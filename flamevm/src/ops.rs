@@ -150,7 +150,7 @@ const OP_SIGNRUN: u8 = 0x99;
 /// through the [`crate::vm::Delegate`]'s side-channel queue).
 #[derive(Clone, Debug)]
 pub enum Instruction {
-    // ── Phase 1: stack literals & manipulation ─────────────────────
+    // ── stack literals & manipulation ─────────────────────
     /// `push:k` (0x00..=0x0f), `pushint8/16/64/128 [neg]`, or
     /// `pushint` (0x18) — the encoder picks the narrowest form for
     /// this `Int253`.
@@ -174,7 +174,7 @@ pub enum Instruction {
     /// `roll:k` (0x30..=0x3f) — `k` ∈ 0..=15.
     RollK(u8),
 
-    // ── Phase 4: String ops ────────────────────────────────────────
+    // ── String ops ────────────────────────────────────────
     /// `readbits` (0x40).
     ReadBits,
     /// `readint` (0x41).
@@ -206,7 +206,7 @@ pub enum Instruction {
     /// `keccak256` (0x4e).
     Keccak256,
 
-    // ── Phase 3: Int253 arithmetic / logic / size ──────────────────
+    // ── Int253 arithmetic / logic / size ──────────────────
     /// `abs` (0x50).
     Abs,
     /// `eq` (0x51).
@@ -230,7 +230,7 @@ pub enum Instruction {
     /// `size` (0x5f).
     Size,
 
-    // ── Phase 11/13: CS opcodes ────────────────────────────────────
+    // ── CS opcodes ────────────────────────────────────
     /// `scalar` (0x5a) — `string → expr`. Pops a String, downcasts to
     /// `Int253`, pushes `Expression::Constant(int)`.
     Scalar,
@@ -248,7 +248,7 @@ pub enum Instruction {
     /// range proof on the Expression (n ∈ [1, 64]; pops `n` as `Int253`).
     Range,
 
-    // ── Phase 5: Dict ops ──────────────────────────────────────────
+    // ── Dict ops ──────────────────────────────────────────
     /// `dict` (0x60).
     Dict,
     /// `put` (0x61).
@@ -268,7 +268,7 @@ pub enum Instruction {
     /// `next` (0x68).
     Next,
 
-    // ── Phase 6: Merlin + SHA ──────────────────────────────────────
+    // ── Merlin + SHA ──────────────────────────────────────
     /// `merlin` (0x69).
     Merlin,
     /// `merlinwrite` (0x6a).
@@ -287,7 +287,7 @@ pub enum Instruction {
     /// `op_log` (also 0x6f).
     Log,
 
-    // ── Phase 8: Tokens ────────────────────────────────────────────
+    // ── Tokens ────────────────────────────────────────────
     /// `amount` (0x70).
     Amount,
     /// `issue` (0x71).
@@ -315,12 +315,12 @@ pub enum Instruction {
     /// `issueflv` (0x78).
     IssueFlv,
 
-    // ── Phase 2: control flow ──────────────────────────────────────
+    // ── control flow ──────────────────────────────────────
     /// `verify` (0x79).
     Verify,
     /// `fee` (0x7a) — external-only. Pops `qty: Int253` (non-negative,
     /// ≤ MAX_FEE) and `flv: Int253`, records `TxEntry::Fee(qty as u64)`,
-    /// pushes a `WideToken` debt with `q = -qty`, `f = flv`. Phase 19.
+    /// pushes a `WideToken` debt with `q = -qty`, `f = flv`.
     Fee,
     /// `run` (0x7b).
     Run,
@@ -335,12 +335,12 @@ pub enum Instruction {
     /// `break:k` (0x80..=0x8f) — `k` ∈ 0..=15.
     BreakK(u8),
 
-    // ── Phase 9/10/22: Cell + I/O ──────────────────────────────────
+    // ── Cell + I/O ──────────────────────────────────
     /// `input` (0x90) — external-only.
     ///
     /// The optional inner [`crate::witness::InputWitnesses`] carries
     /// prover-side commitment witnesses for any `Token` entries in
-    /// the consumed cell's payload (Phase 22). Verifier-side parsing
+    /// the consumed cell's payload. Verifier-side parsing
     /// always reconstructs `Input(None)`; the witness never crosses
     /// the wire. `Box` keeps the enum tag cheap when witness is
     /// `None`. Same shape as `Alloc(Option<Int253>)`.
@@ -909,9 +909,9 @@ mod tests {
 
     #[test]
     fn ext_opcode_for_unknown_bytes() {
-        // 0x4f / 0x9a remain unused. Phase 17 wired 0x6f log; Phase 19
-        // wired 0x7a fee. 0xff is a sentinel "definitely unassigned"
-        // byte for fuzzing future extensions.
+        // 0x4f / 0x9a remain unassigned (0x6f is `log`, 0x7a is
+        // `fee`). 0xff is a sentinel "definitely unassigned" byte
+        // for fuzzing future extensions.
         let unused = [0x4f, 0x9a, 0xff];
         for b in unused {
             let mut r: &[u8] = &[b];

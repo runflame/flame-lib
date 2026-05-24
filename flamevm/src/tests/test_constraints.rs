@@ -4,7 +4,7 @@
 
 use super::test_helpers::*;
 
-// ── Phase 12: range proofs + Constraint composition ──────────
+// ── range proofs + Constraint composition ──────────
 
 #[test]
 fn range_proof_accepts_in_range_value() {
@@ -86,11 +86,10 @@ fn range_proof_rejects_out_of_range_value() {
 
 #[test]
 fn range_proof_constant_in_range_skips_cs() {
-    // push:7 (constant Expression after no alloc), but we don't
-    // have a way to get an Expression::Constant onto the stack
-    // without `scalar` (Phase 13). Skip this until Phase 13.
-    //
-    // For now exercise `range` only via alloc-produced Expressions.
+    // push:7 (constant Expression after no alloc) — covered
+    // indirectly by `op_scalar` tests in `test_commitments`.
+    // `range` is otherwise exercised here via alloc-produced
+    // Expressions.
 }
 
 #[test]

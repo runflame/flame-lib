@@ -1,4 +1,4 @@
-//! Per-input prover witnesses (Phase 22).
+//! Per-input prover witnesses.
 //!
 //! `Cell::encode` strips `Commitment::Open` → `Closed` on the wire
 //! (only the 32-byte point reaches consumers). On the verifier side
