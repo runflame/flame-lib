@@ -770,29 +770,15 @@ impl VM {
             // overloads) is resolved INSIDE each handler — no
             // dispatch-time peek. See `op_neg`, `op_add`, … in 2b.
             I::Abs => self.op_abs(),
-            I::Eq if self.is_external() && self.top_two_have_non_int253()
-                => self.op_eq_expr(),
-            I::Eq => self.op_eq(),
-            I::Neg if self.is_external() && self.top_is_expression()
-                => self.op_neg_expr(),
-            I::Neg => self.op_neg(),
-            I::Add if self.is_external() && self.top_two_have_non_int253()
-                => self.op_add_expr(),
-            I::Add => self.op_add(),
-            I::Mul if self.is_external() && self.top_two_have_non_int253()
-                => self.op_mul_expr(delegate),
-            I::Mul => self.op_mul(),
+            I::Eq => self.op_eq(delegate),
+            I::Neg => self.op_neg(delegate),
+            I::Add => self.op_add(delegate),
+            I::Mul => self.op_mul(delegate),
             I::DivMod => self.op_divmod(),
             I::Mod252 => self.op_mod252(),
-            I::Not if self.is_external() && self.top_is_constraint()
-                => self.op_not_constraint(),
-            I::Not => self.op_not(),
-            I::And if self.is_external() && self.top_two_have_constraint()
-                => self.op_and_constraint(),
-            I::And => self.op_and(),
-            I::Or if self.is_external() && self.top_two_have_constraint()
-                => self.op_or_constraint(),
-            I::Or => self.op_or(),
+            I::Not => self.op_not(delegate),
+            I::And => self.op_and(delegate),
+            I::Or => self.op_or(delegate),
             I::Size => self.op_size(),
             // ── Dict ops ──────────────────────────────────────────
             I::Dict => self.op_dict(),
@@ -816,9 +802,7 @@ impl VM {
             I::Amount => self.op_amount(),
             I::Issue => self.op_issue(),
             I::Retire => self.op_retire(),
-            I::Borrow if self.is_external() && self.top_two_are_variables()
-                => self.op_borrow_encrypted(delegate),
-            I::Borrow => self.op_borrow(),
+            I::Borrow => self.op_borrow(delegate),
             I::Merge => self.op_merge(),
             I::Split => self.op_split(),
             I::IssueFlv => self.op_issueflv(),
@@ -831,9 +815,7 @@ impl VM {
             I::Decrypt => self.op_decrypt(),
             I::Mix => self.op_mix(delegate),
             I::Fee => self.op_fee(delegate),
-            I::Verify if self.is_external() && self.top_is_constraint()
-                => self.op_verify_constraint(delegate),
-            I::Verify => self.op_verify(),
+            I::Verify => self.op_verify(delegate),
             // ── Control flow ──────────────────────────────────────
             I::Run => self.op_run(),
             I::Loop => self.op_loop(),
@@ -1526,42 +1508,123 @@ impl VM {
 
     /// `0x51` `eq` — peeks the top two stack values and pushes `1` if
     /// equal, `0` otherwise. The operands themselves stay on the stack.
-    fn op_eq(&mut self) -> Result<(), VMError> {
+    /// `0x51 eq` — pop two and test equality.
+    ///
+    /// - Both `Int253` (or other cleartext-comparable cross types):
+    ///   peeks both, pushes `1` if equal, `0` otherwise. Operands
+    ///   stay on the stack — `a b → a b {0|1}` per spec.
+    /// - At least one `Expression` / `Variable` (only possible in
+    ///   external context): pops both, lifts each to
+    ///   `Expression-or-Constant`, and pushes a `Constraint::eq` —
+    ///   different stack diagram (`a b → constraint`) because the
+    ///   equality becomes a CS constraint, not an immediate
+    ///   boolean.
+    fn op_eq<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
         let n = self.current_call.stack.len();
         if n < 2 {
             return Err(VMError::StackUnderflow);
         }
-        let eq = self.current_call.stack[n - 1]
-            .try_eq(&self.current_call.stack[n - 2])?;
-        let bit = if eq { 1u64 } else { 0u64 };
-        self.push_value(Value::Int253(Int253::from(bit)));
+        let two_have_non_int = !matches!(self.current_call.stack[n - 1], Value::Int253(_))
+            || !matches!(self.current_call.stack[n - 2], Value::Int253(_));
+        if self.is_external() && two_have_non_int {
+            let b = self.pop_value()?;
+            let a = self.pop_value()?;
+            let bexpr = Self::into_expression_or_const(b)?;
+            let aexpr = Self::into_expression_or_const(a)?;
+            self.push_value(Value::Constraint(crate::Constraint::eq(aexpr, bexpr)));
+        } else {
+            let eq = self.current_call.stack[n - 1]
+                .try_eq(&self.current_call.stack[n - 2])?;
+            let bit = if eq { 1u64 } else { 0u64 };
+            self.push_value(Value::Int253(Int253::from(bit)));
+        }
         Ok(())
     }
 
-    /// `0x52` `neg` — negates an `Int253` (Expression overload deferred
-    /// to Phase 11). Zero stays positive.
-    fn op_neg(&mut self) -> Result<(), VMError> {
-        let v = self.pop_int253()?;
-        self.push_value(Value::Int253(-v));
-        Ok(())
+    /// `0x52 neg` — pop one and negate.
+    ///
+    /// - `Int253`: cleartext negation (zero stays positive).
+    /// - `Expression`: structural negation of the LC (external
+    ///   context only; an Expression can only exist on the stack
+    ///   after `alloc` / `scalar` / `expr`, all of which require
+    ///   external context).
+    fn op_neg<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
+        match self.pop_value()? {
+            Value::Int253(v) => {
+                self.push_value(Value::Int253(-v));
+                Ok(())
+            }
+            Value::Expression(e) => {
+                self.push_value(Value::Expression(-e));
+                Ok(())
+            }
+            other => {
+                self.push_value(other);
+                Err(VMError::TypeNotInt253)
+            }
+        }
     }
 
-    /// `0x53` `add` — adds two `Int253`s modulo ℓ (Expression overload
-    /// deferred to Phase 11).
-    fn op_add(&mut self) -> Result<(), VMError> {
-        let y = self.pop_int253()?;
-        let x = self.pop_int253()?;
-        self.push_value(Value::Int253(x + y));
-        Ok(())
+    /// `0x53 add` — pop two and sum.
+    ///
+    /// - Both `Int253`: cleartext sum modulo ℓ.
+    /// - Otherwise: lift each operand to `Expression` (with Int253
+    ///   folding into `Expression::Constant`) and emit an
+    ///   LC-addition Expression. Requires external context.
+    fn op_add<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
+        let b = self.pop_value()?;
+        let a = self.pop_value()?;
+        match (a, b) {
+            (Value::Int253(x), Value::Int253(y)) => {
+                self.push_value(Value::Int253(x + y));
+                Ok(())
+            }
+            (a, b) if self.is_external() => {
+                let aexpr = Self::into_expression_or_const(a)?;
+                let bexpr = Self::into_expression_or_const(b)?;
+                self.push_value(Value::Expression(aexpr + bexpr));
+                Ok(())
+            }
+            _ => Err(VMError::TypeNotInt253),
+        }
     }
 
-    /// `0x54` `mul` — multiplies two `Int253`s modulo ℓ (Expression
-    /// overload deferred to Phase 11).
-    fn op_mul(&mut self) -> Result<(), VMError> {
-        let y = self.pop_int253()?;
-        let x = self.pop_int253()?;
-        self.push_value(Value::Int253(x * y));
-        Ok(())
+    /// `0x54 mul` — pop two and multiply.
+    ///
+    /// - Both `Int253`: cleartext product modulo ℓ.
+    /// - Otherwise: lift each to `Expression` and emit a CS
+    ///   multiplication (constant-folded where both are
+    ///   constants, allocates a multiplier gate otherwise).
+    ///   Requires external context (needs `delegate.cs()`).
+    fn op_mul<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        let b = self.pop_value()?;
+        let a = self.pop_value()?;
+        match (a, b) {
+            (Value::Int253(x), Value::Int253(y)) => {
+                self.push_value(Value::Int253(x * y));
+                Ok(())
+            }
+            (a, b) if self.is_external() => {
+                let aexpr = Self::into_expression_or_const(a)?;
+                let bexpr = Self::into_expression_or_const(b)?;
+                let product = aexpr.multiply(bexpr, delegate.cs());
+                self.push_value(Value::Expression(product));
+                Ok(())
+            }
+            _ => Err(VMError::TypeNotInt253),
+        }
+    }
+
+    /// Lifts a stack value to `Expression`. Int253 folds to
+    /// `Expression::Constant`; Expression passes through. Anything
+    /// else errors `TypeNotExpression`. Used by `add` / `mul` /
+    /// `eq` when at least one operand is non-Int253.
+    fn into_expression_or_const(v: Value) -> Result<crate::Expression, VMError> {
+        match v {
+            Value::Expression(e) => Ok(e),
+            Value::Int253(i) => Ok(crate::Expression::constant(i)),
+            _ => Err(VMError::TypeNotExpression),
+        }
     }
 
     /// `0x55` `divmod` — `x z → d r`. Truncated division: `sign(d) =
@@ -1591,33 +1654,86 @@ impl VM {
         Ok(())
     }
 
-    /// `0x57` `not` — `Int253` boolean negation: zero → `1`, non-zero
-    /// → `0`. Constraint overload deferred to Phase 12.
-    fn op_not(&mut self) -> Result<(), VMError> {
-        let v = self.pop_int253()?;
-        let r = if v.is_zero() { 1u64 } else { 0u64 };
-        self.push_value(Value::Int253(Int253::from(r)));
+    /// `0x57 not` — pop one and negate.
+    ///
+    /// - `Int253`: zero → `1`, non-zero → `0`.
+    /// - `Constraint`: structural negation
+    ///   (`Constraint::not(c)`). External context only.
+    fn op_not<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
+        match self.pop_value()? {
+            Value::Int253(v) => {
+                let r = if v.is_zero() { 1u64 } else { 0u64 };
+                self.push_value(Value::Int253(Int253::from(r)));
+                Ok(())
+            }
+            Value::Constraint(c) => {
+                self.push_value(Value::Constraint(crate::Constraint::not(c)));
+                Ok(())
+            }
+            other => {
+                self.push_value(other);
+                Err(VMError::TypeNotInt253)
+            }
+        }
+    }
+
+    /// `0x58 and` — pop two and conjoin.
+    ///
+    /// - Both `Int253`: logical AND, `1` iff both non-zero.
+    /// - At least one `Constraint` (only possible in external
+    ///   context): structural `Constraint::and`, with Int253
+    ///   operands lifted to `Constraint::Cleartext`.
+    fn op_and<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
+        let n = self.current_call.stack.len();
+        if n < 2 {
+            return Err(VMError::StackUnderflow);
+        }
+        let either_constraint = matches!(self.current_call.stack[n - 1], Value::Constraint(_))
+            || matches!(self.current_call.stack[n - 2], Value::Constraint(_));
+        if self.is_external() && either_constraint {
+            let b = Self::into_constraint_or_int253(self.pop_value()?)?;
+            let a = Self::into_constraint_or_int253(self.pop_value()?)?;
+            self.push_value(Value::Constraint(crate::Constraint::and(a, b)));
+        } else {
+            let b = self.pop_int253()?;
+            let a = self.pop_int253()?;
+            let r = if !a.is_zero() && !b.is_zero() { 1u64 } else { 0u64 };
+            self.push_value(Value::Int253(Int253::from(r)));
+        }
         Ok(())
     }
 
-    /// `0x58` `and` — `Int253` logical AND: `1` if both operands are
-    /// non-zero, else `0`. Constraint overload deferred to Phase 12.
-    fn op_and(&mut self) -> Result<(), VMError> {
-        let b = self.pop_int253()?;
-        let a = self.pop_int253()?;
-        let r = if !a.is_zero() && !b.is_zero() { 1u64 } else { 0u64 };
-        self.push_value(Value::Int253(Int253::from(r)));
+    /// `0x59 or` — mirror of `and` for disjunction.
+    fn op_or<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
+        let n = self.current_call.stack.len();
+        if n < 2 {
+            return Err(VMError::StackUnderflow);
+        }
+        let either_constraint = matches!(self.current_call.stack[n - 1], Value::Constraint(_))
+            || matches!(self.current_call.stack[n - 2], Value::Constraint(_));
+        if self.is_external() && either_constraint {
+            let b = Self::into_constraint_or_int253(self.pop_value()?)?;
+            let a = Self::into_constraint_or_int253(self.pop_value()?)?;
+            self.push_value(Value::Constraint(crate::Constraint::or(a, b)));
+        } else {
+            let b = self.pop_int253()?;
+            let a = self.pop_int253()?;
+            let r = if !a.is_zero() || !b.is_zero() { 1u64 } else { 0u64 };
+            self.push_value(Value::Int253(Int253::from(r)));
+        }
         Ok(())
     }
 
-    /// `0x59` `or` — `Int253` logical OR: `1` if either operand is
-    /// non-zero, else `0`. Constraint overload deferred to Phase 12.
-    fn op_or(&mut self) -> Result<(), VMError> {
-        let b = self.pop_int253()?;
-        let a = self.pop_int253()?;
-        let r = if !a.is_zero() || !b.is_zero() { 1u64 } else { 0u64 };
-        self.push_value(Value::Int253(Int253::from(r)));
-        Ok(())
+    /// Lifts a stack value to `Constraint`. Constraint passes
+    /// through; Int253 folds to `Constraint::Cleartext(value !=
+    /// 0)`. Anything else errors. Used by `and` / `or` / `not`
+    /// when at least one operand is a Constraint.
+    fn into_constraint_or_int253(v: Value) -> Result<crate::Constraint, VMError> {
+        match v {
+            Value::Constraint(c) => Ok(c),
+            Value::Int253(i) => Ok(crate::Constraint::Cleartext(!i.is_zero())),
+            _ => Err(VMError::TypeNotConstraint),
+        }
     }
 
     /// `0x5f` `size` — peeks the top value and pushes its length as an
@@ -1640,14 +1756,29 @@ impl VM {
 
     // ── Phase 2: control flow ────────────────────────────────────
 
-    /// `0x79` `verify` — fails the script if the top of stack is zero.
-    /// Pops the value on success.
-    fn op_verify(&mut self) -> Result<(), VMError> {
-        let v = self.pop_int253()?;
-        if v.is_zero() {
-            return Err(VMError::VerifyFailed);
+    /// `0x79 verify` — pop one and assert truthiness.
+    ///
+    /// - `Int253`: errors `VerifyFailed` if zero, else pops.
+    /// - `Constraint`: hands the constraint to the CS so the proof
+    ///   commits to its truth. Requires external context.
+    fn op_verify<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        match self.pop_value()? {
+            Value::Int253(v) => {
+                if v.is_zero() {
+                    return Err(VMError::VerifyFailed);
+                }
+                Ok(())
+            }
+            Value::Constraint(c) => {
+                self.require_external()?;
+                c.verify(delegate.cs())?;
+                Ok(())
+            }
+            other => {
+                self.push_value(other);
+                Err(VMError::TypeNotInt253)
+            }
         }
-        Ok(())
     }
 
     /// `0x7b` `run` — pops a `String`, suspends the current Run onto
@@ -1923,7 +2054,21 @@ impl VM {
     /// (the encrypted-borrow branch with range-proof needs CS — Phase
     /// 12). Hard-fails with `TypeNotInt253` for any other operand
     /// type.
-    fn op_borrow(&mut self) -> Result<(), VMError> {
+    /// `0x73 borrow` — pop `(qty, flv)` and produce a debit/credit
+    /// pair.
+    ///
+    /// - Both `Int253`: cleartext borrow — pushes
+    ///   `ClearToken(-qty, flv)` on the bottom and
+    ///   `ClearToken(qty, flv)` on top.
+    /// - Both `Variable`: encrypted borrow — commits both
+    ///   commitments to the CS, range-proves the positive `qty`,
+    ///   allocates `-qty`, constrains the sum to zero, and pushes
+    ///   `WideToken(-qty, flv)` + `Token(qty, flv)`. External
+    ///   context only (CS allocation).
+    /// - `Point` operand: legacy encrypted-via-point hint, no
+    ///   longer accepted — errors `TokenRequiresCS`.
+    /// - Anything else: `TypeNotInt253`.
+    fn op_borrow<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         let flv_val = self.pop_value()?;
         let qty_val = self.pop_value()?;
         match (qty_val, flv_val) {
@@ -1933,6 +2078,10 @@ impl VM {
                 self.push_value(Value::ClearToken(neg));
                 self.push_value(Value::ClearToken(pos));
                 Ok(())
+            }
+            (Value::Variable(qty), Value::Variable(flv)) => {
+                self.require_external()?;
+                self.op_borrow_encrypted_inner(qty, flv, delegate)
             }
             (Value::Point(_), _) | (_, Value::Point(_)) => Err(VMError::TokenRequiresCS),
             _ => Err(VMError::TypeNotInt253),
@@ -2393,68 +2542,6 @@ impl VM {
         }
     }
 
-    /// Pops either an `Expression` or an `Int253` (lifted to a
-    /// constant Expression). Used by Expression-overloaded
-    /// arithmetic ops where one operand may be a cleartext int.
-    fn pop_expression_or_const(&mut self) -> Result<crate::Expression, VMError> {
-        match self.pop_value()? {
-            Value::Expression(e) => Ok(e),
-            Value::Int253(i) => Ok(crate::Expression::constant(i)),
-            _ => Err(VMError::TypeNotExpression),
-        }
-    }
-
-    /// True iff the top stack value is an `Expression`.
-    fn top_is_expression(&self) -> bool {
-        matches!(self.current_call.stack.last(), Some(Value::Expression(_)))
-    }
-
-    /// True iff the top stack value is a `Constraint`.
-    fn top_is_constraint(&self) -> bool {
-        matches!(self.current_call.stack.last(), Some(Value::Constraint(_)))
-    }
-
-    /// True iff at least one of the top two values isn't an `Int253` —
-    /// i.e. the Expression-overloaded path should apply. (Both Int253
-    /// → use the original `try_common` integer path.)
-    fn top_two_have_non_int253(&self) -> bool {
-        let n = self.current_call.stack.len();
-        if n < 2 {
-            return false;
-        }
-        let a = matches!(self.current_call.stack[n - 1], Value::Int253(_));
-        let b = matches!(self.current_call.stack[n - 2], Value::Int253(_));
-        !(a && b)
-    }
-
-    /// True iff at least one of the top two values is a `Constraint`.
-    /// Used by `and` / `or` overload dispatch — the cleartext Int253
-    /// path runs only when neither operand is already a Constraint.
-    fn top_two_have_constraint(&self) -> bool {
-        let n = self.current_call.stack.len();
-        if n < 2 {
-            return false;
-        }
-        let a = matches!(self.current_call.stack[n - 1], Value::Constraint(_));
-        let b = matches!(self.current_call.stack[n - 2], Value::Constraint(_));
-        a || b
-    }
-
-    /// True iff both top-two values are `Variable` — gates the
-    /// encrypted `borrow` overload. Cleartext path runs when neither
-    /// is a Variable; mixed Variable/non-Variable is not a defined
-    /// FlameVM combination (errors via the cleartext-path's TypeNot*
-    /// check).
-    fn top_two_are_variables(&self) -> bool {
-        let n = self.current_call.stack.len();
-        if n < 2 {
-            return false;
-        }
-        let a = matches!(self.current_call.stack[n - 1], Value::Variable(_));
-        let b = matches!(self.current_call.stack[n - 2], Value::Variable(_));
-        a && b
-    }
-
     /// `0x5c alloc` — allocates a low-level R1CS variable. The witness
     /// comes from `Instruction::Alloc(Option<Int253>)`: `Some(i)` on
     /// the prover side (cleartext value the CS uses when proving),
@@ -2499,60 +2586,12 @@ impl VM {
         Ok(())
     }
 
-    /// `0x52 neg` Expression overload.
-    fn op_neg_expr(&mut self) -> Result<(), VMError> {
-        let e = self.pop_expression()?;
-        self.push_value(Value::Expression(-e));
-        Ok(())
-    }
+    // ── Phase 12: range proofs ───────────────────────────────────
 
-    /// `0x53 add` Expression overload. Either operand may be Int253
-    /// (constant-folded into Expression::Constant).
-    fn op_add_expr(&mut self) -> Result<(), VMError> {
-        let b = self.pop_expression_or_const()?;
-        let a = self.pop_expression_or_const()?;
-        self.push_value(Value::Expression(a + b));
-        Ok(())
-    }
-
-    /// `0x54 mul` Expression overload. Allocates a multiplier in the
-    /// CS for the non-constant case; constant-folds otherwise.
-    fn op_mul_expr<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
-        let b = self.pop_expression_or_const()?;
-        let a = self.pop_expression_or_const()?;
-        let product = a.multiply(b, delegate.cs());
-        self.push_value(Value::Expression(product));
-        Ok(())
-    }
-
-    /// `0x51 eq` Expression overload. Both operands as Expression →
-    /// pushes a `Constraint::eq` on top, leaving the operand expressions
-    /// consumed. This differs from the Int253 `eq` (which peeks only),
-    /// because Expression equality is a constraint to be verified later,
-    /// not an immediate boolean.
-    fn op_eq_expr(&mut self) -> Result<(), VMError> {
-        let b = self.pop_expression_or_const()?;
-        let a = self.pop_expression_or_const()?;
-        let c = crate::Constraint::eq(a, b);
-        self.push_value(Value::Constraint(c));
-        Ok(())
-    }
-
-    /// `0x79 verify` Constraint overload. Hands the constraint to the
-    /// CS so the proof commits to its truth.
-    fn op_verify_constraint<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
-        let c = self.pop_constraint()?;
-        c.verify(delegate.cs())?;
-        Ok(())
-    }
-
-    // ── Phase 12: range proofs + Constraint composition ──────────
-
-    /// Pops a `Constraint` if the top of the stack is one, or lifts an
-    /// `Int253` to `Constraint::Cleartext(value != 0)`. Mirrors zkvm's
-    /// pattern of accepting "constant constraints" alongside witness
-    /// constraints, leveraging the Constraint cleartext-fold to keep
-    /// the CS minimal.
+    /// Legacy helper kept only for `op_range`'s Constraint
+    /// lift-from-Int253 case. The polymorphic `and` / `or` / `not`
+    /// handlers inline the equivalent logic via
+    /// `into_constraint_or_int253`.
     fn pop_constraint_or_int253(&mut self) -> Result<crate::Constraint, VMError> {
         match self.pop_value()? {
             Value::Constraint(c) => Ok(c),
@@ -2621,33 +2660,6 @@ impl VM {
         }
     }
 
-    /// `0x57 not` Constraint overload. Pops a Constraint, pushes its
-    /// negation.
-    fn op_not_constraint(&mut self) -> Result<(), VMError> {
-        let c = self.pop_constraint_or_int253()?;
-        self.push_value(Value::Constraint(crate::Constraint::not(c)));
-        Ok(())
-    }
-
-    /// `0x58 and` Constraint overload. Pops two Constraints (or
-    /// Int253-as-Cleartext), pushes their conjunction. Constraint
-    /// composition is purely structural — the CS is only touched when
-    /// `verify` is called on the resulting Constraint.
-    fn op_and_constraint(&mut self) -> Result<(), VMError> {
-        let b = self.pop_constraint_or_int253()?;
-        let a = self.pop_constraint_or_int253()?;
-        self.push_value(Value::Constraint(crate::Constraint::and(a, b)));
-        Ok(())
-    }
-
-    /// `0x59 or` Constraint overload. Mirror of `and`.
-    fn op_or_constraint(&mut self) -> Result<(), VMError> {
-        let b = self.pop_constraint_or_int253()?;
-        let a = self.pop_constraint_or_int253()?;
-        self.push_value(Value::Constraint(crate::Constraint::or(a, b)));
-        Ok(())
-    }
-
     // ── Phase 13: scalar / commit / decrypt / encrypted token ops ────
 
     /// `0x5a scalar` — `string → expr`. Pops a String, downcasts to
@@ -2678,17 +2690,19 @@ impl VM {
         Ok(())
     }
 
-    /// Encrypted overload of `0x73 borrow`. Pops `flv: Variable`,
-    /// `qty: Variable`; commits both to the CS; range-proves `qty`
-    /// (64-bit); allocates `neg_qty_var` and constrains it to be
-    /// the additive inverse; pushes
-    /// `WideToken(AllocatedValue { q: neg_qty_var, f: flv_var, … })`
-    /// then `Token { qty, flv }`. Mirrors zkvm's `borrow` exactly.
-    fn op_borrow_encrypted<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+    /// Encrypted-branch body for `0x73 borrow`. Caller has already
+    /// popped `(qty, flv)` and verified both are `Variable`; this
+    /// just runs the CS plumbing — range-proof + additive-inverse
+    /// allocation — and pushes the `WideToken` / `Token` pair.
+    /// Mirrors zkvm's `borrow` exactly.
+    fn op_borrow_encrypted_inner<D: Delegate>(
+        &mut self,
+        qty: crate::Variable,
+        flv: crate::Variable,
+        delegate: &mut D,
+    ) -> Result<(), VMError> {
         use bulletproofs::r1cs::ConstraintSystem;
         use spacesuit::BitRange;
-        let flv = self.pop_variable()?;
-        let qty = self.pop_variable()?;
         // Commit both to the CS. Prover uses the open witness; verifier
         // sees only the closed point. Either way, the returned r1cs vars
         // are bound to the same commitment point on both sides.
