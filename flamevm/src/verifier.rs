@@ -26,6 +26,7 @@ use crate::vm::{Delegate, DeferredSig, TxResult, VM};
 pub struct Verifier {
     cs: r1cs::Verifier<Transcript>,
     bp_gens: BulletproofGens,
+    batch: musig::BatchVerifier<rand::rngs::ThreadRng>,
 }
 
 impl Verifier {
@@ -41,6 +42,7 @@ impl Verifier {
             // `prover.rs::Prover::new` for the rationale on
             // `(1024, 1)`.
             bp_gens: BulletproofGens::new(1024, 1),
+            batch: musig::BatchVerifier::new(rand::thread_rng()),
         }
     }
 
@@ -58,7 +60,10 @@ impl Verifier {
     }
 
     /// Public Phase-11 entry point: runs `bytecode` through the VM in
-    /// external context, then verifies the R1CS proof.
+    /// external context, then verifies the R1CS proof and (Phase-14)
+    /// batch-verifies any `DeferredSig::Explicit` records via
+    /// `Signature::verify_batched`. `DeferredSig::TxBound` records
+    /// are not yet checked — they need TxID computation (Phase 17).
     pub fn verify(
         pc_gens: &PedersenGens,
         bytecode: Vec<u8>,
@@ -75,7 +80,32 @@ impl Verifier {
             mem_limit,
             &mut verifier,
         )?;
-        verifier.verify_proof(proof, pc_gens)?;
+        // Phase 14: append each Explicit deferred sig to the batch.
+        // TxBound sigs are deferred to Phase 17 (need TxID).
+        for sig in &sigs {
+            if let DeferredSig::Explicit {
+                verification_key,
+                message,
+                signature,
+            } = sig
+            {
+                let starsig = musig::Signature::from_bytes(*signature)
+                    .map_err(|_| VMError::BadSignatureBytes)?;
+                let vk = musig::VerificationKey::from_compressed(*verification_key);
+                let mut t = merlin::Transcript::new(b"flamevm.signrun.v1");
+                t.append_message(b"msg", message);
+                starsig.verify_batched(&mut t, vk, &mut verifier.batch);
+            }
+        }
+        // Verify R1CS proof first, then drain the deferred-sig batch.
+        // Both must pass for the tx to be valid. Destructure so both
+        // consume-by-value methods work without borrow conflicts.
+        let Verifier { cs, batch, bp_gens } = verifier;
+        cs.verify(proof, pc_gens, &bp_gens)
+            .map_err(|_| VMError::InvalidR1CSProof)?;
+        batch
+            .verify()
+            .map_err(|_| VMError::BatchSignatureVerificationFailed)?;
         Ok((result, sigs))
     }
 }
@@ -88,9 +118,14 @@ impl Default for Verifier {
 
 impl Delegate for Verifier {
     type CS = r1cs::Verifier<Transcript>;
+    type BatchVerifier = musig::BatchVerifier<rand::rngs::ThreadRng>;
 
     fn cs(&mut self) -> &mut Self::CS {
         &mut self.cs
+    }
+
+    fn batch_verifier(&mut self) -> &mut Self::BatchVerifier {
+        &mut self.batch
     }
 
     fn commit_variable(

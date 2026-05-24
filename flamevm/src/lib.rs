@@ -19,7 +19,7 @@ pub use cell::{CallProof, Cell, Predicate, PredicateTree};
 pub use constraints::{
     Commitment, CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,
 };
-pub use crypto::{Merlin, MultiscalarMul, Point};
+pub use crypto::{Merlin, Point};
 pub use dict::Dict;
 pub use errors::VMError;
 pub use int253::Int253;

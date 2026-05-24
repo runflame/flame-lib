@@ -33,8 +33,10 @@ use crate::program::Program;
 use crate::tx::TxHeader;
 use crate::vm::{Delegate, DeferredSig, TxResult, VM};
 
-/// Phase-11 R1CS proof builder. Wraps `bulletproofs::r1cs::Prover`;
-/// owns the constraint system and the bulletproof generators.
+/// Phase-11 R1CS proof builder. Wraps `bulletproofs::r1cs::Prover` and
+/// a `musig::BatchVerifier` (used by deferred-sig finalization in
+/// Phase 14); owns the constraint system and the bulletproof
+/// generators.
 ///
 /// Lifetimes: the inner `r1cs::Prover` borrows from the `PedersenGens`
 /// passed at construction. Callers typically build a
@@ -44,6 +46,7 @@ use crate::vm::{Delegate, DeferredSig, TxResult, VM};
 pub struct Prover<'g> {
     cs: r1cs::Prover<'g, Transcript>,
     bp_gens: BulletproofGens,
+    batch: musig::BatchVerifier<rand::rngs::ThreadRng>,
 }
 
 impl<'g> Prover<'g> {
@@ -61,6 +64,7 @@ impl<'g> Prover<'g> {
             // multi-range proofs). Party capacity is 1 because R1CS
             // proofs are single-party.
             bp_gens: BulletproofGens::new(1024, 1),
+            batch: musig::BatchVerifier::new(rand::thread_rng()),
         }
     }
 
@@ -103,9 +107,14 @@ impl<'g> Prover<'g> {
 
 impl<'g> Delegate for Prover<'g> {
     type CS = r1cs::Prover<'g, Transcript>;
+    type BatchVerifier = musig::BatchVerifier<rand::rngs::ThreadRng>;
 
     fn cs(&mut self) -> &mut Self::CS {
         &mut self.cs
+    }
+
+    fn batch_verifier(&mut self) -> &mut Self::BatchVerifier {
+        &mut self.batch
     }
 
     fn commit_variable(

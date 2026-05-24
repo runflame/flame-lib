@@ -141,9 +141,21 @@ pub trait ActorRegistry {
 /// the same VM over the same opcodes; only the proof-machinery differs.
 pub trait Delegate {
     type CS: r1cs::RandomizableConstraintSystem;
+    /// Per-side batched scalar-point check accumulator. Mirrors zkvm's
+    /// `Delegate::BatchVerifier`. Built up by `signtx`/`signrun` (and,
+    /// later, `unblind` / `issue`'s flavor check); drained by
+    /// `Verifier::verify_proof` via `batch.verify()`.
+    type BatchVerifier: musig::BatchVerification;
 
     /// Mutable access to the constraint system.
     fn cs(&mut self) -> &mut Self::CS;
+
+    /// Mutable access to the batch verifier. Used by deferred-sig
+    /// finalization on the verifier side; the prover's
+    /// `BatchVerifier` accumulates the same items (used by the
+    /// `Explicit` deferred-sig path's batch check on the prover, too,
+    /// since proving doesn't change the algebraic check shape).
+    fn batch_verifier(&mut self) -> &mut Self::BatchVerifier;
 
     /// Allocates an R1CS variable backed by a Pedersen commitment.
     ///
@@ -584,6 +596,10 @@ impl VM {
             I::Not if self.top_is_constraint() => self.op_not_constraint(),
             I::And if self.top_two_have_constraint() => self.op_and_constraint(),
             I::Or if self.top_two_have_constraint() => self.op_or_constraint(),
+            // ── Phase 13.5: encrypted borrow ─────────────────────
+            I::Borrow if self.top_two_are_variables() => {
+                self.op_borrow_encrypted(delegate)
+            }
             // ── Phase 10a: external-only ──────────────────────────
             I::Input => self.op_input(),
             // ── Everything else → common dispatch ─────────────────
@@ -682,6 +698,7 @@ impl VM {
             I::Sha256 => self.op_sha256(),
             I::Sha512 => self.op_sha512(),
             I::Sha3 => self.op_sha3(),
+            I::Log => self.op_log(),
             // ── Phase 8: tokens (cleartext branches) ──────────────
             I::Amount => self.op_amount(),
             I::Issue => self.op_issue(),
@@ -946,6 +963,17 @@ impl VM {
         let s = self.pop_string()?;
         let digest = Keccak256::digest(s.as_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
+        Ok(())
+    }
+
+    /// `0x6f` `log` — `str → ø`. Pops a String, emits
+    /// `TxEntry::Data(bytes)` into the txlog. Mirrors zkvm's
+    /// `log` opcode (same byte). Witness-bearing String variants
+    /// serialize via `to_bytes` so prover and verifier emit the
+    /// same canonical bytes.
+    fn op_log(&mut self) -> Result<(), VMError> {
+        let s = self.pop_string()?;
+        self.txlog.push(crate::tx::TxEntry::Data(s.to_bytes()));
         Ok(())
     }
 
@@ -2194,6 +2222,21 @@ impl VM {
         a || b
     }
 
+    /// True iff both top-two values are `Variable` — gates the
+    /// encrypted `borrow` overload. Cleartext path runs when neither
+    /// is a Variable; mixed Variable/non-Variable is not a defined
+    /// FlameVM combination (errors via the cleartext-path's TypeNot*
+    /// check).
+    fn top_two_are_variables(&self) -> bool {
+        let n = self.current_call.stack.len();
+        if n < 2 {
+            return false;
+        }
+        let a = matches!(self.current_call.stack[n - 1], Value::Variable(_));
+        let b = matches!(self.current_call.stack[n - 2], Value::Variable(_));
+        a && b
+    }
+
     /// `0x5c alloc` — allocates a low-level R1CS variable. The witness
     /// comes from `Instruction::Alloc(Option<Int253>)`: `Some(i)` on
     /// the prover side (cleartext value the CS uses when proving),
@@ -2412,22 +2455,160 @@ impl VM {
         Ok(())
     }
 
-    /// `0x76 mix` — `anytokens… commitments… m n → values`. Pops `n`
-    /// then `m` (output and input counts) as `Int253`, then `n` output
-    /// commitment String pairs (`qty`, `flv`), then `m` input
-    /// token-shaped values; invokes the spacesuit cloak gadget to
-    /// constrain that inputs balance with outputs per flavor; pushes
-    /// `n` output `Token`s.
+    /// Encrypted overload of `0x73 borrow`. Pops `flv: Variable`,
+    /// `qty: Variable`; commits both to the CS; range-proves `qty`
+    /// (64-bit); allocates `neg_qty_var` and constrains it to be
+    /// the additive inverse; pushes
+    /// `WideToken(AllocatedValue { q: neg_qty_var, f: flv_var, … })`
+    /// then `Token { qty, flv }`. Mirrors zkvm's `borrow` exactly.
+    fn op_borrow_encrypted<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        use bulletproofs::r1cs::ConstraintSystem;
+        use spacesuit::BitRange;
+        let flv = self.pop_variable()?;
+        let qty = self.pop_variable()?;
+        // Commit both to the CS. Prover uses the open witness; verifier
+        // sees only the closed point. Either way, the returned r1cs vars
+        // are bound to the same commitment point on both sides.
+        let (_flv_point, flv_var) = delegate.commit_variable(&flv.commitment)?;
+        let (_qty_point, qty_var) = delegate.commit_variable(&qty.commitment)?;
+        // Witness assignments (prover only). Negative qty is a
+        // protocol error here — borrow's +T is range-proven non-negative.
+        let qty_assignment = match qty.commitment.assignment() {
+            Some(i) => Some(int253_to_signed_integer(i)?),
+            None => None,
+        };
+        let flv_assignment = flv.commitment.assignment().map(|i| i.to_scalar_mod_order());
+        // 64-bit range proof on the positive qty (matches zkvm BitRange::max()).
+        spacesuit::range_proof(
+            delegate.cs(),
+            qty_var.into(),
+            qty_assignment,
+            BitRange::max(),
+        )
+        .map_err(VMError::R1CSError)?;
+        // Allocate -qty in the CS, witness = -qty_assignment.
+        let neg_qty_assignment = qty_assignment.map(|q| -q);
+        let neg_qty_var = delegate
+            .cs()
+            .allocate(neg_qty_assignment.map(|q| q.to_scalar()))
+            .map_err(VMError::R1CSError)?;
+        // Constrain qty + (-qty) = 0.
+        delegate.cs().constrain(qty_var + neg_qty_var);
+        // Build the WideToken (negative half) and the Token (positive
+        // half). The Token carries the prover's open commitments
+        // unchanged so downstream `mix` / `cloak` can re-commit them.
+        let wide = crate::WideToken(spacesuit::AllocatedValue {
+            q: neg_qty_var,
+            f: flv_var,
+            assignment: match (neg_qty_assignment, flv_assignment) {
+                (Some(q), Some(f)) => Some(spacesuit::Value { q, f }),
+                _ => None,
+            },
+        });
+        let token = crate::Token::new(qty.commitment, flv.commitment);
+        self.push_value(Value::WideToken(wide));
+        self.push_value(Value::Token(token));
+        Ok(())
+    }
+
+    /// Converts a stack value into a `spacesuit::AllocatedValue` for
+    /// the cloak gadget. Mirrors zkvm's `item_to_wide_value`:
+    /// - `Token`: commit both Commitments to the CS, build AllocatedValue.
+    /// - `WideToken`: unwrap the inner AllocatedValue (already in CS).
+    /// - `ClearToken`: promote to unblinded `Token`, then commit.
+    /// - Other types: error `TypeNotToken`.
+    fn value_to_allocated<D: Delegate>(
+        &mut self,
+        value: Value,
+        delegate: &mut D,
+    ) -> Result<spacesuit::AllocatedValue, VMError> {
+        match value {
+            // Use the `allocated()` accessor (rather than `.0`) so the
+            // wrapper stays the only public surface for inspecting a
+            // WideToken's CS-bound shape — keeps the spacesuit
+            // dependency from leaking through `w.0` callsites.
+            Value::WideToken(w) => Ok(*w.allocated()),
+            Value::Token(t) => {
+                let (_, qty_var) = delegate.commit_variable(&t.qty)?;
+                let (_, flv_var) = delegate.commit_variable(&t.flv)?;
+                let qty_assg = match t.qty.assignment() {
+                    Some(i) => Some(int253_to_signed_integer(i)?),
+                    None => None,
+                };
+                let flv_assg = t.flv.assignment().map(|i| i.to_scalar_mod_order());
+                Ok(spacesuit::AllocatedValue {
+                    q: qty_var,
+                    f: flv_var,
+                    assignment: match (qty_assg, flv_assg) {
+                        (Some(q), Some(f)) => Some(spacesuit::Value { q, f }),
+                        _ => None,
+                    },
+                })
+            }
+            Value::ClearToken(c) => {
+                let token = crate::Token::cleartext(c.qty(), c.flv());
+                self.value_to_allocated(Value::Token(token), delegate)
+            }
+            _ => Err(VMError::TypeNotToken),
+        }
+    }
+
+    /// `0x76 mix` — `anytokens… commitments… m n → values`. Pops
+    /// `n` (output count) then `m` (input count) as `Int253`; then
+    /// `n` output commitment String pairs (qty / flv on top of each
+    /// pair); then `m` input token-shaped values. Invokes
+    /// `spacesuit::cloak` to constrain that inputs balance with
+    /// outputs per flavor (each output range-proven 64-bit, all
+    /// values shuffled consistently). Pushes `n` output `Token`s.
     ///
-    /// **Phase-13 status: minimal scaffold.** Today returns
-    /// `WitnessMissing` so callers see a clear "not yet wired" error.
-    /// Full cloak-gadget wiring lands once `WideToken` has a
-    /// public constructor (Phase 13.5 — needs encrypted-`borrow` to
-    /// produce one first). Tests that exercise the dispatch path
-    /// confirm the opcode is routed correctly even as the gadget
-    /// itself stays stubbed.
-    fn op_mix<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
-        Err(VMError::WitnessMissing)
+    /// Mirrors zkvm's `cloak(m, n)` opcode exactly.
+    fn op_mix<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        // Pop n (output count) and m (input count).
+        let n = self.pop_byte_count(usize::MAX)?;
+        let m = self.pop_byte_count(usize::MAX)?;
+        // Stack depth check: we'll pop 2n commitment Strings + m token values.
+        let needed = m.saturating_add(n.saturating_mul(2));
+        if needed > self.current_call.stack.len() {
+            return Err(VMError::StackUnderflow);
+        }
+        // Build outputs (closest to top): each output pops (flv, qty)
+        // Strings → builds Token (with Closed commitments since the
+        // String→Commitment downcast retains witness only for
+        // String::Commitment variants).
+        let mut output_tokens: Vec<crate::Token> = Vec::with_capacity(n);
+        let mut cloak_outs: Vec<spacesuit::AllocatedValue> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let flv_str = self.pop_string()?;
+            let qty_str = self.pop_string()?;
+            let flv_commit = flv_str.to_commitment()?;
+            let qty_commit = qty_str.to_commitment()?;
+            let token = crate::Token::new(qty_commit, flv_commit);
+            // Build the AllocatedValue against the CS.
+            let allocated = self.value_to_allocated(
+                Value::Token(token.clone()),
+                delegate,
+            )?;
+            // Insert at front so the deepest output ends up at cloak_outs[0],
+            // matching zkvm's ordering convention.
+            output_tokens.insert(0, token);
+            cloak_outs.insert(0, allocated);
+        }
+        // Build inputs.
+        let mut cloak_ins: Vec<spacesuit::AllocatedValue> = Vec::with_capacity(m);
+        for _ in 0..m {
+            let item = self.pop_value()?;
+            let allocated = self.value_to_allocated(item, delegate)?;
+            cloak_ins.insert(0, allocated);
+        }
+        // Run the cloak gadget. On constraint-system error, surface
+        // as R1CSError; the verifier will reject the proof.
+        spacesuit::cloak(delegate.cs(), cloak_ins, cloak_outs)
+            .map_err(VMError::R1CSError)?;
+        // Push the output Tokens in the same order (deepest first).
+        for token in output_tokens {
+            self.push_value(Value::Token(token));
+        }
+        Ok(())
     }
 
     /// `0x77 decrypt` — `token f f' q q' → cleartoken`. Reveals a
@@ -6597,6 +6778,7 @@ mod tests {
     /// `step_external` is satisfiable.
     struct StubDelegate {
         cs: bulletproofs::r1cs::Verifier<merlin::Transcript>,
+        batch: musig::BatchVerifier<rand::rngs::ThreadRng>,
     }
 
     impl StubDelegate {
@@ -6605,15 +6787,21 @@ mod tests {
                 cs: bulletproofs::r1cs::Verifier::new(
                     merlin::Transcript::new(b"flamevm.test.stub"),
                 ),
+                batch: musig::BatchVerifier::new(rand::thread_rng()),
             }
         }
     }
 
     impl Delegate for StubDelegate {
         type CS = bulletproofs::r1cs::Verifier<merlin::Transcript>;
+        type BatchVerifier = musig::BatchVerifier<rand::rngs::ThreadRng>;
 
         fn cs(&mut self) -> &mut Self::CS {
             &mut self.cs
+        }
+
+        fn batch_verifier(&mut self) -> &mut Self::BatchVerifier {
+            &mut self.batch
         }
 
         fn commit_variable(
@@ -7422,5 +7610,285 @@ mod tests {
         let mut vm = vm_with_script(vec![0x77]);
         let err = run_to_end(&mut vm).unwrap_err();
         assert!(matches!(err, VMError::ExternalOnly));
+    }
+
+    // ── Phase 13.5: encrypted borrow + mix ───────────────────────
+
+    #[test]
+    fn encrypted_borrow_produces_widetoken_and_token_pair() {
+        // pushstr(open commitment for qty=42) commit
+        // pushstr(open commitment for flv=7) commit
+        // borrow
+        // After borrow the stack is [WideToken(-42, 7), Token(42, 7)].
+        // Neither is droppable on its own; we can't end a script with
+        // them sitting on the stack. So we inspect the borrow result
+        // by hand-driving the VM and stopping after the borrow.
+        let pc_gens = PedersenGens::default();
+        let qty_int = Int253::from(42u64);
+        let flv_int = Int253::from(7u64);
+        let qty_blind = curve25519_dalek::scalar::Scalar::from(11u64);
+        let flv_blind = curve25519_dalek::scalar::Scalar::from(13u64);
+        let qty_commit = crate::Commitment::blinded_with_factor(qty_int, qty_blind);
+        let flv_commit = crate::Commitment::blinded_with_factor(flv_int, flv_blind);
+        let program = Program::new()
+            .push_str(String::commitment(qty_commit))
+            .commit()
+            .push_str(String::commitment(flv_commit))
+            .commit()
+            .borrow();
+        let mut prover = Prover::new(&pc_gens);
+        let mut vm = VM::new(
+            dummy_header(),
+            CallFrame::new_with_run(
+                Run::from_program(program),
+                CallKind::ExternalRoot,
+                1_000_000,
+                0,
+                0,
+            ),
+        );
+        // Step until borrow has executed (5 instructions: 4 setup + borrow).
+        for _ in 0..5 {
+            vm.step_external(&mut prover).expect("step ok");
+        }
+        // Stack: [WideToken, Token].
+        assert_eq!(vm.current_call.stack.len(), 2);
+        match (&vm.current_call.stack[0], &vm.current_call.stack[1]) {
+            (Value::WideToken(_), Value::Token(t)) => {
+                // +T side has the original qty commitment witness preserved.
+                assert_eq!(t.qty.assignment(), Some(Int253::from(42u64)));
+                assert_eq!(t.flv.assignment(), Some(Int253::from(7u64)));
+            }
+            _ => panic!("expected [WideToken, Token]"),
+        }
+    }
+
+    #[test]
+    fn mix_with_single_in_single_out_balances() {
+        // The simplest cloak: 1 input Token, 1 output Token with the
+        // same (qty, flv). Effectively a no-op shuffle that exercises
+        // the cloak gadget's range proof on the output.
+        //
+        // Program:
+        //   pushstr(qty_commit) commit            // builds Variable
+        //   pushstr(flv_commit) commit            // builds Variable
+        //   borrow                                // stack: [-T, +T]
+        //   roll:1                                // bring -T to top
+        //   ... actually borrow's WideToken is non-portable so we
+        //   can't easily plumb it through mix. Simpler: skip borrow,
+        //   build a Token directly and run mix(1,1) on it.
+        //
+        // Construct a Token via pushstr+commit on both halves, then
+        // assemble manually... actually we don't have a `make_token`
+        // opcode. Use the test helper to push a Token onto the stack
+        // and then run mix(1, 1).
+        let pc_gens = PedersenGens::default();
+        let qty_int = Int253::from(10u64);
+        let flv_int = Int253::from(7u64);
+        let qty_blind = curve25519_dalek::scalar::Scalar::from(11u64);
+        let flv_blind = curve25519_dalek::scalar::Scalar::from(13u64);
+        let qty_commit = crate::Commitment::blinded_with_factor(qty_int, qty_blind);
+        let flv_commit = crate::Commitment::blinded_with_factor(flv_int, flv_blind);
+        let token = crate::Token::new(qty_commit.clone(), flv_commit.clone());
+
+        // Build a Program that supplies the output's commitment pair
+        // and runs mix. We pre-push the Token via the harness.
+        let program = Program::new()
+            // Output commitments (pushed deepest first per op_mix):
+            // first qty, then flv. Mix pops them in reverse: first
+            // pop flv (top), then qty.
+            .push_str(String::commitment(qty_commit))
+            .push_str(String::commitment(flv_commit))
+            .push_int(1u64) // m (input count)
+            .push_int(1u64) // n (output count)
+            .mix();
+        let mut prover = Prover::new(&pc_gens);
+        let mut vm = VM::new(
+            dummy_header(),
+            CallFrame::new_with_run(
+                Run::from_program(program),
+                CallKind::ExternalRoot,
+                1_000_000,
+                0,
+                0,
+            ),
+        );
+        // Pre-load the Token at the bottom of the stack (mix pops it as input).
+        vm.push_value(Value::Token(token));
+        // Step exactly 5 times (the program's 5 instructions). Don't
+        // drive to completion — that would trigger StackNotClean on
+        // the leftover Token output (which is fine; the cloak gadget
+        // built its constraints regardless).
+        for _ in 0..5 {
+            vm.step_external(&mut prover).expect("step ok");
+        }
+        // Stack: [Token(10, 7)] — the single mix output.
+        assert_eq!(vm.current_call.stack.len(), 1);
+        match &vm.current_call.stack[0] {
+            Value::Token(_) => {}
+            _ => panic!("expected single Token output"),
+        }
+        // Confirm prover.into_proof works on the accumulated CS.
+        let _proof = prover.into_proof().expect("proof builds");
+    }
+
+    #[test]
+    fn cleartext_borrow_unaffected_by_overload() {
+        // push:5, push:7, borrow → (ClearToken(-5,7), ClearToken(5,7))
+        // remains the existing Phase-8 behavior because top-two aren't
+        // Variables (the new dispatch peek doesn't catch them).
+        let mut vm = vm_with_script(vec![0x05, 0x07, 0x73]);
+        run_to_end(&mut vm).expect("cleartext borrow ok");
+        assert_eq!(vm.current_call.stack.len(), 2);
+    }
+
+    // ── Phase 14: deferred-sig batch verification ────────────────
+
+    #[test]
+    fn signrun_explicit_sig_batch_verifies_correctly() {
+        // Phase-14 unit test for the Explicit-deferred-sig batch path
+        // that `Verifier::verify` uses. Builds a real signature over
+        // the signrun-message transcript and runs it through the same
+        // batch-verification logic as the verifier.
+        //
+        // (Full prove+verify-via-script path stays out of scope until
+        // Phase 17 wires anchor seeding and TxID-bound TxBound sigs.)
+        use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
+        use curve25519_dalek::scalar::Scalar;
+        let sk = Scalar::from(42u64);
+        let vk_point = (&sk * &RISTRETTO_BASEPOINT_TABLE).compress();
+        // Build the message exactly as `op_signrun`'s
+        // `signrun_message(program)` helper does.
+        let inner_prog = vec![0x1c]; // drop
+        let mut prog_t = merlin::Transcript::new(b"flamevm.signrun.v1");
+        prog_t.append_message(b"program", &inner_prog);
+        let mut msg_bytes = vec![0u8; 32];
+        prog_t.challenge_bytes(b"msg", &mut msg_bytes);
+        // Sign over a transcript with that message appended (matches
+        // `Verifier::verify`'s reconstruction).
+        let mut sign_t = merlin::Transcript::new(b"flamevm.signrun.v1");
+        sign_t.append_message(b"msg", &msg_bytes);
+        let signature = musig::Signature::sign(&mut sign_t, sk);
+        // Verifier-side batch check.
+        let mut batch = musig::BatchVerifier::new(rand::thread_rng());
+        let mut t = merlin::Transcript::new(b"flamevm.signrun.v1");
+        t.append_message(b"msg", &msg_bytes);
+        let vk = musig::VerificationKey::from_compressed(vk_point);
+        signature.verify_batched(&mut t, vk, &mut batch);
+        assert!(batch.verify().is_ok());
+    }
+
+    // ── Phase 17 (partial): TxID + log opcode ────────────────────
+
+    #[test]
+    fn log_opcode_emits_txentry_data() {
+        // pushstr "hello", log → txlog has TxEntry::Data(b"hello").
+        let mut script = pushstr_bytes(b"hello");
+        script.push(0x6f); // log
+        let mut vm = vm_with_script(script);
+        run_to_end(&mut vm).expect("log ok");
+        assert!(vm.current_call.stack.is_empty());
+        assert_eq!(vm.txlog.len(), 1);
+        match &vm.txlog[0] {
+            crate::tx::TxEntry::Data(bytes) => assert_eq!(bytes, b"hello"),
+            _ => panic!("expected Data entry"),
+        }
+    }
+
+    #[test]
+    fn log_opcode_requires_string() {
+        // push:5, log — top is Int253 not String.
+        let mut vm = vm_with_script(vec![0x05, 0x6f]);
+        let err = run_to_end(&mut vm).unwrap_err();
+        assert!(matches!(err, VMError::TypeNotString));
+    }
+
+    #[test]
+    fn txid_from_log_is_deterministic_and_distinguishes_entries() {
+        use crate::tx::{TxEntry, TxID};
+        let log1 = vec![TxEntry::Data(b"hello".to_vec())];
+        let log2 = vec![TxEntry::Data(b"hello".to_vec())];
+        let log3 = vec![TxEntry::Data(b"world".to_vec())];
+        let id1 = TxID::from_log(&log1);
+        let id2 = TxID::from_log(&log2);
+        let id3 = TxID::from_log(&log3);
+        // Determinism.
+        assert_eq!(id1.0, id2.0);
+        // Different payload → different TxID.
+        assert_ne!(id1.0, id3.0);
+    }
+
+    #[test]
+    fn txid_distinguishes_entry_order() {
+        // Permuting entries must change the TxID (merkle order matters).
+        use crate::tx::{TxEntry, TxID};
+        let a = TxEntry::Data(b"a".to_vec());
+        let b = TxEntry::Data(b"b".to_vec());
+        let id_ab = TxID::from_log(&[a, b]);
+        let a2 = TxEntry::Data(b"a".to_vec());
+        let b2 = TxEntry::Data(b"b".to_vec());
+        let id_ba = TxID::from_log(&[b2, a2]);
+        assert_ne!(id_ab.0, id_ba.0);
+    }
+
+    #[test]
+    fn txid_distinguishes_input_from_output_entries() {
+        use crate::tx::{TxEntry, TxID};
+        // Two single-entry logs with identical 32-byte payload but
+        // different variant tags should hash differently — confirms
+        // the domain separation in `MerkleItem for TxEntry::commit`.
+        let id_data = TxID::from_log(&[TxEntry::Data([0u8; 32].to_vec())]);
+        let id_input = TxID::from_log(&[TxEntry::Input([0u8; 32])]);
+        assert_ne!(id_data.0, id_input.0);
+    }
+
+    #[test]
+    fn instruction_log_roundtrip() {
+        use crate::ops::Instruction;
+        let mut buf = Vec::new();
+        Instruction::Log.encode(&mut buf);
+        assert_eq!(buf, vec![0x6f]);
+        let mut r: &[u8] = &buf;
+        assert!(matches!(
+            Instruction::parse(&mut r).expect("parses"),
+            Instruction::Log
+        ));
+    }
+
+    #[test]
+    fn signrun_tampered_sig_batch_rejects() {
+        // Verify that a tampered sig fails the batch check (the same
+        // path that Verifier::verify uses for Explicit sigs).
+        use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
+        use curve25519_dalek::scalar::Scalar;
+        let sk = Scalar::from(42u64);
+        let vk_point = (&sk * &RISTRETTO_BASEPOINT_TABLE).compress();
+        let inner_prog = vec![0x1c];
+        let mut prog_t = merlin::Transcript::new(b"flamevm.signrun.v1");
+        prog_t.append_message(b"program", &inner_prog);
+        let mut msg_bytes = vec![0u8; 32];
+        prog_t.challenge_bytes(b"msg", &mut msg_bytes);
+        let mut sign_t = merlin::Transcript::new(b"flamevm.signrun.v1");
+        sign_t.append_message(b"msg", &msg_bytes);
+        let sig = musig::Signature::sign(&mut sign_t, sk);
+        // Tamper: flip a bit in the signature's `s` scalar.
+        let mut bytes = sig.to_bytes();
+        bytes[63] ^= 0x01;
+
+        let mut batch = musig::BatchVerifier::new(rand::thread_rng());
+        let tampered = musig::Signature::from_bytes(bytes)
+            .or_else(|_| {
+                // If from_bytes rejects (non-canonical scalar), build by hand.
+                Ok::<_, ()>(musig::Signature {
+                    R: sig.R,
+                    s: sig.s + Scalar::one(),
+                })
+            })
+            .unwrap();
+        let mut t = merlin::Transcript::new(b"flamevm.signrun.v1");
+        t.append_message(b"msg", &msg_bytes);
+        let vk = musig::VerificationKey::from_compressed(vk_point);
+        tampered.verify_batched(&mut t, vk, &mut batch);
+        assert!(batch.verify().is_err());
     }
 }

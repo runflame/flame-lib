@@ -116,6 +116,7 @@ const OP_MERLINREAD: u8 = 0x6b;
 const OP_SHA256: u8 = 0x6c;
 const OP_SHA512: u8 = 0x6d;
 const OP_SHA3: u8 = 0x6e;
+const OP_LOG: u8 = 0x6f;
 const OP_AMOUNT: u8 = 0x70;
 const OP_ISSUE: u8 = 0x71;
 const OP_RETIRE: u8 = 0x72;
@@ -279,6 +280,11 @@ pub enum Instruction {
     Sha512,
     /// `sha3` (0x6e).
     Sha3,
+    /// `log` (0x6f) — `str → ø`. Pops a String, emits
+    /// `TxEntry::Data(bytes)` into the txlog. Visible to the outer
+    /// verifier; doesn't occupy persistent storage. Mirrors zkvm's
+    /// `op_log` (also 0x6f).
+    Log,
 
     // ── Phase 8: Tokens ────────────────────────────────────────────
     /// `amount` (0x70).
@@ -421,6 +427,7 @@ impl Instruction {
             Instruction::Sha256 => out.push(OP_SHA256),
             Instruction::Sha512 => out.push(OP_SHA512),
             Instruction::Sha3 => out.push(OP_SHA3),
+            Instruction::Log => out.push(OP_LOG),
             Instruction::Amount => out.push(OP_AMOUNT),
             Instruction::Issue => out.push(OP_ISSUE),
             Instruction::Retire => out.push(OP_RETIRE),
@@ -547,6 +554,7 @@ impl Instruction {
             OP_SHA256 => Ok(Instruction::Sha256),
             OP_SHA512 => Ok(Instruction::Sha512),
             OP_SHA3 => Ok(Instruction::Sha3),
+            OP_LOG => Ok(Instruction::Log),
             OP_AMOUNT => Ok(Instruction::Amount),
             OP_ISSUE => Ok(Instruction::Issue),
             OP_RETIRE => Ok(Instruction::Retire),
@@ -885,9 +893,9 @@ mod tests {
 
     #[test]
     fn ext_opcode_for_unknown_bytes() {
-        // 0x1c..0x1f are used; 0x4f / 0x6f / 0x7a / 0x9a are unused
-        // gaps in the current spec (all-Phase-13 opcodes wired).
-        let unused = [0x4f, 0x6f, 0x7a, 0x9a, 0xff];
+        // 0x1c..0x1f are used; 0x4f / 0x7a / 0x9a remain unused
+        // (Phase 17 wires 0x6f log; 0x7a fee is pending).
+        let unused = [0x4f, 0x7a, 0x9a, 0xff];
         for b in unused {
             let mut r: &[u8] = &[b];
             let parsed = Instruction::parse(&mut r).expect("parses");

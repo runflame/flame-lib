@@ -334,9 +334,13 @@ pub enum VMError {
     // #[error("VM anchor is not set via `input`")]
     // AnchorMissing,
 
-    // /// This error occurs when VM's deferred schnorr checks fail
-    // #[error("Deferred batch signature verification failed")]
-    // BatchSignatureVerificationFailed,
+    /// Returned from `Verifier::verify` when the deferred-signature
+    /// batch check fails — at least one of the accumulated `Explicit`
+    /// (or, post-Phase-17, `TxBound`) signatures didn't verify.
+    /// Distinct from `InvalidR1CSProof`: the R1CS proof succeeded,
+    /// only the signatures failed.
+    #[error("Deferred batch signature verification failed")]
+    BatchSignatureVerificationFailed,
 
     // /// This error occurs when R1CS proof verification failed.
     // #[error("R1CS proof is invalid")]

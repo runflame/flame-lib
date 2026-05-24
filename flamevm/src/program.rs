@@ -257,6 +257,12 @@ impl Program {
     pub fn sha512(mut self) -> Self { self.instructions.push(Instruction::Sha512); self }
     pub fn sha3(mut self) -> Self { self.instructions.push(Instruction::Sha3); self }
 
+    /// `log` (0x6f) — see [`Instruction::Log`].
+    pub fn log(mut self) -> Self {
+        self.instructions.push(Instruction::Log);
+        self
+    }
+
     // ── Phase 8: Tokens ──────────────────────────────────────────
 
     pub fn amount(mut self) -> Self { self.instructions.push(Instruction::Amount); self }

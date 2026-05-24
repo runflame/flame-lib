@@ -1,6 +1,4 @@
 use curve25519_dalek::ristretto::CompressedRistretto;
-use curve25519_dalek::ristretto::RistrettoPoint;
-use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 
 #[derive(Clone, Copy, Debug)]
@@ -25,10 +23,13 @@ impl Point {
     }
 }
 
-pub struct MultiscalarMul {
-    weights: Vec<Scalar>,
-    points: Vec<Option<RistrettoPoint>>,
-}
+// `MultiscalarMul` was a placeholder for a stack-visible batched MSM
+// handle. zkvm doesn't have an equivalent: their batched checks live
+// inside `musig::BatchVerifier` as a `Delegate`-owned resource, never
+// reaching the stack. FlameVM Phase 14 adopts the same pattern via
+// `crate::vm::Delegate::batch_verifier`, so the type isn't needed.
+// Removed cleanly; the spec.md type table entry should be retired
+// alongside this deletion (architect ADR).
 
 /// A Merlin transcript wrapper. Linear (non-copyable, non-droppable).
 ///

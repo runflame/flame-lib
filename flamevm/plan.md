@@ -24,12 +24,13 @@ Phase numbers are stable across revisions; execution order changes as priorities
 | 8 | Tokens: port `Token`/`WideToken` from zkvm + clear-only opcodes | ✅ done |
 | 11 | Constraint system bootstrap (real Prover/Verifier) | ✅ done (MVP — Phase 13 extends with rich-`String` + `commit`) |
 | 12 | Range proofs & constraint composition | ✅ done |
-| 13 | Confidential tokens (scalar/commit/decrypt + rich `String`) | ✅ MVP done (mix + encrypted issue/borrow → 13.5) |
-| **14** | **Signatures (sigverify + delegate finalize)** | ⏳ **next** |
+| 13 | Confidential tokens (scalar/commit/decrypt + rich `String`) | ✅ done |
+| 13.5 | Encrypted `borrow` + `mix` cloak gadget (carried from 13) | ✅ MVP done (encrypted `issue` → architect ADR) |
+| 14 | Signatures (batch verifier + `Explicit` deferred sigs) | ✅ MVP done (TxBound multi-sig → Phase 17 finalize) |
+| 17 | Fee, finalization, full tx assembly | ⏳ in progress (TxID + `log` done; fee + TxID-transcript-binding + TxBound batch pending) |
 | 10b | `send` opcode + send queue | ⏳ paused (revisit alongside Phase 15) |
-| 17 | Fee, finalization, full tx assembly | ⏳ pending |
+| **15** | **Internal calls, load, save (the actor heart)** | ⏳ **next** |
 | — | ─── external tx fully functional ─── | |
-| 15 | Internal calls, load, save (the actor heart) | ⏳ pending |
 | 16 | Chain info | ⏳ pending |
 | 7 | Introspection (header, resources, identity) | ⏳ pending (depends on 15) |
 

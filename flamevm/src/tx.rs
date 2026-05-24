@@ -1,8 +1,7 @@
 use bulletproofs::r1cs::R1CSProof;
 use curve25519_dalek::ristretto::CompressedRistretto;
-// `MerkleItem` / `MerkleTree` join when Phase 17 wires
-// `TxID::from_log(txlog)` via the merkle tree.
-use merkle::Hash;
+use merkle::{Hash, MerkleItem, MerkleTree};
+use merlin::Transcript;
 use musig::Signature;
 use serde::{Deserialize, Serialize};
 
@@ -72,4 +71,42 @@ pub enum TxEntry {
     Retire(CompressedRistretto, CompressedRistretto),
     // Future variants (preserved here as comments for the historical record):
     // Fee(u64), Send(Message), etc.
+}
+
+impl TxID {
+    /// Computes the canonical 32-byte transaction identifier as a
+    /// merkle root over the txlog entries (header + effect list).
+    /// Domain-separated by `flamevm.txid.v1`. Mirrors zkvm's
+    /// `TxID::from_log` exactly in shape.
+    pub fn from_log(txlog: &[TxEntry]) -> Self {
+        TxID(MerkleTree::root(b"flamevm.txid.v1", txlog))
+    }
+}
+
+impl MerkleItem for TxEntry {
+    fn commit(&self, t: &mut Transcript) {
+        match self {
+            TxEntry::Data(bytes) => {
+                t.append_message(b"data", bytes);
+            }
+            TxEntry::Input(cell_id) => {
+                t.append_message(b"input", cell_id);
+            }
+            TxEntry::Output(cell) => {
+                // Bind to the cell's canonical 32-byte identity hash.
+                // Cell::id() already absorbs predicate / anchor /
+                // payload bytes via Merlin.
+                let id = cell.id();
+                t.append_message(b"output", &id);
+            }
+            TxEntry::Issue(qty_pt, flv_pt) => {
+                t.append_message(b"issue.qty", qty_pt.as_bytes());
+                t.append_message(b"issue.flv", flv_pt.as_bytes());
+            }
+            TxEntry::Retire(qty_pt, flv_pt) => {
+                t.append_message(b"retire.qty", qty_pt.as_bytes());
+                t.append_message(b"retire.flv", flv_pt.as_bytes());
+            }
+        }
+    }
 }
