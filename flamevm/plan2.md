@@ -10,42 +10,42 @@ what's left to build.
 
 | #  | Phase                                                              | Status |
 |----|--------------------------------------------------------------------|--------|
-| 1  | Skeleton — VM core, CallFrame, Run, dispatch loop, `nop`           | [x]    |
-| 2  | Stack literals & manipulation                                      | [x]    |
-| 3  | Control flow & explicit return                                     | [x]    |
-| 4  | Int253 arithmetic, logic, size                                     | [x]    |
-| 5  | String ops                                                         | [x]    |
-| 6  | Dict ops                                                           | [x]    |
-| 7  | Hash & Merlin                                                      | [x]    |
-| 8  | Cells + open + signtx + signrun                                    | [x]    |
-| 9  | Inputs (stateless VM) + Cell wire encoding                         | [x]    |
-| 10 | Tokens (port from zkvm) + clear-only opcodes                       | [x]    |
-| 11 | CS bootstrap (real Prover/Verifier, Instruction enum, Program)     | [x]    |
-| 12 | Range proofs + Constraint composition                              | [x]    |
-| 13 | Rich `String` + `scalar` / `commit` / `decrypt`                    | [x]    |
-| 14 | Encrypted `borrow` + `mix` cloak gadget                            | [x]    |
-| 15 | Batch verifier + `Explicit` deferred sigs                          | [x]    |
-| 16 | TxID merkle root + `log` opcode                                    | [x]    |
-| 17 | Hygiene sweep + ADR housekeeping                                   | [ ]    |
-| 18 | `TxEntry::Header` + TxID transcript binding                        | [ ]    |
-| 19 | `op_fee` + `CheckedFee` accumulator                                | [ ]    |
-| 20 | TxBound multi-sig batch verification                               | [ ]    |
-| 21 | `TxResult` shape + finalize return values                          | [ ]    |
-| 22 | Gas-cost table + per-op charging                                   | [ ]    |
-| 23 | Block resource pools (B_par : B_ser)                               | [ ]    |
-| 24 | `ActorState` + `ActorRegistry` (real, not stub)                    | [ ]    |
-| 25 | `op_load` + `op_save`                                              | [ ]    |
-| 26 | `op_call` + frame creation                                         | [ ]    |
-| 27 | Re-entrancy guard + memory-cap allocator                           | [ ]    |
-| 28 | Actor lifecycle: grace + freeze + maturity                         | [ ]    |
-| 29 | Introspection: header + resources (7 opcodes)                      | [ ]    |
-| 30 | Introspection: identity (4 opcodes)                                | [ ]    |
-| 31 | Chain info (6 opcodes)                                             | [ ]    |
-| 32 | `op_send` + `TxEntry::Send` + send queue                           | [ ]    |
-| 33 | Encrypted `issue` (after ADR)                                      | [ ]    |
-| 34 | Fuzz targets + canonicality sweeps                                 | [ ]    |
-| 35 | spec.md + design.md sync + ADR backfill                            | [ ]    |
-| 36 | End-to-end integration tests                                       | [ ]    |
+| 1  | Skeleton — VM core, CallFrame, Run, dispatch loop, `nop`           | ✅      |
+| 2  | Stack literals & manipulation                                      | ✅      |
+| 3  | Control flow & explicit return                                     | ✅      |
+| 4  | Int253 arithmetic, logic, size                                     | ✅      |
+| 5  | String ops                                                         | ✅      |
+| 6  | Dict ops                                                           | ✅      |
+| 7  | Hash & Merlin                                                      | ✅      |
+| 8  | Cells + open + signtx + signrun                                    | ✅      |
+| 9  | Inputs (stateless VM) + Cell wire encoding                         | ✅      |
+| 10 | Tokens (port from zkvm) + clear-only opcodes                       | ✅      |
+| 11 | CS bootstrap (real Prover/Verifier, Instruction enum, Program)     | ✅      |
+| 12 | Range proofs + Constraint composition                              | ✅      |
+| 13 | Rich `String` + `scalar` / `commit` / `decrypt`                    | ✅      |
+| 14 | Encrypted `borrow` + `mix` cloak gadget                            | ✅      |
+| 15 | Batch verifier + `Explicit` deferred sigs                          | ✅      |
+| 16 | TxID merkle root + `log` opcode                                    | ✅      |
+| 17 | Hygiene sweep + ADR housekeeping                                   | ⏳      |
+| 18 | `TxEntry::Header` + TxID transcript binding                        | ⏳      |
+| 19 | `op_fee` + `CheckedFee` accumulator                                | ⏳      |
+| 20 | TxBound multi-sig batch verification                               | ⏳      |
+| 21 | `TxResult` shape + finalize return values                          | ⏳      |
+| 22 | Gas-cost table + per-op charging                                   | ⏳      |
+| 23 | Block resource pools (B_par : B_ser)                               | ⏳      |
+| 24 | `ActorState` + `ActorRegistry` (real, not stub)                    | ⏳      |
+| 25 | `op_load` + `op_save`                                              | ⏳      |
+| 26 | `op_call` + frame creation                                         | ⏳      |
+| 27 | Re-entrancy guard + memory-cap allocator                           | ⏳      |
+| 28 | Actor lifecycle: grace + freeze + maturity                         | ⏳      |
+| 29 | Introspection: header + resources (7 opcodes)                      | ⏳      |
+| 30 | Introspection: identity (4 opcodes)                                | ⏳      |
+| 31 | Chain info (6 opcodes)                                             | ⏳      |
+| 32 | `op_send` + `TxEntry::Send` + send queue                           | ⏳      |
+| 33 | Encrypted `issue` (after ADR)                                      | ⏳      |
+| 34 | Fuzz targets + canonicality sweeps                                 | ⏳      |
+| 35 | spec.md + design.md sync + ADR backfill                            | ⏳      |
+| 36 | End-to-end integration tests                                       | ⏳      |
 
 **16 of 36 complete (44 %).** Total test count: 385 passing; build
 clean; 4 leftover compiler warnings, all targeted by Phases 24 / 26 /
