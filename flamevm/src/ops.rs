@@ -139,6 +139,8 @@ const OP_INPUT: u8 = 0x90;
 const OP_CELL: u8 = 0x91;
 const OP_OUTPUT: u8 = 0x92;
 const OP_OPEN: u8 = 0x93;
+const OP_LOAD: u8 = 0x96;
+const OP_SAVE: u8 = 0x97;
 const OP_SIGNTX: u8 = 0x98;
 const OP_SIGNRUN: u8 = 0x99;
 
@@ -351,6 +353,14 @@ pub enum Instruction {
     Output,
     /// `open` (0x93).
     Open,
+    /// `load` (0x96) — internal-only. Pops nothing; pushes the
+    /// current actor's `ActorState` as a Dict and marks the actor
+    /// for destruction. `op_save` clears the mark.
+    Load,
+    /// `save` (0x97) — internal-only. Pops a Dict, persists it as
+    /// the current actor's `ActorState`, and clears the
+    /// mark-for-destruction flag set by `op_load`.
+    Save,
     /// `signtx` (0x98).
     Signtx,
     /// `signrun` (0x99).
@@ -466,6 +476,8 @@ impl Instruction {
             Instruction::Cell => out.push(OP_CELL),
             Instruction::Output => out.push(OP_OUTPUT),
             Instruction::Open => out.push(OP_OPEN),
+            Instruction::Load => out.push(OP_LOAD),
+            Instruction::Save => out.push(OP_SAVE),
             Instruction::Signtx => out.push(OP_SIGNTX),
             Instruction::Signrun => out.push(OP_SIGNRUN),
             Instruction::Ext(b) => out.push(*b),
@@ -593,6 +605,8 @@ impl Instruction {
             OP_CELL => Ok(Instruction::Cell),
             OP_OUTPUT => Ok(Instruction::Output),
             OP_OPEN => Ok(Instruction::Open),
+            OP_LOAD => Ok(Instruction::Load),
+            OP_SAVE => Ok(Instruction::Save),
             OP_SIGNTX => Ok(Instruction::Signtx),
             OP_SIGNRUN => Ok(Instruction::Signrun),
             _ => Ok(Instruction::Ext(byte)),

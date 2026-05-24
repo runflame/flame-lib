@@ -335,6 +335,28 @@ pub enum VMError {
     #[error("Actor already exists at this id")]
     ActorAlreadyExists,
 
+    /// A registry-touching opcode (`load`, `save`, `call`, `send`)
+    /// was invoked through a VM entry point that doesn't carry a
+    /// registry handle. External context never carries one;
+    /// internal context test entry points may be configured
+    /// without one. Hard failure either way.
+    #[error("ActorRegistry unavailable in this context")]
+    RegistryUnavailable,
+
+    /// `op_load` was called against an actor already locked by
+    /// an outstanding load — either earlier on this frame, or
+    /// elsewhere in the call stack via the cross-frame registry
+    /// mark. The lock is the runtime enforcement of the load/save
+    /// exclusive guardrail.
+    #[error("Actor already marked for destruction (re-entrancy lock)")]
+    LoadAlreadyMarked,
+
+    /// `op_save` was called without a matching `op_load` on the
+    /// current frame. A `save` only commits state the frame
+    /// previously loaded; orphan saves are a script bug.
+    #[error("op_save without matching op_load on this frame")]
+    SaveWithoutLoad,
+
     /// An opcode required a top-of-stack `ClearToken` but found a
     /// different type (encrypted Token / WideToken / non-token).
     /// Distinct from `TypeNotToken` so scripts can distinguish "wrong

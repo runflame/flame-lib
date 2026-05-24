@@ -39,7 +39,7 @@ use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
 // test helpers, which inherit `super::super::*`) keep their
 // existing import shape. The types themselves live in `actor.rs`
 // and `send.rs`; vm.rs just plumbs them.
-pub use crate::actor::{ActorID, ActorRegistry, MethodKey};
+pub use crate::actor::{ActorID, ActorRegistry, ActorState, MethodKey};
 pub use crate::send::Message;
 
 // ── Identifiers and metadata ──────────────────────────────────────
@@ -347,6 +347,15 @@ pub struct CallFrame {
 
     /// Vbytes delivered with this call (queryable by `newbytes` opcode).
     pub(crate) newbytes: u64,
+
+    /// Per-frame load/save pairing flag. `true` from `op_load`
+    /// returning successfully until the next `op_save` clears it
+    /// — a second `op_load` on the same frame errors
+    /// `LoadAlreadyMarked`. Saved Q6 self-destruct: a frame that
+    /// finishes with `loaded == true` leaves the actor marked in
+    /// the registry, and the tx-end commit hook drops the actor +
+    /// recycles its vbytes.
+    pub(crate) loaded: bool,
 }
 
 impl CallFrame {
@@ -371,6 +380,7 @@ impl CallFrame {
             mem_limit,
             mem_used: 0,
             newbytes,
+            loaded: false,
         }
     }
 }
@@ -555,11 +565,16 @@ impl VM {
     /// Executes an internal transaction triggered by `message`. Resolves
     /// the target method's bytecode and the target actor's vbyte balance
     /// from `registry`; provides chain info from `block`.
+    ///
+    /// On clean exit, runs the Q6 self-destruct commit hook at
+    /// `block.height`: any actor still marked for destruction
+    /// (script loaded without saving) is removed from the registry
+    /// and its vbytes recycled with the standard maturity delay.
     pub fn execute_internal(
         header: TxHeader,
         message: Message,
         registry: &mut dyn ActorRegistry,
-        _block: &BlockContext,
+        block: &BlockContext,
     ) -> Result<TxResult, VMError> {
         let script = registry.resolve_method(&message.target, message.method)?;
         let mem_limit = registry.actor_vbytes(&message.target)?.saturating_mul(4);
@@ -580,7 +595,11 @@ impl VM {
                 message.vbytes,
             ),
         );
-        while vm.step_internal()? {}
+        while vm.step_internal_with_registry(registry)? {}
+        // Q6: any actor still marked at clean exit is self-destructed.
+        // Failures roll back before reaching here, so this only runs
+        // for successful tx commits.
+        let _cleared = registry.commit_tx_destructions(block.height);
         // Internal context produces no proof and no deferred sigs.
         Ok(vm.into_result(Vec::new(), None))
     }
@@ -667,21 +686,36 @@ impl VM {
     /// [`Self::step`]. Retained as a stable name for callers that
     /// already drive the VM step-by-step with an explicit delegate
     /// (tests, prover/verifier internals).
+    ///
+    /// External context has no actor registry — `op_load` / `op_save`
+    /// are internal-only and route through the
+    /// [`Self::step_internal_with_registry`] entry point instead.
     pub(crate) fn step_external<D: Delegate>(
         &mut self,
         delegate: &mut D,
     ) -> Result<bool, VMError> {
-        self.step(delegate)
+        self.step(delegate, None)
     }
 
-    /// Internal-context step: drives the unified [`Self::step`]
-    /// with a private no-op `InternalDelegate`. The CS opcodes in
-    /// `step` all call `require_external()` first and return
-    /// `ExternalOnly` before any `delegate.cs()` use — so the
-    /// no-op delegate's panicking `cs()` is unreachable at runtime.
+    /// Internal-context step without a registry — for tests
+    /// that exercise opcodes that don't touch actor state. `op_load` /
+    /// `op_save` / future `op_call` / `op_send` error
+    /// `RegistryUnavailable` on this path.
     pub(crate) fn step_internal(&mut self) -> Result<bool, VMError> {
         let mut stub = InternalDelegate;
-        self.step(&mut stub)
+        self.step(&mut stub, None)
+    }
+
+    /// Internal-context step with a live registry handle. The
+    /// normal entry point for real internal-tx execution — the
+    /// consensus crate's executor wraps this in a loop just like
+    /// `execute_internal` does.
+    pub(crate) fn step_internal_with_registry(
+        &mut self,
+        registry: &mut dyn ActorRegistry,
+    ) -> Result<bool, VMError> {
+        let mut stub = InternalDelegate;
+        self.step(&mut stub, Some(registry))
     }
 
     /// Executes one [`Instruction`]. Returns `Ok(true)` to keep
@@ -689,7 +723,17 @@ impl VM {
     /// dispatch — no external/internal/common split, no `if` peeks
     /// on the stack. Per-opcode context and operand rules live
     /// inside each handler.
-    fn step<D: Delegate>(&mut self, delegate: &mut D) -> Result<bool, VMError> {
+    ///
+    /// `registry`: `None` for external context and registry-free
+    /// internal-context tests; `Some(_)` for real internal-tx
+    /// execution. Opcodes that mutate the actor registry (`load`,
+    /// `save`, future `call` / `send`) check for `Some(_)` and
+    /// hard-fail `RegistryUnavailable` otherwise.
+    fn step<D: Delegate>(
+        &mut self,
+        delegate: &mut D,
+        registry: Option<&mut dyn ActorRegistry>,
+    ) -> Result<bool, VMError> {
         let Some(instr) = self.current_call.current_run.next_instruction()? else {
             return self.finish_run();
         };
@@ -791,6 +835,8 @@ impl VM {
             I::Cell => self.op_cell(),
             I::Output => self.op_output(),
             I::Open => self.op_open(),
+            I::Load => self.op_load(registry),
+            I::Save => self.op_save(registry),
             I::Signtx => self.op_signtx(),
             I::Signrun => self.op_signrun(),
             // ── Extension / unknown ───────────────────────────────
@@ -2438,6 +2484,75 @@ impl VM {
             position: position.bytes_view().into_owned(),
             program: program.bytes_view().into_owned(),
         })
+    }
+
+    /// `0x96 load` — `ø → dict`. Internal-only. Loads the current
+    /// actor's `ActorState`, marks the actor for destruction in the
+    /// registry (re-entry blocked until `op_save` clears it), and
+    /// pushes the wrapper Dict onto the stack.
+    ///
+    /// Failure modes (all hard):
+    /// - `OpcodeRequiresActorContext` if the current frame has no
+    ///   actor identity (external root, cell-open under external).
+    /// - `RegistryUnavailable` if invoked through a step path with
+    ///   no registry.
+    /// - `LoadAlreadyMarked` if this frame already loaded (or
+    ///   another sibling frame holds the lock).
+    /// - `ActorNotFound` / `ActorFrozen` per the registry.
+    ///
+    /// Q6 self-destruct: a frame that returns without a matching
+    /// `op_save` leaves the registry mark set. The tx-end commit
+    /// hook drops the actor and recycles its vbytes.
+    fn op_load(
+        &mut self,
+        registry: Option<&mut dyn ActorRegistry>,
+    ) -> Result<(), VMError> {
+        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
+        let actor = self.require_actor()?.clone();
+        if self.current_call.loaded {
+            return Err(VMError::LoadAlreadyMarked);
+        }
+        if registry.is_marked_for_destruction(&actor) {
+            // Cross-frame lock: a sibling frame (or an earlier
+            // `load` whose `save` was lost to a panic) still holds
+            // the mark. Same error variant as the per-frame check
+            // — both surface "load while already locked".
+            return Err(VMError::LoadAlreadyMarked);
+        }
+        let state = registry.load_state(&actor)?;
+        registry.mark_for_destruction(&actor);
+        self.current_call.loaded = true;
+        self.push_value(Value::Dict(state.to_wrapper_dict()));
+        Ok(())
+    }
+
+    /// `0x97 save` — `dict → ø`. Internal-only. Pops a Dict, parses
+    /// it as an `ActorState` (must be the 2-entry wrapper shape),
+    /// persists it against the current actor, and clears the
+    /// re-entrancy mark.
+    ///
+    /// Failure modes (all hard):
+    /// - `OpcodeRequiresActorContext`, `RegistryUnavailable` —
+    ///   same as `op_load`.
+    /// - `SaveWithoutLoad` if this frame hasn't called `op_load`.
+    /// - `MalformedActorState` if the popped Dict isn't the
+    ///   2-entry wrapper.
+    /// - `ActorNotFound` per the registry.
+    fn op_save(
+        &mut self,
+        registry: Option<&mut dyn ActorRegistry>,
+    ) -> Result<(), VMError> {
+        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
+        let actor = self.require_actor()?.clone();
+        if !self.current_call.loaded {
+            return Err(VMError::SaveWithoutLoad);
+        }
+        let state_dict = self.pop_dict()?;
+        let state = ActorState::from_wrapper_dict(state_dict)?;
+        registry.save_state(&actor, state)?;
+        registry.unmark_for_destruction(&actor);
+        self.current_call.loaded = false;
+        Ok(())
     }
 
     /// `0x98 signtx` — `cell → items… k`. Pops the cell, records a
