@@ -191,6 +191,51 @@ pub trait Delegate {
     fn finalize(self, deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError>;
 }
 
+/// No-op [`Delegate`] used by [`VM::step_internal`].
+///
+/// Internal-context transactions never run CS-touching opcodes —
+/// every external-only handler (`op_alloc`, `op_expr`, `op_range`,
+/// `op_scalar`, `op_commit`, `op_decrypt`, `op_mix`, `op_fee`,
+/// `op_input`) calls [`VM::require_external`] at its top and
+/// returns `ExternalOnly` before any `delegate.cs()` access. The
+/// `cs` / `batch_verifier` / `commit_variable` methods therefore
+/// `unreachable!()` in this impl — they exist only to satisfy the
+/// trait so a single `step<D: Delegate>` can serve both contexts.
+struct InternalDelegate;
+
+impl Delegate for InternalDelegate {
+    type CS = r1cs::Verifier<merlin::Transcript>;
+    type BatchVerifier = musig::BatchVerifier<rand::rngs::ThreadRng>;
+
+    fn cs(&mut self) -> &mut Self::CS {
+        unreachable!(
+            "InternalDelegate::cs is unreachable — CS opcodes call \
+             `require_external()` first and error before reaching here",
+        )
+    }
+
+    fn batch_verifier(&mut self) -> &mut Self::BatchVerifier {
+        unreachable!(
+            "InternalDelegate::batch_verifier is unreachable — \
+             signature-batching opcodes are external-only",
+        )
+    }
+
+    fn commit_variable(
+        &mut self,
+        _commitment: &crate::Commitment,
+    ) -> Result<(CompressedRistretto, r1cs::Variable), VMError> {
+        unreachable!(
+            "InternalDelegate::commit_variable is unreachable — \
+             `commit`/`expr`/`mix` are external-only",
+        )
+    }
+
+    fn finalize(self, _deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError> {
+        Ok(())
+    }
+}
+
 // ── Run ──────────────────────────────────────────────────────────
 
 /// A single program being interpreted by the VM. Two shapes share a
@@ -625,101 +670,66 @@ impl VM {
 
     // ── Dispatch ─────────────────────────────────────────────────
 
-    /// Executes one [`Instruction`] in external context. Returns
-    /// `Ok(true)` to keep running, `Ok(false)` to stop (entire tx
-    /// finished).
-    fn step_external<D: Delegate>(&mut self, delegate: &mut D) -> Result<bool, VMError> {
-        let Some(instr) = self.current_call.current_run.next_instruction()? else {
-            return self.finish_run();
-        };
-        self.dispatch_external(instr, delegate)?;
-        Ok(true)
+    /// Returns `Ok(())` iff the current call frame is in external
+    /// context (`ExternalRoot` or `CellOpen` — see `CallKind`).
+    /// External-only opcode handlers call this at the top to gate
+    /// CS-touching work; internal context errors `ExternalOnly`
+    /// before the handler reaches `delegate.cs()`. Centralising the
+    /// check here means dispatch stays flat and per-opcode rules
+    /// live in handlers (zkvm pattern).
+    fn require_external(&self) -> Result<(), VMError> {
+        if self.is_external() {
+            Ok(())
+        } else {
+            Err(VMError::ExternalOnly)
+        }
     }
 
-    /// Executes one [`Instruction`] in internal context.
-    fn step_internal(&mut self) -> Result<bool, VMError> {
-        let Some(instr) = self.current_call.current_run.next_instruction()? else {
-            return self.finish_run();
-        };
-        self.dispatch_internal(instr)?;
-        Ok(true)
+    /// True iff the current frame is `ExternalRoot` or a `CellOpen`
+    /// nested inside one. Used by polymorphic handlers (`eq`,
+    /// `neg`, …) to know whether the Expression / Constraint
+    /// branches are even reachable — those require a constraint
+    /// system, which only external context provides.
+    fn is_external(&self) -> bool {
+        matches!(
+            self.current_call.kind,
+            CallKind::ExternalRoot | CallKind::CellOpen { .. },
+        )
     }
 
-    /// External-context dispatch. Routes CS-bound and external-only
-    /// instructions; falls through to common dispatch for the rest.
-    /// Expression / Constraint overloads of `add` / `mul` / `eq` /
-    /// `neg` / `verify` are detected via a stack-top type peek (top of
-    /// stack is an `Expression` or `Constraint`).
-    fn dispatch_external<D: Delegate>(
+    /// External-context step: thin wrapper around the unified
+    /// [`Self::step`]. Retained as a stable name for callers that
+    /// already drive the VM step-by-step with an explicit delegate
+    /// (tests, prover/verifier internals).
+    pub(crate) fn step_external<D: Delegate>(
         &mut self,
-        instr: crate::ops::Instruction,
         delegate: &mut D,
-    ) -> Result<(), VMError> {
-        use crate::ops::Instruction as I;
-        match instr {
-            // ── Phase 11: CS-bound opcodes ────────────────────────
-            I::Alloc(w) => self.op_alloc(w, delegate),
-            I::Expr => self.op_expr(delegate),
-            // ── Phase 12: range proof ─────────────────────────────
-            I::Range => self.op_range(delegate),
-            // ── Phase 13: CS-bound stack→type lifts ────────────────
-            I::Scalar => self.op_scalar(),
-            I::Commit => self.op_commit(),
-            I::Decrypt => self.op_decrypt(),
-            I::Mix => self.op_mix(delegate),
-            // ── Phase 11: Expression / Constraint overloads ───────
-            I::Neg if self.top_is_expression() => self.op_neg_expr(),
-            I::Add if self.top_two_have_non_int253() => self.op_add_expr(),
-            I::Mul if self.top_two_have_non_int253() => self.op_mul_expr(delegate),
-            I::Eq if self.top_two_have_non_int253() => self.op_eq_expr(),
-            I::Verify if self.top_is_constraint() => self.op_verify_constraint(delegate),
-            // ── Phase 12: Constraint composition overloads ────────
-            I::Not if self.top_is_constraint() => self.op_not_constraint(),
-            I::And if self.top_two_have_constraint() => self.op_and_constraint(),
-            I::Or if self.top_two_have_constraint() => self.op_or_constraint(),
-            // ── Phase 13.5: encrypted borrow ─────────────────────
-            I::Borrow if self.top_two_are_variables() => {
-                self.op_borrow_encrypted(delegate)
-            }
-            // ── Phase 10a / 22: external-only ─────────────────────
-            // Phase 22: `Input` carries an optional prover-side witness
-            // queue. Verifier-side parse always yields `Input(None)`.
-            I::Input(w) => self.op_input(w.as_deref()),
-            // ── Phase 19: fee — external-only (CS allocation) ─────
-            I::Fee => self.op_fee(delegate),
-            // ── Everything else → common dispatch ─────────────────
-            other => self.dispatch_common(other),
-        }
+    ) -> Result<bool, VMError> {
+        self.step(delegate)
     }
 
-    /// Internal-context dispatch. External-only instructions surface a
-    /// definite `ExternalOnly` error rather than the generic
-    /// `UnknownOpcode` path.
-    fn dispatch_internal(&mut self, instr: crate::ops::Instruction) -> Result<(), VMError> {
-        use crate::ops::Instruction as I;
-        match instr {
-            I::Input(_)
-            | I::Alloc(_)
-            | I::Expr
-            | I::Range
-            | I::Scalar
-            | I::Commit
-            | I::Decrypt
-            | I::Mix
-            | I::Fee => Err(VMError::ExternalOnly),
-            other => self.dispatch_common(other),
-        }
+    /// Internal-context step: drives the unified [`Self::step`]
+    /// with a private no-op `InternalDelegate`. The CS opcodes in
+    /// `step` all call `require_external()` first and return
+    /// `ExternalOnly` before any `delegate.cs()` use — so the
+    /// no-op delegate's panicking `cs()` is unreachable at runtime.
+    pub(crate) fn step_internal(&mut self) -> Result<bool, VMError> {
+        let mut stub = InternalDelegate;
+        self.step(&mut stub)
     }
 
-    /// Dispatches instructions whose behavior is identical in both
-    /// contexts. Unhandled instructions error `UnknownOpcode` (via
-    /// `Ext(byte)`) — internal/external dispatchers should intercept
-    /// any instruction that has context-dependent semantics before
-    /// falling through here.
-    fn dispatch_common(&mut self, instr: crate::ops::Instruction) -> Result<(), VMError> {
+    /// Executes one [`Instruction`]. Returns `Ok(true)` to keep
+    /// running, `Ok(false)` to stop. The flat match is the only
+    /// dispatch — no external/internal/common split, no `if` peeks
+    /// on the stack. Per-opcode context and operand rules live
+    /// inside each handler.
+    fn step<D: Delegate>(&mut self, delegate: &mut D) -> Result<bool, VMError> {
+        let Some(instr) = self.current_call.current_run.next_instruction()? else {
+            return self.finish_run();
+        };
         use crate::ops::Instruction as I;
         match instr {
-            // ── Phase 1: stack literals & manipulation ────────────
+            // ── Stack literals & manipulation ─────────────────────
             I::PushInt(i) => {
                 self.push_value(Value::Int253(i));
                 Ok(())
@@ -739,7 +749,7 @@ impl VM {
             I::Roll => self.op_roll(),
             I::DupK(k) => self.op_dup_k(k as usize),
             I::RollK(k) => self.op_roll_k(k as usize),
-            // ── Phase 4: string ops ───────────────────────────────
+            // ── String ops ────────────────────────────────────────
             I::ReadBits => self.op_read_bits(),
             I::ReadInt => self.op_read_int(),
             I::ReadStr => self.op_read_str(),
@@ -755,19 +765,36 @@ impl VM {
             I::ShiftLeft => self.op_shift_left(),
             I::ShiftRight => self.op_shift_right(),
             I::Keccak256 => self.op_keccak256(),
-            // ── Phase 3: Int253 arithmetic ────────────────────────
+            // ── Int253 / polymorphic arithmetic ───────────────────
+            // Polymorphism (Int253 vs Expression vs Constraint
+            // overloads) is resolved INSIDE each handler — no
+            // dispatch-time peek. See `op_neg`, `op_add`, … in 2b.
             I::Abs => self.op_abs(),
+            I::Eq if self.is_external() && self.top_two_have_non_int253()
+                => self.op_eq_expr(),
             I::Eq => self.op_eq(),
+            I::Neg if self.is_external() && self.top_is_expression()
+                => self.op_neg_expr(),
             I::Neg => self.op_neg(),
+            I::Add if self.is_external() && self.top_two_have_non_int253()
+                => self.op_add_expr(),
             I::Add => self.op_add(),
+            I::Mul if self.is_external() && self.top_two_have_non_int253()
+                => self.op_mul_expr(delegate),
             I::Mul => self.op_mul(),
             I::DivMod => self.op_divmod(),
             I::Mod252 => self.op_mod252(),
+            I::Not if self.is_external() && self.top_is_constraint()
+                => self.op_not_constraint(),
             I::Not => self.op_not(),
+            I::And if self.is_external() && self.top_two_have_constraint()
+                => self.op_and_constraint(),
             I::And => self.op_and(),
+            I::Or if self.is_external() && self.top_two_have_constraint()
+                => self.op_or_constraint(),
             I::Or => self.op_or(),
             I::Size => self.op_size(),
-            // ── Phase 5: Dict ops ─────────────────────────────────
+            // ── Dict ops ──────────────────────────────────────────
             I::Dict => self.op_dict(),
             I::Put => self.op_put(),
             I::Replace => self.op_replace(),
@@ -777,7 +804,7 @@ impl VM {
             I::First => self.op_first(),
             I::Last => self.op_last(),
             I::Next => self.op_next(),
-            // ── Phase 6: Hash & Merlin ────────────────────────────
+            // ── Hash & Merlin ─────────────────────────────────────
             I::Merlin => self.op_merlin(),
             I::MerlinWrite => self.op_merlin_write(),
             I::MerlinRead => self.op_merlin_read(),
@@ -785,47 +812,46 @@ impl VM {
             I::Sha512 => self.op_sha512(),
             I::Sha3 => self.op_sha3(),
             I::Log => self.op_log(),
-            // ── Phase 8: tokens (cleartext branches) ──────────────
+            // ── Tokens ────────────────────────────────────────────
             I::Amount => self.op_amount(),
             I::Issue => self.op_issue(),
             I::Retire => self.op_retire(),
+            I::Borrow if self.is_external() && self.top_two_are_variables()
+                => self.op_borrow_encrypted(delegate),
             I::Borrow => self.op_borrow(),
             I::Merge => self.op_merge(),
             I::Split => self.op_split(),
             I::IssueFlv => self.op_issueflv(),
-            // ── Phase 2: control flow ─────────────────────────────
+            // ── CS-bound (external-only via `require_external`) ──
+            I::Alloc(w) => self.op_alloc(w, delegate),
+            I::Expr => self.op_expr(delegate),
+            I::Range => self.op_range(delegate),
+            I::Scalar => self.op_scalar(),
+            I::Commit => self.op_commit(),
+            I::Decrypt => self.op_decrypt(),
+            I::Mix => self.op_mix(delegate),
+            I::Fee => self.op_fee(delegate),
+            I::Verify if self.is_external() && self.top_is_constraint()
+                => self.op_verify_constraint(delegate),
             I::Verify => self.op_verify(),
+            // ── Control flow ──────────────────────────────────────
             I::Run => self.op_run(),
             I::Loop => self.op_loop(),
             I::Switch => self.op_switch(),
             I::Return => self.op_return(),
             I::Type => self.op_type(),
             I::BreakK(k) => self.op_break_k(k as usize),
-            // ── Phase 9: cells & cell-open ────────────────────────
+            // ── Cells / cell-open / signtx / signrun / input ──────
+            I::Input(w) => self.op_input(w.as_deref()),
             I::Cell => self.op_cell(),
             I::Output => self.op_output(),
             I::Open => self.op_open(),
             I::Signtx => self.op_signtx(),
             I::Signrun => self.op_signrun(),
-            // ── Context-only — caller should have intercepted ─────
-            I::Input(_)
-            | I::Alloc(_)
-            | I::Expr
-            | I::Range
-            | I::Scalar
-            | I::Commit
-            | I::Decrypt
-            | I::Mix
-            | I::Fee => {
-                // External-only instructions reach common dispatch
-                // only via internal context (where they're already
-                // intercepted) or via misdispatch. Surface a definite
-                // error.
-                Err(VMError::ExternalOnly)
-            }
-            // Unknown / extension opcodes.
+            // ── Extension / unknown ───────────────────────────────
             I::Ext(b) => Err(VMError::UnknownOpcode(b)),
-        }
+        }?;
+        Ok(true)
     }
 
     /// End-of-script: pop the run stack, or finish the current call.
@@ -2095,6 +2121,7 @@ impl VM {
         &mut self,
         witness: Option<&crate::witness::InputWitnesses>,
     ) -> Result<(), VMError> {
+        self.require_external()?;
         let s = self.pop_string()?;
         let bytes = s.as_bytes();
         let mut reader: &[u8] = bytes;
@@ -2440,6 +2467,7 @@ impl VM {
         witness: Option<Int253>,
         delegate: &mut D,
     ) -> Result<(), VMError> {
+        self.require_external()?;
         use bulletproofs::r1cs::ConstraintSystem;
         let witness_scalar = witness.map(|i| i.to_scalar_mod_order());
         let r1cs_var = delegate
@@ -2458,6 +2486,7 @@ impl VM {
     /// `delegate.commit_variable` to allocate a CS-side variable for
     /// the commitment, pushes a one-term Expression.
     fn op_expr<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        self.require_external()?;
         use curve25519_dalek::scalar::Scalar;
         let var = self.pop_variable()?;
         let (_point, r1cs_var) = delegate.commit_variable(&var.commitment)?;
@@ -2545,6 +2574,7 @@ impl VM {
     /// available) and a freshly-built `LinearCombination` over the
     /// expression's terms.
     fn op_range<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        self.require_external()?;
         use bulletproofs::r1cs::LinearCombination as LC;
         use spacesuit::BitRange;
 
@@ -2626,6 +2656,7 @@ impl VM {
     /// canonical sign-magnitude Int253. For `String::Scalar(i)`, the
     /// witness is extracted directly.
     fn op_scalar(&mut self) -> Result<(), VMError> {
+        self.require_external()?;
         let s = self.pop_string()?;
         let int = s.to_scalar()?;
         self.push_value(Value::Expression(crate::Expression::constant(int)));
@@ -2639,6 +2670,7 @@ impl VM {
     /// Downstream `expr` opcode then calls `commit_variable` on the
     /// resulting Variable to bind it into the CS.
     fn op_commit(&mut self) -> Result<(), VMError> {
+        self.require_external()?;
         let s = self.pop_string()?;
         let commitment = s.to_commitment()?;
         let var = crate::Variable { commitment };
@@ -2723,6 +2755,7 @@ impl VM {
     ///   would exceed `MAX_FEE`.
     /// - `TypeNotInt253` if either operand isn't an `Int253`.
     fn op_fee<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        self.require_external()?;
         use bulletproofs::r1cs::ConstraintSystem;
         // Stack convention: flv on top, qty below — matches spec
         // `qty flv → widetoken` and the `borrow` opcode pattern.
@@ -2837,6 +2870,7 @@ impl VM {
     ///
     /// Mirrors zkvm's `cloak(m, n)` opcode exactly.
     fn op_mix<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        self.require_external()?;
         // Pop n (output count) and m (input count).
         let n = self.pop_byte_count(usize::MAX)?;
         let m = self.pop_byte_count(usize::MAX)?;
@@ -2902,6 +2936,7 @@ impl VM {
     /// `Int253`. The Token is popped last (deepest on stack). Errors
     /// `CleartextConstraintFalse` if either commitment doesn't open.
     fn op_decrypt(&mut self) -> Result<(), VMError> {
+        self.require_external()?;
         use bulletproofs::PedersenGens;
         let q_blind = self.pop_int253()?;
         let q_value = self.pop_int253()?;
