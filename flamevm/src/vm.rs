@@ -9506,8 +9506,29 @@ let proof = proof.expect("proof set");
         qty_blind: u64,
         /// Blinding factor for the new flv commitment.
         flv_blind: u64,
-        /// Predicate point bytes (opaque) for the new cell.
-        predicate: [u8; 32],
+        /// Caller-chosen distinguisher for the output predicate.
+        /// `output_predicate_point(tag)` derives a real Ristretto
+        /// point via `PredicateTree::scripts_only` blinded by the
+        /// tag — so the output predicate is a valid point that a
+        /// future "consume Alice's output as input" test could
+        /// open. Arbitrary 32-byte arrays (e.g. `[0xb1; 32]`) don't
+        /// decompress to valid Ristretto and would break any such
+        /// chained test, even though `Predicate::Opaque` accepts
+        /// them by value.
+        predicate_tag: u8,
+    }
+
+    /// Derive a real Ristretto predicate point for an output spec
+    /// — a single-empty-leaf scripts-only tree, blinded by the
+    /// caller-chosen `tag`. The tag picks the encoding distinct
+    /// from other outputs; the resulting compressed point IS a
+    /// valid Ristretto encoding (unlike a bare `[0xbN; 32]` array).
+    fn output_predicate_point(tag: u8) -> CompressedRistretto {
+        let mut blinding = TEST_BLINDING_KEY;
+        blinding[0] = tag;
+        PredicateTree::scripts_only(vec![Vec::new()], blinding)
+            .expect("scripts_only tree builds")
+            .compute_point()
     }
 
     /// Builds the prover-side `Program` for the N→M script. The
@@ -9581,7 +9602,7 @@ let proof = proof.expect("proof set");
             }
             program = program
                 .push_int(1u64)
-                .push_point(outputs[i].predicate)
+                .push_point(*output_predicate_point(outputs[i].predicate_tag).as_bytes())
                 .output();
         }
         program
@@ -9740,7 +9761,7 @@ let proof = proof.expect("proof set");
         .0
         .to_anchor();
         for (j, out) in outputs.iter().enumerate() {
-            let expected_pred = CompressedRistretto(out.predicate);
+            let expected_pred = output_predicate_point(out.predicate_tag);
             let (q_open, f_open) = open_commitments_for_output(out);
             let idx = 1 + inputs.len() + j;
             match &result.txlog[idx] {
@@ -9846,7 +9867,7 @@ let proof = proof.expect("proof set");
                 flv: 7,
                 qty_blind: 17,
                 flv_blind: 19,
-                predicate: [0xb1; 32],
+                predicate_tag: 0xb1,
             }],
         );
     }
@@ -9868,14 +9889,14 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 21,
                     flv_blind: 22,
-                    predicate: [0xb1; 32],
+                    predicate_tag: 0xb1,
                 },
                 NMOutputSpec {
                     qty: 6,
                     flv: 7,
                     qty_blind: 31,
                     flv_blind: 32,
-                    predicate: [0xb2; 32],
+                    predicate_tag: 0xb2,
                 },
             ],
         );
@@ -9906,7 +9927,7 @@ let proof = proof.expect("proof set");
                 flv: 7,
                 qty_blind: 21,
                 flv_blind: 22,
-                predicate: [0xb1; 32],
+                predicate_tag: 0xb1,
             }],
         );
     }
@@ -9938,14 +9959,14 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 21,
                     flv_blind: 22,
-                    predicate: [0xb1; 32],
+                    predicate_tag: 0xb1,
                 },
                 NMOutputSpec {
                     qty: 8,
                     flv: 7,
                     qty_blind: 31,
                     flv_blind: 32,
-                    predicate: [0xb2; 32],
+                    predicate_tag: 0xb2,
                 },
             ],
         );
@@ -9978,14 +9999,14 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 21,
                     flv_blind: 22,
-                    predicate: [0xb1; 32],
+                    predicate_tag: 0xb1,
                 },
                 NMOutputSpec {
                     qty: 25,
                     flv: 11,
                     qty_blind: 31,
                     flv_blind: 32,
-                    predicate: [0xb2; 32],
+                    predicate_tag: 0xb2,
                 },
             ],
         );
@@ -10024,21 +10045,21 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 21,
                     flv_blind: 22,
-                    predicate: [0xb1; 32],
+                    predicate_tag: 0xb1,
                 },
                 NMOutputSpec {
                     qty: 3,
                     flv: 7,
                     qty_blind: 31,
                     flv_blind: 32,
-                    predicate: [0xb2; 32],
+                    predicate_tag: 0xb2,
                 },
                 NMOutputSpec {
                     qty: 8,
                     flv: 11,
                     qty_blind: 41,
                     flv_blind: 42,
-                    predicate: [0xb3; 32],
+                    predicate_tag: 0xb3,
                 },
             ],
         );
@@ -10079,14 +10100,14 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 21,
                     flv_blind: 22,
-                    predicate: [0xb1; 32],
+                    predicate_tag: 0xb1,
                 },
                 NMOutputSpec {
                     qty: 8,
                     flv: 11,
                     qty_blind: 31,
                     flv_blind: 32,
-                    predicate: [0xb2; 32],
+                    predicate_tag: 0xb2,
                 },
             ],
         );
@@ -10109,21 +10130,21 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 21,
                     flv_blind: 22,
-                    predicate: [0xb1; 32],
+                    predicate_tag: 0xb1,
                 },
                 NMOutputSpec {
                     qty: 4,
                     flv: 7,
                     qty_blind: 31,
                     flv_blind: 32,
-                    predicate: [0xb2; 32],
+                    predicate_tag: 0xb2,
                 },
                 NMOutputSpec {
                     qty: 4,
                     flv: 7,
                     qty_blind: 41,
                     flv_blind: 42,
-                    predicate: [0xb3; 32],
+                    predicate_tag: 0xb3,
                 },
             ],
         );
@@ -10161,7 +10182,7 @@ let proof = proof.expect("proof set");
                 flv: 7,
                 qty_blind: 21,
                 flv_blind: 22,
-                predicate: [0xb1; 32],
+                predicate_tag: 0xb1,
             }],
         );
     }
@@ -10199,21 +10220,21 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 21,
                     flv_blind: 22,
-                    predicate: [0xb1; 32],
+                    predicate_tag: 0xb1,
                 },
                 NMOutputSpec {
                     qty: 2,
                     flv: 7,
                     qty_blind: 31,
                     flv_blind: 32,
-                    predicate: [0xb2; 32],
+                    predicate_tag: 0xb2,
                 },
                 NMOutputSpec {
                     qty: 2,
                     flv: 7,
                     qty_blind: 41,
                     flv_blind: 42,
-                    predicate: [0xb3; 32],
+                    predicate_tag: 0xb3,
                 },
             ],
         );
@@ -10246,21 +10267,21 @@ let proof = proof.expect("proof set");
                     flv: 7,
                     qty_blind: 21,
                     flv_blind: 22,
-                    predicate: [0xb1; 32],
+                    predicate_tag: 0xb1,
                 },
                 NMOutputSpec {
                     qty: 6,
                     flv: 7,
                     qty_blind: 31,
                     flv_blind: 32,
-                    predicate: [0xb2; 32],
+                    predicate_tag: 0xb2,
                 },
                 NMOutputSpec {
                     qty: 8,
                     flv: 11,
                     qty_blind: 41,
                     flv_blind: 42,
-                    predicate: [0xb3; 32],
+                    predicate_tag: 0xb3,
                 },
             ],
         );
@@ -10316,7 +10337,7 @@ let proof = proof.expect("proof set");
             flv: 0,
             qty_blind: 21,
             flv_blind: 22,
-            predicate: [0xb1; 32],
+            predicate_tag: 0xb1,
         };
         let (q_out, f_out) = open_commitments_for_output(&out);
 
@@ -10338,9 +10359,10 @@ let proof = proof.expect("proof set");
         // mix: m=2 (real Token + fee WideToken), n=1 (output).
         program = program.push_int(2u64).push_int(1u64).mix();
         // Emit the output cell.
+        let out_pred = output_predicate_point(out.predicate_tag);
         program = program
             .push_int(1u64)
-            .push_point(out.predicate)
+            .push_point(*out_pred.as_bytes())
             .output();
 
         // ── Prove + verify. ──
@@ -10367,10 +10389,7 @@ let proof = proof.expect("proof set");
         }
         match &prover_result.txlog[3] {
             crate::tx::TxEntry::Output(c) => {
-                assert_eq!(
-                    c.predicate.to_point().as_bytes(),
-                    &out.predicate
-                );
+                assert_eq!(c.predicate.to_point(), out_pred);
                 let token = match &c.payload[0] {
                     Value::Token(t) => t,
                     _ => panic!("output payload[0] must be Token"),
@@ -10422,7 +10441,7 @@ let proof = proof.expect("proof set");
             flv: 7,
             qty_blind: 21,
             flv_blind: 22,
-            predicate: [0xb1; 32],
+            predicate_tag: 0xb1,
         }];
         let program = build_confidential_nm_program(&inputs, &outputs);
         let prove_attempt = Prover::prove(
@@ -10471,7 +10490,7 @@ let proof = proof.expect("proof set");
             flv: 11,
             qty_blind: 21,
             flv_blind: 22,
-            predicate: [0xb1; 32],
+            predicate_tag: 0xb1,
         }];
         let program = build_confidential_nm_program(&inputs, &outputs);
         let prove_attempt = Prover::prove(
