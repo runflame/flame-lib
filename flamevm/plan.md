@@ -24,8 +24,8 @@ Phase numbers are stable across revisions; execution order changes as priorities
 | 8 | Tokens: port `Token`/`WideToken` from zkvm + clear-only opcodes | ✅ done |
 | 11 | Constraint system bootstrap (real Prover/Verifier) | ✅ done (MVP — Phase 13 extends with rich-`String` + `commit`) |
 | 12 | Range proofs & constraint composition | ✅ done |
-| **13** | **Confidential tokens, mix, decrypt** | ⏳ **next** |
-| 14 | Signatures (sigverify + delegate finalize) | ⏳ pending |
+| 13 | Confidential tokens (scalar/commit/decrypt + rich `String`) | ✅ MVP done (mix + encrypted issue/borrow → 13.5) |
+| **14** | **Signatures (sigverify + delegate finalize)** | ⏳ **next** |
 | 10b | `send` opcode + send queue | ⏳ paused (revisit alongside Phase 15) |
 | 17 | Fee, finalization, full tx assembly | ⏳ pending |
 | — | ─── external tx fully functional ─── | |
@@ -1334,22 +1334,104 @@ Expression overloads.
 
 ---
 
-### Phase 13 — Confidential tokens, mix, decrypt
+### ✅ Phase 13 — Confidential tokens (MVP done; mix + encrypted issue/borrow → Phase 13.5)
 
-**Goal**: encrypted-quantity / encrypted-flavor operations using spacesuit cloak.
+**Status**: rich `String` enum + `scalar` / `commit` / `decrypt` opcodes
++ end-to-end prove+verify with witness-bearing strings on the stack
+all ship in this phase. `mix` opcode dispatch is wired (stubs to
+`WitnessMissing` for now); encrypted-`issue` / `borrow` branches and
+the full `cloak` gadget land in Phase 13.5.
 
-**Reuses**: `spacesuit::cloak`, `Token`, `WideToken`.
+**Architectural choices** (zkvm-aligned):
 
-**New**:
-- Confidential paths of `0x71 issue`, `0x72 retire`, `0x73 borrow` (point-committed qty/flv).
-- `Token::decrypt` (cleartext reveal with blinding).
+- `String` becomes an enum: `Opaque(Vec<u8>) | Commitment(Box<Commitment>)
+  | Scalar(Box<Int253>) | Predicate(Box<Predicate>)`. All variants
+  encode to the same opaque bytes on the wire; downcasts
+  (`to_commitment` / `to_scalar` / `to_predicate`) work on both forms.
+  Bit ops (`append`, `bit_or`, `shift_left`, etc.) operate on
+  canonical bytes — witness-bearing variants serialize to Opaque
+  internally before the byte-level op.
+- **Sharp edge**: `String::as_bytes(&self) -> &[u8]` requires Opaque.
+  Witness-bearing variants must use `to_bytes(self)` /
+  `bytes_view(&self) -> Cow<[u8]>` instead. The only callsite that
+  needed updating was `Instruction::PushStr`'s encoder (now uses
+  `bytes_view`).
+- `scalar` (0x5a) and `commit` (0x5b) opcodes pop a String and
+  downcast. Witness preserved on the prover side; verifier sees
+  Opaque and parses bytes.
+- `Delegate::commit_variable` signature changed: now takes
+  `&Commitment` (not `&CompressedRistretto`). Prover uses
+  `commitment.witness()` to call `cs.commit(value, blinding)`;
+  verifier uses `commitment.to_point()` and `cs.commit(point)`.
+  Same `(point, variable)` returned either way.
+- `decrypt` (0x77): pops `(token, f, f', q, q')` (top of stack is
+  q', token at bottom), verifies the supplied (value, blinding)
+  pair opens to the Token's commitments via Pedersen formula,
+  pushes `ClearToken(q, f)`. Hard-fails
+  `CleartextConstraintFalse` on mismatch.
+- `mix` (0x76): dispatch wired; handler returns `WitnessMissing`
+  until Phase 13.5 fleshes out the cloak gadget (the
+  `WideToken` constructor is needed first, which comes from
+  encrypted `borrow`).
 
-**Opcodes (all [E])**:
-- [ ] `0x76` `mix`
-- [ ] `0x77` `decrypt`
-- [ ] Confidential branches of `0x71/0x72/0x73` (extends phase 8)
+**Added**:
 
-**Tests**: 2-in/2-out mix balances qty/flv; decrypt fails on commitment mismatch.
+- `flamevm/src/string.rs` — rewritten as `enum String`. Methods:
+  `commitment(c)`, `scalar(i)`, `predicate(p)`, `to_commitment`,
+  `to_scalar`, `to_predicate`, `bytes_view`, `to_bytes`,
+  `to_bytes_vec`, `into_opaque`, plus all existing `len`,
+  `is_empty`, `append`, `append_bytes`, `split_at`, `bit_not`,
+  `bit_or/and/xor`, `shift_left/right`.
+- `Instruction::Scalar` / `Commit` / `Decrypt` / `Mix` variants.
+  `Instruction::PushStr` encoder uses `bytes_view` so
+  witness-bearing strings serialize to canonical opaque bytes.
+- `Program::scalar()` / `commit()` / `decrypt()` / `mix()` builder
+  methods.
+- `Delegate::commit_variable` signature changed; `Prover` and
+  `Verifier` implement the real CS commit (no more
+  `WitnessMissing` stub).
+- `op_scalar`, `op_commit`, `op_decrypt`, `op_mix` (stub) handlers.
+- Dispatch wiring in `dispatch_external` / `dispatch_internal` /
+  `dispatch_common`.
+- `encoding.rs::write_string` uses `bytes_view` for the same
+  reason as `Instruction::PushStr::encode`.
+
+**Opcodes**:
+- [x] `0x5a` `scalar`
+- [x] `0x5b` `commit`
+- [x] `0x77` `decrypt`
+- [x] `0x76` `mix` — dispatch wired; gadget body stubbed (→ Phase 13.5)
+- [ ] Confidential branches of `0x71/0x72/0x73` → Phase 13.5
+
+**Tests landed** (13 new, all green):
+
+- `string_witness_commitment_encodes_to_point`,
+  `string_witness_commitment_downcasts`,
+  `string_opaque_downcast_to_commitment_gives_closed`,
+  `string_scalar_downcast` — rich String shape.
+- `op_scalar_pushes_constant_expression`,
+  `op_commit_pushes_variable` — opcode unit tests.
+- `prove_then_verify_with_commit_expr_eq` — end-to-end:
+  prover-side `String::Commitment(Open(witness))` flows through
+  `commit → expr → eq → verify`; verifier walks the same bytecode
+  with `String::Opaque` and Closed commitments, both proofs match.
+- `op_decrypt_succeeds_on_matching_witness`,
+  `op_decrypt_rejects_wrong_witness`.
+- `instruction_scalar_commit_decrypt_mix_roundtrip` — bytecode
+  round-trip for the new Instruction variants.
+- `scalar_in_internal_context_errors_external_only`,
+  `commit_in_internal_context_errors_external_only`,
+  `decrypt_in_internal_context_errors_external_only`.
+
+**Total**: 361 → **374 tests** (+13 new).
+
+**Deferred to Phase 13.5**:
+- Full `mix` opcode gadget (`spacesuit::cloak` wiring) — needs
+  `WideToken` public constructor first.
+- Encrypted branches of `issue` / `retire` / `borrow` — need
+  Variable operand support and `add_range_proof` integration on
+  the `+T` half of `borrow`.
+- 2-in/2-out mix balance test (the original Phase 13 spec test).
 
 ---
 

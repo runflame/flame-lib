@@ -95,11 +95,17 @@ impl Delegate for Verifier {
 
     fn commit_variable(
         &mut self,
-        _commitment: &CompressedRistretto,
+        commitment: &crate::Commitment,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError> {
-        // Same Phase-11 stub as the Prover — the `commit` opcode lands
-        // alongside the rich `String` enum in Phase 13.
-        Err(VMError::WitnessMissing)
+        // Verifier-side: only the closed point is known. Call
+        // `cs.commit(point)` — bulletproofs allocates a CS variable
+        // bound to that point. The prover's matching call uses
+        // (value, blinding) which produces the same point by Pedersen
+        // construction, so both sides commit to the same value.
+        use bulletproofs::r1cs::ConstraintSystem;
+        let point = commitment.to_point();
+        let var = self.cs.commit(point);
+        Ok((point, var))
     }
 
     fn finalize(self, _deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError> {

@@ -95,6 +95,8 @@ const OP_MOD252: u8 = 0x56;
 const OP_NOT: u8 = 0x57;
 const OP_AND: u8 = 0x58;
 const OP_OR: u8 = 0x59;
+const OP_SCALAR: u8 = 0x5a;
+const OP_COMMIT: u8 = 0x5b;
 const OP_ALLOC: u8 = 0x5c;
 const OP_EXPR: u8 = 0x5d;
 const OP_RANGE: u8 = 0x5e;
@@ -120,6 +122,8 @@ const OP_RETIRE: u8 = 0x72;
 const OP_BORROW: u8 = 0x73;
 const OP_MERGE: u8 = 0x74;
 const OP_SPLIT: u8 = 0x75;
+const OP_MIX: u8 = 0x76;
+const OP_DECRYPT: u8 = 0x77;
 const OP_ISSUEFLV: u8 = 0x78;
 const OP_VERIFY: u8 = 0x79;
 const OP_RUN: u8 = 0x7b;
@@ -224,7 +228,14 @@ pub enum Instruction {
     /// `size` (0x5f).
     Size,
 
-    // ── Phase 11: CS opcodes ───────────────────────────────────────
+    // ── Phase 11/13: CS opcodes ────────────────────────────────────
+    /// `scalar` (0x5a) — `string → expr`. Pops a String, downcasts to
+    /// `Int253`, pushes `Expression::Constant(int)`.
+    Scalar,
+    /// `commit` (0x5b) — `string → var`. Pops a String, downcasts to
+    /// `Commitment`, wraps in `Variable { commitment }`. The Variable
+    /// later flows through `expr` to bind the commitment into the CS.
+    Commit,
     /// `alloc` (0x5c) — witness in `Option<Int253>` is consumed by the
     /// prover; verifier sees `None` and allocates an unassigned R1CS
     /// variable.
@@ -282,6 +293,18 @@ pub enum Instruction {
     Merge,
     /// `split` (0x75).
     Split,
+    /// `mix` (0x76) — `anytokens… commitments… m n → values`. Pops
+    /// `n` (output count) and `m` (input count) as `Int253`, then `n`
+    /// output commitment Strings + `m` input token-shaped values;
+    /// invokes the spacesuit cloak gadget; pushes `n` output Tokens.
+    Mix,
+    /// `decrypt` (0x77) — `token f f' q q' → cleartoken`. Reveals a
+    /// cleartext quantity and flavor for an encrypted Token by
+    /// supplying the cleartext values and their Pedersen blinding
+    /// factors; verifies that the supplied (value, blinding) pair
+    /// matches the Token's commitments and pushes the resulting
+    /// `ClearToken`.
+    Decrypt,
     /// `issueflv` (0x78).
     IssueFlv,
 
@@ -328,7 +351,12 @@ impl Instruction {
             Instruction::PushStr(s) => {
                 out.push(OP_PUSHSTR);
                 encode_sub_varint(s.len() as u64, out);
-                out.extend_from_slice(s.as_bytes());
+                // Use `bytes_view` so witness-bearing variants
+                // (Commitment / Scalar / Predicate) serialize to their
+                // canonical opaque bytes. `as_bytes` would panic for
+                // those — the verifier's wire form must match
+                // regardless of which variant the prover used.
+                out.extend_from_slice(&s.bytes_view());
             }
             Instruction::PushPoint(b) => {
                 out.push(OP_PUSHPOINT);
@@ -373,6 +401,8 @@ impl Instruction {
             Instruction::And => out.push(OP_AND),
             Instruction::Or => out.push(OP_OR),
             Instruction::Size => out.push(OP_SIZE),
+            Instruction::Scalar => out.push(OP_SCALAR),
+            Instruction::Commit => out.push(OP_COMMIT),
             Instruction::Alloc(_) => out.push(OP_ALLOC),
             Instruction::Expr => out.push(OP_EXPR),
             Instruction::Range => out.push(OP_RANGE),
@@ -397,6 +427,8 @@ impl Instruction {
             Instruction::Borrow => out.push(OP_BORROW),
             Instruction::Merge => out.push(OP_MERGE),
             Instruction::Split => out.push(OP_SPLIT),
+            Instruction::Mix => out.push(OP_MIX),
+            Instruction::Decrypt => out.push(OP_DECRYPT),
             Instruction::IssueFlv => out.push(OP_ISSUEFLV),
             Instruction::Verify => out.push(OP_VERIFY),
             Instruction::Run => out.push(OP_RUN),
@@ -495,6 +527,8 @@ impl Instruction {
             OP_AND => Ok(Instruction::And),
             OP_OR => Ok(Instruction::Or),
             OP_SIZE => Ok(Instruction::Size),
+            OP_SCALAR => Ok(Instruction::Scalar),
+            OP_COMMIT => Ok(Instruction::Commit),
             OP_ALLOC => Ok(Instruction::Alloc(None)),
             OP_EXPR => Ok(Instruction::Expr),
             OP_RANGE => Ok(Instruction::Range),
@@ -519,6 +553,8 @@ impl Instruction {
             OP_BORROW => Ok(Instruction::Borrow),
             OP_MERGE => Ok(Instruction::Merge),
             OP_SPLIT => Ok(Instruction::Split),
+            OP_MIX => Ok(Instruction::Mix),
+            OP_DECRYPT => Ok(Instruction::Decrypt),
             OP_ISSUEFLV => Ok(Instruction::IssueFlv),
             OP_VERIFY => Ok(Instruction::Verify),
             OP_RUN => Ok(Instruction::Run),
@@ -849,10 +885,9 @@ mod tests {
 
     #[test]
     fn ext_opcode_for_unknown_bytes() {
-        // 0x1c..0x1f are used; 0x4f / 0x5a / 0x5b are unused gaps in the
-        // current spec. (0x5a and 0x5b are reserved for future
-        // `scalar` / `commit` opcodes; Phase 12 wires 0x5e `range`.)
-        let unused = [0x4f, 0x5a, 0x5b, 0x6f, 0x76, 0x77, 0x7a, 0x9a, 0xff];
+        // 0x1c..0x1f are used; 0x4f / 0x6f / 0x7a / 0x9a are unused
+        // gaps in the current spec (all-Phase-13 opcodes wired).
+        let unused = [0x4f, 0x6f, 0x7a, 0x9a, 0xff];
         for b in unused {
             let mut r: &[u8] = &[b];
             let parsed = Instruction::parse(&mut r).expect("parses");

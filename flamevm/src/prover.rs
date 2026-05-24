@@ -110,12 +110,18 @@ impl<'g> Delegate for Prover<'g> {
 
     fn commit_variable(
         &mut self,
-        _commitment: &CompressedRistretto,
+        commitment: &crate::Commitment,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError> {
-        // Phase 11 doesn't yet exercise `commit_variable` (no `commit`
-        // opcode wired). The interface stays here so Phase 13 can plug
-        // in the open-commitment witness path.
-        Err(VMError::WitnessMissing)
+        // Prover-side: extract the witness (value + blinding) from the
+        // open commitment and call `cs.commit(value, blinding)`. The
+        // resulting point matches `commitment.to_point()` by Pedersen
+        // construction (which is what the verifier independently
+        // commits to its CS).
+        use bulletproofs::r1cs::ConstraintSystem;
+        let (value, blinding) =
+            commitment.witness().ok_or(VMError::WitnessMissing)?;
+        let scalar: curve25519_dalek::scalar::Scalar = value.into();
+        Ok(self.cs.commit(scalar, blinding))
     }
 
     fn finalize(self, _deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError> {

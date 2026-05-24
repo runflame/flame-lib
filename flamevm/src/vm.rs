@@ -146,9 +146,18 @@ pub trait Delegate {
     fn cs(&mut self) -> &mut Self::CS;
 
     /// Allocates an R1CS variable backed by a Pedersen commitment.
+    ///
+    /// Prover-side: the `Commitment::Open(witness)` case carries the
+    /// cleartext value and blinding factor; the prover calls
+    /// `cs.commit(value, blinding)` to bind both into the proof.
+    /// Verifier-side: `Commitment::Closed(point)` is the only thing
+    /// the verifier sees; it calls `cs.commit(point)` to bind the
+    /// point into the proof. Both return the same `(point, variable)`
+    /// pair so downstream opcode logic is agnostic to which side it's
+    /// running on.
     fn commit_variable(
         &mut self,
-        commitment: &CompressedRistretto,
+        commitment: &crate::Commitment,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError>;
 
     /// Consumes the delegate after VM execution finishes cleanly.
@@ -560,6 +569,11 @@ impl VM {
             I::Expr => self.op_expr(delegate),
             // ── Phase 12: range proof ─────────────────────────────
             I::Range => self.op_range(delegate),
+            // ── Phase 13: CS-bound stack→type lifts ────────────────
+            I::Scalar => self.op_scalar(),
+            I::Commit => self.op_commit(),
+            I::Decrypt => self.op_decrypt(),
+            I::Mix => self.op_mix(delegate),
             // ── Phase 11: Expression / Constraint overloads ───────
             I::Neg if self.top_is_expression() => self.op_neg_expr(),
             I::Add if self.top_two_have_non_int253() => self.op_add_expr(),
@@ -583,7 +597,14 @@ impl VM {
     fn dispatch_internal(&mut self, instr: crate::ops::Instruction) -> Result<(), VMError> {
         use crate::ops::Instruction as I;
         match instr {
-            I::Input | I::Alloc(_) | I::Expr | I::Range => Err(VMError::ExternalOnly),
+            I::Input
+            | I::Alloc(_)
+            | I::Expr
+            | I::Range
+            | I::Scalar
+            | I::Commit
+            | I::Decrypt
+            | I::Mix => Err(VMError::ExternalOnly),
             other => self.dispatch_common(other),
         }
     }
@@ -684,7 +705,14 @@ impl VM {
             I::Signtx => self.op_signtx(),
             I::Signrun => self.op_signrun(),
             // ── Context-only — caller should have intercepted ─────
-            I::Input | I::Alloc(_) | I::Expr | I::Range => {
+            I::Input
+            | I::Alloc(_)
+            | I::Expr
+            | I::Range
+            | I::Scalar
+            | I::Commit
+            | I::Decrypt
+            | I::Mix => {
                 // External-only instructions reach common dispatch
                 // only via internal context (where they're already
                 // intercepted) or via misdispatch. Surface a definite
@@ -2198,7 +2226,7 @@ impl VM {
     fn op_expr<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         use curve25519_dalek::scalar::Scalar;
         let var = self.pop_variable()?;
-        let (_point, r1cs_var) = delegate.commit_variable(&var.commitment.to_point())?;
+        let (_point, r1cs_var) = delegate.commit_variable(&var.commitment)?;
         let witness = var.commitment.assignment();
         let expr = crate::Expression::LinearCombination(
             vec![(r1cs_var, Scalar::one())],
@@ -2353,6 +2381,88 @@ impl VM {
         let b = self.pop_constraint_or_int253()?;
         let a = self.pop_constraint_or_int253()?;
         self.push_value(Value::Constraint(crate::Constraint::or(a, b)));
+        Ok(())
+    }
+
+    // ── Phase 13: scalar / commit / decrypt / encrypted token ops ────
+
+    /// `0x5a scalar` — `string → expr`. Pops a String, downcasts to
+    /// `Int253` via `String::to_scalar`, pushes `Expression::Constant`.
+    /// For `String::Opaque(bytes)`, the bytes are parsed as a
+    /// canonical sign-magnitude Int253. For `String::Scalar(i)`, the
+    /// witness is extracted directly.
+    fn op_scalar(&mut self) -> Result<(), VMError> {
+        let s = self.pop_string()?;
+        let int = s.to_scalar()?;
+        self.push_value(Value::Expression(crate::Expression::constant(int)));
+        Ok(())
+    }
+
+    /// `0x5b commit` — `string → var`. Pops a String, downcasts to
+    /// `Commitment`, wraps in `Variable { commitment }`. Verifier:
+    /// `String::Opaque(point bytes)` → `Commitment::Closed(point)`.
+    /// Prover: `String::Commitment(Open(witness))` → witness preserved.
+    /// Downstream `expr` opcode then calls `commit_variable` on the
+    /// resulting Variable to bind it into the CS.
+    fn op_commit(&mut self) -> Result<(), VMError> {
+        let s = self.pop_string()?;
+        let commitment = s.to_commitment()?;
+        let var = crate::Variable { commitment };
+        self.push_value(Value::Variable(var));
+        Ok(())
+    }
+
+    /// `0x76 mix` — `anytokens… commitments… m n → values`. Pops `n`
+    /// then `m` (output and input counts) as `Int253`, then `n` output
+    /// commitment String pairs (`qty`, `flv`), then `m` input
+    /// token-shaped values; invokes the spacesuit cloak gadget to
+    /// constrain that inputs balance with outputs per flavor; pushes
+    /// `n` output `Token`s.
+    ///
+    /// **Phase-13 status: minimal scaffold.** Today returns
+    /// `WitnessMissing` so callers see a clear "not yet wired" error.
+    /// Full cloak-gadget wiring lands once `WideToken` has a
+    /// public constructor (Phase 13.5 — needs encrypted-`borrow` to
+    /// produce one first). Tests that exercise the dispatch path
+    /// confirm the opcode is routed correctly even as the gadget
+    /// itself stays stubbed.
+    fn op_mix<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
+        Err(VMError::WitnessMissing)
+    }
+
+    /// `0x77 decrypt` — `token f f' q q' → cleartoken`. Reveals a
+    /// cleartext quantity / flavor pair for an encrypted Token by
+    /// supplying their cleartext values (`f`, `q`) and Pedersen
+    /// blinding factors (`f'`, `q'`). Verifies that
+    /// `token.qty.to_point() == q*B + q'*B_blinding` and analogously
+    /// for the flavor, then pushes a `ClearToken(q, f)`.
+    ///
+    /// All four scalar operands (`f`, `f'`, `q`, `q'`) are popped as
+    /// `Int253`. The Token is popped last (deepest on stack). Errors
+    /// `CleartextConstraintFalse` if either commitment doesn't open.
+    fn op_decrypt(&mut self) -> Result<(), VMError> {
+        use bulletproofs::PedersenGens;
+        let q_blind = self.pop_int253()?;
+        let q_value = self.pop_int253()?;
+        let f_blind = self.pop_int253()?;
+        let f_value = self.pop_int253()?;
+        let token = match self.pop_value()? {
+            Value::Token(t) => t,
+            _ => return Err(VMError::TypeNotToken),
+        };
+        let gens = PedersenGens::default();
+        let expected_qty_point = gens
+            .commit(q_value.to_scalar_mod_order(), q_blind.to_scalar_mod_order())
+            .compress();
+        let expected_flv_point = gens
+            .commit(f_value.to_scalar_mod_order(), f_blind.to_scalar_mod_order())
+            .compress();
+        if expected_qty_point != token.qty.to_point()
+            || expected_flv_point != token.flv.to_point()
+        {
+            return Err(VMError::CleartextConstraintFalse);
+        }
+        self.push_value(Value::ClearToken(ClearToken::new(q_value, f_value)));
         Ok(())
     }
 }
@@ -6510,7 +6620,7 @@ mod tests {
 
         fn commit_variable(
             &mut self,
-            _commitment: &CompressedRistretto,
+            _commitment: &crate::Commitment,
         ) -> Result<(CompressedRistretto, bulletproofs::r1cs::Variable), VMError> {
             unreachable!("StubDelegate::commit_variable should not be called in Phase-10 tests");
         }
@@ -7089,6 +7199,230 @@ mod tests {
         // (alloc is ExternalOnly too). The simpler test: just step until
         // the `range` opcode is dispatched — it should error ExternalOnly
         // before consuming any stack operands.
+        let err = run_to_end(&mut vm).unwrap_err();
+        assert!(matches!(err, VMError::ExternalOnly));
+    }
+
+    // ── Phase 13: rich String + scalar / commit / decrypt ────────
+
+    #[test]
+    fn string_witness_commitment_encodes_to_point() {
+        // String::Commitment(witness) serializes to the 32-byte
+        // compressed Pedersen point — identical to what an Opaque
+        // String wrapping the same bytes would yield.
+        let c = crate::Commitment::unblinded(Int253::from(42u64));
+        let point_bytes = c.to_point().as_bytes().to_vec();
+        let s = String::commitment(c);
+        assert_eq!(s.to_bytes_vec(), point_bytes);
+        assert_eq!(s.len(), 32);
+    }
+
+    #[test]
+    fn string_witness_commitment_downcasts() {
+        let c = crate::Commitment::unblinded(Int253::from(42u64));
+        let s = String::commitment(c.clone());
+        let recovered = s.to_commitment().expect("downcast");
+        // The Open commitment is preserved on the witness-bearing path
+        // (not collapsed to Closed).
+        assert!(matches!(recovered, crate::Commitment::Open(_)));
+        assert_eq!(recovered.assignment(), Some(Int253::from(42u64)));
+    }
+
+    #[test]
+    fn string_opaque_downcast_to_commitment_gives_closed() {
+        // 32 bytes of opaque data → Commitment::Closed(point).
+        let c = crate::Commitment::unblinded(Int253::from(42u64));
+        let opaque = String::from(c.to_point().as_bytes().to_vec());
+        let recovered = opaque.to_commitment().expect("downcast");
+        assert!(matches!(recovered, crate::Commitment::Closed(_)));
+        assert_eq!(recovered.to_point(), c.to_point());
+    }
+
+    #[test]
+    fn string_scalar_downcast() {
+        let i = Int253::from(123u64);
+        let s = String::scalar(i);
+        let recovered = s.to_scalar().expect("downcast");
+        assert_eq!(recovered, i);
+    }
+
+    #[test]
+    fn op_scalar_pushes_constant_expression() {
+        // Pre-load a 32-byte String on the stack, dispatch `scalar`,
+        // confirm the result is Expression::Constant.
+        let mut vm = vm_external_with_script(vec![0x5a]); // scalar opcode
+        let s = String::scalar(Int253::from(99u64));
+        vm.push_value(Value::String(s));
+        let mut delegate = StubDelegate::new();
+        vm.step_external(&mut delegate).expect("scalar ok");
+        assert_eq!(vm.current_call.stack.len(), 1);
+        match &vm.current_call.stack[0] {
+            Value::Expression(crate::Expression::Constant(i)) => {
+                assert_eq!(*i, Int253::from(99u64));
+            }
+            _ => panic!("expected Expression::Constant"),
+        }
+    }
+
+    #[test]
+    fn op_commit_pushes_variable() {
+        // Pre-load a witness-bearing String::Commitment, dispatch
+        // `commit`, confirm the result is a Variable with the open
+        // commitment preserved.
+        let mut vm = vm_external_with_script(vec![0x5b]); // commit opcode
+        let c = crate::Commitment::unblinded(Int253::from(42u64));
+        vm.push_value(Value::String(String::commitment(c.clone())));
+        let mut delegate = StubDelegate::new();
+        vm.step_external(&mut delegate).expect("commit ok");
+        assert_eq!(vm.current_call.stack.len(), 1);
+        match &vm.current_call.stack[0] {
+            Value::Variable(v) => {
+                assert_eq!(v.commitment.assignment(), Some(Int253::from(42u64)));
+            }
+            _ => panic!("expected Variable"),
+        }
+    }
+
+    #[test]
+    fn prove_then_verify_with_commit_expr_eq() {
+        // pushstr <open commitment witness> ; commit ; expr ;
+        // alloc(42) ; eq ; verify.
+        // Both the commit-side and alloc-side Expressions point to
+        // value 42 → eq holds → verify succeeds.
+        let pc_gens = PedersenGens::default();
+        let witness_int = Int253::from(42u64);
+        // Use a blinding factor that we'll need to encode into the
+        // Program as a witness-bearing String.
+        let blinding = curve25519_dalek::scalar::Scalar::from(7u64);
+        let c = crate::Commitment::blinded_with_factor(witness_int, blinding);
+        let program = Program::new()
+            // Push the witness-bearing Commitment String. The bytecode
+            // will encode it as 32 bytes (the point); the prover's
+            // Run::Queue preserves the witness; the verifier walks
+            // bytecode and sees String::Opaque, which downcasts to
+            // Commitment::Closed(point) — sufficient for the CS to
+            // bind to the same point the prover used.
+            .push_str(String::commitment(c))
+            .commit()
+            .expr()
+            .alloc(Some(witness_int))
+            .eq()
+            .verify();
+        let (bytecode, proof, _, _) =
+            Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+                .expect("prove succeeds");
+        let pc_gens_v = PedersenGens::default();
+        Verifier::verify(
+            &pc_gens_v,
+            bytecode,
+            &proof,
+            dummy_header(),
+            1_000_000,
+            0,
+        )
+        .expect("verify succeeds");
+    }
+
+    #[test]
+    fn op_decrypt_succeeds_on_matching_witness() {
+        // Build a Token from cleartext (q, f); decrypt with the
+        // correct (q, f, q', f') quartet succeeds and pushes
+        // ClearToken(q, f).
+        let q = Int253::from(100u64);
+        let f = Int253::from(7u64);
+        let q_blind = Int253::from(11u64);
+        let f_blind = Int253::from(13u64);
+        let qty_commit = crate::Commitment::blinded_with_factor(
+            q,
+            curve25519_dalek::scalar::Scalar::from(11u64),
+        );
+        let flv_commit = crate::Commitment::blinded_with_factor(
+            f,
+            curve25519_dalek::scalar::Scalar::from(13u64),
+        );
+        let token = crate::Token::new(qty_commit, flv_commit);
+
+        let mut vm = vm_external_with_script(vec![0x77]); // decrypt
+        vm.push_value(Value::Token(token));
+        vm.push_value(Value::Int253(f));
+        vm.push_value(Value::Int253(f_blind));
+        vm.push_value(Value::Int253(q));
+        vm.push_value(Value::Int253(q_blind));
+        let mut delegate = StubDelegate::new();
+        vm.step_external(&mut delegate).expect("decrypt ok");
+
+        assert_eq!(vm.current_call.stack.len(), 1);
+        match &vm.current_call.stack[0] {
+            Value::ClearToken(ct) => {
+                assert_eq!(ct.qty(), q);
+                assert_eq!(ct.flv(), f);
+            }
+            _ => panic!("expected ClearToken"),
+        }
+    }
+
+    #[test]
+    fn op_decrypt_rejects_wrong_witness() {
+        // Mismatched blinding → commitment opens to a different point
+        // → CleartextConstraintFalse.
+        let q = Int253::from(100u64);
+        let f = Int253::from(7u64);
+        let qty_commit = crate::Commitment::blinded_with_factor(
+            q,
+            curve25519_dalek::scalar::Scalar::from(11u64),
+        );
+        let flv_commit = crate::Commitment::blinded_with_factor(
+            f,
+            curve25519_dalek::scalar::Scalar::from(13u64),
+        );
+        let token = crate::Token::new(qty_commit, flv_commit);
+        let mut vm = vm_external_with_script(vec![0x77]);
+        vm.push_value(Value::Token(token));
+        vm.push_value(Value::Int253(f));
+        vm.push_value(Value::Int253(Int253::from(99u64))); // wrong f_blind
+        vm.push_value(Value::Int253(q));
+        vm.push_value(Value::Int253(Int253::from(11u64)));
+        let mut delegate = StubDelegate::new();
+        let err = vm.step_external(&mut delegate).unwrap_err();
+        assert!(matches!(err, VMError::CleartextConstraintFalse));
+    }
+
+    #[test]
+    fn instruction_scalar_commit_decrypt_mix_roundtrip() {
+        // Round-trip the new Phase-13 Instruction variants.
+        use crate::ops::Instruction;
+        for variant in [
+            Instruction::Scalar,
+            Instruction::Commit,
+            Instruction::Decrypt,
+            Instruction::Mix,
+        ] {
+            let mut buf = Vec::new();
+            variant.encode(&mut buf);
+            assert_eq!(buf.len(), 1);
+            let mut r: &[u8] = &buf;
+            let parsed = Instruction::parse(&mut r).expect("parses");
+            assert_eq!(format!("{:?}", parsed), format!("{:?}", variant));
+        }
+    }
+
+    #[test]
+    fn scalar_in_internal_context_errors_external_only() {
+        let mut vm = vm_with_script(vec![0x5a]);
+        let err = run_to_end(&mut vm).unwrap_err();
+        assert!(matches!(err, VMError::ExternalOnly));
+    }
+
+    #[test]
+    fn commit_in_internal_context_errors_external_only() {
+        let mut vm = vm_with_script(vec![0x5b]);
+        let err = run_to_end(&mut vm).unwrap_err();
+        assert!(matches!(err, VMError::ExternalOnly));
+    }
+
+    #[test]
+    fn decrypt_in_internal_context_errors_external_only() {
+        let mut vm = vm_with_script(vec![0x77]);
         let err = run_to_end(&mut vm).unwrap_err();
         assert!(matches!(err, VMError::ExternalOnly));
     }

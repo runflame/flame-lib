@@ -327,15 +327,24 @@ fn read_negative_full(r: &mut impl Reader) -> Result<Int253, ReadError> {
 // ── String encoding ───────────────────────────────────────────────
 
 /// Writes a `String` (byte-string) in canonical compact form.
+///
+/// For witness-bearing String variants (`Commitment`, `Scalar`,
+/// `Predicate`), the bytes are derived from the variant's canonical
+/// encoding (32-byte compressed point or sign-magnitude int) — the
+/// wire form is byte-identical to what an Opaque String wrapping the
+/// same bytes would produce. The witness data itself is discarded;
+/// the prover ferries it via the in-memory Program (and pushes it
+/// onto the stack as a witness-bearing String when needed).
 pub fn write_string(w: &mut impl Writer, s: &String) -> Result<(), WriteError> {
-    let len = s.as_bytes().len() as u64;
+    let bytes = s.bytes_view();
+    let len = bytes.len() as u64;
     if len <= INT_IMM_MAX as u64 {
         w.write_u8(b"str.tag", STR_IMM_MIN + len as u8)?;
     } else {
         w.write_u8(b"str.tag", STR_VAR)?;
         write_subvarint(w, len - CONTAINER_VAR_BASE)?;
     }
-    w.write(b"str.data", s.as_bytes())
+    w.write(b"str.data", &bytes)
 }
 
 /// Reads a compact-encoded `String`.

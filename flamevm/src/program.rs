@@ -222,6 +222,20 @@ impl Program {
         self
     }
 
+    /// `scalar` (0x5a) — `string → expr`. Lifts a 32-byte String
+    /// (parsed as `Int253`) into a constant Expression.
+    pub fn scalar(mut self) -> Self {
+        self.instructions.push(Instruction::Scalar);
+        self
+    }
+
+    /// `commit` (0x5b) — `string → var`. Promotes a 32-byte String
+    /// (parsed as a Pedersen commitment) into a Variable.
+    pub fn commit(mut self) -> Self {
+        self.instructions.push(Instruction::Commit);
+        self
+    }
+
     // ── Phase 5: Dict ops ────────────────────────────────────────
 
     pub fn dict(mut self) -> Self { self.instructions.push(Instruction::Dict); self }
@@ -251,6 +265,19 @@ impl Program {
     pub fn borrow(mut self) -> Self { self.instructions.push(Instruction::Borrow); self }
     pub fn merge(mut self) -> Self { self.instructions.push(Instruction::Merge); self }
     pub fn split(mut self) -> Self { self.instructions.push(Instruction::Split); self }
+
+    /// `mix` (0x76) — see [`Instruction::Mix`].
+    pub fn mix(mut self) -> Self {
+        self.instructions.push(Instruction::Mix);
+        self
+    }
+
+    /// `decrypt` (0x77) — see [`Instruction::Decrypt`].
+    pub fn decrypt(mut self) -> Self {
+        self.instructions.push(Instruction::Decrypt);
+        self
+    }
+
     pub fn issue_flv(mut self) -> Self { self.instructions.push(Instruction::IssueFlv); self }
 
     // ── Phase 2: control flow ────────────────────────────────────

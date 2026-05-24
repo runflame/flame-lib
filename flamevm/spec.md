@@ -366,8 +366,8 @@ All constraint operations available on external transactions only.
 
 | Hex | Name | Stack diagram | Notes |
 | --- | --- | --- | --- |
-| 5a | const | scalar → expression | Converts scalar into an expression with weight 1. |
-| 5b | extvar | point → var | Allocates an external variable based on a Pedersen commitment. |
+| 5a | scalar | string → expr | **[E]** Pops a 32-byte `String`, downcasts to `Int253` (`String::to_scalar`), pushes `Expression::Constant(int)`. For witness-bearing `String::Scalar(i)` the witness is extracted directly; for `String::Opaque(bytes)` the bytes are parsed as a canonical sign-magnitude `Int253`. |
+| 5b | commit | string → var | **[E]** Pops a 32-byte `String`, downcasts to `Commitment` (`String::to_commitment`), wraps in `Variable { commitment }`. Verifier: `String::Opaque(point bytes)` → `Commitment::Closed(point)`. Prover: `String::Commitment(Open(witness))` → witness preserved. Downstream `expr` opcode binds the resulting `Variable` into the CS via `Delegate::commit_variable`. |
 | 5c | intvar | ø → var | Allocates an internal variable in CS (non-committed via PC). |
 | 5d | expr | var → expr | Converts variable into an expression. |
 | 5e | range | expr n → expr | **[E]** Pops bit count `n: Int253` (must be in `[1, 64]`) and an `Expression`. For `Expression::Constant`, asserts the constant fits in `[0, 2ⁿ)` (cleartext check, no CS work). For `Expression::LinearCombination`, adds a bulletproofs range-proof gadget asserting `0 ≤ expr.value < 2ⁿ`. The Expression is pushed back unchanged. Hard-fails `BitCountOutOfRange` if `n ∉ [1, 64]`, `InvalidBitrange` on cleartext overflow, `R1CSError` on CS-construction failure. |
@@ -410,8 +410,8 @@ All constraint operations available on external transactions only.
 | 73 | borrow | qty flv → –T +T | Cleartext branch (both `Int253`): pushes `(ClearToken(-qty, flv), ClearToken(qty, flv))` — the negative is non-portable bottom, the positive is portable top. Encrypted branch (any operand is `Point`): defers to Phase 12 with a 64-bit range proof on `+T` — hard-fails `TokenRequiresCS` until then. |
 | 74 | merge | a b → {c 1 | a b 0} | ClearTokens only: on flavor match, pushes `(ClearToken(a.qty+b.qty, flv), 1)`. On flavor mismatch, restores `(a, b, 0)` (soft-fail). Non-ClearToken inputs error `TypeNotClearToken`. |
 | 75 | split | a q → a’ b | ClearTokens only: returns `(ClearToken(a.qty-q, flv), ClearToken(q, flv))`. Hard-fails `TokenSplitOutOfRange` if `q < 0`, `a.qty < 0`, or `q > a.qty`. Non-ClearToken inputs error `TypeNotClearToken`. |
-| 76 | mix | anytokens... commitments… m n → values | (External) Performs merge and split of tokens, cleartokens and widetokens. |
-| 77 | decrypt | token f f’ q q’ → cleartoken | Converts token to a cleartext one by providing cleartext flavor and quantity with their blinding factors. |
+| 76 | mix | anytokens… commitments… m n → values | **[E]** Pops  (output count) and  (input count) as ; pops  output Pedersen commitment pairs (qty/flv Strings); pops  input token-shaped values; invokes the spacesuit cloak gadget to constrain that inputs balance with outputs per flavor (and range-proof each output); pushes  output s. (Phase 13.5: gadget wiring deferred until  has a public constructor.) |
+| 77 | decrypt | token f f’ q q’ → cleartoken | **[E]** Pops  (qty blinding),  (qty cleartext),  (flv blinding),  (flv cleartext), . Verifies that  and analogously for the flavor. On success, pushes . Hard-fails  on commitment mismatch. All scalar operands are . |
 | 78 | issueflv | cid tag → int | Pops a `tag` String and a `cid` String (must be exactly 32 bytes — actor id); pushes `flavor_from_actor(cid, tag)` as `Int253`. Pure helper: no CS, no txlog effect, no actor-context requirement. Domain separator `flamevm.token.flavor.v1` (consensus-fixed). |
 
 ### Control flow
