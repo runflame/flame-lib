@@ -33,15 +33,15 @@ what's left to build.
 | 21 | `TxResult` shape + finalize return values                          | ✅      |
 | 22 | Input-cell witness re-attachment (`Instruction::Input(witness)`)   | ✅      |
 | 23 | Confidential N→M end-to-end test harness                           | ✅      |
-| 24 | `ActorState` + `ActorRegistry` (real, not stub)                    | ⏳      |
-| 25 | `op_load` + `op_save`                                              | ⏳      |
-| 26 | `op_call` + frame creation                                         | ⏳      |
-| 27 | Re-entrancy guard                                                  | ⏳      |
-| 28 | Actor lifecycle: grace + freeze + maturity                         | ⏳      |
-| 29 | Introspection: identity (4 opcodes)                                | ⏳      |
+| 24 | `ActorState` + `ActorRegistry` + `Address` + `send.rs`             | ✅      |
+| 25 | `op_load` + `op_save` (incl. Q6 self-destruct)                     | ✅      |
+| 26 | `op_call` + frame creation + `TxEntry::Call`                       | ✅      |
+| 27 | Re-entrancy guard                                                  | ✅      |
+| 28 | Actor lifecycle: grace + freeze + maturity (VM-side)               | ✅      |
+| 29 | Introspection: identity (4 opcodes)                                | ✅      |
 | 30 | Introspection: tx header (`timelock`, `version`)                   | ⏳      |
 | 31 | Chain info (6 opcodes)                                             | ⏳      |
-| 32 | `op_send` + `TxEntry::Send` + send queue                           | ⏳      |
+| 32 | `op_send` + `TxEntry::Send` + send queue                           | ✅      |
 | 33 | Encrypted `issue` (after ADR)                                      | ⏳      |
 | 34 | Gas-cost table + per-op charging                                   | ⏳      |
 | 35 | Memory-cap allocator + resource introspection (5 opcodes)          | ⏳      |
@@ -50,9 +50,38 @@ what's left to build.
 | 38 | spec.md + design.md sync + ADR backfill                            | ⏳      |
 | 39 | End-to-end integration tests                                       | ⏳      |
 
-**23 of 39 complete (59 %).** Total test count: 437 passing; build
-clean; 4 leftover compiler warnings, all targeted by Phases 24 / 26
-/ 27 / 35.
+**31 of 39 complete (79 %).** Total test count: 536 passing; build
+clean; remaining compiler warnings target Phases 34 / 35 (gas + mem
+accounting).
+
+### Actor build (Phases 24–29, 32) — landed in 8 units
+
+The actor sub-project shipped as 8 logically-distinct units rather
+than the original 7-phase decomposition; the units roll up into the
+phase numbers above. See commits `d8b7d32`..`3046843` for the
+land sequence, and the architect-side question dialogue captured
+in the conversation log for the design decisions (referred to
+below as Q1–Q6, awaiting ADR backfill `0010` / `0011` / `0012`).
+
+| Unit | Maps to plan phase | Highlights |
+|---|---|---|
+| 1 — actor.rs data model | 24 | `ActorID` (Hash + Constructor enum), `MethodKey(Int253)`, `ActorState`, `Actor`, `vbyte_size` (Q2: wire_len + 32 overhead), `b"flamevm.actorid"` domain (Q1). |
+| 2 — `address.rs` | 24 | `Address::Predicate` / `MessageTarget` enum + canonical wire encoding; not a stack `Value` variant. |
+| 3 — Registry trait + `MemRegistry` + `VbytePool` | 24 + 28 | `ActorRegistry` trait (load/save/resolve/mark/deploy/credit_vbytes/tick_block); `VbytePool` (5000/block introduction + 100-block maturity); per-block ACTIVE↔FROZEN↔CLEARED state machine. |
+| 4 — Move Message/ActorID out of vm.rs; add `send.rs` | (sub-task of 32) | `Message` gains `refund_predicate` (Q3); new `SendID` newtype (Q5 — SendID == Message.anchor). |
+| 5 — `op_load` + `op_save` | 25 | Per-frame `loaded` flag; cross-frame `mark_for_destruction` as re-entry lock; tx-end `commit_tx_destructions` hook = Q6 self-destruct. **`LoadWithoutSave` is not an error** — it's the destroy path. |
+| 6 — `op_call` + re-entrancy + `TxEntry::Call` | 26 + 27 | `ActorCall` frame with caller + anchor; `iter_actor_ids_on_stack` walks the live frame chain for the guard; `TxEntry::Call` records callee + pre_state_root + callee_anchor so Internal TxID binds to the exact actor states observed (Q5). |
+| 7 — Identity opcodes | 29 | `actorid` / `anchor` / `callerid` / `method`. `CallKind::ActorCall` extended with `anchor`. All four hard-fail `OpcodeRequiresActorContext` from external root. |
+| 8 — `op_send` + `TxEntry::Send` + queue | 32 | Anchor ratchet right before emitting Send (Q5 timing); `payload_hash` keeps Send entry fixed-size; `refund_predicate` operand (Q3); `NonPortableInSend` guards args. |
+
+**Deferred to consensus-side** (the VM has nothing to do; trait
+surface is in place):
+- Transparent `Constructor` deploy at first message delivery (Q4).
+- Bounce-Output emission on internal-tx failure (Q3) — consensus
+  builds the cell under the message's `refund_predicate` and emits
+  it as an Output effect directly.
+- Per-block `tick_block` driver — consensus calls into the
+  registry method after applying each block.
 
 The confidential N→M transaction test harness (Phase 23) exercises
 13 shapes end-to-end through `Prover::prove` → `Verifier::verify`:
@@ -60,22 +89,23 @@ The confidential N→M transaction test harness (Phase 23) exercises
 - 2→2 / 3→2 / 2→3 / 3→3 (two flavors)
 - 2 negative tests: imbalance rejected, flavor mismatch rejected
 
-### Gas + memory accounting is deferred
+### Gas + memory accounting is deferred (Phases 34–36)
 
 `gas_used` and `vbytes_used` currently always read `0` in `TxResult`.
-Until the actor machinery (Phases 24–28) lands, every opcode is
-treated as costing **gas = 1, mem = 0** *implicitly* — no charging,
-no limit enforcement, no introspection. The resource pipeline lights
-up in Phases 34–36 once we have:
+Every opcode is treated as costing **gas = 1, mem = 0** *implicitly*
+— no charging, no limit enforcement, no introspection.
 
-- a real actor registry to size `mem_limit = 4 × vbytes(actor)` (Phase 24)
-- a working call stack so refunds across `op_call` make sense (Phase 26)
-- a re-entrancy guard so `mem_used` cleanup on frame exit is well-defined (Phase 27)
+All prerequisites for the resource pipeline are now in place:
 
-This ordering is load-bearing: there's no point implementing gas
-charging before there are call frames to charge against, and no
-point implementing `mem_limit` before there's an actor whose vbytes
-size the cap.
+- ✅ real actor registry to size `mem_limit = 4 × vbytes(actor)` (Phase 24)
+- ✅ working call stack with refund hook so `op_call` gas refund makes sense (Phase 26)
+- ✅ re-entrancy guard so `mem_used` cleanup on frame exit is well-defined (Phase 27)
+
+The remaining work is just the per-opcode tables + hooks (Phase 34
+gas, Phase 35 mem-cap, Phase 36 block pools). The introspection
+opcodes (`gas`, `bytes`, `gaslimit`, `memlimit`, `newbytes`) are
+gated on Phases 34/35 since they read counters those phases
+populate.
 
 ---
 
@@ -108,6 +138,13 @@ size the cap.
 | 21 | `TxResult` shape                                   | 4     | Unified return: `{ txid, txlog, total_fee, gas_used, vbytes_used, bytecode, proof, deferred_sigs, sends }`. |
 | 22 | Input-cell witness re-attachment                   | 7     | `Instruction::Input(Option<Box<InputWitnesses>>)`. Prover-side re-attaches `Commitment::Open` post-decode; point-equality check guards prover bugs. |
 | 23 | Confidential N→M test harness                      | 13    | Full input→open→mix→output prove/verify round-trip. Matrix: N∈{1,2,3} × M∈{1,2,3} × {1,2 flavors} + 2 negatives. |
+| 24 | ActorState + Registry + Address                    | 51    | `ActorID` (enum), `MethodKey(Int253)`, `ActorState`, `Actor`, `vbyte_size`, `Address` enum, `ActorRegistry` trait, `MemRegistry`, `VbytePool` (sum of Units 1+2+3 in the actor build). |
+| 25 | `op_load` + `op_save`                              | 11    | Per-frame `loaded` flag, cross-frame registry mark, tx-end `commit_tx_destructions` hook = Q6 self-destruct. |
+| 26 | `op_call` + `TxEntry::Call`                        | 7     | `ActorCall` frame, parent-stack return via existing `op_return` machinery, `TxEntry::Call { callee, method, pre_state_root, callee_anchor }`. |
+| 27 | Re-entrancy guard                                  | (incl. in 26) | `iter_actor_ids_on_stack` walks current + suspended frames; hard-fail `ReentrancyDetected` covers direct + indirect cycles. |
+| 28 | Actor lifecycle (VM-side)                          | (incl. in 24) | `tick_block` + `VbytePool` queue/release; per-actor `frozen_since` / `active_blocks` / grace formula. Consensus-side per-block driver TBD by integrator. |
+| 29 | Identity opcodes                                   | 10    | `actorid` / `anchor` / `callerid` / `method`. `CallKind` extended with `method()` / `caller()` / `anchor()` accessors. |
+| 32 | `op_send` + `TxEntry::Send` + queue                | 7     | Anchor ratchet at send time (Q5); `Message` queue drained into `TxResult.sends`; `payload_hash` keeps Send entry fixed-size; `refund_predicate` operand for Q3 bounce path. |
 
 ## Known wiring gap
 
@@ -123,270 +160,94 @@ size the cap.
 
 | Opcode / feature | Source | Phase |
 |---|---|---|
-| `0x94 send` | spec.md row | 32 |
-| `0x95 call` | spec.md row | 26 |
-| `0x96 load`, `0x97 save` | spec.md rows | 25 |
 | `0x9a timelock`, `0x9b version` | spec.md rows | 30 |
-| `0x9c actorid`, `0x9d anchor`, `0xa0 callerid`, `0xa1 method` | spec.md rows | 29 |
 | `0x9e gas`, `0x9f bytes`, `0xa2 gaslimit`, `0xa3 memlimit`, `0xa4 newbytes` | spec.md rows | 35 |
 | `0xa5..=0xaa` chain-info opcodes | spec.md rows | 31 |
+| Encrypted `issue` (Point → Token branch) | spec.md row, design.md | 33 |
 | Memory cap `4× vbytes` enforcement | design.md ADR 0002 | 35 |
 | Gas charging per opcode | design.md §Resources / Gas | 34 |
 | Block resource pools (`B_par : B_ser = 4:1`) | design.md §Block resource pools | 36 |
-| Actor grace + freeze + 100-block maturity | design.md ADR 0005 | 28 |
-| Re-entrancy guard | design.md ADR 0003 | 27 |
+| Per-block consensus-side `tick_block` driver | design.md ADR 0005 | (consensus / integrator) |
+| Transparent Constructor deploy at delivery | Q4 | (consensus / integrator) |
+| Bounce-Output emission on internal-tx failure | Q3 | (consensus / integrator) |
 
 ## Architect ADR queue
 
 | Topic | Blocking phase | Notes |
 |---|---|---|
 | Input-cell witness encoding | — (resolved Phase 22) | Implemented as `Instruction::Input(Option<Box<InputWitnesses>>)`; verifier-side parses to `None`. ADR pending in Phase 38 housekeeping. |
+| Actor data model (Q1, Q2, Q4, Q6) | — (resolved during actor build) | Q1: `b"flamevm.actorid"` domain. Q2: vbyte = wire_len(state) + 32. Q4: Constructor-form id deploys transparently at first delivery. Q6: load-without-save is the destroy path. ADR `0010-actor-data-model` queued for Phase 38. |
+| Send-ID + Internal TxID (Q3, Q5) | — (resolved during actor build) | Q5: three IDs (External TxID, SendID = Send.anchor, Internal TxID); anchor ratcheted before emitting `TxEntry::Send`; Internal TxID binds to per-call `pre_state_root` via `TxEntry::Call`. Q3: send-failure bounce is a consensus-emitted Output, not a fresh sub-VM. ADR `0011-send-id-and-internal-txid` queued for Phase 38. |
+| Load/save re-entry lock (Q6) | — (resolved during actor build) | `mark_for_destruction` as the cross-frame lock; per-frame `loaded` flag layered on top; tx-end sweep destroys still-marked actors. ADR `0012-load-save-reentry-lock` queued for Phase 38. |
 | Encrypted `issue` semantics | 33 | Variable-only, Predicate-as-issuer, internal-only, or explicit-cid? |
 | Extension tag (255) policy | 37 | Reject vs reserve for soft-fork. Currently rejects. |
-| Refund predicate execution context | 32 | Fresh micro-VM vs recoverable sub-call? |
 
 ---
 
 # Section 2 — Pending phases
 
-## Phase 22 — Input-cell witness re-attachment
+## Phases 22–23 — Witness re-attachment + N→M test harness (landed)
 
-**Goal**: close the witness-loss bug for cell-bearing confidential
-Tokens, so the full input → open → mix → output chain works for
-encrypted inputs.
+Detailed specs for both phases lived in this section while they
+were in flight; both are now done (see "Phases complete" table
+above for headlines, commit log for the implementation).
 
-**Problem**: `Cell::encode` strips `Commitment::Open` → `Closed`
-(only points reach the wire). `op_input → Cell::decode` reconstructs
-the cell with `Closed` Tokens — the prover loses its own witnesses
-on the round-trip. Then `op_mix → value_to_allocated →
-commit_variable` errors `WitnessMissing` on the prover side because
-`Commitment::Closed` has no `.witness()`. The verifier path works
-fine (it only needs points), but no proof can be produced.
-
-**Solution**: extend `Instruction::Input` with an optional
-prover-side witness, following the same pattern as
-`Instruction::Alloc(Option<Int253>)`. Verifier-side parsing yields
-`Input(None)`; bytecode `encode()` writes only `0x90` (witnesses
-never reach the wire).
-
-**Items**:
-- New type `InputWitnesses { tokens: Vec<TokenWitness> }` where
-  `TokenWitness { qty: Commitment, flv: Commitment }` carries Open
-  commitments. Lives in a fresh `flamevm/src/witness.rs` (or under
-  `vm.rs`).
-- `Instruction::Input(Option<Box<InputWitnesses>>)`. Box keeps the
-  enum cheap when most variants don't carry witnesses.
-- `Instruction::encode` writes `0x90` regardless of inner Option.
-- `Instruction::parse` reads `0x90` → `Input(None)`.
-- `Program::input_with_witnesses(InputWitnesses) -> Self` builder.
-  Keep existing `Program::input()` → no-witness form.
-- `op_input(witness: Option<&InputWitnesses>)` (signature change):
-  after `Cell::decode`, if witness is `Some`, walk the payload in
-  order; for each `Value::Token` entry pop the next `TokenWitness`
-  and replace the Token's `qty` / `flv` commitments with the
-  witness-bearing Open variants. **Assert** that each Open
-  commitment's `to_point()` matches the decoded Closed point;
-  mismatch → `WitnessPointMismatch` error.
-- Witness queue length must match the count of `Token` entries in
-  the cell payload; under-/over-supply → `WitnessCountMismatch`.
-- `VMError::WitnessPointMismatch`, `WitnessCountMismatch`.
-- Dispatch: `I::Input(w)` arm in `dispatch_external` threads
-  `w.as_deref()` into `op_input`. Verifier always sees `None`.
-
-**Tests**: ~6 new
-- `input_with_witness_upgrades_closed_to_open` — single Token cell,
-  prover gets Open commitments post-input.
-- `input_witness_count_mismatch_rejects` — too many / too few.
-- `input_witness_point_mismatch_rejects` — bogus witness.
-- `input_no_witness_keeps_closed` — None branch unchanged.
-- `input_encoded_byte_is_just_0x90` — wire form unaffected.
-- `input_witness_for_non_token_payload_skipped` — Int253 / String
-  payload entries are passed through without consuming the witness
-  queue.
+Recap:
+- **Phase 22** added `Instruction::Input(Option<Box<InputWitnesses>>)`
+  so the prover can re-attach `Commitment::Open` after the
+  Cell::decode round-trip strips them to `Closed`. Verifier
+  always parses to `Input(None)`; bytecode is the bare `0x90`.
+- **Phase 23** built the confidential-N→M test harness (13
+  passing shapes including 2 negative-balance tests). The
+  helpers `make_confidential_token` /
+  `make_confidential_input_cell` / `assemble_nm_script` live
+  in `flamevm/src/tests/test_confidential_nm.rs`.
 
 ---
 
-## Phase 23 — Confidential N→M end-to-end test harness
+## Phases 24–29 + 32 — Actor build (landed)
 
-**Goal**: complete external-only confidential transaction tests
-matching the canonical use case: N inputs, M outputs, K asset
-flavors. Single round-trip through `Prover::prove` → `Verifier::verify`.
+The actor sub-project (data model → registry → lifecycle →
+load/save → call + re-entrancy → identity opcodes → send) is in.
+See the "Actor build (Phases 24–29, 32)" section at the top of
+this file for the 8-unit roll-up and the commit list, plus the
+"Phases complete" table for per-phase test counts.
 
-**Scope**: tests only (and the helpers they need). No new opcodes.
+Material design decisions made during the build and now blocked
+into the codebase (all queued for ADR backfill in Phase 38 —
+`0010-actor-data-model`, `0011-send-id-and-internal-txid`,
+`0012-load-save-reentry-lock`):
 
-**Test fixture helpers** (in `flamevm/src/vm.rs::tests` or a new
-`flamevm/tests/confidential_nm.rs` integration file):
+- **Q1**: actor-id hash domain = `b"flamevm.actorid"`.
+- **Q2**: vbyte size = `wire_len(state) + 32` (the 32 covers the
+  lifecycle counters).
+- **Q3**: send-failure bounce path = consensus emits an Output
+  effect directly under `Message.refund_predicate`, no fresh
+  sub-VM. The VM records the refund predicate and is done.
+- **Q4**: `ActorID::Constructor(bytes)` deploys transparently at
+  first delivery; consensus runs the constructor, computes
+  canonical hash from the resulting state, and re-keys the
+  registry entry.
+- **Q5**: three IDs — External TxID (external txlog merkle root,
+  known at broadcast), SendID = `Send.anchor` (deterministic at
+  broadcast, identifies the future internal tx), Internal TxID
+  (binds to actual execution including per-call `pre_state_root`).
+  Anchor ratcheted at send time *before* the `TxEntry::Send` lands
+  so External TxID covers all SendIDs.
+- **Q6**: `op_load` without a matching `op_save` is **not** an
+  error — it's the self-destruct path. Tx-end commit hook
+  (`commit_tx_destructions`) drops still-marked actors and
+  recycles their vbytes through the 100-block maturity queue.
 
-- `make_confidential_token(qty, flv, qty_blind, flv_blind) -> (Token, TokenWitness)`
-  — returns the witness-bearing Token (prover-side) and the matching
-  `TokenWitness` to feed into `Program::input_with_witnesses`.
-- `make_confidential_input_cell(token, predicate, anchor) -> (Cell, InputWitnesses, CallProof)`
-  — packages a Token into a cell under a scripts-only predicate
-  (`PredicateTree::scripts_only(vec![drop_program_for_payload], ...)`)
-  whose unlocked program simply leaves the payload tokens on the
-  stack for downstream `mix` to consume. Returns the cell, its
-  prover-side witnesses, and a callproof for `open`.
-- `assemble_nm_script(inputs, outputs, witnesses) -> Program` —
-  builds the canonical N→M script:
-    1. For each input cell: `pushstr <cell_bytes>` → `input` (with
-       witness) → callproof pieces → `push:0` → `open` (unlocked
-       program leaves Tokens on stack).
-    2. For each output: `pushstr <qty_open_commitment>` (witness-bearing,
-       prover) → `pushstr <flv_open_commitment>` (same).
-    3. `push:M push:N mix` → pops 2M output Strings + N input
-       Tokens, balances per flavor, pushes M output Tokens.
-    4. For each output (deepest first): `push:1` (k=1) → `pushpoint
-       <output_predicate>` → `output`.
+Deferred to consensus-side (the VM has nothing to do; trait
+surface is in place):
 
-**Test matrix** (`flamevm/tests/confidential_nm.rs` or inline; one
-test fn per shape):
-- `confidential_1_to_1_single_flavor`
-- `confidential_1_to_2_single_flavor` (split: 10 → [4, 6])
-- `confidential_2_to_1_single_flavor` (merge: [3, 7] → 10)
-- `confidential_2_to_2_single_flavor` (4-way shuffle)
-- `confidential_2_to_2_two_flavors` (gold+silver, balanced
-  per-flavor)
-- `confidential_3_to_3_two_flavors` (mixed split/merge across
-  flavors)
-- `confidential_3_to_2_two_flavors`
-- `confidential_2_to_3_two_flavors`
-
-Each test:
-1. Constructs N input cells with random blinding factors.
-2. Builds the script + witness queues.
-3. Calls `Prover::prove` → asserts result has `proof: Some`.
-4. Calls `Verifier::verify` → asserts accepts.
-5. Asserts `result.txlog` contains exactly `Header + N×Input + M×Output`.
-6. Asserts `result.txid` matches between prover and verifier.
-
-**Negative tests** (~3):
-- `confidential_unbalanced_inputs_rejected` — qty sum mismatch →
-  CS fails → `InvalidR1CSProof`.
-- `confidential_flavor_mismatch_rejected` — output flavor not
-  in input set → CS fails.
-- `confidential_range_overflow_rejected` — output qty exceeds
-  2⁶⁴ → range proof fails.
-
-**Tests**: ~11 new (8 positive matrix + 3 negative).
-
----
-
-## Phase 24 — `ActorState` + `ActorRegistry` (real, not stub)
-
-**Goal**: actor storage layer.
-
-**Items**:
-- `ActorState` type per design.md (`public: Dict`, `private: Dict`).
-- `ActorRegistry` trait extended: `load_actor(actor_id) ->
-  Result<ActorState>`, `save_actor(actor_id, state) -> Result<()>`,
-  `mark_for_destruction(actor_id)`,
-  `unmark_for_destruction(actor_id)`,
-  `is_marked_for_destruction(actor_id) -> bool`.
-- In-memory impl for tests; real impl is integrator territory.
-- `ActorID` computation from constructor script per design.md.
-
-**Tests**: ~5 (load/save round-trip, mark/unmark idempotent,
-unknown actor errors).
-
----
-
-## Phase 25 — `op_load` + `op_save`
-
-**Goal**: spec opcodes `0x96` / `0x97`.
-
-**Items**:
-- `0x96 load`: `ø → dict`. Calls `registry.load_actor(current_actor)`
-  + `registry.mark_for_destruction(current_actor)`. Pushes
-  `Value::Dict(state)`.
-- `0x97 save`: `dict → ø`. Pops Dict, calls
-  `registry.save_actor(current_actor, dict)` +
-  `registry.unmark_for_destruction(current_actor)`.
-- Pair invariant: `load` without subsequent `save` errors
-  `LoadWithoutSave` at call exit. Tracked via per-frame flag.
-- `VMError::LoadWithoutSave`.
-
-**Tests**: ~6 (load+save pair, load-without-save errors at exit,
-double-load errors, save-without-load errors).
-
----
-
-## Phase 26 — `op_call` + frame creation
-
-**Goal**: synchronous actor-to-actor call.
-
-**Items**:
-- `0x95 call`: `args… k gas bytes method addr → results… k'`. Pops
-  `k`, `gas`, `bytes`, `method`, `addr` (actor_id String).
-- Looks up bytecode via `registry.resolve_method(actor, method)`.
-- Creates a new `CallFrame` with
-  `CallKind::ActorCall { actor, method, caller: current_actor }`,
-  `gas_limit = popped_gas` (no charging yet — see Phase 34),
-  `newbytes = popped_bytes`.
-- Pushes args onto the new frame's stack.
-- On clean exit: parent's stack receives results via the existing
-  `finish_call` machinery; no gas refund yet (Phase 34).
-
-**Tests**: ~6 (call A → B with args, A → B → C clean exit,
-`ArgCount` mismatch errors, unknown method errors).
-
----
-
-## Phase 27 — Re-entrancy guard
-
-**Goal**: design.md ADR 0003 (no re-entrancy).
-
-**Items**:
-- `VM::check_no_reentry(target_actor) -> Result<()>` walks
-  `iter::once(&current_call).chain(call_stack.iter())`; errors
-  `ReentrancyDetected` if `actor()` matches.
-- Called from `op_call` before frame creation.
-- `VMError::ReentrancyDetected`.
-
-**Tests**: ~4 (A → B → A direct cycle → `ReentrancyDetected`;
-A → B → C → A indirect cycle; recursion within one method
-allowed; sibling calls allowed).
-
----
-
-## Phase 28 — Actor lifecycle: grace + freeze + maturity
-
-**Goal**: design.md ADR 0005.
-
-**Items**:
-- Per-block vbyte deduction (called by consensus crate after
-  applying block).
-- Freeze on `vbytes == 0`: subsequent `op_call` errors
-  `ActorFrozen`. State preserved.
-- Grace window = `min(active_blocks / 4, blocks_per_6_months)`.
-  Top-up resets the counter.
-- Elapse without top-up: state cleared, vbytes return to pool
-  after 100 blocks (maturity).
-- Pool re-introduction: 5000 vbytes / block (design.md
-  commitment), adjustable up to 2× by supermajority.
-- `VMError::ActorFrozen`.
-
-**Tests**: ~6 (freeze on zero, grace counts down, top-up unfreezes,
-expiry clears state, maturity delay, supermajority adjustment).
-
----
-
-## Phase 29 — Introspection: identity (4 opcodes)
-
-**Goal**: actor identity / call context.
-
-**Items**:
-- `0x9c actorid` (`ø → string` — `current_call.kind.actor()`).
-- `0x9d anchor` (`ø → string` — `current_call.kind.anchor()` for
-  `InternalRoot` / `CellOpen`).
-- `0xa0 callerid` (`ø → string` — caller actor id; all-zero if
-  external).
-- `0xa1 method` (`ø → int` — `current_call.kind.method()`).
-- `CallKind` accessor methods (`anchor`, `method`, `caller`,
-  `predicate`).
-- All `OpcodeRequiresActorContext` from `ExternalRoot`.
-
-**Tests**: ~8 (positive in valid context, ExternalOnly error from
-wrong context).
+- Transparent `Constructor` deploy at first message delivery
+  (registry's `deploy` is callable; consensus orchestrates).
+- Bounce-Output emission on internal-tx failure (consensus
+  builds the cell under `Message.refund_predicate`).
+- Per-block `tick_block` driver (registry method exists;
+  consensus calls it after applying each block).
 
 ---
 
@@ -422,24 +283,14 @@ Dict shape).
 
 ---
 
-## Phase 32 — `op_send` + `TxEntry::Send` + send queue
+## Phase 32 — `op_send` + `TxEntry::Send` + send queue (landed)
 
-**Goal**: async message-send to actors.
-
-**Items**:
-- `0x94 send`: `args… k gas bytes method addr → ø`. Pops operands;
-  no per-tx gas debit yet (Phase 34 wires charging).
-- Builds `Message { target, method, caller, anchor, payload, gas,
-  vbytes }` (`caller = current_actor` or `None` for external).
-- `TxEntry::Send(MessageRef)` variant — opaque handle into
-  `VM.sends`.
-- `VM.sends: Vec<Message>` collector. `TxResult.sends` returned.
-- Refund predicate: per spec, message has a bounce predicate for
-  failures. Architect ADR required ("Open structural question —
-  refund predicate context").
-
-**Tests**: ~8 (send from External → `caller = None`, send from
-Internal → `caller = Some`, payload preserved, refund-predicate-shape).
+Shipped as part of the actor build. See the "Actor build" roll-up
+at the top of this file. Stack shape was extended with a
+`refund_predicate` operand right before `addr` (Flame extension
+on top of the spec's bare `args… k gas bytes method addr → ø`
+diagram) to make Q3 — the sender-chosen bounce path — explicit
+on the wire.
 
 ---
 
@@ -566,13 +417,21 @@ at consensus seam, ratio enforcement).
 - Walk every opcode row in `spec.md`; cross-check against current
   handler. Update wording, error codes, edge cases.
 - Bump ADR index in `design.md`:
+  - `0010-actor-data-model` — Q1 hash domain, Q2 vbyte sizing,
+    Q4 Constructor deploy, Q6 load-without-save = destroy.
+  - `0011-send-id-and-internal-txid` — Q5 three-IDs scheme,
+    anchor ratchet timing, Internal TxID binding via
+    `TxEntry::Call.pre_state_root`; Q3 refund-path = consensus
+    Output emission.
+  - `0012-load-save-reentry-lock` — `mark_for_destruction` as
+    runtime enforcement of the load/save lock; per-frame
+    `loaded` flag; tx-end commit sweep.
   - `MultiscalarMul` removal.
   - `op_log` opcode addition.
   - Encrypted `issue` semantics (recording the Phase-33 decision).
   - `BulletproofGens` singleton.
   - Input-cell witness re-attachment (Phase 22 design rationale).
   - Extension tag (255) policy (optional).
-  - Refund predicate execution context (optional).
 - Update `flamevm/design.md` (if it has stale content).
 - Update `status/vm-engineer.md`.
 - Resolve `threats/vm.md` "Open structural questions" against
@@ -595,10 +454,19 @@ spec.md is misled".
 - Cell life-cycle: `input` → `open` → repackage payload via
   `output`. Anchor chain advances correctly across multiple
   inputs.
-- Re-entrancy attempt rejected end-to-end.
-- Memory cap trigger end-to-end.
-- Gas exhaustion trigger end-to-end.
+- End-to-end constructor deploy: send to `ActorID::Constructor(...)`,
+  consensus deploys, second send to canonical id hits the same
+  actor (Q4 acceptance test).
+- End-to-end self-destruct: load-without-save in a script,
+  tx commits, actor removed, vbytes mature in pool (Q6).
+- End-to-end refund: send to an actor whose method intentionally
+  fails, Output emitted under the refund predicate, original args
+  recoverable (Q3).
+- Memory cap trigger end-to-end (after Phase 35).
+- Gas exhaustion trigger end-to-end (after Phase 34).
 - TxID determinism across distinct prover runs.
+- Internal TxID changes when callee state changes between two
+  otherwise-identical internal txs (Q5 acceptance test).
 
 **Note**: the confidential-transfer life-cycle (alice + bob
 `issue`, transfer via `mix`, `decrypt`) is already covered by
@@ -616,31 +484,38 @@ its phase:
 | design.md commitment | Status | Phase |
 |---|---|---|
 | Linear types non-copyable / non-droppable | ✅ Done | 2, 5, 8, 10, 13 |
-| No re-entrancy (ADR 0003) | ⏳ Pending | 27 |
+| No re-entrancy (ADR 0003) | ✅ Done | 27 |
 | Transient memory cap = 4× vbytes (ADR 0002) | ⏳ Pending | 35 |
 | Single external-tx fee | ⏳ Partial — opcode wired | 19 + 34 |
-| Per-vbyte persistent storage (ADR 0004) | ⏳ Pending | 28 |
+| Per-vbyte persistent storage (ADR 0004) | ✅ Done (VM-side) | 24 + 28 |
 | Wire format LE everywhere (ADR 0006) | ✅ Done | All wire-format phases |
 | Cell + Actor naming (ADR 0001) | ✅ Done | 8 + 24 |
 | Taproot predicates (ADR 0008) | ✅ Done | 8 |
 | Atomic external-tx effects | ✅ Done | 18 + 21 |
-| Grace + freeze + maturity (ADR 0005) | ⏳ Pending | 28 |
+| Grace + freeze + maturity (ADR 0005) | ✅ Done (VM-side) | 28 |
 | TxID binding (signatures + ZK bind to TxID) | ✅ Done | 18 + 20 |
+| Internal TxID binds to touched-actor state (Q5) | ✅ Done | 26 (`TxEntry::Call.pre_state_root`) |
 | Concurrency (external parallel, internal serial) | ⏳ Consensus crate; VM hooks in 36 | 36 |
 | Block resource pools (4:1) | ⏳ Pending | 36 |
 | Bitcoin coupling (chain-info opcodes) | ⏳ Pending | 31 |
 | Confidential N→M transfers | ✅ Done | 22 + 23 |
+| Actor data model + identity (Q1, Q2, Q4) | ✅ Done | 24 |
+| Send-id semantics + refund predicate (Q3, Q5) | ✅ Done | 32 |
+| Load/save as re-entry lock + self-destruct (Q6) | ✅ Done | 25 |
 
 **Open structural questions** from design.md:
 - BFT family / stake / finality / validator rotation — consensus
   crate, not the VM.
 - Extension tag (255) policy — VM; Phase 37 (with ADR).
-- Refund predicate execution context — VM; Phase 32 (with ADR).
+- Refund predicate execution context — **resolved** (Q3): consensus
+  emits an Output effect directly under `Message.refund_predicate`.
+  No fresh sub-VM. ADR `0011-send-id-and-internal-txid` queued.
 - Soft 8× internal-gas multiplier — VM hook in Phase 34, but the
   multiplier policy is consensus.
 - Frontend framework — UI crate.
 
-All VM-side commitments and open questions are mapped to a phase.
+All VM-side commitments and open questions are mapped to a phase
+(or marked resolved).
 
 ---
 
