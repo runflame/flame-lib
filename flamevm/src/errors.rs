@@ -357,6 +357,13 @@ pub enum VMError {
     #[error("op_save without matching op_load on this frame")]
     SaveWithoutLoad,
 
+    /// `op_call` targeted an actor that already appears on the
+    /// current call stack (direct self-call or indirect cycle).
+    /// Per design.md ADR 0003 re-entrancy is forbidden — surface
+    /// hard fail, aborts the enclosing internal tx.
+    #[error("Re-entrancy detected: target actor already on call stack")]
+    ReentrancyDetected,
+
     /// An opcode required a top-of-stack `ClearToken` but found a
     /// different type (encrypted Token / WideToken / non-token).
     /// Distinct from `TypeNotToken` so scripts can distinguish "wrong

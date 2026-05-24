@@ -321,6 +321,19 @@ impl CallKind {
     }
 }
 
+/// Iterates over the actor ids of every live frame — current call
+/// first, then suspended frames innermost-out. Used by the
+/// re-entrancy guard inside `op_call` (ADR 0003): the target id
+/// must not appear anywhere in the walk.
+fn iter_actor_ids_on_stack<'a>(
+    current: &'a CallFrame,
+    suspended: &'a [CallFrame],
+) -> impl Iterator<Item = &'a ActorID> {
+    core::iter::once(&current.kind)
+        .chain(suspended.iter().map(|f| &f.kind))
+        .filter_map(|k| k.actor())
+}
+
 /// An isolated execution scope. Holds its own stack, run, gas budget, and
 /// transient-memory cap. Created by `call`, `open`, or the outermost frame
 /// of a tx.
@@ -835,6 +848,7 @@ impl VM {
             I::Cell => self.op_cell(),
             I::Output => self.op_output(),
             I::Open => self.op_open(),
+            I::Call => self.op_call(registry),
             I::Load => self.op_load(registry),
             I::Save => self.op_save(registry),
             I::Signtx => self.op_signtx(),
@@ -2484,6 +2498,140 @@ impl VM {
             position: position.bytes_view().into_owned(),
             program: program.bytes_view().into_owned(),
         })
+    }
+
+    /// `0x95 call` — `args… k gas bytes method addr → results…`.
+    /// Internal-only synchronous call into another actor's method.
+    ///
+    /// Operand order (top first when popped):
+    /// - `addr`: 32-byte String — the callee's `ActorID::Hash`.
+    /// - `method`: `Int253` — the target method key.
+    /// - `bytes`: `Int253` — vbyte allotment to credit on entry
+    ///   (currently delivered as `newbytes`; full transfer
+    ///   semantics arrive with the wider resource model).
+    /// - `gas`: `Int253` — gas allotment for the callee frame.
+    /// - `k`: `Int253` — count of args below.
+    /// - `args…`: `k` values to push onto the callee's stack.
+    ///
+    /// Re-entrancy guard (ADR 0003): walks the current frame and
+    /// the call stack; if the callee id already appears,
+    /// `ReentrancyDetected` aborts the enclosing internal tx. The
+    /// re-entrancy check applies to both direct self-calls and
+    /// indirect cycles (A → B → A).
+    ///
+    /// Emits `TxEntry::Call { callee, method, pre_state_root,
+    /// callee_anchor }` so the Internal TxID merkle root binds to
+    /// the exact callee state observed at entry (Q5).
+    fn op_call(
+        &mut self,
+        registry: Option<&mut dyn ActorRegistry>,
+    ) -> Result<(), VMError> {
+        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
+
+        // ── pop operands ────────────────────────────────────────
+        let addr_str = self.pop_string()?;
+        if addr_str.len() != 32 {
+            return Err(VMError::MalformedAddress);
+        }
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes.copy_from_slice(&addr_str.bytes_view());
+        let callee = ActorID::Hash(addr_bytes);
+
+        let method_int = self.pop_int253()?;
+        let method = MethodKey::from(method_int);
+
+        let bytes_alloc = self
+            .pop_int253()?
+            .to_u64()
+            .ok_or(VMError::InvalidBitrange)?;
+        let gas_alloc = self
+            .pop_int253()?
+            .to_u64()
+            .ok_or(VMError::InvalidBitrange)?;
+        let k = self.pop_byte_count(usize::MAX)?;
+        let args = self.pop_n_values(k)?;
+
+        // ── re-entrancy guard ──────────────────────────────────
+        // Walk the current call + suspended frames looking for the
+        // callee id. Direct cycles (A → A) and indirect cycles
+        // (A → B → A) both surface here. Per ADR 0003: hard fail.
+        if iter_actor_ids_on_stack(&self.current_call, &self.call_stack)
+            .any(|id| id == &callee)
+        {
+            return Err(VMError::ReentrancyDetected);
+        }
+
+        // ── resolve method bytes + capture pre-state hash ──────
+        let script = registry.resolve_method(&callee, method)?;
+        let pre_state_root = {
+            // Hash the callee's state at the moment of call. The
+            // VM only needs the root; we don't carry the snapshot
+            // forward (the callee re-loads via `op_load` if it
+            // needs the state on the stack).
+            let snapshot = registry.load_state(&callee)?;
+            // No re-entrancy mark side-effect: load_state doesn't
+            // mark, only op_load does. We needed read access; the
+            // callee's own op_load (if it runs one) will set the
+            // mark separately.
+            let mut buf = Vec::new();
+            snapshot
+                .encode(&mut buf)
+                .map_err(|_| VMError::MalformedActorState)?;
+            let mut t = merlin::Transcript::new(b"flamevm.actor.state.root");
+            t.append_message(b"state", &buf);
+            let mut h = [0u8; 32];
+            t.challenge_bytes(b"root", &mut h);
+            h
+        };
+
+        // ── derive callee anchor + emit Call entry ─────────────
+        // Per Q5: ratchet the anchor chain at entry. Use the
+        // current `last_anchor` (or a zero seed if none).
+        let prev_anchor = self.last_anchor.unwrap_or(Anchor([0u8; 32]));
+        let callee_anchor = prev_anchor.ratchet();
+        self.last_anchor = Some(callee_anchor);
+        self.txlog.push(crate::tx::TxEntry::Call {
+            callee: callee.clone(),
+            method,
+            pre_state_root,
+            callee_anchor,
+        });
+
+        // ── parse callee script ────────────────────────────────
+        let program = crate::program::Program::parse(&script)?;
+
+        // ── create and switch to new CallFrame ─────────────────
+        let mem_limit = registry
+            .actor_vbytes(&callee)?
+            .saturating_mul(4);
+        let caller = self
+            .current_call
+            .kind
+            .actor()
+            .cloned()
+            .unwrap_or(ActorID::Hash([0u8; 32]));
+        let mut new_frame = CallFrame::new(
+            program.into_instructions(),
+            CallKind::ActorCall {
+                actor: callee,
+                method,
+                caller,
+            },
+            gas_alloc,
+            mem_limit,
+            bytes_alloc,
+        );
+        // Push args onto the new frame's stack in original
+        // (deepest-first) order — `pop_n_values` already returned
+        // them that way.
+        for v in args {
+            new_frame.stack.push(v);
+        }
+
+        // Suspend the current frame and switch.
+        let parent = core::mem::replace(&mut self.current_call, new_frame);
+        self.call_stack.push(parent);
+        Ok(())
     }
 
     /// `0x96 load` — `ø → dict`. Internal-only. Loads the current

@@ -82,8 +82,22 @@ pub enum TxEntry {
     /// Aggregated by `VM::total_fee` (a `CheckedFee`) into the
     /// eventual `TxResult.total_fee`.
     Fee(u64),
+
+    /// Synchronous actor-to-actor call recorded by `op_call`. Binds
+    /// the callee's identity and its pre-call state hash into the
+    /// internal TxID merkle root — per Q5, this makes the
+    /// resulting Internal TxID unique to the exact actor states
+    /// observed during execution. The callee anchor is recorded
+    /// alongside to give external observers a deterministic
+    /// reference into the call chain.
+    Call {
+        callee: crate::actor::ActorID,
+        method: crate::actor::MethodKey,
+        pre_state_root: [u8; 32],
+        callee_anchor: crate::vm::Anchor,
+    },
     // Future variants (preserved here as comments for the historical record):
-    // Send(Message), etc.
+    // Send(Message), Receive(SendID), etc.
 }
 
 impl TxID {
@@ -124,6 +138,11 @@ impl core::fmt::Debug for TxEntry {
             TxEntry::Fee(q) => {
                 f.debug_tuple("TxEntry::Fee").field(q).finish()
             }
+            TxEntry::Call { callee, method, .. } => f
+                .debug_struct("TxEntry::Call")
+                .field("callee", callee)
+                .field("method", method)
+                .finish(),
         }
     }
 }
@@ -163,6 +182,24 @@ impl MerkleItem for TxEntry {
                 // little-endian everywhere". Domain tag distinguishes
                 // this from any other 8-byte append.
                 t.append_message(b"fee.qty", &qty.to_le_bytes());
+            }
+            TxEntry::Call {
+                callee,
+                method,
+                pre_state_root,
+                callee_anchor,
+            } => {
+                // Bind every cross-actor call into the Internal TxID
+                // merkle root: callee identity (canonical bytes),
+                // method key (canonical sign-magnitude), the callee's
+                // state hash at the moment of entry, and the callee
+                // anchor seed. Per Q5 this is what makes the resulting
+                // Internal TxID unique to the exact actor states
+                // observed during execution.
+                t.append_message(b"call.callee", &callee.to_bytes());
+                t.append_message(b"call.method", &method.as_int().to_bytes());
+                t.append_message(b"call.pre_state_root", pre_state_root);
+                t.append_message(b"call.callee_anchor", &callee_anchor.0);
             }
         }
     }
