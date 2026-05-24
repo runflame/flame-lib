@@ -9648,17 +9648,18 @@ let proof = proof.expect("proof set");
     ///
     /// Uses `PredicateTree::scripts_only` (NUMS-unspendable
     /// internal key) so the cell is openable only by the empty
-    /// script leaf — never key-path. We don't need a key-spend
-    /// path here: the test scripts open every cell via callproof
-    /// + empty unlocked program. This is cleaner than the prior
-    /// "real internal key generated but never used for signing"
-    /// arrangement.
+    /// script leaf — never key-path. We derive the tree's blinding
+    /// key from `inp.anchor`, so every input cell carries a
+    /// *distinct* predicate point. Without per-cell variation the
+    /// harness would only exercise the "all inputs locked under
+    /// the same predicate" shape, which doesn't match real
+    /// transactions where each input comes from its own keypair.
     fn build_input_cell(inp: &NMInputSpec) -> (Cell, CallProof) {
         let (q_open, f_open) = open_commitments(inp);
         let token = crate::Token::new(q_open, f_open);
         let tree = PredicateTree::scripts_only(
             vec![Vec::new()],
-            TEST_BLINDING_KEY,
+            input_blinding_for(inp),
         )
         .expect("scripts_only tree builds");
         let cp = tree.callproof_for(0).expect("callproof for leaf 0");
@@ -9669,6 +9670,21 @@ let proof = proof.expect("proof set");
             vec![Value::Token(token)],
         );
         (cell, cp)
+    }
+
+    /// Derive a per-input PredicateTree blinding key from
+    /// `inp.anchor`. Just XOR-ing the anchor into
+    /// `TEST_BLINDING_KEY` gives every distinct input spec its own
+    /// tree without exposing a new field on `NMInputSpec`. The
+    /// blinding key is consensus-irrelevant to the test (it only
+    /// affects predicate-point determinism); we just need *some*
+    /// per-cell variation.
+    fn input_blinding_for(inp: &NMInputSpec) -> [u8; 32] {
+        let mut k = TEST_BLINDING_KEY;
+        for i in 0..32 {
+            k[i] ^= inp.anchor[i];
+        }
+        k
     }
 
     /// Strong txlog assertion: every `TxEntry::Input` matches the
