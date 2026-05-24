@@ -144,6 +144,10 @@ const OP_LOAD: u8 = 0x96;
 const OP_SAVE: u8 = 0x97;
 const OP_SIGNTX: u8 = 0x98;
 const OP_SIGNRUN: u8 = 0x99;
+const OP_ACTORID: u8 = 0x9c;
+const OP_ANCHOR: u8 = 0x9d;
+const OP_CALLERID: u8 = 0xa0;
+const OP_METHOD: u8 = 0xa1;
 
 // ── Instruction enum ─────────────────────────────────────────────────
 
@@ -369,6 +373,18 @@ pub enum Instruction {
     Signtx,
     /// `signrun` (0x99).
     Signrun,
+    /// `actorid` (0x9c) — pushes the current frame's actor id as
+    /// a 32-byte String. Internal-only.
+    Actorid,
+    /// `anchor` (0x9d) — pushes the current frame's anchor as a
+    /// 32-byte String.
+    Anchor,
+    /// `callerid` (0xa0) — pushes the caller's actor id, or
+    /// all-zero String if the originator is external. Internal-only.
+    Callerid,
+    /// `method` (0xa1) — pushes the current frame's method key as
+    /// `Int253`. Internal-only.
+    Method,
 
     /// Unknown opcode byte — used by the parser for any byte not yet
     /// in the spec. Mirrors zkvm's extension-opcode handling.
@@ -485,6 +501,10 @@ impl Instruction {
             Instruction::Save => out.push(OP_SAVE),
             Instruction::Signtx => out.push(OP_SIGNTX),
             Instruction::Signrun => out.push(OP_SIGNRUN),
+            Instruction::Actorid => out.push(OP_ACTORID),
+            Instruction::Anchor => out.push(OP_ANCHOR),
+            Instruction::Callerid => out.push(OP_CALLERID),
+            Instruction::Method => out.push(OP_METHOD),
             Instruction::Ext(b) => out.push(*b),
         }
     }
@@ -615,6 +635,10 @@ impl Instruction {
             OP_SAVE => Ok(Instruction::Save),
             OP_SIGNTX => Ok(Instruction::Signtx),
             OP_SIGNRUN => Ok(Instruction::Signrun),
+            OP_ACTORID => Ok(Instruction::Actorid),
+            OP_ANCHOR => Ok(Instruction::Anchor),
+            OP_CALLERID => Ok(Instruction::Callerid),
+            OP_METHOD => Ok(Instruction::Method),
             _ => Ok(Instruction::Ext(byte)),
         }
     }

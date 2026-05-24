@@ -297,10 +297,16 @@ pub enum CallKind {
     },
 
     /// Synchronous actor-to-actor `call` inside an internal tx.
+    ///
+    /// `anchor` is the ratcheted anchor emitted by `op_call` at
+    /// entry; the same value lands in the matching
+    /// `TxEntry::Call.callee_anchor`. Surfaces via `op_anchor`
+    /// from inside the callee.
     ActorCall {
         actor: ActorID,
         method: MethodKey,
         caller: ActorID,
+        anchor: Anchor,
     },
 
     /// `open` of a cell predicate (either context).
@@ -317,6 +323,40 @@ impl CallKind {
         match self {
             Self::InternalRoot { actor, .. } | Self::ActorCall { actor, .. } => Some(actor),
             Self::ExternalRoot | Self::CellOpen { .. } => None,
+        }
+    }
+
+    /// Returns the dispatched method key, if the frame has one.
+    /// `op_method` reads this; pure read.
+    pub fn method(&self) -> Option<MethodKey> {
+        match self {
+            Self::InternalRoot { method, .. } | Self::ActorCall { method, .. } => Some(*method),
+            Self::ExternalRoot | Self::CellOpen { .. } => None,
+        }
+    }
+
+    /// Returns the caller's actor id, if any. `op_callerid` reads
+    /// this — for `InternalRoot` with a `None` caller (the
+    /// originating tx came from an external sender) we surface
+    /// `Some(&zero_id)` via the dedicated method [`Self::caller_or_zero`]
+    /// so the opcode can push all-zeros instead of erroring.
+    pub fn caller(&self) -> Option<&ActorID> {
+        match self {
+            Self::InternalRoot { caller, .. } => caller.as_ref(),
+            Self::ActorCall { caller, .. } => Some(caller),
+            Self::ExternalRoot | Self::CellOpen { .. } => None,
+        }
+    }
+
+    /// Returns the frame's anchor (cell-open anchor or call-entry
+    /// anchor). `op_anchor` reads this. `ExternalRoot` and
+    /// `ActorCall`-by-error have no anchor concept.
+    pub fn anchor(&self) -> Option<Anchor> {
+        match self {
+            Self::InternalRoot { anchor, .. }
+            | Self::ActorCall { anchor, .. }
+            | Self::CellOpen { anchor, .. } => Some(*anchor),
+            Self::ExternalRoot => None,
         }
     }
 }
@@ -853,6 +893,11 @@ impl VM {
             I::Save => self.op_save(registry),
             I::Signtx => self.op_signtx(),
             I::Signrun => self.op_signrun(),
+            // ── Identity / call-context readouts ──────────────────
+            I::Actorid => self.op_actorid(),
+            I::Anchor => self.op_anchor(),
+            I::Callerid => self.op_callerid(),
+            I::Method => self.op_method(),
             // ── Extension / unknown ───────────────────────────────
             I::Ext(b) => Err(VMError::UnknownOpcode(b)),
         }?;
@@ -2616,6 +2661,7 @@ impl VM {
                 actor: callee,
                 method,
                 caller,
+                anchor: callee_anchor,
             },
             gas_alloc,
             mem_limit,
@@ -2770,6 +2816,70 @@ impl VM {
         // verbatim; `Opaque(bytes)` parses them.
         let instrs = prog_str.to_instructions()?;
         self.enter_run(instrs)
+    }
+
+    // ── Identity / call-context readouts ────────────────────────
+    //
+    // Four opcodes that just read fields out of `current_call.kind`
+    // and push the result onto the stack. All four hard-fail
+    // `OpcodeRequiresActorContext` outside an actor-bearing frame
+    // (ExternalRoot, CellOpen).
+
+    /// `0x9c actorid` — pushes the current frame's actor id as a
+    /// 32-byte String. Errors `OpcodeRequiresActorContext` from
+    /// `ExternalRoot` / `CellOpen`.
+    fn op_actorid(&mut self) -> Result<(), VMError> {
+        let actor = self.require_actor()?.clone();
+        self.push_value(Value::String(String::from(actor.to_hash().to_vec())));
+        Ok(())
+    }
+
+    /// `0x9d anchor` — pushes the current frame's anchor as a
+    /// 32-byte String. Available in `InternalRoot`, `ActorCall`,
+    /// and `CellOpen`; errors `OpcodeRequiresActorContext` from
+    /// `ExternalRoot` (no anchor concept at root).
+    fn op_anchor(&mut self) -> Result<(), VMError> {
+        let a = self
+            .current_call
+            .kind
+            .anchor()
+            .ok_or(VMError::OpcodeRequiresActorContext)?;
+        self.push_value(Value::String(String::from(a.0.to_vec())));
+        Ok(())
+    }
+
+    /// `0xa0 callerid` — pushes the caller actor id as a 32-byte
+    /// String. For `InternalRoot` triggered by an external send,
+    /// the caller is `None` and we push the all-zero String per
+    /// spec.md. For `ActorCall` the caller is always present.
+    /// Errors `OpcodeRequiresActorContext` from `ExternalRoot` /
+    /// `CellOpen`.
+    fn op_callerid(&mut self) -> Result<(), VMError> {
+        // Require an actor-bearing frame first, so `ExternalRoot`
+        // still errors loudly even though `caller()` returns None.
+        self.require_actor()?;
+        let zero = [0u8; 32];
+        let id_bytes = self
+            .current_call
+            .kind
+            .caller()
+            .map(|c| c.to_hash())
+            .unwrap_or(zero);
+        self.push_value(Value::String(String::from(id_bytes.to_vec())));
+        Ok(())
+    }
+
+    /// `0xa1 method` — pushes the current frame's method key as an
+    /// `Int253`. Errors `OpcodeRequiresActorContext` from
+    /// `ExternalRoot` / `CellOpen`.
+    fn op_method(&mut self) -> Result<(), VMError> {
+        let m = self
+            .current_call
+            .kind
+            .method()
+            .ok_or(VMError::OpcodeRequiresActorContext)?;
+        self.push_value(Value::Int253(*m.as_int()));
+        Ok(())
     }
 
     // ── CS opcode handlers + Expression overloads ──────
