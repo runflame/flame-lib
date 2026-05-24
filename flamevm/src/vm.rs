@@ -32,7 +32,7 @@ use crate::tx::TxHeader;
 use crate::cell::{CallProof, Cell, Predicate};
 use crate::constraints::Commitment;
 use crate::token::flavor_from_actor;
-use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Token, Value};
+use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
 
 // ── Identifiers and metadata ──────────────────────────────────────
 
@@ -2596,7 +2596,7 @@ mod tests {
         // callee's stack must use `return` to ship those values explicitly.
         // Reaching end-of-script with a non-empty stack is a script bug.
         use crate::Int253;
-        let mut reg = StubRegistry { script: vec![] };
+        let reg = StubRegistry { script: vec![] };
         let block = BlockContext { height: 0 };
         // Re-create what `execute_internal` would, but pre-load the stack.
         let kind = CallKind::InternalRoot {
@@ -3549,8 +3549,7 @@ mod tests {
     #[test]
     fn mod252_64_bytes_reduces() {
         // 64 bytes of 0xff — should equal 2^512 - 1 reduced mod ℓ.
-        let mut script = vec![0x19, 0x01, 0x05]; // sub-varint tag=1, payload 5 → length 256+5=261 — wrong
-        // Use length 64. sub-varint tag 0, byte 64
+        // sub-varint tag 0, byte 64, then 64 × 0xff, then mod252.
         let script = {
             let mut s = vec![0x19, 0x00, 64];
             s.extend_from_slice(&[0xffu8; 64]);
@@ -5529,8 +5528,7 @@ mod tests {
 
     #[test]
     fn signrun_rejects_wrong_signature_length() {
-        let mut script = vec![0x01]; // payload count = 0 cell? No, cells need ≥0 — let me just put one item.
-        // payload, count, predicate, cell
+        // payload(5), count(1), predicate, cell, then signrun-with-bad-sig.
         let mut script = vec![0x05, 0x01];
         push_point_bytes(&mut script, &[0xaa; 32]);
         script.push(0x91); // cell
@@ -5549,7 +5547,7 @@ mod tests {
     // ── Phase 8: tokens (port from zkvm) ─────────────────────────
 
     use crate::token::flavor_from_actor as test_flavor_from_actor;
-    use crate::{Commitment, Token, WideToken};
+    use crate::{Commitment, Token};
 
     /// Convenience: builds a Token via the cleartext constructor for tests.
     fn make_cleartext_token(qty: u64, flv: u64) -> Token {
@@ -6633,7 +6631,6 @@ mod tests {
 
     // ── Phase 11: Prover/Verifier end-to-end ─────────────────────
 
-    use crate::ops::Instruction;
     use crate::program::Program;
     use crate::{Prover, Verifier};
     use bulletproofs::PedersenGens;

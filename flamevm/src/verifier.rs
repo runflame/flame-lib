@@ -102,7 +102,8 @@ impl Delegate for Verifier {
         // bound to that point. The prover's matching call uses
         // (value, blinding) which produces the same point by Pedersen
         // construction, so both sides commit to the same value.
-        use bulletproofs::r1cs::ConstraintSystem;
+        // `r1cs::Verifier::commit` is an inherent method — no
+        // `ConstraintSystem` trait import needed.
         let point = commitment.to_point();
         let var = self.cs.commit(point);
         Ok((point, var))

@@ -116,8 +116,8 @@ impl<'g> Delegate for Prover<'g> {
         // open commitment and call `cs.commit(value, blinding)`. The
         // resulting point matches `commitment.to_point()` by Pedersen
         // construction (which is what the verifier independently
-        // commits to its CS).
-        use bulletproofs::r1cs::ConstraintSystem;
+        // commits to its CS). `r1cs::Prover::commit` is an inherent
+        // method — no `ConstraintSystem` trait import needed.
         let (value, blinding) =
             commitment.witness().ok_or(VMError::WitnessMissing)?;
         let scalar: curve25519_dalek::scalar::Scalar = value.into();

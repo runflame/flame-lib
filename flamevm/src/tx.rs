@@ -1,6 +1,8 @@
 use bulletproofs::r1cs::R1CSProof;
 use curve25519_dalek::ristretto::CompressedRistretto;
-use merkle::{Hash, MerkleItem, MerkleTree};
+// `MerkleItem` / `MerkleTree` join when Phase 17 wires
+// `TxID::from_log(txlog)` via the merkle tree.
+use merkle::Hash;
 use musig::Signature;
 use serde::{Deserialize, Serialize};
 
