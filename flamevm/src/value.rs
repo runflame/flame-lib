@@ -105,7 +105,13 @@ impl Value {
     pub fn try_eq(&self, other: &Value) -> Result<bool, VMError> {
         match (self, other) {
             (Value::Int253(a), Value::Int253(b)) => Ok(a == b),
-            (Value::String(a), Value::String(b)) => Ok(a.as_bytes() == b.as_bytes()),
+            // Use `bytes_view` (Cow) so witness-bearing variants
+            // (Commitment / Scalar / Predicate / Script) are
+            // compared by their canonical wire form, the same way
+            // the verifier would see them.
+            (Value::String(a), Value::String(b)) => {
+                Ok(a.bytes_view().as_ref() == b.bytes_view().as_ref())
+            }
             (Value::Point(a), Value::Point(b)) => Ok(a.as_bytes() == b.as_bytes()),
             // Cross-variant always unequal.
             (sa, sb) if core::mem::discriminant(sa) != core::mem::discriminant(sb) => Ok(false),

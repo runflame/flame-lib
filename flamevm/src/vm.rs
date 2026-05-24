@@ -1767,10 +1767,17 @@ impl VM {
     }
 
     /// `0x7b` `run` — pops a `String`, suspends the current Run onto
-    /// the run-stack, and switches to a fresh Run over the string's bytes.
+    /// the run-stack, and switches to a fresh Run over the string's
+    /// instructions. For `String::Script(instrs)` the witness slots
+    /// (`Alloc(Some(_))`, nested `Input(Some(_))`, …) survive into
+    /// the new Run; for `String::Opaque(bytes)` the verifier-side
+    /// path parses the bytes and the witness slots default to
+    /// `None`. Both sides hash to the same bytecode for the proof
+    /// transcript.
     fn op_run(&mut self) -> Result<(), VMError> {
         let s = self.pop_string()?;
-        self.enter_run(s.as_bytes().to_vec())
+        let instrs = s.to_instructions()?;
+        self.enter_run(instrs)
     }
 
     /// `0x7c` `loop` — resets the current Run's cursor to the start.
@@ -1783,13 +1790,15 @@ impl VM {
 
     /// `0x7d` `switch` — pops three values `x a b` (top is `b`), chooses
     /// `a` if `x` is non-zero and `b` if `x` is zero, then enters the
-    /// chosen program as a new Run (same semantics as `run`).
+    /// chosen script as a new Run (same semantics as `run`,
+    /// including the witness-preserving path for `String::Script`).
     fn op_switch(&mut self) -> Result<(), VMError> {
         let b = self.pop_string()?;
         let a = self.pop_string()?;
         let x = self.pop_int253()?;
         let chosen = if x.is_zero() { b } else { a };
-        self.enter_run(chosen.as_bytes().to_vec())
+        let instrs = chosen.to_instructions()?;
+        self.enter_run(instrs)
     }
 
     /// `0x7e` `return k` — atomic cross-frame return:
@@ -1884,16 +1893,16 @@ impl VM {
         }
     }
 
-    /// Pushes the current Run onto the run-stack and replaces it with a
-    /// fresh Run over `script` (raw bytecode pulled off the stack
-    /// or from a CallProof leaf). The bytes are parsed into
-    /// `Vec<Instruction>` here — inner programs cannot carry
-    /// witnesses (Strings on the stack only hold bytes), so the
-    /// prover and verifier produce identical inner Runs.
-    fn enter_run(&mut self, script: Vec<u8>) -> Result<(), VMError> {
-        let instrs = crate::program::Program::parse(&script)?
-            .into_instructions();
-        let new_run = Run::new(instrs);
+    /// Pushes the current Run onto the run-stack and replaces it
+    /// with a fresh Run over the supplied instructions. Callers
+    /// that have raw bytecode (`op_open`'s CallProof leaf,
+    /// `op_signrun`'s wire-message script) parse via
+    /// `Program::parse` first and pass `Vec<Instruction>` here;
+    /// callers with a stack `String` go through
+    /// [`String::to_instructions`], which preserves witnesses for
+    /// `String::Script` and parses bytes for `String::Opaque`.
+    fn enter_run(&mut self, instructions: Vec<crate::ops::Instruction>) -> Result<(), VMError> {
+        let new_run = Run::new(instructions);
         let old_run = mem::replace(&mut self.current_call.current_run, new_run);
         self.current_call.run_stack.push(old_run);
         Ok(())
@@ -2386,7 +2395,13 @@ impl VM {
             &position_str,
             &program_str,
         )?;
-        let program = cell.predicate.verify_callproof(&cp)?.to_vec();
+        let program_bytes = cell.predicate.verify_callproof(&cp)?.to_vec();
+        // The unlocked script comes from the cell's predicate tree
+        // (stored bytecode), not the stack — no witness slots
+        // could be carried even on the prover side. Parse to
+        // Instructions here.
+        let instrs = crate::program::Program::parse(&program_bytes)?
+            .into_instructions();
 
         for v in cell.payload {
             self.push_value(v);
@@ -2394,7 +2409,7 @@ impl VM {
         for v in args {
             self.push_value(v);
         }
-        self.enter_run(program)
+        self.enter_run(instrs)
     }
 
     /// Builds a `CallProof` from the four stack-popped pieces.
@@ -2477,8 +2492,13 @@ impl VM {
         }
         let mut sig = [0u8; 64];
         sig.copy_from_slice(sig_bytes);
-        let program = prog_str.as_bytes().to_vec();
-        let msg = Self::signrun_message(&program);
+        // The deferred-sig message commits to the script's CANONICAL
+        // wire bytes — same on both sides regardless of whether
+        // the prover pushed `String::Script(instrs)` or raw bytes.
+        // Materialise via `bytes_view` so both `Script` and
+        // `Opaque` produce identical message bytes.
+        let program_bytes = prog_str.bytes_view().into_owned();
+        let msg = Self::signrun_message(&program_bytes);
         self.deferred_sigs.push(DeferredSig::Explicit {
             verification_key: cell.predicate.verification_key(),
             message: msg,
@@ -2490,7 +2510,10 @@ impl VM {
         for v in args {
             self.push_value(v);
         }
-        self.enter_run(program)
+        // Witness-preserving path: `Script(instrs)` returns instrs
+        // verbatim; `Opaque(bytes)` parses them.
+        let instrs = prog_str.to_instructions()?;
+        self.enter_run(instrs)
     }
 
     // ── CS opcode handlers + Expression overloads ──────

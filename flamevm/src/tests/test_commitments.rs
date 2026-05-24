@@ -48,6 +48,73 @@ fn string_scalar_downcast() {
 }
 
 #[test]
+fn string_script_encodes_to_compiled_bytecode() {
+    // String::Script(instrs) serializes to the canonical bytecode
+    // of those instructions — the wire form a verifier reading
+    // pushstr would see. So an Opaque(bytes) string wrapping that
+    // bytecode and the Script(instrs) string have identical
+    // `to_bytes` / `bytes_view` / `len`.
+    let inner = Program::new()
+        .push_int(7u64)
+        .push_int(3u64)
+        .add();
+    let bytecode = inner.to_bytecode();
+    let script_str = String::script(inner.into_instructions());
+    assert_eq!(script_str.to_bytes_vec(), bytecode);
+    assert_eq!(script_str.len(), bytecode.len());
+}
+
+#[test]
+fn string_script_downcasts_to_instructions() {
+    // `to_instructions` returns the witness-bearing Vec verbatim.
+    let inner = Program::new()
+        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Int253::from(3u64)))
+        .add();
+    let original = inner.instructions().to_vec();
+    let s = String::script(original.clone());
+    let recovered = s.to_instructions().expect("downcast");
+    // Witnesses on `Alloc` survive — checking the first instruction.
+    match &recovered[0] {
+        crate::Instruction::Alloc(Some(w)) => {
+            assert_eq!(*w, Int253::from(7u64));
+        }
+        other => panic!("expected Alloc(Some(7)), got {:?}", other),
+    }
+    // And the whole stream is byte-equivalent to what we put in
+    // (same compiled bytecode).
+    let bytecode_in: Vec<u8> = {
+        let mut p = Program::new();
+        for i in &original { p.push_instr(i.clone()); }
+        p.to_bytecode()
+    };
+    let bytecode_out: Vec<u8> = {
+        let mut p = Program::new();
+        for i in &recovered { p.push_instr(i.clone()); }
+        p.to_bytecode()
+    };
+    assert_eq!(bytecode_in, bytecode_out);
+}
+
+#[test]
+fn string_opaque_downcast_to_instructions_parses_bytes() {
+    // The verifier-side path: `Opaque(bytes)` → parse via
+    // `Program::parse`. Witness slots end up `None`.
+    let inner = Program::new()
+        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Int253::from(3u64)))
+        .add();
+    let bytes = inner.to_bytecode();
+    let opaque = String::from(bytes);
+    let recovered = opaque.to_instructions().expect("parse ok");
+    // Same shape, but Alloc's witness is gone.
+    assert!(matches!(
+        recovered[0],
+        crate::Instruction::Alloc(None),
+    ));
+}
+
+#[test]
 fn op_scalar_pushes_constant_expression() {
     // Pre-load a 32-byte String on the stack, dispatch `scalar`,
     // confirm the result is Expression::Constant.

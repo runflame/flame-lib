@@ -74,6 +74,104 @@ fn run_requires_string() {
     ));
 }
 
+/// Prover-side: a sub-script pushed via `push_script` (i.e. as
+/// `String::Script(instrs)`) carries witnesses through `run`. The
+/// inner `alloc(Some(_))` slots survive the dispatch, so a CS
+/// equality involving them satisfies the constraint system at
+/// prove time. End-to-end via Prover::prove → Verifier::verify.
+///
+/// Regression guard for the witness-erasing path that existed
+/// before `String::Script` was introduced (then, every sub-script
+/// went through `String::Opaque(bytes)` and lost witnesses).
+#[test]
+fn run_preserves_alloc_witnesses_via_script_string() {
+    let pc_gens = bulletproofs::PedersenGens::default();
+    // Inner: alloc(7), alloc(3), add, alloc(10), eq, verify.
+    let inner = Program::new()
+        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Int253::from(3u64)))
+        .add()
+        .alloc(Some(Int253::from(10u64)))
+        .eq()
+        .verify();
+    // Outer: push the inner as a Script-string, then run it.
+    let outer = Program::new().push_script(inner).run();
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+        .expect("prove with witness-bearing sub-script");
+    let TxResult { bytecode, proof, .. } = result;
+    let proof = proof.expect("proof set");
+    let pc_gens_v = bulletproofs::PedersenGens::default();
+    Verifier::verify(
+        &pc_gens_v,
+        bytecode,
+        &proof,
+        dummy_header(),
+        1_000_000,
+        0,
+        None,
+    )
+    .expect("verify ok");
+}
+
+/// Negative counterpart: pushing the inner script as
+/// `String::Opaque(bytes)` (not `Script`) erases witnesses, so
+/// the prover's CS variables come up unassigned and the proof
+/// step fails with `WitnessMissing`. Demonstrates that
+/// `push_script` is what carries the witness through; the bytes
+/// path is only useful for verifier-side input.
+#[test]
+fn run_with_opaque_sub_script_erases_alloc_witnesses() {
+    let pc_gens = bulletproofs::PedersenGens::default();
+    let inner = Program::new()
+        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Int253::from(3u64)))
+        .add()
+        .alloc(Some(Int253::from(10u64)))
+        .eq()
+        .verify();
+    let inner_bytes = inner.to_bytecode();
+    let outer = Program::new()
+        .push_str(String::from(inner_bytes)) // Opaque, no witnesses
+        .run();
+    let err = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+        .unwrap_err();
+    assert!(matches!(err, VMError::R1CSError(_)));
+}
+
+/// Same shape with `op_switch` — confirm the chosen branch's
+/// witnesses survive too. Picks `a` (x=1), which holds the
+/// witness-bearing equality script; `b` is a no-op script.
+#[test]
+fn switch_preserves_alloc_witnesses_via_script_string() {
+    let pc_gens = bulletproofs::PedersenGens::default();
+    let a = Program::new()
+        .alloc(Some(Int253::from(4u64)))
+        .alloc(Some(Int253::from(4u64)))
+        .eq()
+        .verify();
+    let b = Program::new(); // never taken
+    let outer = Program::new()
+        .push_int(1u64) // x = 1 → pick a
+        .push_script(a)
+        .push_script(b)
+        .switch();
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+        .expect("prove with witness-bearing switch branch");
+    let TxResult { bytecode, proof, .. } = result;
+    let proof = proof.expect("proof set");
+    let pc_gens_v = bulletproofs::PedersenGens::default();
+    Verifier::verify(
+        &pc_gens_v,
+        bytecode,
+        &proof,
+        dummy_header(),
+        1_000_000,
+        0,
+        None,
+    )
+    .expect("verify ok");
+}
+
 // ── loop (0x7c) ──────────────────────────────────────────────
 
 #[test]

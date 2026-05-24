@@ -11,12 +11,16 @@
 //!   to its 32-byte sign-magnitude representation.
 //! - `Predicate(Box<Predicate>)` — prover's view of an unlock
 //!   predicate. Encodes to its 32-byte opaque point.
+//! - `Script(Vec<Instruction>)` — prover's view of a sub-script.
+//!   Carries the decoded instruction stream with witness slots
+//!   intact (`Alloc(Some(_))`, nested `Input(Some(_))`, etc.).
+//!   Encodes to the compiled bytecode of those instructions.
 //!
 //! All variants encode to the same opaque bytes on the wire — the
 //! verifier always sees `Opaque(bytes)`. Downcasts (`to_commitment`,
-//! `to_scalar`, `to_predicate`) work on both forms: for witness-bearing
-//! variants they extract the typed payload; for `Opaque` they parse it
-//! from the bytes.
+//! `to_scalar`, `to_predicate`, `to_instructions`) work on both forms:
+//! for witness-bearing variants they extract the typed payload; for
+//! `Opaque` they parse it from the bytes.
 //!
 //! ## Sharp edge: `as_bytes(&self)` and bit operations require `Opaque`
 //!
@@ -37,6 +41,7 @@ use std::borrow::Cow;
 use crate::constraints::Commitment;
 use crate::errors::VMError;
 use crate::int253::Int253;
+use crate::ops::Instruction;
 
 /// Variable-length binary string with optional witness-bearing
 /// variants. See module docs for the design.
@@ -50,6 +55,12 @@ pub enum String {
     Scalar(Box<Int253>),
     /// Predicate witness; encodes to 32-byte point.
     Predicate(Box<crate::cell::Predicate>),
+    /// Prover-side sub-script: a decoded instruction stream with
+    /// witness slots intact. Encodes to the compiled bytecode.
+    /// Consumed by `op_run`, `op_switch`, `op_signrun` via
+    /// [`String::to_instructions`] — verifier sees `Opaque(bytes)`
+    /// and parses, prover keeps witnesses inline.
+    Script(Vec<Instruction>),
 }
 
 impl String {
@@ -68,6 +79,14 @@ impl String {
     /// Constructs a witness-bearing Predicate-String.
     pub fn predicate(p: crate::cell::Predicate) -> String {
         String::Predicate(Box::new(p))
+    }
+
+    /// Constructs a witness-bearing Script-String. Used by the
+    /// prover when pushing a sub-script that contains witnesses
+    /// (e.g. inner `alloc(Some(_))` / `input(Some(_))` calls) and
+    /// will later be consumed by `run` / `switch` / `signrun`.
+    pub fn script(instructions: Vec<Instruction>) -> String {
+        String::Script(instructions)
     }
 
     // ── Byte views ──────────────────────────────────────────────
@@ -95,6 +114,7 @@ impl String {
             }
             String::Scalar(s) => Cow::Owned(s.to_bytes().to_vec()),
             String::Predicate(p) => Cow::Owned(p.to_point().as_bytes().to_vec()),
+            String::Script(instrs) => Cow::Owned(compile_instructions(instrs)),
         }
     }
 
@@ -107,6 +127,7 @@ impl String {
             String::Commitment(c) => c.to_point().as_bytes().to_vec(),
             String::Scalar(s) => s.to_bytes().to_vec(),
             String::Predicate(p) => p.to_point().as_bytes().to_vec(),
+            String::Script(instrs) => compile_instructions(&instrs),
         }
     }
 
@@ -118,11 +139,12 @@ impl String {
 
     /// Length in canonical wire bytes. For witness-bearing variants
     /// this is the encoded-form length (32 bytes for Commitment,
-    /// Scalar, Predicate).
+    /// Scalar, Predicate; compiled bytecode length for Script).
     pub fn len(&self) -> usize {
         match self {
             String::Opaque(d) => d.len(),
             String::Commitment(_) | String::Scalar(_) | String::Predicate(_) => 32,
+            String::Script(instrs) => compile_instructions(instrs).len(),
         }
     }
 
@@ -130,6 +152,7 @@ impl String {
     pub fn is_empty(&self) -> bool {
         match self {
             String::Opaque(d) => d.is_empty(),
+            String::Script(instrs) => instrs.is_empty(),
             _ => false,
         }
     }
@@ -182,6 +205,27 @@ impl String {
                 Int253::from_bytes(bytes).ok_or(VMError::InvalidInt253Encoding)
             }
             _ => Err(VMError::InvalidInt253Encoding),
+        }
+    }
+
+    /// Downcasts to a `Vec<Instruction>` — the runtime form the VM
+    /// walks. For `Script(instrs)`, returns the witness-bearing
+    /// instructions directly (prover side); for `Opaque(bytes)`,
+    /// parses the bytes via `Program::parse` (verifier side, or
+    /// for scripts that came from the wire); errors for other
+    /// variants since they're 32-byte points/scalars, not
+    /// executable bytecode.
+    ///
+    /// Used by `op_run`, `op_switch`, `op_signrun` to enter a
+    /// sub-script — letting the prover keep witnesses inline
+    /// across nested programs.
+    pub fn to_instructions(self) -> Result<Vec<Instruction>, VMError> {
+        match self {
+            String::Script(instrs) => Ok(instrs),
+            String::Opaque(data) => Ok(
+                crate::program::Program::parse(&data)?.into_instructions(),
+            ),
+            _ => Err(VMError::TypeNotString),
         }
     }
 
@@ -341,6 +385,18 @@ impl From<Vec<u8>> for String {
     fn from(v: Vec<u8>) -> Self {
         String::Opaque(v)
     }
+}
+
+// ── Internal: compile a Script-string's instruction stream to its
+// canonical bytecode (the same bytes the verifier would see). Used
+// by `bytes_view`, `to_bytes`, `len` for `String::Script`. ───────
+
+fn compile_instructions(instrs: &[Instruction]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for instr in instrs {
+        instr.encode(&mut out);
+    }
+    out
 }
 
 // ── Internal bit helpers (MSB-first numbering) ───────────────────
