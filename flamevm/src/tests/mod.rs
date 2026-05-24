@@ -29,4 +29,5 @@ mod test_txlog;
 mod test_actor_state;
 mod test_actor_call;
 mod test_actor_introspection;
+mod test_actor_send;
 mod test_witness;

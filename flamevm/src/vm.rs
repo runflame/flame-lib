@@ -492,10 +492,10 @@ pub struct TxResult {
     /// after the fact for the same audit shape).
     pub deferred_sigs: Vec<DeferredSig>,
 
-    /// Outbound message sends recorded by `op_send`. Empty placeholder
-    /// until the opcode and the matching `TxEntry::Send` variant are
-    /// wired in.
-    pub sends: Vec<()>,
+    /// Outbound message sends recorded by `op_send`. Drained by
+    /// the consensus layer after external-tx commit to instantiate
+    /// each one as an internal transaction.
+    pub sends: Vec<Message>,
 }
 
 /// Manual `Debug` — same reason as `TxEntry`'s manual impl: the
@@ -541,6 +541,11 @@ pub struct VM {
     /// Signature checks deferred to `Delegate::finalize`. Always empty in
     /// internal mode.
     deferred_sigs: Vec<DeferredSig>,
+
+    /// Outbound messages queued by `op_send`. Drained into
+    /// `TxResult.sends` for the consensus layer to dispatch as
+    /// internal transactions after this tx commits.
+    sends: Vec<Message>,
 }
 
 impl VM {
@@ -672,6 +677,7 @@ impl VM {
             txlog,
             total_fee: crate::fees::CheckedFee::zero(),
             deferred_sigs: Vec::new(),
+            sends: Vec::new(),
         }
     }
 
@@ -692,6 +698,7 @@ impl VM {
     ) -> TxResult {
         let txlog = mem::take(&mut self.txlog);
         let deferred_sigs = mem::take(&mut self.deferred_sigs);
+        let sends = mem::take(&mut self.sends);
         let txid = crate::tx::TxID::from_log(&txlog);
         TxResult {
             txid,
@@ -702,7 +709,7 @@ impl VM {
             bytecode,
             proof,
             deferred_sigs,
-            sends: Vec::new(),
+            sends,
         }
     }
 
@@ -888,6 +895,7 @@ impl VM {
             I::Cell => self.op_cell(),
             I::Output => self.op_output(),
             I::Open => self.op_open(),
+            I::Send => self.op_send(),
             I::Call => self.op_call(registry),
             I::Load => self.op_load(registry),
             I::Save => self.op_save(registry),
@@ -2543,6 +2551,129 @@ impl VM {
             position: position.bytes_view().into_owned(),
             program: program.bytes_view().into_owned(),
         })
+    }
+
+    /// `0x94 send` — `args… k refund gas bytes method addr → ø`.
+    /// Asynchronous message-send: queues a [`Message`] for the
+    /// consensus layer to instantiate as an internal tx after this
+    /// tx commits, and emits a [`crate::tx::TxEntry::Send`] entry.
+    ///
+    /// Operand layout (top first at pop):
+    /// - `addr`: 32-byte String — target actor id (Hash variant).
+    ///   The Constructor-form id is reserved for the deploy-on-send
+    ///   path; consensus handles transparent deployment at delivery
+    ///   time (Q4) — the VM just records the bytes.
+    /// - `method`: `Int253` — target method key.
+    /// - `bytes`: `Int253` — vbyte allotment to deliver.
+    /// - `gas`: `Int253` — gas allotment for the future internal tx.
+    /// - `refund`: 32-byte String — bounce predicate for the
+    ///   bounce-Output emitted by consensus on internal-tx failure
+    ///   (Q3). Decoded as `Predicate::Opaque(point)`.
+    /// - `k`: `Int253` — count of args below.
+    /// - `args…`: `k` portable values to deliver as the payload.
+    ///
+    /// Per Q5: ratchet `last_anchor` *before* appending the Send
+    /// entry, so the entry's `anchor` field is deterministic from
+    /// the script's instruction stream alone — that's the SendID
+    /// external observers can use to identify the future internal
+    /// tx at broadcast time.
+    ///
+    /// Available in both external and internal context (an actor
+    /// may emit further sends; the originator's gas allotment is
+    /// the source for sub-sends per spec.md §Block resource pools).
+    /// Payload values must be portable — non-portable types
+    /// (linear tokens-with-witness, cells, etc.) fail
+    /// `NonPortableInSend`.
+    fn op_send(&mut self) -> Result<(), VMError> {
+        // ── pop operands ────────────────────────────────────────
+        let addr_str = self.pop_string()?;
+        if addr_str.len() != 32 {
+            return Err(VMError::MalformedAddress);
+        }
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes.copy_from_slice(&addr_str.bytes_view());
+        let target = ActorID::Hash(addr_bytes);
+
+        let method_int = self.pop_int253()?;
+        let method = MethodKey::from(method_int);
+
+        let bytes_alloc = self
+            .pop_int253()?
+            .to_u64()
+            .ok_or(VMError::InvalidBitrange)?;
+        let gas_alloc = self
+            .pop_int253()?
+            .to_u64()
+            .ok_or(VMError::InvalidBitrange)?;
+
+        let refund_str = self.pop_string()?;
+        if refund_str.len() != 32 {
+            return Err(VMError::MalformedAddress);
+        }
+        let mut refund_bytes = [0u8; 32];
+        refund_bytes.copy_from_slice(&refund_str.bytes_view());
+        let refund_predicate = Predicate::Opaque(
+            curve25519_dalek::ristretto::CompressedRistretto(refund_bytes),
+        );
+
+        let k = self.pop_byte_count(usize::MAX)?;
+        let args = self.pop_n_values(k)?;
+
+        // Portability check: non-portable args can't be sealed
+        // into a delivery payload (no defined wire encoding).
+        for v in &args {
+            if !v.is_portable() {
+                return Err(VMError::NonPortableInSend);
+            }
+        }
+
+        // ── ratchet anchor (Q5) ─────────────────────────────────
+        let prev_anchor = self.last_anchor.unwrap_or(Anchor([0u8; 32]));
+        let anchor = prev_anchor.ratchet();
+        self.last_anchor = Some(anchor);
+
+        // ── compute payload hash ────────────────────────────────
+        // Bind every payload value's canonical wire bytes into a
+        // single hash, so TxEntry::Send (fixed-size) commits to
+        // the args without inlining them.
+        let payload_hash = {
+            let mut t = merlin::Transcript::new(b"flamevm.send.payload");
+            let len = args.len() as u64;
+            t.append_message(b"len", &len.to_le_bytes());
+            let mut buf = Vec::new();
+            for v in &args {
+                buf.clear();
+                crate::encoding::write_value(&mut buf, v)
+                    .map_err(|_| VMError::NonPortableInSend)?;
+                t.append_message(b"item", &buf);
+            }
+            let mut h = [0u8; 32];
+            t.challenge_bytes(b"payload_hash", &mut h);
+            h
+        };
+
+        // ── emit txlog entry + queue message ────────────────────
+        self.txlog.push(crate::tx::TxEntry::Send {
+            anchor,
+            target: target.clone(),
+            method,
+            refund_predicate: refund_predicate.clone(),
+            gas: gas_alloc,
+            vbytes: bytes_alloc,
+            payload_hash,
+        });
+        let caller = self.current_call.kind.actor().cloned();
+        self.sends.push(Message {
+            target,
+            method,
+            caller,
+            anchor,
+            payload: args,
+            gas: gas_alloc,
+            vbytes: bytes_alloc,
+            refund_predicate,
+        });
+        Ok(())
     }
 
     /// `0x95 call` — `args… k gas bytes method addr → results…`.

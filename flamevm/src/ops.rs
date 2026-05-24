@@ -139,6 +139,7 @@ const OP_INPUT: u8 = 0x90;
 const OP_CELL: u8 = 0x91;
 const OP_OUTPUT: u8 = 0x92;
 const OP_OPEN: u8 = 0x93;
+const OP_SEND: u8 = 0x94;
 const OP_CALL: u8 = 0x95;
 const OP_LOAD: u8 = 0x96;
 const OP_SAVE: u8 = 0x97;
@@ -358,6 +359,11 @@ pub enum Instruction {
     Output,
     /// `open` (0x93).
     Open,
+    /// `send` (0x94) — asynchronous message-send. Queues a
+    /// `Message` for delivery as a future internal tx; emits
+    /// `TxEntry::Send` recording the send's identity.
+    /// `args… k refund gas bytes method addr → ø`.
+    Send,
     /// `call` (0x95) — internal-only synchronous call into another
     /// actor's method. `args… k gas bytes method addr → results… k'`.
     Call,
@@ -496,6 +502,7 @@ impl Instruction {
             Instruction::Cell => out.push(OP_CELL),
             Instruction::Output => out.push(OP_OUTPUT),
             Instruction::Open => out.push(OP_OPEN),
+            Instruction::Send => out.push(OP_SEND),
             Instruction::Call => out.push(OP_CALL),
             Instruction::Load => out.push(OP_LOAD),
             Instruction::Save => out.push(OP_SAVE),
@@ -630,6 +637,7 @@ impl Instruction {
             OP_CELL => Ok(Instruction::Cell),
             OP_OUTPUT => Ok(Instruction::Output),
             OP_OPEN => Ok(Instruction::Open),
+            OP_SEND => Ok(Instruction::Send),
             OP_CALL => Ok(Instruction::Call),
             OP_LOAD => Ok(Instruction::Load),
             OP_SAVE => Ok(Instruction::Save),

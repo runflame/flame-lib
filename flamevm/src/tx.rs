@@ -96,8 +96,26 @@ pub enum TxEntry {
         pre_state_root: [u8; 32],
         callee_anchor: crate::vm::Anchor,
     },
-    // Future variants (preserved here as comments for the historical record):
-    // Send(Message), Receive(SendID), etc.
+
+    /// Outbound asynchronous message scheduled by `op_send`. Per
+    /// Q5 the `anchor` is ratcheted from `last_anchor` right
+    /// before the entry is appended; it doubles as the SendID
+    /// (deterministic at broadcast time, identifies the future
+    /// internal-tx delivery).
+    ///
+    /// `payload_hash` summarizes the args' canonical wire bytes,
+    /// keeping the entry fixed-size on the wire even when args
+    /// are large. The actual payload travels with the send queue
+    /// for delivery; consensus binds them together by `anchor`.
+    Send {
+        anchor: crate::vm::Anchor,
+        target: crate::actor::ActorID,
+        method: crate::actor::MethodKey,
+        refund_predicate: crate::cell::Predicate,
+        gas: u64,
+        vbytes: u64,
+        payload_hash: [u8; 32],
+    },
 }
 
 impl TxID {
@@ -142,6 +160,16 @@ impl core::fmt::Debug for TxEntry {
                 .debug_struct("TxEntry::Call")
                 .field("callee", callee)
                 .field("method", method)
+                .finish(),
+            TxEntry::Send {
+                target, method, anchor, gas, vbytes, ..
+            } => f
+                .debug_struct("TxEntry::Send")
+                .field("anchor", anchor)
+                .field("target", target)
+                .field("method", method)
+                .field("gas", gas)
+                .field("vbytes", vbytes)
                 .finish(),
         }
     }
@@ -200,6 +228,30 @@ impl MerkleItem for TxEntry {
                 t.append_message(b"call.method", &method.as_int().to_bytes());
                 t.append_message(b"call.pre_state_root", pre_state_root);
                 t.append_message(b"call.callee_anchor", &callee_anchor.0);
+            }
+            TxEntry::Send {
+                anchor,
+                target,
+                method,
+                refund_predicate,
+                gas,
+                vbytes,
+                payload_hash,
+            } => {
+                // Bind a complete summary of the send into the
+                // external TxID merkle root so the (External
+                // TxID, SendID) pair commits to every parameter
+                // the future internal tx will be delivered with.
+                t.append_message(b"send.anchor", &anchor.0);
+                t.append_message(b"send.target", &target.to_bytes());
+                t.append_message(b"send.method", &method.as_int().to_bytes());
+                t.append_message(
+                    b"send.refund_predicate",
+                    refund_predicate.to_point().as_bytes(),
+                );
+                t.append_message(b"send.gas", &gas.to_le_bytes());
+                t.append_message(b"send.vbytes", &vbytes.to_le_bytes());
+                t.append_message(b"send.payload_hash", payload_hash);
             }
         }
     }

@@ -364,6 +364,13 @@ pub enum VMError {
     #[error("Re-entrancy detected: target actor already on call stack")]
     ReentrancyDetected,
 
+    /// `op_send` was given a payload value with no canonical wire
+    /// encoder (a linear token-with-witness, cell, transcript, or
+    /// other non-portable type). Sends can only deliver portable
+    /// values — the payload travels through the queue as bytes.
+    #[error("Non-portable value in send payload")]
+    NonPortableInSend,
+
     /// An opcode required a top-of-stack `ClearToken` but found a
     /// different type (encrypted Token / WideToken / non-token).
     /// Distinct from `TypeNotToken` so scripts can distinguish "wrong
