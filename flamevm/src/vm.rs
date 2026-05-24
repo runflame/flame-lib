@@ -9703,11 +9703,26 @@ let proof = proof.expect("proof set");
                 _ => panic!("txlog[{}] must be Input", 1 + i),
             }
         }
-        // Outputs at [1+N .. 1+N+M], in spec order. We verify the
-        // predicate point AND the Token's qty/flv commitment points
-        // — this is what would have caught the
-        // predicate/token-pairing inversion fixed in the prior
-        // commit.
+        // Outputs at [1+N .. 1+N+M], in spec order. We verify:
+        //
+        //   - predicate point             (catches pairing inversion)
+        //   - Token qty/flv commitment points
+        //   - cell anchor                 (catches anchor-chain bugs)
+        //
+        // The anchor chain seeds at the LAST input's ratcheted
+        // anchor (op_input overwrites `last_anchor` on each input,
+        // so after the N-th input it equals `inputs[N-1].to_anchor()`).
+        // Each output's anchor is the *previous cell*'s ratcheted
+        // anchor; we walk forward as we go.
+        //
+        // The cell_id is hash(predicate, anchor, payload), so
+        // asserting all three pins down the cell_id without
+        // recomputing it.
+        let mut expected_anchor = build_input_cell(
+            inputs.last().expect("at least one input"),
+        )
+        .0
+        .to_anchor();
         for (j, out) in outputs.iter().enumerate() {
             let expected_pred = CompressedRistretto(out.predicate);
             let (q_open, f_open) = open_commitments_for_output(out);
@@ -9718,6 +9733,11 @@ let proof = proof.expect("proof set");
                         c.predicate.to_point(),
                         expected_pred,
                         "output[{}] predicate mismatch (idx {})",
+                        j, idx
+                    );
+                    assert_eq!(
+                        c.anchor.0, expected_anchor.0,
+                        "output[{}] anchor mismatch (idx {})",
                         j, idx
                     );
                     assert_eq!(
@@ -9745,6 +9765,8 @@ let proof = proof.expect("proof set");
                             "output[{}] payload[0] must be Token", j
                         ),
                     }
+                    // Advance the chain for the next iteration.
+                    expected_anchor = c.to_anchor();
                 }
                 _ => panic!("txlog[{}] must be Output", idx),
             }
