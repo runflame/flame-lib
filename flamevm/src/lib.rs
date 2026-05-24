@@ -1,3 +1,4 @@
+mod actor;
 mod cell;
 mod constraints;
 mod encoding;
@@ -17,6 +18,10 @@ mod verifier;
 mod vm;
 mod witness;
 
+pub use actor::{
+    Actor, ActorID, ActorState, MethodKey, RECV_METHOD_KEY, vbyte_size,
+    ACTOR_ID_DOMAIN, ACTOR_LIFECYCLE_OVERHEAD_VBYTES,
+};
 pub use cell::{CallProof, Cell, Predicate, PredicateTree};
 pub use constraints::{
     Commitment, CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,

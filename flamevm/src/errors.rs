@@ -296,6 +296,14 @@ pub enum VMError {
     #[error("Malformed cell encoding")]
     MalformedCellEncoding,
 
+    /// `ActorState::from_wrapper_dict` or related helpers were given
+    /// a Dict that does not have the canonical 2-entry shape
+    /// (`0x00 → public, 0x01 → private`) with both values being Dicts.
+    /// Also returned by `vbyte_size` when a `private` payload value
+    /// can't be canonically encoded.
+    #[error("Malformed ActorState")]
+    MalformedActorState,
+
     /// An opcode required a top-of-stack `ClearToken` but found a
     /// different type (encrypted Token / WideToken / non-token).
     /// Distinct from `TypeNotToken` so scripts can distinguish "wrong

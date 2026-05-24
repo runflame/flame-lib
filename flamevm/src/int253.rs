@@ -134,9 +134,15 @@ impl Int253 {
         Int253 { bytes: abs_bytes }
     }
 
+    /// The additive identity as a compile-time constant. Same value
+    /// as [`Self::zero`] but usable in `const` contexts (e.g. as the
+    /// `RECV` method-key key, where the surrounding constant cannot
+    /// invoke a regular function).
+    pub const ZERO: Int253 = Int253 { bytes: [0u8; 32] };
+
     /// Returns the additive identity.
     pub fn zero() -> Int253 {
-        Int253 { bytes: [0u8; 32] }
+        Self::ZERO
     }
 
     /// Returns the multiplicative identity.
