@@ -10520,4 +10520,89 @@ let proof = proof.expect("proof set");
             }
         }
     }
+
+    /// Fee + undersupply: input qty=10, output qty=10, fee=3.
+    /// The mix balance is `10 = 10 + (-3)` (i.e. 10 = 7) — false.
+    /// Cloak must reject.
+    ///
+    /// The most realistic real-world mistake when composing fees
+    /// with a transfer: forgetting to reduce the output by the fee
+    /// amount. The 1→1+fee positive test (qty 10 → qty 7 + fee 3)
+    /// covers the success path; this one covers the obvious slip.
+    #[test]
+    fn confidential_with_fee_undersupply_rejected() {
+        let pc_gens = PedersenGens::default();
+
+        let inp = NMInputSpec {
+            qty: 10,
+            flv: 0,
+            qty_blind: 11,
+            flv_blind: 13,
+            anchor: [0xa1; 32],
+        };
+        let (q_in, f_in) = open_commitments(&inp);
+        let (cell, cp) = build_input_cell(&inp);
+        let cell_bytes = encode_cell_to_bytes(&cell);
+        let input_witness = crate::witness::InputWitnesses {
+            tokens: vec![crate::witness::TokenWitness {
+                qty: q_in,
+                flv: f_in,
+            }],
+        };
+
+        // Output qty = 10 (NOT 7) — fee is unfunded.
+        let out = NMOutputSpec {
+            qty: 10,
+            flv: 0,
+            qty_blind: 21,
+            flv_blind: 22,
+            predicate_tag: 0xb1,
+        };
+        let (q_out, f_out) = open_commitments_for_output(&out);
+
+        // Same script shape as the positive fee test, just with
+        // the unbalanced output qty.
+        let out_pred = output_predicate_point(out.predicate_tag);
+        let mut program = Program::new();
+        program = program.push_str(crate::String::from(cell_bytes));
+        program = program.input_with_witnesses(input_witness);
+        program = push_callproof_to_program(program, &cp);
+        program = program.push_int(0u64).open();
+        program = program.push_int(3u64).push_int(0u64).fee();
+        program = program
+            .push_str(crate::String::commitment(q_out))
+            .push_str(crate::String::commitment(f_out));
+        program = program.push_int(2u64).push_int(1u64).mix();
+        program = program
+            .push_int(1u64)
+            .push_point(*out_pred.as_bytes())
+            .output();
+
+        let prove_attempt = Prover::prove(
+            &pc_gens,
+            program,
+            dummy_header(),
+            1_000_000,
+            0,
+        );
+        match prove_attempt {
+            Err(_) => { /* prover refused the bad witness — good */ }
+            Ok(result) => {
+                let TxResult { bytecode, proof, .. } = result;
+                let proof = proof.expect("proof set");
+                let pc_gens_v = PedersenGens::default();
+                let err = Verifier::verify(
+                    &pc_gens_v,
+                    bytecode,
+                    &proof,
+                    dummy_header(),
+                    1_000_000,
+                    0,
+                    None,
+                )
+                .expect_err("verifier must reject fee undersupply");
+                assert!(matches!(err, VMError::InvalidR1CSProof));
+            }
+        }
+    }
 }
