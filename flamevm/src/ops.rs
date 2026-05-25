@@ -119,7 +119,7 @@ const OP_METHOD: u8 = 0xa1;
 pub enum Instruction {
     PushInt(Int253),       // ø push → int
     PushStr(String),       // ø pushstr → str
-    PushPoint([u8; 32]),   // ø pushpoint → point
+    PushPoint(crate::crypto::Point), // ø pushpoint → point (witness-bearing on prover)
     PushToken,             // flv pushtoken → token
     Drop,                  // x drop → ø
     Nop,                   // ø nop → ø
@@ -223,9 +223,11 @@ impl Instruction {
                 // regardless of which variant the prover used.
                 out.extend_from_slice(&s.bytes_view());
             }
-            Instruction::PushPoint(b) => {
+            Instruction::PushPoint(p) => {
                 out.push(OP_PUSHPOINT);
-                out.extend_from_slice(b);
+                // Always serializes the canonical 32-byte form;
+                // witness variants compute their compressed point.
+                out.extend_from_slice(&p.to_bytes());
             }
             Instruction::PushToken => out.push(OP_PUSHTOKEN),
             Instruction::Drop => out.push(OP_DROP),
@@ -369,7 +371,7 @@ impl Instruction {
                 reader
                     .read(&mut buf)
                     .map_err(|_| VMError::UnexpectedEndOfScript)?;
-                Ok(Instruction::PushPoint(buf))
+                Ok(Instruction::PushPoint(crate::crypto::Point::from_bytes(buf)))
             }
             OP_PUSHTOKEN => Ok(Instruction::PushToken),
             OP_DROP => Ok(Instruction::Drop),
@@ -684,9 +686,9 @@ mod tests {
     #[test]
     fn pushpoint_roundtrip() {
         let pt = [0x42u8; 32];
-        let r = roundtrip(Instruction::PushPoint(pt));
+        let r = roundtrip(Instruction::PushPoint(crate::crypto::Point::from_bytes(pt)));
         match r {
-            Instruction::PushPoint(p) => assert_eq!(p, pt),
+            Instruction::PushPoint(p) => assert_eq!(p.to_bytes(), pt),
             _ => panic!("PushPoint didn't round-trip"),
         }
     }

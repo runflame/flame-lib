@@ -111,9 +111,20 @@ impl Program {
         self
     }
 
-    /// `pushpoint` (0x1a).
+    /// `pushpoint` (0x1a) from raw 32 bytes (the verifier-style
+    /// `Point::Opaque`). For witness-bearing points use
+    /// [`Program::push_point_typed`].
     pub fn push_point(mut self, bytes: [u8; 32]) -> Self {
-        self.instructions.push(Instruction::PushPoint(bytes));
+        self.instructions
+            .push(Instruction::PushPoint(crate::crypto::Point::from_bytes(bytes)));
+        self
+    }
+
+    /// `pushpoint` (0x1a) with a typed `Point`. Use this on the prover
+    /// side to attach a `Point::Commitment` / `Point::Predicate`
+    /// witness; both encode to the canonical 32 bytes on the wire.
+    pub fn push_point_typed(mut self, p: crate::crypto::Point) -> Self {
+        self.instructions.push(Instruction::PushPoint(p));
         self
     }
 

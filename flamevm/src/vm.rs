@@ -590,8 +590,10 @@ impl VM {
                 self.push_value(Value::String(s));
                 Ok(())
             }
-            I::PushPoint(bytes) => {
-                self.push_value(Value::Point(Point::from_bytes(bytes)));
+            I::PushPoint(p) => {
+                // Witness-bearing variants flow through unchanged;
+                // verifier-side decoded form is `Point::Opaque`.
+                self.push_value(Value::Point(p));
                 Ok(())
             }
             I::PushToken => self.op_pushtoken(),
