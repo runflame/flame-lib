@@ -372,6 +372,32 @@ impl Cell {
         Cell { predicate, anchor, payload }
     }
 
+    /// Deep-clone preserving prover-side witnesses on Token payloads.
+    ///
+    /// Used by `String::to_cell` when the wrapping `Arc<Cell>` is
+    /// shared (e.g. because `Run::next_instruction` cloned the
+    /// outer `PushStr` instruction and the original Arc is still
+    /// pinned in `instructions[]`). Walks the payload, cloning each
+    /// entry via its derive-Clone — Token/ClearToken/Int253/Point
+    /// are all cheap to clone, and `Commitment::Open` is preserved
+    /// so downstream `op_mix` finds the witness intact.
+    ///
+    /// Errors if any payload entry isn't a portable type (a contract
+    /// violation — payload is filtered through `pop_n_portable` at
+    /// construction). Non-portable variants like Merlin/Variable
+    /// would have nothing to clone to anyway.
+    pub fn try_clone_with_witnesses(&self) -> Result<Cell, VMError> {
+        let mut new_payload = Vec::with_capacity(self.payload.len());
+        for v in &self.payload {
+            new_payload.push(clone_portable_value(v)?);
+        }
+        Ok(Cell {
+            predicate: self.predicate.clone(),
+            anchor: self.anchor,
+            payload: new_payload,
+        })
+    }
+
     /// Computes the canonical identity hash of this cell, via a Merlin
     /// transcript that absorbs the opaque predicate point, the anchor,
     /// and each payload value's **canonical wire encoding**.
@@ -436,6 +462,16 @@ impl Cell {
             write_value(w, v)?;
         }
         Ok(())
+    }
+
+    /// Canonical wire bytes — convenience wrapper over [`Cell::encode`]
+    /// for callers that need an owned `Vec<u8>` (e.g. `String::Cell`
+    /// serialization). Cannot fail: `Vec<u8>` is an infallible writer
+    /// and payload entries are guaranteed portable by construction.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        self.encode(&mut buf).expect("cell encodes; payload portable by construction");
+        buf
     }
 
     /// Reads the canonical wire form. The reader is advanced past the
@@ -567,6 +603,33 @@ fn merkle_walk_up(
         };
     }
     Ok(hash)
+}
+
+/// Clone a Value that's known to be portable. Portable types
+/// (Int253, String, Dict, Point, Token, ClearToken, Cell) all have
+/// either derive-Clone or a manual Clone; non-portable variants
+/// (Merlin / Variable / Expression / Constraint / WideToken) are
+/// never present in `Cell::payload` (construction filters via
+/// `pop_n_portable`) and would error here.
+///
+/// Distinct from `Value::try_clone`, which is the *stack-level*
+/// linearity gate that rejects Token/Cell to prevent implicit
+/// duplication of bearer values. Cell-payload cloning is below
+/// the stack level — these values are still inside a cell, not
+/// live on the stack — so the clone is allowed.
+fn clone_portable_value(v: &Value) -> Result<Value, VMError> {
+    use crate::Token;
+    match v {
+        Value::Int253(i) => Ok(Value::Int253(*i)),
+        Value::String(s) => Ok(Value::String(s.clone())),
+        Value::Dict(d) => Ok(Value::Dict(d.try_clone()?)),
+        Value::Point(p) => Ok(Value::Point(*p)),
+        Value::Token(t) => Ok(Value::Token(Token::new(t.qty.clone(), t.flv.clone()))),
+        Value::ClearToken(ct) => Ok(Value::ClearToken(*ct)),
+        Value::Cell(c) => Ok(Value::Cell(c.try_clone_with_witnesses()?)),
+        // Non-portable types should never appear in a cell payload.
+        _ => Err(VMError::NonPortableInOutput),
+    }
 }
 
 fn get_bit(bits: &[u8], i: usize) -> u8 {

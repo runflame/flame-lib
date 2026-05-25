@@ -306,24 +306,12 @@ impl Program {
 
     // ── Cell + I/O ───────────────────────────────────
 
-    /// `input` (0x90), no prover witness — fine for cell payloads
-    /// that contain no `Token` entries, or for verifier-side
-    /// program reconstruction.
+    /// `input` (0x90). Witness data (open commitments on Token
+    /// payloads) rides on the pushed String value — call
+    /// `push_str(String::cell(c))` before this on the prover side;
+    /// verifiers push `String::Opaque(cell.to_bytes())`.
     pub fn input(mut self) -> Self {
-        self.instructions.push(Instruction::Input(None));
-        self
-    }
-
-    /// `input` (0x90) with a prover-side witness queue — required
-    /// when the consumed cell's payload contains any `Token`
-    /// entries that participate in a downstream `mix` (the
-    /// witnesses re-attach `Commitment::Open` after decode).
-    pub fn input_with_witnesses(
-        mut self,
-        witnesses: crate::witness::InputWitnesses,
-    ) -> Self {
-        self.instructions
-            .push(Instruction::Input(Some(Box::new(witnesses))));
+        self.instructions.push(Instruction::Input);
         self
     }
     pub fn cell(mut self) -> Self { self.instructions.push(Instruction::Cell); self }

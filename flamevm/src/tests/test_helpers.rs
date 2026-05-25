@@ -21,7 +21,6 @@ pub use crate::{
     Token, WideToken,
     PredicateTree,
     Instruction,
-    InputWitnesses, TokenWitness,
     CheckedFee, MAX_FEE,
     CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,
 };
@@ -552,18 +551,16 @@ pub(crate) fn make_signtx_script_with_cell(
     (script, cell_id)
 }
 
-/// Helper: build a witness-bearing cell with a single Token
-/// payload entry. Returns the cell (with `Open` commitments —
-/// not what's on the wire) plus the matching `InputWitnesses`
-/// the prover passes to `input_with_witnesses`. Wire-encoding
-/// the cell collapses the commitments to `Closed`; the witness
-/// re-attaches them on decode.
-pub(crate) fn make_token_witness_pair(
+/// Helper: build a Token with `Commitment::Open` quantity and
+/// flavor (witness-bearing). The token can be embedded in a Cell
+/// and pushed via `String::cell(c)` so witnesses survive the trip
+/// through `op_input` and into the downstream `mix` gadget.
+pub(crate) fn make_open_token(
     qty_value: u64,
     flv_value: u64,
     qty_blind: u64,
     flv_blind: u64,
-) -> (crate::Token, crate::witness::TokenWitness) {
+) -> crate::Token {
     let q = crate::Commitment::blinded_with_factor(
         Int253::from(qty_value),
         Scalar::from(qty_blind),
@@ -572,9 +569,7 @@ pub(crate) fn make_token_witness_pair(
         Int253::from(flv_value),
         Scalar::from(flv_blind),
     );
-    let token = crate::Token::new(q.clone(), f.clone());
-    let witness = crate::witness::TokenWitness { qty: q, flv: f };
-    (token, witness)
+    crate::Token::new(q, f)
 }
 
 //
@@ -684,19 +679,12 @@ pub(crate) fn build_confidential_nm_program(
 
     //                    callproof pieces + push:0 + open. ──
     for inp in inputs {
-        let (q_open, f_open) = open_commitments(inp);
         let (cell, cp) = build_input_cell(inp);
-        let cell_bytes = encode_cell_to_bytes(&cell);
-        // pushstr cell_bytes — opaque on both sides.
-        program = program.push_str(crate::String::from(cell_bytes));
-        // input with witness (prover-side only).
-        let witness = crate::witness::InputWitnesses {
-            tokens: vec![crate::witness::TokenWitness {
-                qty: q_open,
-                flv: f_open,
-            }],
-        };
-        program = program.input_with_witnesses(witness);
+        // pushstr String::Cell(c) — prover-side witness carrier
+        // (Token's open commitments ride along into op_input).
+        // The verifier-side equivalent is `String::from(cell.to_bytes())`.
+        program = program.push_str(crate::String::cell(cell));
+        program = program.input();
         // callproof pieces.
         program = push_callproof_to_program(program, &cp);
         // push:0 args, open.

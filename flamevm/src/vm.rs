@@ -667,7 +667,7 @@ impl VM {
             I::Type => self.op_type(),
             I::BreakK(k) => self.op_break_k(k as usize),
 
-            I::Input(w) => self.op_input(w.as_deref()),
+            I::Input => self.op_input(),
             I::Cell => self.op_cell(),
             I::Output => self.op_output(),
             I::Open => self.op_open(),
@@ -1755,57 +1755,17 @@ impl VM {
 
     /// _string_ **input** → _cell_
     ///
-    /// External-only. Witness `Some` re-attaches `Commitment::Open`
-    /// to Token payloads after `Cell::decode` strips them.
-    fn op_input(
-        &mut self,
-        witness: Option<&crate::witness::InputWitnesses>,
-    ) -> Result<(), VMError> {
+    /// External-only. The prover pushes a `String::Cell(c)` carrying
+    /// open commitments on Token payloads; the verifier pushes
+    /// `String::Opaque(cell_bytes)` and `to_cell()` decodes to closed
+    /// commitments. No separate witness operand — witnesses ride the
+    /// stack with the value, matching zkvm's `to_output()` pattern.
+    fn op_input(&mut self) -> Result<(), VMError> {
         self.require_external()?;
-        let s = self.pop_value()?.to_string()?;
-        let bytes = s.as_bytes();
-        let mut reader: &[u8] = bytes;
-        let mut cell = Cell::decode(&mut reader)?;
-        if !reader.is_empty() {
-            return Err(VMError::MalformedCellEncoding);
-        }
-        if let Some(w) = witness {
-            self.attach_input_witnesses(&mut cell, w)?;
-        }
+        let cell = self.pop_value()?.to_string()?.to_cell()?;
         self.txlog.push(crate::tx::TxEntry::Input(cell.id()));
         self.last_anchor = Some(cell.to_anchor());
         self.push_value(Value::Cell(cell));
-        Ok(())
-    }
-
-    /// Swaps each Token payload's `Commitment::Closed` for the matching
-    /// `Commitment::Open` from the prover's witness queue.
-    fn attach_input_witnesses(
-        &self,
-        cell: &mut Cell,
-        witness: &crate::witness::InputWitnesses,
-    ) -> Result<(), VMError> {
-        let token_count = cell.payload.iter().filter(|v| matches!(v, Value::Token(_))).count();
-        if witness.tokens.len() != token_count {
-            return Err(VMError::WitnessCountMismatch);
-        }
-        let mut wi = 0usize;
-        for v in cell.payload.iter_mut() {
-            if let Value::Token(t) = v {
-                let tw = &witness.tokens[wi];
-                wi += 1;
-                if tw.qty.witness().is_none() || tw.flv.witness().is_none() {
-                    return Err(VMError::WitnessNotOpen);
-                }
-                if tw.qty.to_point() != t.qty.to_point()
-                    || tw.flv.to_point() != t.flv.to_point()
-                {
-                    return Err(VMError::WitnessPointMismatch);
-                }
-                t.qty = tw.qty.clone();
-                t.flv = tw.flv.clone();
-            }
-        }
         Ok(())
     }
 

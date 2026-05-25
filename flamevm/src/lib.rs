@@ -18,7 +18,6 @@ mod tx;
 mod value;
 mod verifier;
 mod vm;
-mod witness;
 
 pub use actor::{
     grace_window, vbyte_size, Actor, ActorID, ActorRegistry, ActorState,
@@ -44,6 +43,5 @@ pub use string::String;
 pub use token::{flavor_from_actor, ClearToken, Token, WideToken};
 pub use value::Value;
 pub use verifier::Verifier;
-pub use witness::{InputWitnesses, TokenWitness};
 
 pub use tx::{ExternalTx, InternalTx};

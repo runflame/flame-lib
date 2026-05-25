@@ -31,7 +31,7 @@ what's left to build.
 | 19 | `op_fee` + `CheckedFee` accumulator                                | ✅      |
 | 20 | TxBound multi-sig batch verification                               | ✅      |
 | 21 | `TxResult` shape + finalize return values                          | ✅      |
-| 22 | Input-cell witness re-attachment (`Instruction::Input(witness)`)   | ✅      |
+| 22 | Input-cell witness via `String::Cell` (zkvm-parity refactor)       | ✅      |
 | 23 | Confidential N→M end-to-end test harness                           | ✅      |
 | 24 | `ActorState` + `ActorRegistry` + `Address` + `send.rs`             | ✅      |
 | 25 | `op_load` + `op_save` (incl. Q6 self-destruct)                     | ✅      |
@@ -137,7 +137,7 @@ populate.
 | 19 | `op_fee` + `CheckedFee`                            | 14    | `0x7a fee` allocates WideToken debt; `MAX_FEE = 2²⁴` per-tx cap. `TxEntry::Fee(u64)`. |
 | 20 | TxBound multi-sig batch verification               | 7     | `DeferredSig::TxBound { vk, cell_id }`. `verify_multi_batched` against `flamevm.signtx.v1` transcript bound to TxID. |
 | 21 | `TxResult` shape                                   | 4     | Unified return: `{ txid, txlog, total_fee, gas_used, vbytes_used, bytecode, proof, deferred_sigs, sends }`. |
-| 22 | Input-cell witness re-attachment                   | 7     | `Instruction::Input(Option<Box<InputWitnesses>>)`. Prover-side re-attaches `Commitment::Open` post-decode; point-equality check guards prover bugs. |
+| 22 | Input-cell witness via `String::Cell` (zkvm-parity refactor) | 6     | `String::Cell(Arc<Cell>)` is the prover-side carrier; verifier pushes `String::Opaque(bytes)`. `to_cell()` handles both shapes. `Instruction::Input` is a unit variant (no operand). Drops the `attach_input_witnesses` walk and three witness-mismatch errors. |
 | 23 | Confidential N→M test harness                      | 13    | Full input→open→mix→output prove/verify round-trip. Matrix: N∈{1,2,3} × M∈{1,2,3} × {1,2 flavors} + 2 negatives. |
 | 24 | ActorState + Registry + Address                    | 51    | `ActorID` (enum), `MethodKey(Int253)`, `ActorState`, `Actor`, `vbyte_size`, `Address` enum, `ActorRegistry` trait, `MemRegistry`, `VbytePool` (sum of Units 1+2+3 in the actor build). |
 | 25 | `op_load` + `op_save`                              | 11    | Per-frame `loaded` flag, cross-frame registry mark, tx-end `commit_tx_destructions` hook = Q6 self-destruct. |
@@ -176,7 +176,7 @@ populate.
 
 | Topic | Blocking phase | Notes |
 |---|---|---|
-| Input-cell witness encoding | — (resolved Phase 22) | Implemented as `Instruction::Input(Option<Box<InputWitnesses>>)`; verifier-side parses to `None`. ADR pending in Phase 38 housekeeping. |
+| Input-cell witness encoding | — (resolved; refactored to zkvm parity) | Carrier is `String::Cell(Arc<Cell>)` — same pattern as zkvm's `String::Output`. Prover pushes `String::Cell(c)` with open commitments; verifier pushes `String::Opaque(bytes)`. `Instruction::Input` is a unit variant; no separate witness queue, no re-attachment step. ADR pending in Phase 38 housekeeping. |
 | Actor data model (Q1, Q2, Q4, Q6) | — (resolved during actor build) | Q1: `b"flamevm.actorid"` domain. Q2: vbyte = wire_len(state) + 32. Q4: Constructor-form id deploys transparently at first delivery. Q6: load-without-save is the destroy path. ADR `0010-actor-data-model` queued for Phase 38. |
 | Send-ID + Internal TxID (Q3, Q5) | — (resolved during actor build) | Q5: three IDs (External TxID, SendID = Send.anchor, Internal TxID); anchor ratcheted before emitting `TxEntry::Send`; Internal TxID binds to per-call `pre_state_root` via `TxEntry::Call`. Q3: send-failure bounce is a consensus-emitted Output, not a fresh sub-VM. ADR `0011-send-id-and-internal-txid` queued for Phase 38. |
 | Load/save re-entry lock (Q6) | — (resolved during actor build) | `mark_for_destruction` as the cross-frame lock; per-frame `loaded` flag layered on top; tx-end sweep destroys still-marked actors. ADR `0012-load-save-reentry-lock` queued for Phase 38. |
@@ -194,10 +194,15 @@ were in flight; both are now done (see "Phases complete" table
 above for headlines, commit log for the implementation).
 
 Recap:
-- **Phase 22** added `Instruction::Input(Option<Box<InputWitnesses>>)`
-  so the prover can re-attach `Commitment::Open` after the
+- **Phase 22** originally added `Instruction::Input(Option<Box<InputWitnesses>>)`
+  so the prover could re-attach `Commitment::Open` after the
   Cell::decode round-trip strips them to `Closed`. Verifier
-  always parses to `Input(None)`; bytecode is the bare `0x90`.
+  always parsed to `Input(None)`; bytecode was the bare `0x90`.
+  **Later refactored** to match zkvm: the witness now rides on a
+  `String::Cell(Arc<Cell>)` pushed before the bare `Instruction::Input`
+  unit variant. Same wire bytes; no side-channel queue; the
+  `attach_input_witnesses` walk and the three `WitnessCount/Point/NotOpen`
+  errors are deleted.
 - **Phase 23** built the confidential-N→M test harness (13
   passing shapes including 2 negative-balance tests). The
   helpers `make_confidential_token` /

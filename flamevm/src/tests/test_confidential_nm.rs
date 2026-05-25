@@ -472,16 +472,8 @@ fn confidential_1_to_1_with_fee() {
         flv_blind: 13,
         anchor: [0xa1; 32],
     };
-    let (q_in, f_in) = open_commitments(&inp);
     let (cell, cp) = build_input_cell(&inp);
     let expected_input_id = cell.id();
-    let cell_bytes = encode_cell_to_bytes(&cell);
-    let input_witness = crate::witness::InputWitnesses {
-        tokens: vec![crate::witness::TokenWitness {
-            qty: q_in,
-            flv: f_in,
-        }],
-    };
 
     let out = NMOutputSpec {
         qty: 7,
@@ -493,9 +485,10 @@ fn confidential_1_to_1_with_fee() {
     let (q_out, f_out) = open_commitments_for_output(&out);
 
     let mut program = Program::new();
-    // Consume the input cell.
-    program = program.push_str(crate::String::from(cell_bytes));
-    program = program.input_with_witnesses(input_witness);
+    // Consume the input cell — push the witness-bearing String::Cell
+    // so the Token's open commitments survive into the CS.
+    program = program.push_str(crate::String::cell(cell));
+    program = program.input();
     program = push_callproof_to_program(program, &cp);
     program = program.push_int(0u64).open();
     // Fee opcode: pushes WideToken(-3, 0).
@@ -687,15 +680,7 @@ fn confidential_with_fee_undersupply_rejected() {
         flv_blind: 13,
         anchor: [0xa1; 32],
     };
-    let (q_in, f_in) = open_commitments(&inp);
     let (cell, cp) = build_input_cell(&inp);
-    let cell_bytes = encode_cell_to_bytes(&cell);
-    let input_witness = crate::witness::InputWitnesses {
-        tokens: vec![crate::witness::TokenWitness {
-            qty: q_in,
-            flv: f_in,
-        }],
-    };
 
     // Output qty = 10 (NOT 7) — fee is unfunded.
     let out = NMOutputSpec {
@@ -711,8 +696,8 @@ fn confidential_with_fee_undersupply_rejected() {
     // the unbalanced output qty.
     let out_pred = output_predicate_point(out.predicate_tag);
     let mut program = Program::new();
-    program = program.push_str(crate::String::from(cell_bytes));
-    program = program.input_with_witnesses(input_witness);
+    program = program.push_str(crate::String::cell(cell));
+    program = program.input();
     program = push_callproof_to_program(program, &cp);
     program = program.push_int(0u64).open();
     program = program.push_int(3u64).push_int(0u64).fee();

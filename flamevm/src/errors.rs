@@ -277,16 +277,4 @@ pub enum VMError {
     /// This error occurs when `fee` is given a negative quantity.
     #[error("fee qty must be non-negative")]
     FeeQtyNegative,
-
-    /// This error occurs when the input witness count does not match the cell's Token count.
-    #[error("input witness count does not match cell payload Token count")]
-    WitnessCountMismatch,
-
-    /// This error occurs when an input witness point does not match the cell's commitment point.
-    #[error("input witness commitment point does not match cell payload")]
-    WitnessPointMismatch,
-
-    /// This error occurs when an input witness commitment is Closed instead of Open.
-    #[error("input witness commitment must be Open (witness-bearing)")]
-    WitnessNotOpen,
 }

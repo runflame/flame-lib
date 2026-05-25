@@ -1,6 +1,7 @@
 //! Variable-length binary string; carries optional prover-side witness payloads.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use crate::constraints::Commitment;
 use crate::errors::VMError;
@@ -9,7 +10,13 @@ use crate::ops::Instruction;
 
 /// Variable-length binary string with optional witness-bearing
 /// variants. See module docs for the design.
-#[derive(Clone, Debug)]
+///
+/// `Clone` and `Debug` are implemented manually so the `Cell`
+/// variant — whose inner `Cell` carries non-clonable, non-debuggable
+/// payload values — can share ownership via `Arc` on clone (cheap
+/// refcount bump, witnesses preserved) and print as the cell id on
+/// debug. The cheap-Box variants (Commitment / Scalar / Predicate /
+/// Script) clone in O(1) and keep their witnesses normally.
 pub enum String {
     /// Plain byte buffer — the verifier's view.
     Opaque(Vec<u8>),
@@ -25,6 +32,18 @@ pub enum String {
     /// [`String::to_instructions`] — verifier sees `Opaque(bytes)`
     /// and parses, prover keeps witnesses inline.
     Script(Vec<Instruction>),
+    /// Prover-side cell with witness-bearing `Commitment::Open`
+    /// quantities/flavors on its Token payloads. Encodes to the
+    /// canonical cell bytes — verifier sees `Opaque(bytes)` and
+    /// decodes via `Cell::decode` to closed commitments. Consumed
+    /// by `op_input` via [`String::to_cell`].
+    ///
+    /// Held behind `Arc` so cloning the wrapping `String` (e.g.
+    /// when `Run::next_instruction` clones the `PushStr` operand
+    /// on every step) is a cheap refcount bump that preserves
+    /// witnesses — `Cell` itself is non-Clonable because its
+    /// payload may hold linear types.
+    Cell(Arc<crate::cell::Cell>),
 }
 
 impl String {
@@ -47,10 +66,18 @@ impl String {
 
     /// Constructs a witness-bearing Script-String. Used by the
     /// prover when pushing a sub-script that contains witnesses
-    /// (e.g. inner `alloc(Some(_))` / `input(Some(_))` calls) and
-    /// will later be consumed by `run` / `switch` / `signrun`.
+    /// (e.g. inner `alloc(Some(_))` calls) and will later be
+    /// consumed by `run` / `switch` / `signrun`.
     pub fn script(instructions: Vec<Instruction>) -> String {
         String::Script(instructions)
+    }
+
+    /// Constructs a witness-bearing Cell-String. Used by the prover
+    /// before `op_input` to push a cell whose Token payloads still
+    /// carry `Commitment::Open` quantities/flavors. The verifier-side
+    /// equivalent is `String::Opaque(cell.to_bytes())`.
+    pub fn cell(c: crate::cell::Cell) -> String {
+        String::Cell(Arc::new(c))
     }
 
     // ── Byte views ──────────────────────────────────────────────
@@ -79,6 +106,7 @@ impl String {
             String::Scalar(s) => Cow::Owned(s.to_bytes().to_vec()),
             String::Predicate(p) => Cow::Owned(p.to_point().as_bytes().to_vec()),
             String::Script(instrs) => Cow::Owned(compile_instructions(instrs)),
+            String::Cell(c) => Cow::Owned(c.to_bytes()),
         }
     }
 
@@ -92,6 +120,7 @@ impl String {
             String::Scalar(s) => s.to_bytes().to_vec(),
             String::Predicate(p) => p.to_point().as_bytes().to_vec(),
             String::Script(instrs) => compile_instructions(&instrs),
+            String::Cell(c) => c.to_bytes(),
         }
     }
 
@@ -103,12 +132,14 @@ impl String {
 
     /// Length in canonical wire bytes. For witness-bearing variants
     /// this is the encoded-form length (32 bytes for Commitment,
-    /// Scalar, Predicate; compiled bytecode length for Script).
+    /// Scalar, Predicate; compiled bytecode length for Script;
+    /// serialized cell length for Cell).
     pub fn len(&self) -> usize {
         match self {
             String::Opaque(d) => d.len(),
             String::Commitment(_) | String::Scalar(_) | String::Predicate(_) => 32,
             String::Script(instrs) => compile_instructions(instrs).len(),
+            String::Cell(c) => c.to_bytes().len(),
         }
     }
 
@@ -117,6 +148,8 @@ impl String {
         match self {
             String::Opaque(d) => d.is_empty(),
             String::Script(instrs) => instrs.is_empty(),
+            // Commitment / Scalar / Predicate are 32 bytes; Cell has a
+            // non-empty header → never empty.
             _ => false,
         }
     }
@@ -211,6 +244,47 @@ impl String {
                 ))
             }
             _ => Err(VMError::InvalidPoint),
+        }
+    }
+
+    /// Downcasts to a `Cell`. For `String::Cell(c)`, returns the
+    /// witness-bearing cell directly (Token payloads keep their
+    /// `Commitment::Open` quantities/flavors). For `Opaque`, decodes
+    /// the canonical wire bytes via `Cell::decode` (yields
+    /// `Commitment::Closed`). Hard-fails `MalformedCellEncoding` on
+    /// malformed bytes, trailing data, or any non-decodable variant.
+    ///
+    /// Used by `op_input` — matches zkvm's `String::to_output` shape.
+    ///
+    /// For `String::Cell`, the cell is held in an `Arc` (so clones
+    /// of the wrapping `String` share ownership and preserve
+    /// witnesses). If this is the sole reference (the common case
+    /// — pushed once, consumed by `op_input` once), `Arc::try_unwrap`
+    /// returns the owned cell directly. If the Arc has been cloned
+    /// (rare — `dup` on a witness-bearing pushed cell), we fall back
+    /// to encoding the shared cell to canonical bytes and decoding a
+    /// fresh closed-commitment copy — the witness is lost only in
+    /// this multi-reference path, and only for this consumer.
+    pub fn to_cell(self) -> Result<crate::cell::Cell, VMError> {
+        match self {
+            String::Cell(arc) => match Arc::try_unwrap(arc) {
+                Ok(cell) => Ok(cell),
+                // Shared Arc — happens in the common path because
+                // `Run::next_instruction` clones the `PushStr` operand
+                // (the original ref is pinned in `instructions[]` for
+                // potential `loop` rewinds). Deep-clone the cell so
+                // witnesses survive into op_input.
+                Err(shared) => shared.try_clone_with_witnesses(),
+            },
+            String::Opaque(data) => {
+                let mut reader: &[u8] = &data;
+                let cell = crate::cell::Cell::decode(&mut reader)?;
+                if !reader.is_empty() {
+                    return Err(VMError::MalformedCellEncoding);
+                }
+                Ok(cell)
+            }
+            _ => Err(VMError::MalformedCellEncoding),
         }
     }
 
@@ -348,6 +422,46 @@ impl String {
 impl From<Vec<u8>> for String {
     fn from(v: Vec<u8>) -> Self {
         String::Opaque(v)
+    }
+}
+
+impl Clone for String {
+    fn clone(&self) -> Self {
+        match self {
+            String::Opaque(d) => String::Opaque(d.clone()),
+            String::Commitment(c) => String::Commitment(c.clone()),
+            String::Scalar(s) => String::Scalar(s.clone()),
+            String::Predicate(p) => String::Predicate(p.clone()),
+            String::Script(i) => String::Script(i.clone()),
+            // Arc bump — witnesses survive cloning (the underlying
+            // Cell is shared, not deep-copied). Needed so the VM's
+            // per-step instruction clone in `Run::next_instruction`
+            // doesn't degrade a witness-bearing pushed cell.
+            String::Cell(c) => String::Cell(Arc::clone(c)),
+        }
+    }
+}
+
+impl std::fmt::Debug for String {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            String::Opaque(d) => f.debug_tuple("Opaque").field(d).finish(),
+            String::Commitment(c) => f.debug_tuple("Commitment").field(c).finish(),
+            String::Scalar(s) => f.debug_tuple("Scalar").field(s).finish(),
+            String::Predicate(p) => f.debug_tuple("Predicate").field(p).finish(),
+            String::Script(i) => f.debug_tuple("Script").field(i).finish(),
+            // Cell isn't Debug-derived; print its canonical id (in
+            // hex) as a surrogate so test output stays readable.
+            String::Cell(c) => {
+                let id = c.id();
+                let mut hex = std::string::String::with_capacity(64);
+                for b in id.iter() {
+                    use std::fmt::Write;
+                    let _ = write!(hex, "{:02x}", b);
+                }
+                f.debug_struct("Cell").field("id", &hex).finish()
+            }
+        }
     }
 }
 

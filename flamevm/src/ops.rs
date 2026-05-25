@@ -191,7 +191,7 @@ pub enum Instruction {
     Return,                                                // a(k-1) … a(0) k return → ø
     Type,                                                  // x type → x code
     BreakK(u8),                                            // ø break:k → ø
-    Input(Option<Box<crate::witness::InputWitnesses>>),    // s input → cell
+    Input,                                                 // s input → cell
     Cell,                                                  // items… k pred cell → cell
     Output,                                                // items… k pred output → ø
     Open,                                                  // cell ik nbrs pos script gas bytes args… k open → results… k'
@@ -309,7 +309,7 @@ impl Instruction {
             }
             // Witness (if any) never crosses the wire — prover-side
             // only. Encoded form is the bare opcode byte.
-            Instruction::Input(_) => out.push(OP_INPUT),
+            Instruction::Input => out.push(OP_INPUT),
             Instruction::Cell => out.push(OP_CELL),
             Instruction::Output => out.push(OP_OUTPUT),
             Instruction::Open => out.push(OP_OPEN),
@@ -444,7 +444,7 @@ impl Instruction {
             OP_BREAKK_BASE..=OP_BREAKK_MAX => {
                 Ok(Instruction::BreakK(byte - OP_BREAKK_BASE))
             }
-            OP_INPUT => Ok(Instruction::Input(None)),
+            OP_INPUT => Ok(Instruction::Input),
             OP_CELL => Ok(Instruction::Cell),
             OP_OUTPUT => Ok(Instruction::Output),
             OP_OPEN => Ok(Instruction::Open),
@@ -750,7 +750,7 @@ mod tests {
             Instruction::IssueFlv,
             Instruction::Verify,
             Instruction::Return,
-            Instruction::Input(None),
+            Instruction::Input,
             Instruction::Cell,
             Instruction::Signtx,
             Instruction::Signrun,

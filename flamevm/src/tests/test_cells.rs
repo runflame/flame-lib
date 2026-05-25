@@ -634,7 +634,7 @@ fn input_pushes_cell_seeds_anchor_and_emits_txlog() {
     // Build an ExternalRoot VM with the wire bytes on the stack as a String.
     let mut vm = vm_external_with_script(Vec::new());
     vm.push_value(Value::String(crate::String::from(bytes)));
-    vm.op_input(None).expect("input succeeds");
+    vm.op_input().expect("input succeeds");
 
     // Top of stack is the decoded Cell.
     assert_eq!(vm.current_call.stack.len(), 1);
@@ -662,7 +662,7 @@ fn input_requires_string_on_top() {
     // Non-String top → TypeNotString. (Use an Int253.)
     let mut vm = vm_external_with_script(Vec::new());
     vm.push_value(Value::Int253(Int253::from(7u64)));
-    let err = vm.op_input(None).unwrap_err();
+    let err = vm.op_input().unwrap_err();
     assert!(matches!(err, VMError::TypeNotString));
 }
 
@@ -671,7 +671,7 @@ fn input_rejects_malformed_bytes() {
     // Random non-canonical bytes on the stack.
     let mut vm = vm_external_with_script(Vec::new());
     vm.push_value(Value::String(crate::String::from(vec![0xffu8; 8])));
-    let err = vm.op_input(None).unwrap_err();
+    let err = vm.op_input().unwrap_err();
     assert!(matches!(err, VMError::MalformedCellEncoding));
 }
 
@@ -685,7 +685,7 @@ fn input_rejects_trailing_bytes_after_cell() {
 
     let mut vm = vm_external_with_script(Vec::new());
     vm.push_value(Value::String(crate::String::from(bytes)));
-    let err = vm.op_input(None).unwrap_err();
+    let err = vm.op_input().unwrap_err();
     assert!(matches!(err, VMError::MalformedCellEncoding));
 }
 
@@ -717,7 +717,7 @@ fn input_then_output_anchor_chain() {
 
     // Step 1: feed cell bytes into op_input.
     vm.push_value(Value::String(crate::String::from(bytes)));
-    vm.op_input(None).expect("input ok");
+    vm.op_input().expect("input ok");
     // Stack: [Cell]. last_anchor: Some(ratcheted anchor from input).
     assert_eq!(
         vm.last_anchor.expect("anchor").0,

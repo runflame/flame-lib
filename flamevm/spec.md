@@ -196,6 +196,16 @@ Strings are used to represent arbitrary-length binary data, programs and cryptog
 
 Each string acts as a builder and a reader.
 
+**Prover-side witness variants.** On the prover side a String may carry a typed witness payload that encodes to the same canonical wire bytes the verifier sees but preserves the underlying witness data through `dup` / `run` / payload-pour boundaries:
+
+- `String::Commitment(Open(value, blinding))` — used before `commit`, `scalar`, `expr`.
+- `String::Scalar(int)` — used before `scalar`.
+- `String::Predicate(p)` — used before `signtx`, `signcall`, `cell`, `output`.
+- `String::Script(instructions)` — used before `run`, `switch`, `signcall`.
+- `String::Cell(c)` — used before `input`, carrying open commitments on Token payloads.
+
+The verifier always sees `String::Opaque(bytes)`; the downcasts (`to_commitment`, `to_scalar`, `to_predicate`, `to_instructions`, `to_cell`) handle both shapes uniformly. There is no separate witness queue or per-opcode witness operand — witnesses ride on the pushed value itself.
+
 ### Point
 
 Ristretto255 group element. Stored as compressed 32-byte encoding. Used to represent public keys and Pedersen commitments.
@@ -928,7 +938,13 @@ When the cascade ends the entire call (e.g. `break:0` at the outermost Run of a 
 
 _s_ → _cell_
 
-Decodes a wire-encoded Cell from `s` and materializes a `cell` handle on the stack. Seeds the VM's `last_anchor` from the cell's identity (via `Cell::to_anchor()`, which ratchets internally) and emits `TxEntry::Input(cell_id)`.
+Materializes a `cell` handle from the String on top of the stack. Seeds the VM's `last_anchor` from the cell's identity (via `Cell::to_anchor()`, which ratchets internally) and emits `TxEntry::Input(cell_id)`.
+
+**Witness path (prover).** The prover pushes `String::Cell(c)` whose Token payloads still carry `Commitment::Open` quantities and flavors. `to_cell()` extracts the cell directly — open commitments survive into downstream `mix`/`commit` without any separate witness queue. Same pattern as zkvm's `String::Output` / `to_output`.
+
+**Opaque path (verifier).** The verifier pushes `String::Opaque(cell_bytes)`. `to_cell()` runs `Cell::decode`, producing `Commitment::Closed` everywhere. The verifier-side CS rebuilds the commitments from points only.
+
+Both paths produce the same `cell.id()` and the same `TxEntry::Input` (the txlog is byte-canonical regardless of which String variant the prover chose).
 
 **The VM does not consult any Utreexo accumulator.** The caller must validate the supplied bytes against the Utreexo proof outside the VM before invoking the script. The txlog entry commits the script's reliance on that external check.
 
