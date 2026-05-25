@@ -65,27 +65,98 @@ impl Value {
         }
     }
 
-    /// Downcasts to `Expression`.
-    pub fn to_expression(self) -> Result<Expression, VMError> {
-        match self {
-            Value::Expression(e) => Ok(e),
-            _ => Err(VMError::TypeNotExpression),
-        }
-    }
-
-    /// Downcasts to `Constraint`.
-    pub fn to_constraint(self) -> Result<Constraint, VMError> {
-        match self {
-            Value::Constraint(c) => Ok(c),
-            _ => Err(VMError::TypeNotConstraint),
-        }
-    }
-
     /// Downcasts to `ClearToken`.
     pub fn to_clear_token(self) -> Result<ClearToken, VMError> {
         match self {
             Value::ClearToken(t) => Ok(t),
             _ => Err(VMError::TypeNotClearToken),
+        }
+    }
+
+    /// Lifts to `Expression`. `Int253` folds to `Expression::Constant`;
+    /// `Expression` passes through. Other variants error.
+    pub fn to_expression(self) -> Result<Expression, VMError> {
+        match self {
+            Value::Expression(e) => Ok(e),
+            Value::Int253(i) => Ok(Expression::constant(i)),
+            _ => Err(VMError::TypeNotExpression),
+        }
+    }
+
+    /// Lifts to `Constraint`. `Constraint` passes through; `Int253`
+    /// folds to `Constraint::Cleartext(value != 0)`. Other variants
+    /// error.
+    pub fn to_constraint(self) -> Result<Constraint, VMError> {
+        match self {
+            Value::Constraint(c) => Ok(c),
+            Value::Int253(i) => Ok(Constraint::Cleartext(!i.is_zero())),
+            _ => Err(VMError::TypeNotConstraint),
+        }
+    }
+
+    /// _x_ **neg** — Int253 cleartext or Expression LC negate.
+    pub fn neg(self) -> Result<Value, VMError> {
+        match self {
+            Value::Int253(v) => Ok(Value::Int253(-v)),
+            Value::Expression(e) => Ok(Value::Expression(-e)),
+            _ => Err(VMError::TypeNotInt253),
+        }
+    }
+
+    /// _x y_ **add** — cleartext if both Int253; lifts to Expression
+    /// otherwise (caller must be in external context).
+    pub fn add(self, other: Value, can_constrain: bool) -> Result<Value, VMError> {
+        match (self, other) {
+            (Value::Int253(x), Value::Int253(y)) => Ok(Value::Int253(x + y)),
+            (a, b) if can_constrain => {
+                Ok(Value::Expression(a.to_expression()? + b.to_expression()?))
+            }
+            _ => Err(VMError::TypeNotInt253),
+        }
+    }
+
+    /// _x_ **not** — cleartext if Int253; structural if Constraint.
+    pub fn not(self) -> Result<Value, VMError> {
+        match self {
+            Value::Int253(v) => {
+                let r = if v.is_zero() { 1u64 } else { 0u64 };
+                Ok(Value::Int253(Int253::from(r)))
+            }
+            Value::Constraint(c) => Ok(Value::Constraint(Constraint::not(c))),
+            _ => Err(VMError::TypeNotInt253),
+        }
+    }
+
+    /// _a b_ **and** — cleartext if both Int253; structural if a
+    /// Constraint is involved (caller in external context).
+    pub fn and(self, other: Value, can_constrain: bool) -> Result<Value, VMError> {
+        let either_constraint = matches!(self, Value::Constraint(_))
+            || matches!(other, Value::Constraint(_));
+        if can_constrain && either_constraint {
+            let a = self.to_constraint()?;
+            let b = other.to_constraint()?;
+            Ok(Value::Constraint(Constraint::and(a, b)))
+        } else {
+            let a = self.to_int253()?;
+            let b = other.to_int253()?;
+            let r = if !a.is_zero() && !b.is_zero() { 1u64 } else { 0u64 };
+            Ok(Value::Int253(Int253::from(r)))
+        }
+    }
+
+    /// _a b_ **or** — mirror of [`Value::and`].
+    pub fn or(self, other: Value, can_constrain: bool) -> Result<Value, VMError> {
+        let either_constraint = matches!(self, Value::Constraint(_))
+            || matches!(other, Value::Constraint(_));
+        if can_constrain && either_constraint {
+            let a = self.to_constraint()?;
+            let b = other.to_constraint()?;
+            Ok(Value::Constraint(Constraint::or(a, b)))
+        } else {
+            let a = self.to_int253()?;
+            let b = other.to_int253()?;
+            let r = if !a.is_zero() || !b.is_zero() { 1u64 } else { 0u64 };
+            Ok(Value::Int253(Int253::from(r)))
         }
     }
 }

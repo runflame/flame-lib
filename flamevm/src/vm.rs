@@ -1300,11 +1300,9 @@ impl VM {
         let two_have_non_int = !matches!(self.current_call.stack[n - 1], Value::Int253(_))
             || !matches!(self.current_call.stack[n - 2], Value::Int253(_));
         if self.is_external() && two_have_non_int {
-            let b = self.pop_value()?;
-            let a = self.pop_value()?;
-            let bexpr = Self::into_expression_or_const(b)?;
-            let aexpr = Self::into_expression_or_const(a)?;
-            self.push_value(Value::Constraint(crate::Constraint::eq(aexpr, bexpr)));
+            let b = self.pop_value()?.to_expression()?;
+            let a = self.pop_value()?.to_expression()?;
+            self.push_value(Value::Constraint(crate::Constraint::eq(a, b)));
         } else {
             let eq = self.current_call.stack[n - 1]
                 .try_eq(&self.current_call.stack[n - 2])?;
@@ -1316,39 +1314,18 @@ impl VM {
 
     /// _x_ **neg** → _-x_  (Int253 cleartext or Expression LC negate)
     fn op_neg<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
-        match self.pop_value()? {
-            Value::Int253(v) => {
-                self.push_value(Value::Int253(-v));
-                Ok(())
-            }
-            Value::Expression(e) => {
-                self.push_value(Value::Expression(-e));
-                Ok(())
-            }
-            other => {
-                self.push_value(other);
-                Err(VMError::TypeNotInt253)
-            }
-        }
+        let v = self.pop_value()?.neg()?;
+        self.push_value(v);
+        Ok(())
     }
 
     /// _x y_ **add** → _z_  (cleartext modulo ℓ, or LC sum)
     fn op_add<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
         let b = self.pop_value()?;
         let a = self.pop_value()?;
-        match (a, b) {
-            (Value::Int253(x), Value::Int253(y)) => {
-                self.push_value(Value::Int253(x + y));
-                Ok(())
-            }
-            (a, b) if self.is_external() => {
-                let aexpr = Self::into_expression_or_const(a)?;
-                let bexpr = Self::into_expression_or_const(b)?;
-                self.push_value(Value::Expression(aexpr + bexpr));
-                Ok(())
-            }
-            _ => Err(VMError::TypeNotInt253),
-        }
+        let r = a.add(b, self.is_external())?;
+        self.push_value(r);
+        Ok(())
     }
 
     /// _x y_ **mul** → _z_  (cleartext modulo ℓ, or CS multiplier)
@@ -1361,25 +1338,13 @@ impl VM {
                 Ok(())
             }
             (a, b) if self.is_external() => {
-                let aexpr = Self::into_expression_or_const(a)?;
-                let bexpr = Self::into_expression_or_const(b)?;
+                let aexpr = a.to_expression()?;
+                let bexpr = b.to_expression()?;
                 let product = aexpr.multiply(bexpr, delegate.cs());
                 self.push_value(Value::Expression(product));
                 Ok(())
             }
             _ => Err(VMError::TypeNotInt253),
-        }
-    }
-
-    /// Lifts a stack value to `Expression`. Int253 folds to
-    /// `Expression::Constant`; Expression passes through. Anything
-    /// else errors `TypeNotExpression`. Used by `add` / `mul` /
-    /// `eq` when at least one operand is non-Int253.
-    fn into_expression_or_const(v: Value) -> Result<crate::Expression, VMError> {
-        match v {
-            Value::Expression(e) => Ok(e),
-            Value::Int253(i) => Ok(crate::Expression::constant(i)),
-            _ => Err(VMError::TypeNotExpression),
         }
     }
 
@@ -1410,81 +1375,29 @@ impl VM {
         Ok(())
     }
 
-    /// `0x57 not` — pop one and negate.
-    ///
-    /// - `Int253`: zero → `1`, non-zero → `0`.
-    /// - `Constraint`: structural negation
-    ///   (`Constraint::not(c)`). External context only.
+    /// _x_ **not** → _y_  (Int253 logical, or Constraint negation)
     fn op_not<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
-        match self.pop_value()? {
-            Value::Int253(v) => {
-                let r = if v.is_zero() { 1u64 } else { 0u64 };
-                self.push_value(Value::Int253(Int253::from(r)));
-                Ok(())
-            }
-            Value::Constraint(c) => {
-                self.push_value(Value::Constraint(crate::Constraint::not(c)));
-                Ok(())
-            }
-            other => {
-                self.push_value(other);
-                Err(VMError::TypeNotInt253)
-            }
-        }
+        let v = self.pop_value()?.not()?;
+        self.push_value(v);
+        Ok(())
     }
 
     /// _a b_ **and** → _c_  (Int253 logical, or Constraint conjunction)
     fn op_and<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
-        let n = self.current_call.stack.len();
-        if n < 2 {
-            return Err(VMError::StackUnderflow);
-        }
-        let either_constraint = matches!(self.current_call.stack[n - 1], Value::Constraint(_))
-            || matches!(self.current_call.stack[n - 2], Value::Constraint(_));
-        if self.is_external() && either_constraint {
-            let b = Self::into_constraint_or_int253(self.pop_value()?)?;
-            let a = Self::into_constraint_or_int253(self.pop_value()?)?;
-            self.push_value(Value::Constraint(crate::Constraint::and(a, b)));
-        } else {
-            let b = self.pop_value()?.to_int253()?;
-            let a = self.pop_value()?.to_int253()?;
-            let r = if !a.is_zero() && !b.is_zero() { 1u64 } else { 0u64 };
-            self.push_value(Value::Int253(Int253::from(r)));
-        }
+        let b = self.pop_value()?;
+        let a = self.pop_value()?;
+        let r = a.and(b, self.is_external())?;
+        self.push_value(r);
         Ok(())
     }
 
-    /// `0x59 or` — mirror of `and` for disjunction.
+    /// _a b_ **or** → _c_  (Int253 logical, or Constraint disjunction)
     fn op_or<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
-        let n = self.current_call.stack.len();
-        if n < 2 {
-            return Err(VMError::StackUnderflow);
-        }
-        let either_constraint = matches!(self.current_call.stack[n - 1], Value::Constraint(_))
-            || matches!(self.current_call.stack[n - 2], Value::Constraint(_));
-        if self.is_external() && either_constraint {
-            let b = Self::into_constraint_or_int253(self.pop_value()?)?;
-            let a = Self::into_constraint_or_int253(self.pop_value()?)?;
-            self.push_value(Value::Constraint(crate::Constraint::or(a, b)));
-        } else {
-            let b = self.pop_value()?.to_int253()?;
-            let a = self.pop_value()?.to_int253()?;
-            let r = if !a.is_zero() || !b.is_zero() { 1u64 } else { 0u64 };
-            self.push_value(Value::Int253(Int253::from(r)));
-        }
+        let b = self.pop_value()?;
+        let a = self.pop_value()?;
+        let r = a.or(b, self.is_external())?;
+        self.push_value(r);
         Ok(())
-    }
-
-    /// Lifts a stack value to `Constraint`. Constraint passes
-    /// through; Int253 folds to `Constraint::Cleartext(value !=
-    /// 0)`. Anything else errors. Used by `and` / `or` / `not`
-    /// when at least one operand is a Constraint.
-    fn into_constraint_or_int253(v: Value) -> Result<crate::Constraint, VMError> {
-        match v {
-            Value::Constraint(c) => Ok(c),
-            Value::Int253(i) => Ok(crate::Constraint::Cleartext(!i.is_zero())),
-            _ => Err(VMError::TypeNotConstraint),
-        }
     }
 
     /// `0x5f` `size` — peeks the top value and pushes its length as an
