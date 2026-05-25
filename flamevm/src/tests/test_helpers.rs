@@ -184,16 +184,16 @@ pub(crate) fn pushstr_bytes(payload: &[u8]) -> Vec<u8> {
     s
 }
 
-/// Helper: builds a VM with a child CellOpen frame as `current_call`
+/// Helper: builds a VM with a child ActorCall frame as `current_call`
 /// and a placeholder ExternalRoot on `call_stack`. Used by the arity
-/// / clean-stack `return` tests which need a non-root frame to
-/// exercise the inner checks (root frame would short-circuit with
-/// `ReturnAtRoot`).
+/// / clean-stack `return` tests which need a non-root frame.
 pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
     let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
-    let child_kind = CallKind::CellOpen {
+    let child_kind = CallKind::ActorCall {
+        actor: ActorID::Hash([0u8; 32]),
+        method: Int253::ZERO,
+        caller: ActorID::Hash([0u8; 32]),
         anchor: Anchor([0u8; 32]),
-        predicate: Predicate::Opaque(CompressedRistretto([0u8; 32])),
     };
     let child = CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), child_kind, 500, 0, 0);
     let mut vm = VM::new(dummy_header(), parent);

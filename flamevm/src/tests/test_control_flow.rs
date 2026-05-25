@@ -314,9 +314,11 @@ fn return_transfers_values_to_parent() {
     let child_script = vec![0x07, 0x01, 0x7e];
     let parent_frame =
         CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
-    let child_kind = CallKind::CellOpen {
+    let child_kind = CallKind::ActorCall {
+        actor: ActorID::Hash([0u8; 32]),
+        method: Int253::ZERO,
+        caller: ActorID::Hash([0u8; 32]),
         anchor: Anchor([0u8; 32]),
-        predicate: Predicate::Opaque(CompressedRistretto([0u8; 32])),
     };
     let child_frame = CallFrame::new(
         Program::parse(&child_script).expect("parse").into_instructions(),
