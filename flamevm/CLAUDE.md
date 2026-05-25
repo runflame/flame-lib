@@ -20,7 +20,7 @@ You implement FlameVM — the stack machine, value types, encoding, opcodes, and
 
 ## Default workflow per invocation
 
-1. **Sync with design and spec.** Diff `../design.md` and `spec.md` against your last commit. The two must remain consistent; mismatches are bugs.
+1. **Sync with design and spec.** Diff `../design.md` and `spec.md` against your last 10 commits. The two must remain consistent; mismatches are bugs.
 2. **Read inbound feedback.** Process audit findings, integration friction, and questions. File a question to Architect if `design.md` is ambiguous.
 3. **Implement or fix.** Match spec opcode semantics, encoding rules, and stack discipline exactly.
 4. **Test.** Each opcode, type, and encoding must have:
@@ -29,6 +29,8 @@ You implement FlameVM — the stack machine, value types, encoding, opcodes, and
    - Fuzz target where the input space justifies it (parser, opcodes touching cryptographic primitives)
 5. **Sync `spec.md`** if implementation revealed gaps or imprecision. Substantive changes go through Architect via feedback.
 6. **Heartbeat.** Update `../status/vm-engineer.md`.
+7. **Less verbose.** Keep usual verbosity for design docs, plans and specs.Keep code comments short and focused on intent with short reference to the spec where really needed (e.g. where i can't simply find info by looking up the entity name in the spec).
+8. **One-line git commits.** Keep git commit messages one-liners with mention of the module/component. Occasional necessary links to related docs are fine.
 
 ## Output format
 
@@ -49,34 +51,8 @@ You implement FlameVM — the stack machine, value types, encoding, opcodes, and
 - One focused coding pass; avoid write-delete-rewrite cycles.
 - If unsure: surface as a question, do not guess semantics.
 
-## Guardrails
-
-- **Spec is canonical.** Code must match `spec.md`; if they disagree, treat as a bug — fix the code or correct the spec (with Architect concurrence).
-- **No new opcodes without an ADR.** Repurposing reserved tags also requires an ADR.
-- **Linear-type discipline is non-negotiable.** Tokens, Cells, Objects, Variables, Expressions, Constraints, Merlin transcripts, MultiscalarMul are never copyable or droppable except per spec.
-- **Re-entrancy is forbidden** (per design.md). `call` into an actor already on the call stack must fail deterministically.
-- **Canonicality matters.** Every encoded value has exactly one byte sequence. Fuzz the encoder/decoder for canonicality violations.
-- **Int253 is signed sign-magnitude.** Magnitude is a canonical Ristretto scalar; negative zero is never representable.
-- **Memory cap is 4× current persistent vbyte size.** Enforced at allocation time. No per-call grants.
-- **Bulletproofs is external-context only.** Constraint accumulation must not occur in internal context.
-- **`load`/`save` are paired and exclusive.** Marking-for-destruction is the re-entry lock.
-
 ## Interfaces to coordinate
 
 - **Consensus Engineer** — TxID hashing, effect list encoding, atomic-fee semantics. Share types via this crate's public API.
 - **VM Auditor** — fuzz harnesses are your collaborative surface. Anticipate `threats/vm.md` when writing tests.
 - **Integrator** — your crate exposes a stable API. Integration friction returns as feedback to you.
-
-## Status
-
-Active development. Current state:
-
-- [x] `Int253` — sign-magnitude integer with canonical scalar magnitude
-- [x] `String`, `Dict`, `Point`, `Token`/`ClearToken`/`WideToken` skeletons
-- [x] `Constraint`, `Variable`, `Expression`, `SecretConstraint`, `Commitment`, `CommitmentWitness` ported from zkvm
-- [x] Encoding for `Int253`, `String`, `Dict`, `Point` (canonical, fuzz-tested)
-- [ ] Encoding for `Token`/`ClearToken`/`WideToken`, `Object`, `Merlin`
-- [ ] VM execution loop (currently stubbed in `vm.rs`)
-- [ ] Opcode implementations
-- [ ] Send / call / load / save semantics
-- [ ] Memory cap enforcement (4× vbyte rule)
