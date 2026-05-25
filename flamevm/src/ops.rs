@@ -113,290 +113,99 @@ const OP_METHOD: u8 = 0xa1;
 
 // ── Instruction enum ─────────────────────────────────────────────────
 
-/// A decoded instruction.
+/// A decoded instruction. See `spec.md` for stack semantics; each
+/// variant's inline comment shows its stack diagram.
 #[derive(Clone, Debug)]
 pub enum Instruction {
-    /// **push:_k_** / **pushint_n_** / **pushint** → _int_
-    ///
-    /// Pushes an `Int253`. Encoder picks the narrowest opcode width.
-    PushInt(Int253),
-
-    /// **pushstr:_n_:_x_** → _string_
-    ///
-    /// Pushes a String of `n` bytes.
-    PushStr(String),
-
-    /// **pushpoint** → _point_
-    PushPoint([u8; 32]),
-
-    /// _flv_ **pushtoken** → _token_
-    PushToken,
-
-    /// _x_ **drop** → ø
-    ///
-    /// Fails if `x` is not a droppable type.
-    Drop,
-
-    /// **nop** → ø
-    Nop,
-
-    /// _x(k) … x(0) k_ **dup** → _x(k) … x(0) x(k)_
-    Dup,
-
-    /// _x(k) … x(0) k_ **roll** → _x(k-1) … x(0) x(k)_
-    Roll,
-
-    /// _x(k) … x(0)_ **dup:_k_** → _x(k) … x(0) x(k)_
-    DupK(u8),
-
-    /// _x(k) … x(0)_ **roll:_k_** → _x(k-1) … x(0) x(k)_
-    RollK(u8),
-
-    /// _s n_ **readbits** → _s' x 1_ | _s 0_
-    ReadBits,
-
-    /// _s_ **readint** → _s' x 1_ | _s 0_
-    ReadInt,
-
-    /// _s n_ **readstr** → _s' s'' 1_ | _s 0_
-    ReadStr,
-
-    /// _s_ **readpoint** → _s' point 1_ | _s 0_
-    ReadPoint,
-
-    /// _s x n_ **writebits** → _s'_
-    WriteBits,
-
-    /// _s x_ **writeint** → _s'_
-    WriteInt,
-
-    /// _a b_ **append** → _c_
-    Append,
-
-    /// _s n_ **writezeros** → _s'_
-    WriteZeros,
-
-    /// _s_ **bitnot** → _s'_
-    BitNot,
-
-    /// _a b_ **bitor** → _c_
-    BitOr,
-
-    /// _a b_ **bitand** → _c_
-    BitAnd,
-
-    /// _a b_ **bitxor** → _c_
-    BitXor,
-
-    /// _a n_ **shiftleft** → _b c_
-    ShiftLeft,
-
-    /// _a n_ **shiftright** → _b c_
-    ShiftRight,
-
-    /// _s_ **keccak256** → _hash_
-    Keccak256,
-
-    /// _x_ **abs** → _|x| sign_
-    Abs,
-
-    /// _x y_ **eq** → _x y {0|1}_
-    Eq,
-
-    /// _x_ **neg** → _-x_
-    Neg,
-
-    /// _x y_ **add** → _z_
-    Add,
-
-    /// _x y_ **mul** → _z_
-    Mul,
-
-    /// _x z_ **divmod** → _d r_
-    DivMod,
-
-    /// _s_ **mod252** → _int_
-    Mod252,
-
-    /// _x_ **not** → _y_
-    Not,
-
-    /// _a b_ **and** → _c_
-    And,
-
-    /// _a b_ **or** → _c_
-    Or,
-
-    /// _x_ **size** → _x n_
-    Size,
-
-    /// _s_ **scalar** → _expr_
-    Scalar,
-
-    /// _s_ **commit** → _var_
-    Commit,
-
-    /// **alloc** → _expr_
-    ///
-    /// Witness in `Option<Int253>` is filled by the prover; verifier
-    /// sees `None` and allocates an unassigned R1CS variable.
-    Alloc(Option<Int253>),
-
-    /// _var_ **expr** → _expr_
-    Expr,
-
-    /// _expr n_ **range** → _expr_
-    Range,
-
-    /// _… val key val key n_ **dict** → _dict_
-    Dict,
-
-    /// _dict k v_ **put** → _dict'_
-    Put,
-
-    /// _dict k v_ **replace** → _dict' {prev 1|0}_
-    Replace,
-
-    /// _dict k_ **get** → _dict' v_
-    Get,
-
-    /// _dict k_ **getopt** → _dict' {v 1|0}_
-    GetOpt,
-
-    /// _dict k_ **getdup** → _dict {v 1|0}_
-    GetDup,
-
-    /// _dict_ **first** → _dict {k 1|0}_
-    First,
-
-    /// _dict_ **last** → _dict {k 1|0}_
-    Last,
-
-    /// _dict k_ **next** → _dict {k' 1|0}_
-    Next,
-
-    /// _label_ **merlin** → _merlin_
-    Merlin,
-
-    /// _merlin label data_ **merlinwrite** → _merlin_
-    MerlinWrite,
-
-    /// _merlin label n_ **merlinread** → _merlin string_
-    MerlinRead,
-
-    /// _s_ **sha256** → _hash_
-    Sha256,
-
-    /// _s_ **sha512** → _hash_
-    Sha512,
-
-    /// _s_ **sha3** → _hash_
-    Sha3,
-
-    /// _data_ **log** → ø
-    Log,
-
-    /// _token_ **amount** → _token qty flv_
-    Amount,
-
-    /// _qty tag_ **issue** → _token_
-    Issue,
-
-    /// _token_ **retire** → ø
-    Retire,
-
-    /// _qty flv_ **borrow** → _widetoken token_
-    Borrow,
-
-    /// _token1 token2_ **merge** → _token_
-    Merge,
-
-    /// _token qty_ **split** → _token1 token2_
-    Split,
-
-    /// _anytokens… commitments… m n_ **mix** → _tokens_
-    Mix,
-
-    /// _token f f' q q'_ **decrypt** → _cleartoken_
-    Decrypt,
-
-    /// _cid tag_ **issueflv** → _int_
-    IssueFlv,
-
-    /// _x_ **verify** → ø
-    Verify,
-
-    /// _qty flv_ **fee** → _widetoken_
-    Fee,
-
-    /// _prog_ **run** → _results…_
-    Run,
-
-    /// _prog_ **loop** → ø
-    Loop,
-
-    /// _i prog…_ **switch** → _results…_
-    Switch,
-
-    /// _x(k-1) … x(0) k_ **return** → ø
-    Return,
-
-    /// _x_ **type** → _x n_
-    Type,
-
-    /// **break:_k_** → ø
-    ///
-    /// Stops the current program and `k` more enclosing Runs.
-    BreakK(u8),
-
-    /// _string_ **input** → _cell_
-    ///
-    /// Optional inner `InputWitnesses` carries prover-side
-    /// commitment witnesses for Token payload entries; verifier-side
-    /// parsing always reconstructs `Input(None)`.
-    Input(Option<Box<crate::witness::InputWitnesses>>),
-
-    /// _items… pred_ **cell** → _cell_
-    Cell,
-
-    /// _items… pred_ **output** → ø
-    Output,
-
-    /// _cell internal_key neighbors position script args… k_ **open** → _results…_
-    Open,
-
-    /// _args… k refund gas bytes method addr_ **send** → ø
-    Send,
-
-    /// _args… k gas bytes method addr_ **call** → _results…_
-    Call,
-
-    /// **load** → _dict_
-    Load,
-
-    /// _dict_ **save** → ø
-    Save,
-
-    /// _cell_ **signtx** → _items… k_
-    Signtx,
-
-    /// _cell prog sig args… m_ **signrun** → _items… k_
-    Signrun,
-
-    /// **actorid** → _string_
-    Actorid,
-
-    /// **anchor** → _string_
-    Anchor,
-
-    /// **callerid** → _string_
-    Callerid,
-
-    /// **method** → _int_
-    Method,
-
-    /// Unknown opcode byte; used by the parser for any unassigned tag.
-    Ext(u8),
+    PushInt(Int253),                                       // ø push → int
+    PushStr(String),                                       // ø pushstr → str
+    PushPoint([u8; 32]),                                   // ø pushpoint → point
+    PushToken,                                             // flv pushtoken → token
+    Drop,                                                  // x drop → ø
+    Nop,                                                   // ø nop → ø
+    Dup,                                                   // x(k) … x(0) k dup → x(k) … x(0) x(k)
+    Roll,                                                  // x(k) … x(0) k roll → x(k-1) … x(0) x(k)
+    DupK(u8),                                              // x(k) … x(0) dup:k → x(k) … x(0) x(k)
+    RollK(u8),                                             // x(k) … x(0) roll:k → x(k-1) … x(0) x(k)
+    ReadBits,                                              // s n readbits → s' x 1 | s 0
+    ReadInt,                                               // s readint → s' x 1 | s 0
+    ReadStr,                                               // s n readstr → s' s'' 1 | s 0
+    ReadPoint,                                             // s readpoint → s' p 1 | s 0
+    WriteBits,                                             // s x n writebits → s'
+    WriteInt,                                              // s x writeint → s'
+    Append,                                                // s s' append → s''
+    WriteZeros,                                            // s n writezeros → s'
+    BitNot,                                                // s bitnot → s'
+    BitOr,                                                 // a b bitor → c
+    BitAnd,                                                // a b bitand → c
+    BitXor,                                                // a b bitxor → c
+    ShiftLeft,                                             // a n shiftleft → b c
+    ShiftRight,                                            // a n shiftright → b c
+    Keccak256,                                             // s keccak256 → x
+    Abs,                                                   // x abs → |x| s
+    Eq,                                                    // a b eq → a b {0|1} or constraint
+    Neg,                                                   // x neg → -x
+    Add,                                                   // x y add → z
+    Mul,                                                   // x y mul → z
+    DivMod,                                                // x z divmod → d r
+    Mod252,                                                // s mod252 → int
+    Not,                                                   // x not → y
+    And,                                                   // a b and → c
+    Or,                                                    // a b or → c
+    Size,                                                  // x size → x n
+    Scalar,                                                // s scalar → expr
+    Commit,                                                // s commit → var
+    Alloc(Option<Int253>),                                 // ø alloc → expr
+    Expr,                                                  // var expr → expr
+    Range,                                                 // expr n range → expr
+    Dict,                                                  // val key … val key n dict → dict
+    Put,                                                   // dict k v put → dict'
+    Replace,                                               // dict k v replace → dict' {prev 1 | 0}
+    Get,                                                   // dict k get → dict' k v
+    GetOpt,                                                // dict k getopt → dict' {v 1 | 0}
+    GetDup,                                                // dict k getdup → dict {v 1 | 0}
+    First,                                                 // dict first → dict {k 1 | 0}
+    Last,                                                  // dict last → dict {k 1 | 0}
+    Next,                                                  // dict k next → dict {k' 1 | 0}
+    Merlin,                                                // label merlin → merlin
+    MerlinWrite,                                           // m label s merlinwrite → m
+    MerlinRead,                                            // m label n merlinread → m s
+    Sha256,                                                // s sha256 → x
+    Sha512,                                                // s sha512 → x
+    Sha3,                                                  // s sha3 → x
+    Log,                                                   // s log → ø
+    Amount,                                                // t amount → t qty flv
+    Issue,                                                 // qty tag issue → T
+    Retire,                                                // t retire → ø
+    Borrow,                                                // qty flv borrow → -T +T
+    Merge,                                                 // a b merge → {c 1 | a b 0}
+    Split,                                                 // a q split → a' b
+    Mix,                                                   // tokens… cmts… m n mix → tokens
+    Decrypt,                                               // T f' f q' q decrypt → CT
+    IssueFlv,                                              // cid tag issueflv → int
+    Verify,                                                // x verify → ø
+    Fee,                                                   // qty flv fee → -WT
+    Run,                                                   // s run → …
+    Loop,                                                  // ø loop → ø
+    Switch,                                                // x a b switch → …
+    Return,                                                // a(k-1) … a(0) k return → ø
+    Type,                                                  // x type → x code
+    BreakK(u8),                                            // ø break:k → ø
+    Input(Option<Box<crate::witness::InputWitnesses>>),    // s input → cell
+    Cell,                                                  // items… k pred cell → cell
+    Output,                                                // items… k pred output → ø
+    Open,                                                  // cell ik nbrs pos script gas bytes args… k open → results… k'
+    Send,                                                  // args… k refund gas bytes method addr send → ø
+    Call,                                                  // args… k gas bytes method addr call → results… k'
+    Load,                                                  // ø load → dict
+    Save,                                                  // dict save → ø
+    Signtx,                                                // cell signtx → items… k
+    Signrun,                                               // cell script sig gas bytes args… m signrun → results… k'
+    Actorid,                                               // ø actorid → s
+    Anchor,                                                // ø anchor → s
+    Callerid,                                              // ø callerid → s
+    Method,                                                // ø method → int
+    Ext(u8),                                               // unknown opcode byte; produced by the parser for any unassigned tag
 }
 
 impl Instruction {
