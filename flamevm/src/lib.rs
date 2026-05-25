@@ -47,4 +47,4 @@ pub use verifier::Verifier;
 pub use witness::{InputWitnesses, TokenWitness};
 
 pub use tx::{ExternalTx, InternalTx};
-pub use vm::VM;
+pub(crate) use vm::VM;

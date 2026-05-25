@@ -368,7 +368,7 @@ impl core::fmt::Debug for TxResult {
     }
 }
 
-pub struct VM {
+pub(crate) struct VM {
     #[allow(dead_code)]
     header: TxHeader,
     pub(crate) last_anchor: Option<Anchor>,
