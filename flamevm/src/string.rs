@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::constraints::Commitment;
+use crate::crypto::Point;
 use crate::errors::VMError;
 use crate::int253::Int253;
 use crate::ops::Instruction;
@@ -11,21 +12,21 @@ use crate::ops::Instruction;
 /// Variable-length binary string with optional witness-bearing
 /// variants. See module docs for the design.
 ///
-/// `Clone` and `Debug` are implemented manually so the `Cell`
-/// variant — whose inner `Cell` carries non-clonable, non-debuggable
-/// payload values — can share ownership via `Arc` on clone (cheap
-/// refcount bump, witnesses preserved) and print as the cell id on
-/// debug. The cheap-Box variants (Commitment / Scalar / Predicate /
-/// Script) clone in O(1) and keep their witnesses normally.
+/// `Clone` and `Debug` are implemented manually so the `Cell` variant
+/// — whose inner `Cell` carries non-clonable, non-debuggable payload
+/// values — can share ownership via `Arc` on clone (cheap refcount
+/// bump, witnesses preserved) and print as the cell id on debug. The
+/// other variants clone in O(1) (cheap Box / inline) and keep their
+/// witnesses normally.
 pub enum String {
     /// Plain byte buffer — the verifier's view.
     Opaque(Vec<u8>),
-    /// Pedersen commitment witness; encodes to 32-byte point.
-    Commitment(Box<Commitment>),
+    /// Point witness (Opaque / Commitment / Predicate). Encodes to
+    /// the canonical 32-byte compressed point regardless of variant;
+    /// see [`Point`].
+    Point(Point),
     /// Scalar witness (cleartext `Int253`); encodes to 32 bytes.
     Scalar(Box<Int253>),
-    /// Predicate witness; encodes to 32-byte point.
-    Predicate(Box<crate::cell::Predicate>),
     /// Prover-side sub-script: a decoded instruction stream with
     /// witness slots intact. Encodes to the compiled bytecode.
     /// Consumed by `op_run`, `op_switch`, `op_signcall` via
@@ -49,9 +50,14 @@ pub enum String {
 impl String {
     // ── Construction ────────────────────────────────────────────
 
-    /// Constructs a witness-bearing Commitment-String.
+    /// Constructs a witness-bearing Point-String.
+    pub fn point(p: Point) -> String {
+        String::Point(p)
+    }
+
+    /// Convenience: wrap a `Commitment` as a `String::Point(Point::Commitment)`.
     pub fn commitment(c: Commitment) -> String {
-        String::Commitment(Box::new(c))
+        String::Point(Point::commitment(c))
     }
 
     /// Constructs a witness-bearing Scalar-String.
@@ -59,9 +65,9 @@ impl String {
         String::Scalar(Box::new(s.into()))
     }
 
-    /// Constructs a witness-bearing Predicate-String.
+    /// Convenience: wrap a `Predicate` as a `String::Point(Point::Predicate)`.
     pub fn predicate(p: crate::cell::Predicate) -> String {
-        String::Predicate(Box::new(p))
+        String::Point(Point::predicate(p))
     }
 
     /// Constructs a witness-bearing Script-String. Used by the
@@ -100,11 +106,8 @@ impl String {
     pub fn bytes_view(&self) -> Cow<'_, [u8]> {
         match self {
             String::Opaque(d) => Cow::Borrowed(d),
-            String::Commitment(c) => {
-                Cow::Owned(c.to_point().as_bytes().to_vec())
-            }
+            String::Point(p) => Cow::Owned(p.to_bytes().to_vec()),
             String::Scalar(s) => Cow::Owned(s.to_bytes().to_vec()),
-            String::Predicate(p) => Cow::Owned(p.to_point().as_bytes().to_vec()),
             String::Script(instrs) => Cow::Owned(compile_instructions(instrs)),
             String::Cell(c) => Cow::Owned(c.to_bytes()),
         }
@@ -116,9 +119,8 @@ impl String {
     pub fn to_bytes(self) -> Vec<u8> {
         match self {
             String::Opaque(d) => d,
-            String::Commitment(c) => c.to_point().as_bytes().to_vec(),
+            String::Point(p) => p.to_bytes().to_vec(),
             String::Scalar(s) => s.to_bytes().to_vec(),
-            String::Predicate(p) => p.to_point().as_bytes().to_vec(),
             String::Script(instrs) => compile_instructions(&instrs),
             String::Cell(c) => c.to_bytes(),
         }
@@ -130,14 +132,13 @@ impl String {
         self.bytes_view().into_owned()
     }
 
-    /// Length in canonical wire bytes. For witness-bearing variants
-    /// this is the encoded-form length (32 bytes for Commitment,
-    /// Scalar, Predicate; compiled bytecode length for Script;
-    /// serialized cell length for Cell).
+    /// Length in canonical wire bytes. 32 bytes for Point/Scalar,
+    /// compiled bytecode length for Script, serialized cell length
+    /// for Cell.
     pub fn len(&self) -> usize {
         match self {
             String::Opaque(d) => d.len(),
-            String::Commitment(_) | String::Scalar(_) | String::Predicate(_) => 32,
+            String::Point(_) | String::Scalar(_) => 32,
             String::Script(instrs) => compile_instructions(instrs).len(),
             String::Cell(c) => c.to_bytes().len(),
         }
@@ -148,8 +149,7 @@ impl String {
         match self {
             String::Opaque(d) => d.is_empty(),
             String::Script(instrs) => instrs.is_empty(),
-            // Commitment / Scalar / Predicate are 32 bytes; Cell has a
-            // non-empty header → never empty.
+            // Point / Scalar are 32 bytes; Cell has a non-empty header.
             _ => false,
         }
     }
@@ -166,13 +166,12 @@ impl String {
 
     // ── Downcasts ───────────────────────────────────────────────
 
-    /// Downcasts to a `Commitment`. For `Opaque`, parses the bytes
-    /// as a 32-byte compressed Ristretto point and wraps in
-    /// `Commitment::Closed`. For `String::Commitment(c)`, returns
-    /// the witness directly.
+    /// Downcasts to a `Commitment`. `Point` routes through
+    /// `Point::to_commitment` (preserves witness when present);
+    /// `Opaque` parses 32 bytes as `Commitment::Closed`.
     pub fn to_commitment(self) -> Result<Commitment, VMError> {
         match self {
-            String::Commitment(c) => Ok(*c),
+            String::Point(p) => p.to_commitment(),
             String::Opaque(data) => {
                 if data.len() != 32 {
                     return Err(VMError::TypeNotString);
@@ -226,13 +225,12 @@ impl String {
         }
     }
 
-    /// Downcasts to a `Predicate`. For `Opaque`, parses the bytes as
-    /// a 32-byte compressed Ristretto point and wraps in
-    /// `Predicate::Opaque`. For `String::Predicate(p)`, returns the
-    /// witness directly.
+    /// Downcasts to a `Predicate`. `Point` routes through
+    /// `Point::to_predicate` (preserves witness when present);
+    /// `Opaque` parses 32 bytes as `Predicate::Opaque`.
     pub fn to_predicate(self) -> Result<crate::cell::Predicate, VMError> {
         match self {
-            String::Predicate(p) => Ok(*p),
+            String::Point(p) => p.to_predicate(),
             String::Opaque(data) => {
                 if data.len() != 32 {
                     return Err(VMError::InvalidPoint);
@@ -429,9 +427,8 @@ impl Clone for String {
     fn clone(&self) -> Self {
         match self {
             String::Opaque(d) => String::Opaque(d.clone()),
-            String::Commitment(c) => String::Commitment(c.clone()),
+            String::Point(p) => String::Point(p.clone()),
             String::Scalar(s) => String::Scalar(s.clone()),
-            String::Predicate(p) => String::Predicate(p.clone()),
             String::Script(i) => String::Script(i.clone()),
             // Arc bump — witnesses survive cloning (the underlying
             // Cell is shared, not deep-copied). Needed so the VM's
@@ -446,9 +443,8 @@ impl std::fmt::Debug for String {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             String::Opaque(d) => f.debug_tuple("Opaque").field(d).finish(),
-            String::Commitment(c) => f.debug_tuple("Commitment").field(c).finish(),
+            String::Point(p) => f.debug_tuple("Point").field(p).finish(),
             String::Scalar(s) => f.debug_tuple("Scalar").field(s).finish(),
-            String::Predicate(p) => f.debug_tuple("Predicate").field(p).finish(),
             String::Script(i) => f.debug_tuple("Script").field(i).finish(),
             // Cell isn't Debug-derived; print its canonical id (in
             // hex) as a surrogate so test output stays readable.
