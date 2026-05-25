@@ -49,10 +49,11 @@ what's left to build.
 | 37 | Fuzz targets + canonicality sweeps                                 | ⏳      |
 | 38 | spec.md + design.md sync + ADR backfill                            | ⏳      |
 | 39 | End-to-end integration tests                                       | ⏳      |
+| 40 | Isolated calls: `open`/`signcall`/`call` unified frames (ADR 0013) | ⏳      |
 
-**31 of 39 complete (79 %).** Total test count: 536 passing; build
+**31 of 40 complete (78 %).** Total test count: 536 passing; build
 clean; remaining compiler warnings target Phases 34 / 35 (gas + mem
-accounting).
+accounting) and Phase 40 (frame creation paths for `open`/`signcall`).
 
 ### Actor build (Phases 24–29, 32) — landed in 8 units
 
@@ -432,6 +433,10 @@ at consensus seam, ratio enforcement).
   - `0012-load-save-reentry-lock` — `mark_for_destruction` as
     runtime enforcement of the load/save lock; per-frame
     `loaded` flag; tx-end commit sweep.
+  - `0013-predicate-call-isolation` — `open` / `signcall` / `call`
+    all create isolated call frames; `signrun` renamed to
+    `signcall`; cell-script sandbox eliminates confused-deputy
+    in actor context.
   - `MultiscalarMul` removal.
   - `op_log` opcode addition.
   - Encrypted `issue` semantics (recording the Phase-33 decision).
@@ -482,6 +487,74 @@ Phase 23. Phase 39 focuses on the actor-side flows.
 
 ---
 
+## Phase 40 — Isolated calls: unify `open` / `signcall` / `call`
+
+**Goal**: implement ADR 0013 (design.md §Calls and isolation).
+Predicate-bound execution always creates a new call frame; the
+three call-creating opcodes share one mechanism.
+
+**Status quo**: `op_open` and `op_signrun` use `enter_run` (Run-level,
+shared frame). `op_call` already creates a `CallKind::ActorCall`
+frame.
+
+**Items**:
+- **Rename** `signrun` → `signcall` everywhere: opcode constant
+  `OP_SIGNRUN` → `OP_SIGNCALL` (byte stays `0x99`),
+  `Instruction::Signrun` → `Signcall`, `signrun_message` →
+  `signcall_message`, transcript label `flamevm.signrun.v1` →
+  `flamevm.signcall.v1` (consensus-fixed; documented in spec).
+- **Reshape `op_open`**:
+  - Pop additional `gas` + `bytes` operands (Int253) like `op_call`.
+    Spec stack: `cell ik nbrs pos script gas bytes args… k`.
+  - Verify call-proof as today.
+  - Build a `CallKind::CellOpen { anchor, predicate }` frame with
+    its own stack (payload + args), gas, mem_limit. No actor identity.
+  - Replace current Run-level enter; push parent onto `call_stack`.
+- **Reshape `op_signcall`**: same as `op_open`, authenticator
+  changes from merkle-path to signature.
+- **`CallKind::CellOpen`**:
+  - `actor()` returns `None` (no actor identity in cell scope).
+  - `method()` returns `None`.
+  - `caller()` returns `None`.
+  - `anchor()` returns the stored cell anchor.
+  - `op_load` / `op_save` / `op_call` / `op_send` all error
+    `OpcodeRequiresActorContext` from inside a CellOpen frame.
+- **Result protocol**: cell-script must `return k'` to exit; results
+  pour onto the parent's stack. `break:k` cascades past frames as
+  with actor calls. Stack must be empty at clean exit (the existing
+  `finish_call` invariant).
+- **External-context `is_external` semantics**: `CallKind::CellOpen`
+  nested under `ExternalRoot` returns `true` from `is_external`
+  (CS opcodes available); nested under `InternalRoot`/`ActorCall`
+  returns `false` (no CS, no actor authority). This preserves the
+  existing rule that external scripts can use the CS and internal
+  scripts can't.
+- **Tests**: ~12 new
+  - `open_creates_isolated_frame_with_own_stack_and_gas`
+  - `open_clears_remaining_gas_refunds_to_parent`
+  - `open_script_op_load_errors_no_actor`
+  - `open_script_op_call_errors_no_actor`
+  - `open_script_op_send_errors_no_actor`
+  - `open_external_ctx_allows_cs_opcodes`
+  - `open_internal_ctx_blocks_cs_opcodes`
+  - `signcall_isolation_matches_open`
+  - `signcall_message_label_v1`
+  - `open_return_arity_pours_to_parent`
+  - `open_break_cascades_past_frame`
+  - Existing `open_*` tests in `test_cells.rs` re-targeted to push
+    `gas` + `bytes` operands and consume returns.
+
+**ADR**: `decisions/0013-predicate-call-isolation.md` formalizes
+the choice. Reserved alongside the actor-build backfill
+(0010 / 0011 / 0012) — see Phase 38.
+
+**Risk**: substantial. Existing scripts using cell-open and
+`signrun` need updated stack shapes. Audit every existing
+`open` / `signcall` test in `test_cells.rs` and
+`test_authorization.rs` to add `gas`/`bytes` and `return k`.
+
+---
+
 # Section 3 — Design-doc audit
 
 Walk every architectural commitment in `design.md` and trace to
@@ -508,6 +581,7 @@ its phase:
 | Actor data model + identity (Q1, Q2, Q4) | ✅ Done | 24 |
 | Send-id semantics + refund predicate (Q3, Q5) | ✅ Done | 32 |
 | Load/save as re-entry lock + self-destruct (Q6) | ✅ Done | 25 |
+| Isolated calls for `open` / `signcall` / `call` (ADR 0013) | ⏳ Pending | 40 |
 
 **Open structural questions** from design.md:
 - BFT family / stake / finality / validator rotation — consensus

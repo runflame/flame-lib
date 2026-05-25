@@ -303,7 +303,7 @@ Layout of all the instructions:
 | 6 | push6 | pushi128 | dup6 | roll6 | append | mod252 | first | mix | break6 | load | blockhash |  |  |  |  |  |
 | 7 | push7 | pushi128s | dup7 | roll7 | writezeros | not | last | decrypt | break7 | save | blockburn |  |  |  |  |  |
 | 8 | push8 | pushint | dup8 | roll8 | bitnot | and | next | issueflv | break8 | signtx | blockweight |  |  |  |  |  |
-| 9 | push9 | pushstr | dup9 | roll9 | bitor | or | merlin | verify | break9 | signrun | blockrate |  |  |  |  |  |
+| 9 | push9 | pushstr | dup9 | roll9 | bitor | or | merlin | verify | break9 | signcall | blockrate |  |  |  |  |  |
 | A | push10 | pushpoint | dup10 | roll10 | bitand | const | merlinwrite | fee | break10 | timelock | chainstate |  |  |  |  |  |
 | B | push11 | pushtoken | dup11 | roll11 | bitxor | extvar | merlinread | run | break11 | version |  |  |  |  |  |  |
 | C | push12 | drop | dup12 | roll12 | shiftleft | intvar | sha256 | loop | break12 | actorid |  |  |  |  |  |  |
@@ -405,7 +405,7 @@ All constraint operations available on external transactions only.
 | 6d | sha512 | str → x | Returns a 512-bit string with sha2-512 digest of an input |
 | 6e | sha3 | str → x | Returns a 256-bit string with sha3-256 (FIPS-202) digest of an input |
 | 4e | keccak256 | str → x | Returns a 256-bit string with Keccak-256 digest of an input (Ethereum compatibility). |
-| 6f | log | str → ø | **[E or I]** Pops a `String`, emits `TxEntry::Data(bytes)` into the txlog. Visible to the outer verifier; doesn't occupy persistent storage. Mirrors zkvm's `log` opcode (same byte). Witness-bearing String variants serialize via `to_bytes` so prover and verifier emit identical canonical bytes. (Earlier draft assigned `sigverify` to this byte; that role is now covered by the deferred-sig batch on `signtx` / `signrun` via the delegate's `BatchVerifier` — no separate opcode.) |
+| 6f | log | str → ø | **[E or I]** Pops a `String`, emits `TxEntry::Data(bytes)` into the txlog. Visible to the outer verifier; doesn't occupy persistent storage. Mirrors zkvm's `log` opcode (same byte). Witness-bearing String variants serialize via `to_bytes` so prover and verifier emit identical canonical bytes. (Earlier draft assigned `sigverify` to this byte; that role is now covered by the deferred-sig batch on `signtx` / `signcall` via the delegate's `BatchVerifier` — no separate opcode.) |
 
 ### Tokens
 
@@ -441,13 +441,13 @@ All constraint operations available on external transactions only.
 | 90 | input | string → cell | **[E]** Decodes a wire-encoded cell from `string` and materializes a `cell` handle on the stack. Seeds the VM's `last_anchor` from the cell's identity (via `Cell::to_anchor()`, which ratchets internally) and emits a `TxEntry::Input(cell_id)` effect into the txlog committing the consumed cell's id. **The VM does not consult any Utreexo accumulator**: the caller is expected to have validated the supplied bytes against the Utreexo proof outside the VM before invoking the script. From the VM's perspective the bytes simply assert "this cell existed as a UTXO"; the txlog entry commits the script's reliance on that assertion so the outer verifier can cross-check it against Utreexo state. Hard-fails on a non-`String` top, on bytes that don't decode as a canonical cell (`MalformedCellEncoding`, including trailing bytes after the cell), or when invoked from internal context (`ExternalOnly`). |
 | 91 | cell | args… k pred → cell | Wraps a tuple of portable items into a linear `cell` handle. Consumes the VM's `last_anchor` for the new cell's anchor and advances it to the next anchor via `Cell::to_anchor()`. |
 | 92 | output | args… k pred → ø | Same construction as `cell` but emits an `Output` effect into the txlog instead of pushing the handle. |
-| 93 | open | cell internal_key neighbors position script args… k → results… | Verifies the Taproot call-proof formed by `internal_key` (a Point), `neighbors` (list-style Dict of 32-byte Strings, leaf-to-root order), `position` (String of bit-packed sides), and `script` (String) against the cell's predicate. On success, pours the cell's payload then the `k` args onto the current call's stack and enters a new Run over `script`. Cell-open is **Run-level, not Call-level**: the script shares the current call's stack, gas, memory cap, identity, and control-flow scope — `return k` from inside the opened script exits the enclosing call frame, and `break:k` past the run-stack errors `BreakOutOfCall`. Any error inside the Run hard-fails the current call. Position bits are read LSB-first within byte, zero-extended past the end; bit value `0` = current hash on left / neighbor on right, `1` = swap. |
+| 93 | open | cell internal_key neighbors position script gas bytes args… k → results… k' | Verifies the Taproot call-proof formed by `internal_key` (a Point), `neighbors` (list-style Dict of 32-byte Strings, leaf-to-root order), `position` (String of bit-packed sides), and `script` (String) against the cell's predicate. On success, creates a new **isolated call frame** with `gas` and `bytes` allotments from the caller, pours the cell's payload then the `k` args onto the new frame's stack, and enters the unlocked `script`. The frame has no actor identity, no `op_load`/`op_save`/`op_call`/`op_send` access by default — it is a pure script sandbox. Results return via `return k'` (refunds unused gas). Position bits are read LSB-first within byte, zero-extended past the end; bit value `0` = current hash on left / neighbor on right, `1` = swap. |
 | 94 | send | args… k gas bytes method addr → ø | Send message; similar to call, but does not expect results. |
-| 95 | call | args… k gas bytes method addr → results… k | (Internal) Calls a method on an actor, transferring control. |
+| 95 | call | args… k gas bytes method addr → results… k' | (Internal) Calls a method on an actor, transferring control. Creates an isolated `CallKind::ActorCall` frame; same shape as `open` but the callee is an actor and the frame carries the callee's identity. |
 | 96 | load | ø → dict | (Internal) Loads actor state and marks the actor for destruction (re-entry blocked until `save`). |
 | 97 | save | dict → ø | (Internal) Saves the actor state and unmarks it for destruction. |
 | 98 | signtx | cell → items… k | Pops the cell, defers a TxID-bound signature record (verification key = cell's predicate point; signature comes from the tx envelope at finalize), pours the cell's payload onto the current call's stack and pushes the count `k`. |
-| 99 | signrun | cell script sig args… m → items… k | Records a deferred signature commitment over `script` only (verification key = cell's predicate point; signature = the popped `sig` String, must be 64 bytes); pours the cell's payload then the `m` args onto the current call's stack; enters a new Run over `script`. Same Run-level isolation rules as `open`. Scripts bind themselves to context (anchor, actor identity, etc.) via explicit checks inside the script. |
+| 99 | signcall | cell script sig gas bytes args… m → results… k' | Records a deferred signature commitment over `script` only (verification key = cell's predicate point; signature = the popped `sig` String, must be 64 bytes). Creates a new **isolated call frame** with `gas` and `bytes` allotments from the caller, pours the cell's payload then the `m` args onto the new frame's stack, and enters the signed `script`. Same frame shape and sandbox rules as `open` — the signed script runs as if revealed via taproot, just authenticated by signature instead of merkle path. Scripts bind themselves to context (anchor, actor identity, etc.) via explicit checks. |
 | 9a | timelock | ø → n {0 | 1} | Pushes timelock integer and a flag: 0 for block height, 1 for timestamp. |
 | 9b | version | ø → n | Version bits of the external transaction invoking this call. |
 | 9c | actorid | ø → string | Pushes actor ID. |
@@ -480,9 +480,23 @@ All constraint operations available on external transactions only.
 
 **Varlength encoding:** using the same CompactSize format as in Bitcoin.
 
-**Cell-open trust model.** `open` and `signrun` are Run-level — the unlocked script runs inside the caller's call frame, sharing its stack, gas, memory cap, identity, and (when called from within an actor) its actor authority. The caller is choosing to delegate full local authority to the unlocked script. This is safe in external transactions because the *creator* of the external tx is the same party choosing which cell to open and which predicate to satisfy — the script is, by construction, code the tx author has accepted by accepting the predicate. The same reasoning applies to internal-context cell-opens but with finer granularity: an actor opening a cell is granting the cell's script full access to the actor's frame. Authors of methods that accept cells from untrusted callers must therefore treat the cell's predicate as **the** authorization filter for the entire script-side authority. (Future review: tighter sandboxing for cell-opens in internal context may be desirable.)
+**Cell-open trust model.** `open`, `signcall`, and `call` all create
+isolated call frames. The unlocked / signed / called script runs in
+its own stack, gas budget, memory cap, and identity scope. No
+implicit access to the host's actor state, gas pool, or identity.
+This eliminates the confused-deputy class of bugs for both
+external- and internal-context cell-opens: an actor accepting an
+untrusted-source cell does not need to audit the predicate as a
+global authorization filter, because the script can't reach the
+actor's state regardless of what the predicate authorizes. See
+design.md §Calls and isolation.
 
-**`signrun` binding policy.** The deferred signature for `signrun` commits to the script bytes only. The script is expected to bind itself to further context (anchor, actor identity, tx-level data) by including explicit checks such as `anchor <expected> eq verify` inside the script. This shifts the binding policy into the script author's hands — flexibility at the price of footgun.
+**`signcall` binding policy.** The deferred signature for `signcall`
+commits to the script bytes only. The script is expected to bind
+itself to further context (anchor, actor identity, tx-level data)
+by including explicit checks such as `anchor <expected> eq verify`
+inside the script. This shifts the binding policy into the script
+author's hands — flexibility at the price of footgun.
 
 ### Actor structure
 
