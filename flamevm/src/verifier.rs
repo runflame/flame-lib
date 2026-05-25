@@ -1,14 +1,4 @@
-//! `Verifier` — the verifier-side [`Delegate`] implementation.
-//!
-//! Wraps `bulletproofs::r1cs::Verifier`: walks the same VM bytecode the
-//! prover produced (with no witness queue — every `alloc` opcode binds
-//! an unassigned variable) and then checks the supplied `R1CSProof`
-//! against the accumulated constraint system. Mirrors
-//! `zkvm::verifier::Verifier` in spirit.
-//!
-//! The verifier's transcript label must match the prover's exactly —
-//! any divergence silently invalidates every proof. Both files
-//! consume `flamevm.r1cs.v1`.
+//! Verifier-side [`Delegate`] implementation.
 
 use std::sync::OnceLock;
 

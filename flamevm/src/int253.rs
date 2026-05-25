@@ -1,31 +1,4 @@
-//! Signed sign-magnitude integer with magnitude bounded by the
-//! Ristretto group order ℓ ≈ 2²⁵². The name `Int253` reflects the
-//! effective conceptual width — ⌈log₂(ℓ)⌉ = 253 bits of magnitude
-//! plus an explicit sign bit — even though the on-the-wire encoding
-//! occupies 32 bytes.
-//!
-//! ## Representation
-//!
-//! Bit 255 (the high bit of `bytes[31]`) is the sign; the lower 255 bits
-//! are a canonical Ristretto scalar magnitude (strictly less than ℓ).
-//! Negative zero is not representable — every constructor either rejects
-//! it (`from_bytes`) or normalizes it to positive zero (`from_parts`,
-//! arithmetic ops, `Neg`).
-//!
-//! ## Arithmetic wraps modulo ℓ
-//!
-//! `Add` / `Sub` / `Mul` operate on magnitudes via `Scalar` arithmetic,
-//! which is mod ℓ. Small inputs whose results stay below ℓ behave like
-//! ordinary signed integers; results that would exceed ℓ wrap. Callers
-//! that need overflow detection should bound their inputs themselves;
-//! no `checked_*` variants are provided.
-//!
-//! ## Not constant-time
-//!
-//! Sign branching, ordering, and magnitude comparison are data-dependent.
-//! `Int253` is intended for public VM stack values. Secret witness data
-//! should flow through constraint-system types (`Variable`, `Expression`),
-//! not through `Int253`.
+//! Signed sign-magnitude integer; magnitude is a canonical Ristretto scalar (< ℓ ≈ 2²⁵²).
 
 use core::cmp::Ordering;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};

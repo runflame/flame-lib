@@ -1,44 +1,5 @@
-//! High-level [`Instruction`] enum — the *decoded* form of each opcode.
-//!
-//! The Instruction layer matches zkvm's design: one variant per opcode,
-//! with typed inline parameters where the opcode carries them. Variants
-//! that carry **prover witness data** (currently only `Alloc`) hold an
-//! `Option<…>`; the bytecode `encode()` discards the witness, the
-//! bytecode `parse()` reconstructs `None`. The prover ferries the
-//! witness via a side-channel queue on the [`crate::vm::Delegate`].
-//!
-//! ## Canonicality
-//!
-//! Each `Instruction` value has exactly one canonical bytecode
-//! encoding. Notably `PushInt` picks the narrowest opcode width that
-//! holds its `Int253` magnitude — `0` becomes `0x00` (push:0), `42`
-//! becomes `0x10 0x2a` (pushint8 positive), and so on.
-//!
-//! ## Tag namespace (one byte; same as VM dispatch)
-//!
-//! ```text
-//! 0x00..=0x0f  push:k                          (PushInt with k ∈ 0..=15)
-//! 0x10/0x11    pushint8  pos/neg               (PushInt 16..=255)
-//! 0x12/0x13    pushint16 pos/neg               (PushInt 256..=65535)
-//! 0x14/0x15    pushint64 pos/neg               (PushInt 65536..=2⁶⁴-1)
-//! 0x16/0x17    pushint128 pos/neg              (PushInt 2⁶⁴..=2¹²⁸-1)
-//! 0x18         pushint   (32 byte sign-mag)    (PushInt larger)
-//! 0x19         pushstr   (sub-varint len)      (PushStr)
-//! 0x1a         pushpoint (32 bytes)            (PushPoint)
-//! 0x1b         pushtoken                       (PushToken)
-//! 0x1c..=0x1f  drop, nop, dup, roll
-//! 0x20..=0x2f  dup:k                           (DupK)
-//! 0x30..=0x3f  roll:k                          (RollK)
-//! 0x40..=0x4e  string ops + keccak
-//! 0x50..=0x5f  Int253 arithmetic + CS opcodes
-//! 0x60..=0x68  Dict ops
-//! 0x69..=0x6e  Merlin + SHA hashes
-//! 0x70..=0x78  Token opcodes
-//! 0x79..=0x7f  Control flow + type
-//! 0x80..=0x8f  break:k                         (BreakK)
-//! 0x90         input
-//! 0x91..=0x99  Cell + actor opcodes
-//! ```
+//! Definition of all instructions in FlameVM,
+//! their codes and decoding/encoding utility functions.
 
 use curve25519_dalek::scalar::Scalar;
 use readerwriter::Reader;

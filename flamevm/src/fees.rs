@@ -1,12 +1,4 @@
-//! `CheckedFee` — overflow-safe per-tx fee accumulator.
-//!
-//! Mirrors zkvm's `fees::CheckedFee` (`zkvm/src/fees.rs`) exactly:
-//! a single `u64` capped at [`MAX_FEE`] so that any subsequent
-//! `size_bytes × fee` computation in the fee-rate machinery cannot
-//! overflow even at the largest reasonable transaction size.
-//!
-//! The cap is consensus-fixed — every node must agree on the same
-//! value or transactions hash differently.
+//! Overflow-safe per-tx fee accumulator.
 
 use crate::errors::VMError;
 

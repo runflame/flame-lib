@@ -1,16 +1,4 @@
-//! Actor data model — identity, state, lifecycle counters.
-//!
-//! Module boundary: anything actor-shaped lives here; `vm.rs` only
-//! holds the opcode handlers that read/mutate actors through the
-//! registry interface. Cross-references flow one way:
-//! `vm.rs → actor.rs`, never the reverse.
-//!
-//! Unit 1 of the actor build (per the plan in
-//! `flamevm/plan.md`) introduces the data layer: `ActorID`,
-//! `MethodKey`, `ActorState`, `Actor`, and the canonical
-//! `vbyte_size` measure. The `Address` enum, the registry trait,
-//! the vbyte pool, and the per-block lifecycle ticker arrive in
-//! subsequent units.
+//! Actor data model: identity, state, lifecycle counters, registry.
 
 use merlin::Transcript;
 use readerwriter::{ReadError, Reader, WriteError, Writer};

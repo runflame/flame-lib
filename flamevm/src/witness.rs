@@ -1,30 +1,4 @@
-//! Per-input prover witnesses.
-//!
-//! `Cell::encode` strips `Commitment::Open` → `Closed` on the wire
-//! (only the 32-byte point reaches consumers). On the verifier side
-//! that's fine — the verifier only ever needs points. On the prover
-//! side it's a problem: after `pushstr <cell_bytes> input → open`
-//! the Tokens that get poured onto the stack are `Closed`, so a
-//! downstream `mix` opcode (which calls
-//! `delegate.commit_variable(&commitment)`) fails
-//! [`crate::errors::VMError::WitnessMissing`] because
-//! `Commitment::Closed` has no `.witness()`.
-//!
-//! The fix is to thread the witnesses through the prover via the
-//! `Instruction::Input(Option<Box<InputWitnesses>>)` variant — same
-//! mechanism as `Instruction::Alloc(Option<Int253>)`. Bytecode
-//! `encode()` writes only the bare `0x90` opcode; bytecode `parse()`
-//! reconstructs `Input(None)`. The witness is a prover-side memory
-//! object that never crosses the wire.
-//!
-//! On dispatch the prover-side `op_input` decodes the cell from the
-//! pushed bytes, then walks the payload in order, consuming one
-//! [`TokenWitness`] from the queue for every `Value::Token` entry
-//! it encounters. The witness's `to_point()` must match the decoded
-//! Closed commitment's point — mismatch is a hard error
-//! ([`crate::errors::VMError::WitnessPointMismatch`]) since it
-//! signals a buggy witness on the prover side, not a malicious
-//! input.
+//! Per-input prover witnesses for re-attaching Commitment::Open after Cell::decode.
 
 use crate::constraints::Commitment;
 

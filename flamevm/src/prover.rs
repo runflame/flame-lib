@@ -1,28 +1,4 @@
-//! `Prover` — the prover-side [`Delegate`] implementation.
-//!
-//! Wraps `bulletproofs::r1cs::Prover`: owns the witness scalars (carried
-//! inline in each [`Instruction::Alloc(Some(int))`]), walks the VM in
-//! external context, then emits an `R1CSProof`. Mirrors
-//! `zkvm::prover::Prover` in spirit — the constraint system is shared
-//! with the verifier; only the proof-machinery differs.
-//!
-//! ## Witness flow
-//!
-//! Witnesses live inside `Instruction::Alloc(Option<Int253>)` and travel
-//! with the prover's [`crate::Program`]. The VM, when stepping through a
-//! `Run::Queue` populated from a Program, sees each Alloc with its
-//! cleartext witness intact, and binds the witness to a newly allocated
-//! R1CS variable. The verifier walks the same bytecode, where every
-//! Alloc parses to `Alloc(None)` — the variable is left unassigned
-//! and the constraint system fills it in algebraically during proof
-//! verification.
-//!
-//! `commit_variable` is invoked by the `commit` opcode (and by the
-//! CS-bound branches of `borrow` / `mix`); it extracts `(value,
-//! blinding)` from the open commitment and calls
-//! `r1cs::Prover::commit(value, blinding)`.
-//!
-//! [`Instruction::Alloc(Some(int))`]: crate::ops::Instruction::Alloc
+//! Prover-side [`Delegate`] implementation.
 
 use std::sync::OnceLock;
 

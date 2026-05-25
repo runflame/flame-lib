@@ -1,17 +1,4 @@
-//! Routing addresses — `Predicate` (spend gate for a cell) or
-//! `MessageTarget` (delivery target for an actor send).
-//!
-//! Per `flamevm/spec.md` §Addresses and design.md §Addresses. The
-//! `Address` enum routes both payment-style spends (the target is
-//! a cell predicate, which the consumer authorizes by satisfying)
-//! and message-style sends (the target is an actor + method + args).
-//!
-//! Not a stack `Value` variant — scripts construct addresses by
-//! hand (typically as tagged Dicts) and consume them through
-//! `op_send` / `op_output`. The Rust enum here is the host-side
-//! shape that the send queue, the refund-path builder, and the
-//! per-block message dispatcher all read from. Wire form is a
-//! tagged list-Dict, encoded by [`Address::encode`].
+//! Routing addresses: spend predicates and actor message targets.
 
 use readerwriter::{Reader, WriteError, Writer};
 

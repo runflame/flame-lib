@@ -1,40 +1,4 @@
-//! Variable-length binary string — the VM's universal byte-bag and
-//! witness carrier.
-//!
-//! `String` is an enum with multiple "shapes" — the prover-side
-//! variants carry witness data alongside the encoded bytes:
-//!
-//! - `Opaque(Vec<u8>)` — verifier's view; arbitrary byte data.
-//! - `Commitment(Box<Commitment>)` — prover's view of a Pedersen
-//!   commitment with witness. Encodes to its 32-byte compressed point.
-//! - `Scalar(Box<Int253>)` — prover's view of a scalar value. Encodes
-//!   to its 32-byte sign-magnitude representation.
-//! - `Predicate(Box<Predicate>)` — prover's view of an unlock
-//!   predicate. Encodes to its 32-byte opaque point.
-//! - `Script(Vec<Instruction>)` — prover's view of a sub-script.
-//!   Carries the decoded instruction stream with witness slots
-//!   intact (`Alloc(Some(_))`, nested `Input(Some(_))`, etc.).
-//!   Encodes to the compiled bytecode of those instructions.
-//!
-//! All variants encode to the same opaque bytes on the wire — the
-//! verifier always sees `Opaque(bytes)`. Downcasts (`to_commitment`,
-//! `to_scalar`, `to_predicate`, `to_instructions`) work on both forms:
-//! for witness-bearing variants they extract the typed payload; for
-//! `Opaque` they parse it from the bytes.
-//!
-//! ## Sharp edge: `as_bytes(&self)` and bit operations require `Opaque`
-//!
-//! [`String::as_bytes`] returns a borrowed slice. For witness-bearing
-//! variants there is no inner byte buffer to borrow — callers must
-//! use [`String::to_bytes`] (consuming, allocates if needed) or
-//! [`String::to_bytes_vec`] (non-consuming, always allocates) instead.
-//! Calling `as_bytes()` on a witness-bearing variant panics with a
-//! clear message. In practice, witness-bearing Strings only enter the
-//! stack via prover-side `Program::push_str(rich_variant)` and are
-//! immediately consumed by `op_commit` / `op_scalar` / `op_predicate`
-//! via downcasts — they never reach the bit-manipulation opcodes.
-//! Hashing and bit ops on the stack always operate on Opaque Strings
-//! produced by `pushstr` / `read_str` / `sha*` / `keccak256` / `merlin_read`.
+//! Variable-length binary string; carries optional prover-side witness payloads.
 
 use std::borrow::Cow;
 

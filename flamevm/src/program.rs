@@ -1,32 +1,4 @@
-//! `Program` builder — assembles a sequence of [`Instruction`]s and
-//! produces both:
-//!
-//! - canonical **bytecode** that the verifier-side `Program::parse`
-//!   recovers at VM entry, and
-//! - a **witness queue** carrying the prover-side data the bytecode
-//!   doesn't contain (one entry per witness-bearing instruction, in
-//!   opcode order).
-//!
-//! Mirrors zkvm's `Program` type in spirit — fluent builder, deterministic
-//! bytecode, witness-bearing variants for prover-only data. The
-//! `ProgramItem { Bytecode, Program }` wrapper distinguishes the
-//! prover's view (Program with witnesses) from the verifier's view
-//! (opaque bytecode).
-//!
-//! ## Authoring
-//!
-//! ```ignore
-//! use flamevm::{Int253, Program};
-//! let prog = Program::new()
-//!     .alloc(Some(Int253::from(7u64)))
-//!     .alloc(Some(Int253::from(3u64)))
-//!     .add()
-//!     .alloc(Some(Int253::from(10u64)))
-//!     .eq()
-//!     .verify();
-//! let bytecode = prog.to_bytecode();
-//! let witnesses = prog.to_witnesses();   // [Some(7), Some(3), Some(10)]
-//! ```
+//! Fluent `Program` builder + `ProgramItem` wire-form wrapper.
 
 use std::collections::VecDeque;
 

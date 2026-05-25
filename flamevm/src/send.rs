@@ -1,28 +1,4 @@
-//! Outbound message sends + send-id identity.
-//!
-//! Per `flamevm/spec.md` §Messages and design.md §Internal
-//! transaction lifecycle. `op_send` (Unit 8) queues a [`Message`]
-//! into the VM's `sends` collector and emits a `TxEntry::Send` with
-//! a deterministic [`SendID`]. The consensus layer drains the queue
-//! after the external tx commits and instantiates each message as
-//! an internal transaction.
-//!
-//! ### Three identities (Q5)
-//!
-//! - **External TxID** — merkle root over the external tx's full
-//!   txlog (header + every effect including `Send` entries). Known
-//!   at broadcast time.
-//! - **SendID** — equal to the send's `anchor` field
-//!   ([`SendID::from_anchor`]). Known at broadcast time. Identifies
-//!   one specific future internal transaction.
-//! - **Internal TxID** — merkle root over the internal tx's
-//!   execution txlog (Receive + Output + Send + Issue + Retire +
-//!   Data + Call entries). Known only after execution.
-//!
-//! The ratchet timing for `Send.anchor` lives in `op_send`: pop
-//! operands, ratchet `last_anchor`, emit the entry — the anchor
-//! field in `TxEntry::Send` is therefore deterministic from the
-//! external tx's instruction stream alone.
+//! Outbound message sends and SendID identity.
 
 use crate::actor::{ActorID, MethodKey};
 use crate::cell::Predicate;

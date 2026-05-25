@@ -1,26 +1,4 @@
-//! Token value types.
-//!
-//! Three linear value types — never copyable; droppable only under the
-//! conditions documented per type (zero-qty `ClearToken`; nothing else).
-//!
-//! - [`Token`]      — encrypted quantity & flavor (Pedersen commitments);
-//!                    proven non-negative via range-proof. Portable.
-//!                    Ported from `zkvm::types::Value`.
-//! - [`ClearToken`] — cleartext quantity & flavor (`Int253`s); may be
-//!                    negative (in which case it is **non-portable**).
-//!                    Mirrors `zkvm::types::ClearValue` but with the
-//!                    flamevm flavor type `Int253` instead of raw `Scalar`.
-//! - [`WideToken`]  — encrypted quantity & flavor with **no** range proof;
-//!                    quantity may be negative. Stack-only intermediate
-//!                    used by `borrow` / `fee` / `mix` / `cloak`.
-//!                    Ported from `zkvm::types::WideValue` — wraps a
-//!                    `spacesuit::AllocatedValue` (R1CS variables + an
-//!                    optional cleartext assignment).
-//!
-//! Cleartext constructions live alongside the encrypted ones — the
-//! `Token` / `ClearToken` / `WideToken` types share the same module
-//! because their opcode handlers (`issue`, `retire`, `borrow`,
-//! `merge`, `split`, `mix`, `fee`) all dispatch by stack-top type.
+//! Token, ClearToken, WideToken — linear asset value types.
 
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;

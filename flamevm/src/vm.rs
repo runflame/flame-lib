@@ -1,24 +1,4 @@
-//! FlameVM execution engine.
-//!
-//! One [`VM`] type drives both external and internal transactions via
-//! two distinct entry points:
-//!
-//! - [`VM::execute_external`] is generic over a [`Delegate`] (prover or
-//!   verifier) which owns the R1CS constraint system and finalizes the
-//!   transaction by producing or verifying a Bulletproofs proof.
-//! - [`VM::execute_internal`] takes no delegate; internal transactions
-//!   do not produce or consume R1CS proofs and operate against a live
-//!   actor registry instead.
-//!
-//! ## Three layers of nesting
-//!
-//! - **Tx** — one transaction (this `VM` instance). Owns the txlog,
-//!   gas/vbyte totals, deferred signature records, and the active call.
-//! - **Call** ([`CallFrame`]) — one isolated execution scope created by
-//!   `call`, `open`, or the outermost frame of a tx. Has its own stack,
-//!   gas budget, and transient-memory cap.
-//! - **Run** ([`Run`]) — one bytecode script being interpreted. Created
-//!   by `run`, `loop`, `switch`, and at the entry of every Call.
+//! FlameVM execution engine: Tx → CallFrame → Run nesting + dispatch loop.
 
 use bulletproofs::r1cs;
 use bulletproofs::r1cs::R1CSProof;

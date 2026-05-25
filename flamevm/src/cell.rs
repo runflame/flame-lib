@@ -1,34 +1,4 @@
-//! Cells — the unit of locked, portable value in FlameVM.
-//!
-//! A `Cell` is a linear value that wraps a portable payload under a
-//! Taproot-compressed `Predicate`. Cells exist in three places:
-//!
-//! - **On the stack** during VM execution, as a `Value::Cell` handle.
-//! - **In the UTXO accumulator** (Utreexo), as a wire-encoded blob.
-//! - **In the txlog** as the result of an `output` effect.
-//!
-//! ## Linear semantics
-//!
-//! Cells are non-copyable and non-droppable: they can be created (`cell`,
-//! `output`), opened (`open`, `signrun`, `signtx`), or sealed into the
-//! Utreexo (`output`). Holding a cell on the stack outside one of these
-//! flows is an error at frame exit (StackNotClean).
-//!
-//! ## Wire encoding
-//!
-//! On the wire, a cell is a list-style `Dict` with three entries:
-//!
-//! ```text
-//! Cell = list-Dict {
-//!   0: Point   (opaque predicate point P)
-//!   1: String  (32-byte anchor)
-//!   2: Dict    (list-style; payload items in order)
-//! }
-//! ```
-//!
-//! The opaque predicate is what consensus sees — the Taproot-compressed
-//! point P. Prover-side witnesses (the internal key, the merkle tree) are
-//! stripped before encoding.
+//! Cells, predicates, and call-proofs.
 
 use bulletproofs::PedersenGens;
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;

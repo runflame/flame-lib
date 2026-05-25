@@ -1,58 +1,37 @@
-//! Canonical compact encoding for flamevm types.
+//! Canonical compact encoding for flamevm values.
 //!
-//! Each logical value has exactly one wire byte sequence. The first
-//! byte is a type+width tag; within each type, width classes carve
-//! the value range into disjoint, offset-based sub-ranges so that the
-//! encoder has no choice about which tag to use and the decoder has
-//! nothing (or very little) to enforce.
+//! Each value has exactly one wire byte sequence. The first byte is
+//! a type+width tag; offset-based width classes carve disjoint
+//! sub-ranges so the encoder has no choice and the decoder has
+//! little to enforce.
 //!
-//! ## Tag namespace
+//! Tag namespace:
 //!
 //! ```text
 //! 0..=58     Int253 positive immediate (value = tag)
-//! 59         Int253 +U8     (1-byte payload b; value = 59 + b;  range 59..=314)
-//! 60         Int253 +U32    (4-byte payload w; value = 315 + w; range 315..≈4.3e9)
-//! 61         Int253 +U64    (8-byte payload w; value = 4_294_967_611 + w)
-//! 62         Int253 +FULL   (32-byte canonical scalar; value > U64 range)
-//! 63         Int253 -1
-//! 64         Int253 -U8     (value = -(2 + b);   range -2..=-257)
-//! 65         Int253 -U32    (value = -(258 + w))
-//! 66         Int253 -U64    (value = -(4_294_967_554 + w))
-//! 67         Int253 -FULL   (32-byte sign-magnitude; magnitude > U64 range)
-//! 68..=126   Str immediate length (length = tag - 68; range 0..=58)
-//! 127        Str VAR     (sub-varint v; length = 59 + v)
-//! 128..=186  List immediate count (count = tag - 128; range 0..=58)
-//! 187        List VAR    (sub-varint v; count = 59 + v)
-//! 188..=246  Dict immediate count (count = tag - 188; range 0..=58)
-//! 247        Dict VAR    (sub-varint v; count = 59 + v)
-//! 248        Point (32-byte compressed Ristretto)
-//! 249..=253  Token, ClearToken, WideToken, Object, Merlin (sizes TBD)
+//! 59..=62    Int253 +U8 / +U32 / +U64 / +FULL (offset-based widths)
+//! 63..=67    Int253 -1 / -U8 / -U32 / -U64 / -FULL
+//! 68..=127   String (immediate length 0..=58; 127 = VAR sub-varint)
+//! 128..=187  List (immediate count; 187 = VAR sub-varint)
+//! 188..=247  Dict  (immediate count; 247 = VAR sub-varint)
+//! 248        Point          (32-byte compressed Ristretto)
+//! 249..=253  Token / ClearToken / WideToken / Object / Merlin
 //! 254        reserved
-//! 255        extension (sub-tag follows)
+//! 255        extension      (sub-tag follows)
 //! ```
 //!
-//! ## Sub-varint (used inside `STR_VAR` / `LIST_VAR` / `DICT_VAR`)
-//!
-//! Encodes a non-negative integer with exactly one byte sequence per
-//! value, by offset-based disjoint ranges:
+//! Sub-varint (used inside `STR_VAR` / `LIST_VAR` / `DICT_VAR`)
+//! encodes a non-negative integer with one byte sequence per value:
 //!
 //! ```text
-//! sub-tag 0  1 LE byte    value = b              range 0..=255
-//! sub-tag 1  2 LE bytes   value = 256 + w        range 256..=65_791
-//! sub-tag 2  4 LE bytes   value = 65_792 + w     range 65_792..≈4.3e9
-//! sub-tag 3  8 LE bytes   value = 4_295_032_608 + w   range up to ≈1.8e19
+//! sub-tag 0  1 LE byte    value = b                  range 0..=255
+//! sub-tag 1  2 LE bytes   value = 256 + w            range 256..=65_791
+//! sub-tag 2  4 LE bytes   value = 65_792 + w         range up to ≈4.3e9
+//! sub-tag 3  8 LE bytes   value = 4_295_032_608 + w  range up to ≈1.8e19
 //! ```
 //!
-//! ## Canonicality checks performed at decode time
-//!
-//! Most non-canonical encodings are impossible by construction. Two
-//! cases still require explicit checks:
-//!
-//! 1. `INT_PFULL` / `INT_NFULL`: the 32-byte payload encodes the
-//!    value as-is (no offset). The decoder rejects if the value
-//!    could have been encoded in a narrower width class.
-//! 2. `DICT_*` payload whose keys turned out to be `0..n-1` must be
-//!    rejected — that dict has a shorter `LIST_*` encoding.
+//! `INT_PFULL` / `INT_NFULL` reject values that fit in a narrower
+//! width; `DICT_*` rejects keys `0..n-1` (use `LIST_*`).
 
 use core::cmp::Ordering;
 use core::convert::TryFrom;
