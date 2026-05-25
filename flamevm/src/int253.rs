@@ -205,25 +205,18 @@ impl Neg for Int253 {
 impl Add for Int253 {
     type Output = Int253;
     fn add(self, other: Int253) -> Int253 {
-        match (self.is_negative(), other.is_negative()) {
-            (false, false) | (true, true) => Int253::from_parts(
-                self.is_negative(),
-                self.abs_scalar() + other.abs_scalar(),
-            ),
-            _ => {
-                let (sign, abs) = match self.cmp_magnitude(&other) {
-                    Ordering::Less => (
-                        other.is_negative(),
-                        other.abs_scalar() - self.abs_scalar(),
-                    ),
-                    _ => (
-                        self.is_negative(),
-                        self.abs_scalar() - other.abs_scalar(),
-                    ),
-                };
-                Int253::from_parts(sign, abs)
-            }
+        let (sa, sb) = (self.is_negative(), other.is_negative());
+        if sa == sb {
+            return Int253::from_parts(sa, self.abs_scalar() + other.abs_scalar());
         }
+        // Opposite signs: subtract the smaller magnitude, take the sign
+        // of the larger.
+        let (sign, abs) = if self.cmp_magnitude(&other) == Ordering::Less {
+            (sb, other.abs_scalar() - self.abs_scalar())
+        } else {
+            (sa, self.abs_scalar() - other.abs_scalar())
+        };
+        Int253::from_parts(sign, abs)
     }
 }
 
@@ -283,51 +276,34 @@ impl core::fmt::Debug for Int253 {
 
 impl From<u64> for Int253 {
     fn from(v: u64) -> Self {
-        Int253 {
-            bytes: Scalar::from(v).to_bytes(),
-        }
+        Int253::from_parts(false, Scalar::from(v))
     }
 }
 
 impl From<i64> for Int253 {
     fn from(v: i64) -> Self {
-        if v < 0 {
-            // `unsigned_abs` handles i64::MIN correctly (its magnitude is 2^63,
-            // which doesn't fit in i64 but does fit in u64). Plain `-v` would
-            // overflow in debug builds.
-            let mut bytes = Scalar::from(v.unsigned_abs()).to_bytes();
-            bytes[31] |= 0x80;
-            Int253 { bytes }
-        } else {
-            Int253 {
-                bytes: Scalar::from(v as u64).to_bytes(),
-            }
-        }
+        // `unsigned_abs` handles i64::MIN correctly (magnitude 2^63
+        // fits in u64); plain `-v` would overflow in debug builds.
+        Int253::from_parts(v < 0, Scalar::from(v.unsigned_abs()))
     }
 }
 
 impl From<Scalar> for Int253 {
     fn from(s: Scalar) -> Self {
-        Int253 {
-            bytes: s.to_bytes(),
-        }
+        Int253 { bytes: s.to_bytes() }
     }
 }
 
 impl From<SignedInteger> for Int253 {
     fn from(si: SignedInteger) -> Self {
-        match si.to_u64() {
-            Some(v) => Int253::from(v),
-            None => {
-                let neg = -si;
-                let abs_val = neg
-                    .to_u64()
-                    .expect("negation of negative SignedInteger is non-negative");
-                let mut bytes = Scalar::from(abs_val).to_bytes();
-                bytes[31] |= 0x80;
-                Int253 { bytes }
-            }
-        }
+        let (sign, magnitude) = match si.to_u64() {
+            Some(v) => (false, v),
+            None => (
+                true,
+                (-si).to_u64().expect("negation of negative SignedInteger is non-negative"),
+            ),
+        };
+        Int253::from_parts(sign, Scalar::from(magnitude))
     }
 }
 
