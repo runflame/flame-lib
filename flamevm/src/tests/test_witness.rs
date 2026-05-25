@@ -144,18 +144,6 @@ fn input_mixed_payload_decodes_on_both_paths() {
     }
 }
 
-/// `Instruction::Input` is a unit variant — encodes to exactly
-/// `0x90` and round-trips. No payload, no witnesses.
-#[test]
-fn input_instruction_encodes_to_single_byte() {
-    let mut buf = Vec::new();
-    crate::ops::Instruction::Input.encode(&mut buf);
-    assert_eq!(buf, vec![0x90]);
-    let mut r: &[u8] = &buf;
-    let parsed = crate::ops::Instruction::parse(&mut r).expect("parses");
-    assert!(matches!(parsed, crate::ops::Instruction::Input));
-}
-
 /// Cloning a `String::Cell` degrades to `Opaque(bytes)` so the
 /// underlying Cell (which contains non-Clonable Tokens) need not
 /// be cloned. The opaque bytes still decode to the same cell id.

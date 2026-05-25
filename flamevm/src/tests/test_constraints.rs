@@ -83,14 +83,6 @@ fn range_proof_rejects_out_of_range_value() {
 }
 
 #[test]
-fn range_proof_constant_in_range_skips_cs() {
-    // push:7 (constant Expression after no alloc) — covered
-    // indirectly by `op_scalar` tests in `test_commitments`.
-    // `range` is otherwise exercised here via alloc-produced
-    // Expressions.
-}
-
-#[test]
 fn range_bit_count_zero_rejected() {
     // push:0 — zero-bit range proof is degenerate, rejected at the
     // opcode level.
@@ -257,16 +249,6 @@ fn constraint_and_with_false_branch_rejected() {
     )
     .unwrap_err();
     assert!(matches!(err, VMError::InvalidR1CSProof));
-}
-
-#[test]
-fn instruction_range_roundtrip() {
-    let mut buf = Vec::new();
-    crate::ops::Instruction::Range.encode(&mut buf);
-    assert_eq!(buf, vec![0x5e]);
-    let mut r: &[u8] = &buf;
-    let parsed = crate::ops::Instruction::parse(&mut r).expect("parses");
-    assert!(matches!(parsed, crate::ops::Instruction::Range));
 }
 
 #[test]

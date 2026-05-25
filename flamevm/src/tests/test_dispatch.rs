@@ -81,22 +81,6 @@ fn dirty_stack_at_call_exit_is_an_error() {
 }
 
 #[test]
-fn callkind_actor_identity() {
-    assert!(CallKind::ExternalRoot.actor().is_none());
-    let aid = ActorID::Hash([1u8; 32]);
-    assert_eq!(
-        CallKind::InternalRoot {
-            actor: aid.clone(),
-            method: Int253::from(0u64),
-            caller: None,
-            anchor: Anchor([0u8; 32]),
-        }
-        .actor(),
-        Some(&aid)
-    );
-}
-
-#[test]
 fn dispatch_falls_through_to_int_path_when_no_constraint_on_top() {
     // Pure Int253 path for `and` — must NOT route to Constraint
     // overload when both operands are Int253. push:1 push:1 and

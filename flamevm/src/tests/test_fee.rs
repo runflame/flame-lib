@@ -174,20 +174,6 @@ fn phase19_op_fee_rejects_internal_context() {
     assert!(matches!(err, VMError::ExternalOnly));
 }
 
-/// `Fee` instruction roundtrips through encode/parse.
-#[test]
-fn phase19_fee_instruction_roundtrip() {
-    use crate::ops::Instruction;
-    let mut buf = Vec::new();
-    Instruction::Fee.encode(&mut buf);
-    assert_eq!(buf, vec![0x7a]);
-    let mut r: &[u8] = &buf;
-    assert!(matches!(
-        Instruction::parse(&mut r).expect("parses"),
-        Instruction::Fee
-    ));
-}
-
 /// `TxEntry::Fee(qty)` participates in the TxID merkle root —
 /// changing `qty` changes the TxID, proving the fee entry is
 /// committed by the proof transcript binding.

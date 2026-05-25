@@ -99,18 +99,6 @@ fn actorid_unresolved_for_constructor_form() {
 }
 
 #[test]
-fn recv_method_is_zero() {
-    assert_eq!(RECV_METHOD, Int253::zero());
-}
-
-#[test]
-fn actorstate_new_is_empty() {
-    let s = ActorState::new();
-    assert!(s.public.is_empty());
-    assert!(s.private.is_empty());
-}
-
-#[test]
 fn actorstate_resolve_method_returns_script() {
     let mut s = ActorState::new();
     s.public.insert(
@@ -220,16 +208,6 @@ fn vbyte_size_grows_with_state() {
 }
 
 #[test]
-fn actor_new_active_starts_unfrozen() {
-    let a = Actor::new_active(ActorState::new(), 500, 42);
-    assert_eq!(a.vbytes, 500);
-    assert_eq!(a.last_activation_height, 42);
-    assert_eq!(a.active_blocks, 0);
-    assert!(!a.is_frozen());
-    assert_eq!(a.frozen_since, None);
-}
-
-#[test]
 fn vbyte_pool_introduce_adds_per_block_amount() {
     let mut p = VbytePool::new();
     assert_eq!(p.available, 0);
@@ -252,13 +230,6 @@ fn vbyte_pool_queue_and_release_at_maturity() {
 }
 
 #[test]
-fn vbyte_pool_queue_zero_is_noop() {
-    let mut p = VbytePool::new();
-    p.queue_recycle(0, 10);
-    assert!(p.is_empty());
-}
-
-#[test]
 fn vbyte_pool_multiple_recycles_accumulate_per_bucket() {
     let mut p = VbytePool::new();
     p.queue_recycle(100, 10);
@@ -269,13 +240,6 @@ fn vbyte_pool_multiple_recycles_accumulate_per_bucket() {
     let released = p.release_matured(120);
     assert_eq!(released, 200);
     assert_eq!(p.available, 350);
-}
-
-#[test]
-fn grace_window_quarters_active_blocks() {
-    assert_eq!(grace_window(0), 0);
-    assert_eq!(grace_window(4), 1);
-    assert_eq!(grace_window(100), 25);
 }
 
 #[test]

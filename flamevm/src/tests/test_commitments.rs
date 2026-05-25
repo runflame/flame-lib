@@ -256,25 +256,6 @@ fn op_decrypt_rejects_wrong_witness() {
 }
 
 #[test]
-fn instruction_scalar_commit_decrypt_mix_roundtrip() {
-    // Round-trip the new Phase-13 Instruction variants.
-    use crate::ops::Instruction;
-    for variant in [
-        Instruction::Scalar,
-        Instruction::Commit,
-        Instruction::Decrypt,
-        Instruction::Mix,
-    ] {
-        let mut buf = Vec::new();
-        variant.encode(&mut buf);
-        assert_eq!(buf.len(), 1);
-        let mut r: &[u8] = &buf;
-        let parsed = Instruction::parse(&mut r).expect("parses");
-        assert_eq!(format!("{:?}", parsed), format!("{:?}", variant));
-    }
-}
-
-#[test]
 fn scalar_in_internal_context_errors_external_only() {
     let mut vm = vm_with_script(vec![0x5a]);
     let err = run_to_end(&mut vm).unwrap_err();

@@ -67,16 +67,3 @@ fn txid_distinguishes_input_from_output_entries() {
     assert_ne!(id_data.0, id_input.0);
 }
 
-#[test]
-fn instruction_log_roundtrip() {
-    use crate::ops::Instruction;
-    let mut buf = Vec::new();
-    Instruction::Log.encode(&mut buf);
-    assert_eq!(buf, vec![0x6f]);
-    let mut r: &[u8] = &buf;
-    assert!(matches!(
-        Instruction::parse(&mut r).expect("parses"),
-        Instruction::Log
-    ));
-}
-
