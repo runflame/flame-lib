@@ -21,6 +21,7 @@ mod test_dispatch;
 mod test_fee;
 mod test_hashing;
 mod test_int253_ops;
+mod test_msm;
 mod test_proof_pipeline;
 mod test_stack;
 mod test_string_ops;

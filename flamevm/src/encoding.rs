@@ -579,7 +579,8 @@ pub fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), WriteError> {
         | Value::Merlin(_)
         | Value::Variable(_)
         | Value::Expression(_)
-        | Value::Constraint(_) => Err(WriteError::InsufficientCapacity),
+        | Value::Constraint(_)
+        | Value::MultiscalarMul(_) => Err(WriteError::InsufficientCapacity),
     }
 }
 

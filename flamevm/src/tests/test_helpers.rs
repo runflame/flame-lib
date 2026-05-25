@@ -163,6 +163,7 @@ pub(crate) fn value_kind(v: &Value) -> &'static str {
         Value::Variable(_) => "Variable",
         Value::Expression(_) => "Expression",
         Value::Constraint(_) => "Constraint",
+        Value::MultiscalarMul(_) => "MultiscalarMul",
     }
 }
 

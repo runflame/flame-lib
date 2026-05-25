@@ -1336,14 +1336,37 @@ impl VM {
         Ok(())
     }
 
-    /// _x y_ **mul** → _z_  (cleartext modulo ℓ, or CS multiplier)
+    /// _x y_ **mul** → _z_  (cleartext modulo ℓ, MSM scalar-point lift,
+    /// or CS multiplier)
     fn op_mul<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        use crate::msm::{int_to_scalar, MultiscalarMul};
         let b = self.pop_value()?;
         let a = self.pop_value()?;
         match (a, b) {
             (Value::Int253(x), Value::Int253(y)) => {
                 self.push_value(Value::Int253(x * y));
                 Ok(())
+            }
+            // scalar * point / point * scalar → MSM with one term.
+            (Value::Int253(s), Value::Point(p)) | (Value::Point(p), Value::Int253(s)) => {
+                self.push_value(Value::MultiscalarMul(
+                    MultiscalarMul::term(int_to_scalar(s), p.to_compressed()),
+                ));
+                Ok(())
+            }
+            // scalar * MSM / MSM * scalar → scale coefficients.
+            (Value::Int253(s), Value::MultiscalarMul(m))
+            | (Value::MultiscalarMul(m), Value::Int253(s)) => {
+                self.push_value(Value::MultiscalarMul(m.scaled(int_to_scalar(s))));
+                Ok(())
+            }
+            // Quadratic group-element products are not defined in
+            // Sigma-protocol semantics.
+            (Value::Point(_), Value::Point(_))
+            | (Value::Point(_), Value::MultiscalarMul(_))
+            | (Value::MultiscalarMul(_), Value::Point(_))
+            | (Value::MultiscalarMul(_), Value::MultiscalarMul(_)) => {
+                Err(VMError::TypeNotInt253)
             }
             (a, b) if self.is_external() => {
                 let aexpr = a.to_expression()?;
@@ -1431,6 +1454,9 @@ impl VM {
     /// - `Int253`: errors `VerifyFailed` if zero, else pops.
     /// - `Constraint`: hands the constraint to the CS so the proof
     ///   commits to its truth. Requires external context.
+    /// - `MultiscalarMul`: appends `sum(s_i · P_i) == identity` to
+    ///   the delegate's `BatchVerifier` (alongside Schnorr/Musig
+    ///   sigs). Requires external context.
     fn op_verify<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         match self.pop_value()? {
             Value::Int253(v) => {
@@ -1442,6 +1468,26 @@ impl VM {
             Value::Constraint(c) => {
                 self.require_external()?;
                 c.verify(delegate.cs())?;
+                Ok(())
+            }
+            Value::MultiscalarMul(m) => {
+                self.require_external()?;
+                let terms = m.into_terms();
+                let scalars: Vec<curve25519_dalek::scalar::Scalar> =
+                    terms.iter().map(|(s, _)| *s).collect();
+                let points: Vec<Option<curve25519_dalek::ristretto::RistrettoPoint>> =
+                    terms.iter().map(|(_, p)| p.decompress()).collect();
+                // basepoint_scalar = 0: no contribution from the
+                // basepoint; the entire MSM must sum to identity.
+                // The BatchVerifier multiplies the whole statement by
+                // a fresh random scalar so unrelated batched
+                // statements can't cancel each other.
+                musig::BatchVerification::append(
+                    delegate.batch_verifier(),
+                    curve25519_dalek::scalar::Scalar::zero(),
+                    scalars,
+                    points,
+                );
                 Ok(())
             }
             other => {

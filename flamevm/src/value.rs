@@ -26,6 +26,8 @@ impl Value {
     pub fn to_variable(self)    -> Result<Variable, VMError>   { match self { Value::Variable(x) => Ok(x),   _ => Err(VMError::TypeNotVariable) } }
     /// Downcast to ClearToken.
     pub fn to_clear_token(self) -> Result<ClearToken, VMError> { match self { Value::ClearToken(x) => Ok(x), _ => Err(VMError::TypeNotClearToken) } }
+    /// Downcast to MultiscalarMul.
+    pub fn to_msm(self)         -> Result<crate::MultiscalarMul, VMError> { match self { Value::MultiscalarMul(x) => Ok(x), _ => Err(VMError::TypeNotMsm) } }
 }
 
 impl Value {
@@ -47,26 +49,50 @@ impl Value {
         }
     }
 
-    /// _x_ **neg** — Int253 cleartext or Expression LC negate.
+    /// _x_ **neg** — sign flip for Int253, LC negate for Expression,
+    /// scalar-coefficient negation for Point/MSM (lifts to MSM).
     pub fn neg(self) -> Result<Value, VMError> {
         match self {
             Value::Int253(v) => Ok(Value::Int253(-v)),
             Value::Expression(e) => Ok(Value::Expression(-e)),
+            Value::Point(p) => Ok(Value::MultiscalarMul(
+                crate::msm::MultiscalarMul::term(
+                    -curve25519_dalek::scalar::Scalar::one(),
+                    p.to_compressed(),
+                ),
+            )),
+            Value::MultiscalarMul(m) => Ok(Value::MultiscalarMul(m.negated())),
             _ => Err(VMError::TypeNotInt253),
         }
     }
 
-    /// _x y_ **add** — cleartext if both Int253; lifts to Expression
-    /// otherwise (caller must be in external context).
+    /// _x y_ **add** — cleartext if both Int253; Point/MSM operands
+    /// produce a `MultiscalarMul`; otherwise lifts to Expression
+    /// (caller must be in external context).
     pub fn add(self, other: Value, can_constrain: bool) -> Result<Value, VMError> {
+        use crate::msm::MultiscalarMul;
         match (self, other) {
             (Value::Int253(x), Value::Int253(y)) => Ok(Value::Int253(x + y)),
+            // Point + Point → MSM with two unit-scalar terms.
+            (Value::Point(a), Value::Point(b)) => Ok(Value::MultiscalarMul(
+                MultiscalarMul::from_point(&a).push_point(&b),
+            )),
+            // Point + MSM / MSM + Point → append.
+            (Value::Point(p), Value::MultiscalarMul(m))
+            | (Value::MultiscalarMul(m), Value::Point(p)) => {
+                Ok(Value::MultiscalarMul(m.push_point(&p)))
+            }
+            // MSM + MSM → concat term lists.
+            (Value::MultiscalarMul(a), Value::MultiscalarMul(b)) => {
+                Ok(Value::MultiscalarMul(a.append(b)))
+            }
             (a, b) if can_constrain => {
                 Ok(Value::Expression(a.to_expression()? + b.to_expression()?))
             }
             _ => Err(VMError::TypeNotInt253),
         }
     }
+
 
     /// _x_ **not** — cleartext if Int253; structural if Constraint.
     pub fn not(self) -> Result<Value, VMError> {
@@ -128,7 +154,9 @@ pub enum Value {
     Variable(Variable),
     Expression(Expression),
     Constraint(Constraint),
-    //MultiscalarMul(MultiscalarMul),
+    /// Deferred multi-scalar multiplication; consumed by `verify`
+    /// which adds it to the same batch as Schnorr/Musig sigs.
+    MultiscalarMul(crate::msm::MultiscalarMul),
 }
 
 impl Value {
@@ -149,7 +177,8 @@ impl Value {
             | Value::Merlin(_)
             | Value::Variable(_)
             | Value::Expression(_)
-            | Value::Constraint(_) => Err(VMError::TypeNotCopyable),
+            | Value::Constraint(_)
+            | Value::MultiscalarMul(_) => Err(VMError::TypeNotCopyable),
         }
     }
 
@@ -246,6 +275,7 @@ impl Value {
             Value::Variable(_) => 0xc0,
             Value::Expression(_) => 0xc1,
             Value::Constraint(_) => 0xc2,
+            Value::MultiscalarMul(_) => 0xc3,
         }
     }
 }

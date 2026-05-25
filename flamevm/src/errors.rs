@@ -130,6 +130,14 @@ pub enum VMError {
     #[error("Item is not a Point")]
     TypeNotPoint,
 
+    /// This error occurs when an instruction requires a MultiscalarMul.
+    #[error("Item is not a MultiscalarMul")]
+    TypeNotMsm,
+
+    /// This error occurs when a MultiscalarMul has a non-decompressable point.
+    #[error("MultiscalarMul contains non-decompressable point")]
+    MsmInvalidPoint,
+
     /// This error occurs when a CallProof's wire pieces are malformed.
     #[error("Malformed CallProof")]
     MalformedCallProof,
