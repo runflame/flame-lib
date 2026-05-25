@@ -123,19 +123,18 @@ fn output_opcode_emits_to_txlog_without_pushing() {
 
 #[test]
 fn open_with_valid_callproof_runs_program() {
-    // Cell payload: 5. Program: drop. After open: payload poured to
-    // stack, program drops it → empty stack.
-    let inner_program = vec![0x1c]; // drop
+    // Cell payload: 5. Inner program: drop, push:0, return — drains
+    // the payload inside the isolated CellOpen frame and returns 0
+    // items to parent (ADR 0013).
+    let inner_program = vec![0x1c, 0x00, 0x7e];
     let (tree, cp) = build_predicate_with_program(&inner_program, 7);
     let pred_point = tree.compute_point();
 
-    // Script: push payload(5), push count(1), pushpoint(pred), cell,
-    //         push callproof pieces (internal_key, neighbors, pos, prog),
-    //         push k=0 (no args), open.
     let mut script = vec![0x05, 0x01];
     push_point_bytes(&mut script, pred_point.as_bytes());
     script.push(0x91); // cell
     push_callproof_pieces(&mut script, &cp);
+    push_open_gas_bytes(&mut script);
     script.push(0x00); // k=0 args
     script.push(0x93); // open
     let mut vm = vm_with_script(script);
@@ -146,9 +145,9 @@ fn open_with_valid_callproof_runs_program() {
 
 #[test]
 fn open_with_wrong_program_hard_fails() {
-    // Predicate commits to `drop`; callproof claims `nop` instead.
-    let real_program = vec![0x1c];
-    let fake_program = vec![0x1d];
+    // Predicate commits to one leaf; callproof claims a different one.
+    let real_program = vec![0x1c, 0x00, 0x7e];
+    let fake_program = vec![0x1d, 0x00, 0x7e];
     let (tree, _real_cp) = build_predicate_with_program(&real_program, 7);
     let cp = CallProof {
         internal_key: tree.internal_key,
@@ -162,6 +161,7 @@ fn open_with_wrong_program_hard_fails() {
     push_point_bytes(&mut script, pred_point.as_bytes());
     script.push(0x91);
     push_callproof_pieces(&mut script, &cp);
+    push_open_gas_bytes(&mut script);
     script.push(0x00);
     script.push(0x93);
     let mut vm = vm_with_script(script);
@@ -185,14 +185,18 @@ fn open_with_wrong_program_hard_fails() {
 /// returned bytes to using the stack `program_str` directly.
 #[test]
 fn open_preserves_alloc_witnesses_via_script_string() {
-    // Inner unlock script with `alloc(Some(_))` witnesses.
+    // Inner unlock script with `alloc(Some(_))` witnesses. Ends with
+    // `push:0, return` so the isolated CellOpen frame exits cleanly
+    // after `verify` drains the constraint (ADR 0013).
     let inner = Program::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
         .add()
         .alloc(Some(Int253::from(10u64)))
         .eq()
-        .verify();
+        .verify()
+        .push_int(0u64)
+        .return_();
     let inner_bytes = inner.to_bytecode();
 
     // Single-leaf predicate tree whose leaf == inner_bytes. The
@@ -237,7 +241,9 @@ fn open_preserves_alloc_witnesses_via_script_string() {
         .dict()
         .push_str(String::from(cp.position.clone()))
         .push_script(inner) // ← Script(instrs), witnesses intact
-        .push_int(0u64)
+        .push_int(1024u64) // gas
+        .push_int(1024u64) // bytes
+        .push_int(0u64)    // k args
         .open();
 
     // Prover round-trip.
@@ -267,11 +273,10 @@ fn open_preserves_alloc_witnesses_via_script_string() {
 
 #[test]
 fn open_passes_args_after_payload() {
-    // Cell payload: [10]. args: [20, 30]. Program: stack must end with
-    // exactly the args + payload arrangement; cleanup leaves stack
-    // empty. Inside the cell-run, stack = [10, 20, 30]. Program: drop
-    // three items.
-    let inner_program = vec![0x1c, 0x1c, 0x1c]; // drop, drop, drop
+    // Cell payload: [10]. args: [20, 30]. Inside the isolated CellOpen
+    // frame the stack starts as [10, 20, 30] (payload then args). The
+    // leaf drops all three and exits via `return 0`.
+    let inner_program = vec![0x1c, 0x1c, 0x1c, 0x00, 0x7e];
     let (tree, cp) = build_predicate_with_program(&inner_program, 11);
     let pred_point = tree.compute_point();
 
@@ -279,6 +284,7 @@ fn open_passes_args_after_payload() {
     push_point_bytes(&mut script, pred_point.as_bytes());
     script.push(0x91);                  // cell
     push_callproof_pieces(&mut script, &cp);
+    push_open_gas_bytes(&mut script);
     // push args 20, 30 (deepest first) and k=2
     script.push(0x14);                  // pushint64 positive
     script.extend_from_slice(&20u64.to_le_bytes());
@@ -324,10 +330,10 @@ fn predicate_tree_new_validates_inputs() {
 #[test]
 fn scripts_only_predicate_opens_via_program_path() {
     // End-to-end: build a scripts-only predicate, lock a cell under
-    // it, and unlock via `open` with the script-path proof. Verifies
-    // the unspendable-internal-key construction is wire-compatible
-    // with the existing `open` opcode.
-    let program = vec![0x1c]; // drop (cell payload is one item)
+    // it, and unlock via `open` with the script-path proof. Leaf
+    // `drop, push:0, return` drains the 1-item payload and exits the
+    // isolated frame (ADR 0013).
+    let program = vec![0x1c, 0x00, 0x7e];
     let tree = PredicateTree::scripts_only(
         vec![program.clone()],
         TEST_BLINDING_KEY,
@@ -340,6 +346,7 @@ fn scripts_only_predicate_opens_via_program_path() {
     push_point_bytes(&mut script, pred_point.as_bytes());
     script.push(0x91); // cell
     push_callproof_pieces(&mut script, &cp);
+    push_open_gas_bytes(&mut script);
     script.push(0x00); // 0 args
     script.push(0x93); // open
     let mut vm = vm_with_script(script);
@@ -350,14 +357,13 @@ fn scripts_only_predicate_opens_via_program_path() {
 
 #[test]
 fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
-    // Three programs; build a CallProof for each and confirm open succeeds.
+    // Three programs; each ends with `push:0, return` so the isolated
+    // CellOpen frame exits cleanly after draining its payload.
     let programs: Vec<Vec<u8>> = vec![
-        vec![0x1c],           // drop
-        vec![0x1c, 0x1c],     // drop, drop
-        vec![0x1c, 0x1c, 0x1c], // drop, drop, drop
+        vec![0x1c, 0x00, 0x7e],
+        vec![0x1c, 0x1c, 0x00, 0x7e],
+        vec![0x1c, 0x1c, 0x1c, 0x00, 0x7e],
     ];
-    // payload size must match the program's drop count so the cell-open
-    // run leaves an empty stack. Test each program with that exact payload.
     for i in 0..programs.len() {
         let (tree, cp) =
             build_multi_leaf_predicate(programs.clone(), i, 11 + i as u64);
@@ -374,6 +380,7 @@ fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
         push_point_bytes(&mut script, pred_point.as_bytes());
         script.push(0x91); // cell
         push_callproof_pieces(&mut script, &cp);
+        push_open_gas_bytes(&mut script);
         script.push(0x00); // k=0 args
         script.push(0x93); // open
         let mut vm = vm_with_script(script);
@@ -394,9 +401,9 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
     // Build a 3-leaf tree. Construct a CallProof claiming program[0]
     // but with the path that opens program[1]. Verification must fail.
     let programs: Vec<Vec<u8>> = vec![
-        vec![0x1c],
-        vec![0x1c, 0x1c],
-        vec![0x1c, 0x1c, 0x1c],
+        vec![0x1c, 0x00, 0x7e],
+        vec![0x1c, 0x1c, 0x00, 0x7e],
+        vec![0x1c, 0x1c, 0x1c, 0x00, 0x7e],
     ];
     let (tree, valid_cp_for_1) =
         build_multi_leaf_predicate(programs.clone(), 1, 7);
@@ -413,6 +420,7 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
     push_point_bytes(&mut script, pred_point.as_bytes());
     script.push(0x91);
     push_callproof_pieces(&mut script, &forged);
+    push_open_gas_bytes(&mut script);
     script.push(0x00);
     script.push(0x93);
     let mut vm = vm_with_script(script);
@@ -908,7 +916,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     // Each input cell's program is `drop` — it consumes the single
     // payload item the cell-open pours onto the stack.
 
-    let prog = vec![0x1c]; // drop
+    let prog = vec![0x1c, 0x00, 0x7e]; // drop, push:0, return
 
     let (tree1, cp1) = build_predicate_with_program(&prog, 11);
     let cell1 = Cell::new(
@@ -958,6 +966,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     push_string_bytes(&mut script, &cell1_bytes);
     script.push(0x90); // input
     push_callproof_pieces(&mut script, &cp1);
+    push_open_gas_bytes(&mut script);
     script.push(0x00); // k = 0 args
     script.push(0x93); // open
 
@@ -965,6 +974,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     push_string_bytes(&mut script, &cell2_bytes);
     script.push(0x90); // input
     push_callproof_pieces(&mut script, &cp2);
+    push_open_gas_bytes(&mut script);
     script.push(0x00); // k = 0 args
     script.push(0x93); // open
 

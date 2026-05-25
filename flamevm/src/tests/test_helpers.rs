@@ -319,6 +319,16 @@ pub(crate) fn push_callproof_pieces(script: &mut Vec<u8>, cp: &CallProof) {
     push_string_bytes(script, &cp.program);
 }
 
+/// Helper: appends `gas` and `bytes` operands (both generous defaults
+/// for tests) for `op_open` / `op_signcall`. Encoded as two `pushint16`
+/// ops — six bytes total.
+pub(crate) fn push_open_gas_bytes(script: &mut Vec<u8>) {
+    script.push(0x12); // pushint16_pos (gas = 1024)
+    script.extend_from_slice(&1024u16.to_le_bytes());
+    script.push(0x12); // pushint16_pos (bytes = 1024)
+    script.extend_from_slice(&1024u16.to_le_bytes());
+}
+
 /// Helper: builds a script that pushes a `String` value of the given bytes.
 /// Uses the sub-varint length-prefix the `pushstr` opcode expects.
 pub(crate) fn push_string_bytes(script: &mut Vec<u8>, bytes: &[u8]) {
@@ -688,8 +698,12 @@ pub(crate) fn build_confidential_nm_program(
         program = program.input();
         // callproof pieces.
         program = push_callproof_to_program(program, &cp);
-        // push:0 args, open.
-        program = program.push_int(0u64).open();
+        // gas/bytes operands (generous), then push:0 args, open.
+        program = program
+            .push_int(1024u64)
+            .push_int(1024u64)
+            .push_int(0u64)
+            .open();
     }
 
     //                    commit String (witness-bearing). ──
@@ -804,8 +818,12 @@ pub(crate) fn push_callproof_to_program(
 pub(crate) fn build_input_cell(inp: &NMInputSpec) -> (Cell, CallProof) {
     let (q_open, f_open) = open_commitments(inp);
     let token = crate::Token::new(q_open, f_open);
+    // Leaf script `push:1, return` — under ADR 0013 the opened cell
+    // runs in an isolated frame, so the leaf must explicitly return
+    // its single-Token payload to the caller.
+    let leaf = vec![0x01, 0x7e];
     let tree = PredicateTree::scripts_only(
-        vec![Vec::new()],
+        vec![leaf],
         input_blinding_for(inp),
     )
     .expect("scripts_only tree builds");

@@ -1799,14 +1799,16 @@ impl VM {
         Ok(())
     }
 
-    /// _cell internal_key neighbors position program args… k_ **open** → _results…_
+    /// _cell ik nbrs pos script gas bytes args… k_ **open** → _results… k'_
     ///
-    /// Verifies the call-proof against the cell's predicate, pours the
-    /// payload + args onto the current stack, and enters a new Run
-    /// over the unlocked program. Run-level (no new CallFrame).
+    /// Verifies the call-proof and enters the unlocked script in an
+    /// isolated `CallKind::CellOpen` frame with caller-specified gas
+    /// and bytes budgets. Results return via `return k'`. (ADR 0013.)
     fn op_open(&mut self) -> Result<(), VMError> {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
+        let bytes = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
+        let gas = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
         let prog = self.pop_value()?.to_string()?;
         let position = self.pop_value()?.to_string()?;
         let neighbors = self.pop_value()?.to_dict()?;
@@ -1819,18 +1821,27 @@ impl VM {
             &position,
             &prog,
         )?;
-        // verify_callproof succeeds iff prog's bytes match the leaf,
-        // so we can use the witness-bearing prog directly.
         let _ = cell.predicate.verify_callproof(&cp)?;
         let instrs = prog.to_instructions()?;
 
+        let external_context = self.is_external();
+        let anchor = cell.to_anchor();
+        let mut frame = CallFrame::new(
+            instrs,
+            CallKind::CellOpen { anchor, predicate: cell.predicate.clone(), external_context },
+            gas,
+            /*mem_limit=*/ bytes,
+            /*newbytes=*/ bytes,
+        );
         for v in cell.payload {
-            self.push_value(v);
+            frame.stack.push(v);
         }
         for v in args {
-            self.push_value(v);
+            frame.stack.push(v);
         }
-        self.enter_run(instrs)
+        let parent = core::mem::replace(&mut self.current_call, frame);
+        self.call_stack.push(parent);
+        Ok(())
     }
 
     /// Builds a `CallProof` from the four stack-popped pieces. `neighbors`
