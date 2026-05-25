@@ -26,6 +26,7 @@ mod test_stack;
 mod test_string_ops;
 mod test_tokens;
 mod test_txlog;
+mod test_actor;
 mod test_actor_state;
 mod test_actor_call;
 mod test_actor_introspection;
