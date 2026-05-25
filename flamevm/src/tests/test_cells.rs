@@ -441,8 +441,8 @@ fn callproof_for_out_of_range_index_errors() {
 
 //
 // A cell's payload bytes can only return to the stack via `open`,
-// `signtx`, or `signrun` — each of which consumes the source cell
-// and records (open) or defers (signtx/signrun) an authorization
+// `signtx`, or `signcall` — each of which consumes the source cell
+// and records (open) or defers (signtx/signcall) an authorization
 // check. There is no "transfer the cell handle into a new output"
 // shortcut, because `Value::Cell` is non-portable and the cell
 // construction opcodes (`cell`, `output`) reject non-portable
@@ -903,7 +903,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     // External tx consumes two distinct cells via `open` (each
     // unlocked by a valid Taproot CallProof against its predicate
     // tree), then emits two fresh output cells. No `signtx` /
-    // `signrun` here, so `deferred_sigs` stays empty.
+    // `signcall` here, so `deferred_sigs` stays empty.
     //
     // Each input cell's program is `drop` — it consumes the single
     // payload item the cell-open pours onto the stack.
@@ -1034,7 +1034,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     let final_anchor = vm.last_anchor.expect("anchor set after output 2");
     assert_eq!(final_anchor.0, out2.to_anchor().0);
 
-    // No `signtx` / `signrun` were used → no deferred sigs.
+    // No `signtx` / `signcall` were used → no deferred sigs.
     assert!(
         vm.deferred_sigs.is_empty(),
         "open does not record deferred sigs"

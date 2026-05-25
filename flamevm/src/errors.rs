@@ -122,7 +122,7 @@ pub enum VMError {
     #[error("Non-portable item in cell payload")]
     NonPortableInOutput,
 
-    /// This error occurs when `signrun` sees a signature that is not 64 bytes.
+    /// This error occurs when `signcall` sees a signature that is not 64 bytes.
     #[error("Bad signature byte length")]
     BadSignatureBytes,
 

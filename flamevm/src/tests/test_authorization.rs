@@ -29,7 +29,7 @@ fn signtx_pours_payload_and_records_txbound_sig() {
 }
 
 #[test]
-fn signrun_records_explicit_sig_and_runs_program() {
+fn signcall_records_explicit_sig_and_runs_program() {
     let prog = vec![0x1c]; // drop
     let sig_bytes = [0u8; 64];
 
@@ -39,7 +39,7 @@ fn signrun_records_explicit_sig_and_runs_program() {
     push_string_bytes(&mut script, &prog);
     push_string_bytes(&mut script, &sig_bytes);
     script.push(0x00); // m=0 args
-    script.push(0x99); // signrun
+    script.push(0x99); // signcall
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
@@ -61,11 +61,11 @@ fn signrun_records_explicit_sig_and_runs_program() {
 }
 
 #[test]
-fn signrun_message_binds_only_to_program_not_to_cell() {
+fn signcall_message_binds_only_to_program_not_to_cell() {
     // Two different cells running the same program produce
     // identical deferred-sig messages — confirms architect's
-    // intent that signrun binds only to the program.
-    fn run_signrun(predicate_byte: u8) -> DeferredSig {
+    // intent that signcall binds only to the program.
+    fn run_signcall(predicate_byte: u8) -> DeferredSig {
         let prog = vec![0x1c];
         let sig = [0u8; 64];
         let mut script = vec![0x05, 0x01];
@@ -80,8 +80,8 @@ fn signrun_message_binds_only_to_program_not_to_cell() {
         run_to_end(&mut vm).unwrap();
         vm.deferred_sigs.into_iter().next().unwrap()
     }
-    let s1 = run_signrun(0xaa);
-    let s2 = run_signrun(0xbb);
+    let s1 = run_signcall(0xaa);
+    let s2 = run_signcall(0xbb);
     let (m1, m2) = match (&s1, &s2) {
         (
             DeferredSig::Explicit { message: m1, .. },
@@ -89,12 +89,12 @@ fn signrun_message_binds_only_to_program_not_to_cell() {
         ) => (m1.clone(), m2.clone()),
         _ => panic!("expected Explicit on both"),
     };
-    assert_eq!(m1, m2, "signrun message must be program-only");
+    assert_eq!(m1, m2, "signcall message must be program-only");
 }
 
 #[test]
-fn signrun_rejects_wrong_signature_length() {
-    // payload(5), count(1), predicate, cell, then signrun-with-bad-sig.
+fn signcall_rejects_wrong_signature_length() {
+    // payload(5), count(1), predicate, cell, then signcall-with-bad-sig.
     let mut script = vec![0x05, 0x01];
     push_point_bytes(&mut script, &[0xaa; 32]);
     script.push(0x91); // cell
@@ -111,10 +111,10 @@ fn signrun_rejects_wrong_signature_length() {
 }
 
 #[test]
-fn signrun_explicit_sig_batch_verifies_correctly() {
+fn signcall_explicit_sig_batch_verifies_correctly() {
     // Phase-14 unit test for the Explicit-deferred-sig batch path
     // that `Verifier::verify` uses. Builds a real signature over
-    // the signrun-message transcript and runs it through the same
+    // the signcall-message transcript and runs it through the same
     // batch-verification logic as the verifier.
     //
     // (Full prove+verify-via-script path is covered by
@@ -123,21 +123,21 @@ fn signrun_explicit_sig_batch_verifies_correctly() {
     use curve25519_dalek::scalar::Scalar;
     let sk = Scalar::from(42u64);
     let vk_point = (&sk * &RISTRETTO_BASEPOINT_TABLE).compress();
-    // Build the message exactly as `op_signrun`'s
-    // `signrun_message(program)` helper does.
+    // Build the message exactly as `op_signcall`'s
+    // `signcall_message(program)` helper does.
     let inner_prog = vec![0x1c]; // drop
-    let mut prog_t = merlin::Transcript::new(b"flamevm.signrun.v1");
+    let mut prog_t = merlin::Transcript::new(b"flamevm.signcall.v1");
     prog_t.append_message(b"program", &inner_prog);
     let mut msg_bytes = vec![0u8; 32];
     prog_t.challenge_bytes(b"msg", &mut msg_bytes);
     // Sign over a transcript with that message appended (matches
     // `Verifier::verify`'s reconstruction).
-    let mut sign_t = merlin::Transcript::new(b"flamevm.signrun.v1");
+    let mut sign_t = merlin::Transcript::new(b"flamevm.signcall.v1");
     sign_t.append_message(b"msg", &msg_bytes);
     let signature = musig::Signature::sign(&mut sign_t, sk);
     // Verifier-side batch check.
     let mut batch = musig::BatchVerifier::new(rand::thread_rng());
-    let mut t = merlin::Transcript::new(b"flamevm.signrun.v1");
+    let mut t = merlin::Transcript::new(b"flamevm.signcall.v1");
     t.append_message(b"msg", &msg_bytes);
     let vk = musig::VerificationKey::from_compressed(vk_point);
     signature.verify_batched(&mut t, vk, &mut batch);
@@ -145,7 +145,7 @@ fn signrun_explicit_sig_batch_verifies_correctly() {
 }
 
 #[test]
-fn signrun_tampered_sig_batch_rejects() {
+fn signcall_tampered_sig_batch_rejects() {
     // Verify that a tampered sig fails the batch check (the same
     // path that Verifier::verify uses for Explicit sigs).
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
@@ -153,11 +153,11 @@ fn signrun_tampered_sig_batch_rejects() {
     let sk = Scalar::from(42u64);
     let vk_point = (&sk * &RISTRETTO_BASEPOINT_TABLE).compress();
     let inner_prog = vec![0x1c];
-    let mut prog_t = merlin::Transcript::new(b"flamevm.signrun.v1");
+    let mut prog_t = merlin::Transcript::new(b"flamevm.signcall.v1");
     prog_t.append_message(b"program", &inner_prog);
     let mut msg_bytes = vec![0u8; 32];
     prog_t.challenge_bytes(b"msg", &mut msg_bytes);
-    let mut sign_t = merlin::Transcript::new(b"flamevm.signrun.v1");
+    let mut sign_t = merlin::Transcript::new(b"flamevm.signcall.v1");
     sign_t.append_message(b"msg", &msg_bytes);
     let sig = musig::Signature::sign(&mut sign_t, sk);
     // Tamper: flip a bit in the signature's `s` scalar.
@@ -174,7 +174,7 @@ fn signrun_tampered_sig_batch_rejects() {
             })
         })
         .unwrap();
-    let mut t = merlin::Transcript::new(b"flamevm.signrun.v1");
+    let mut t = merlin::Transcript::new(b"flamevm.signcall.v1");
     t.append_message(b"msg", &msg_bytes);
     let vk = musig::VerificationKey::from_compressed(vk_point);
     tampered.verify_batched(&mut t, vk, &mut batch);

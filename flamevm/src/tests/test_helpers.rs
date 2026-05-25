@@ -933,7 +933,7 @@ pub(crate) fn assert_nm_txlog(
             _ => panic!("txlog[{}] must be Output", idx),
         }
     }
-    // No `signtx` / `signrun` in the N→M matrix → deferred_sigs
+    // No `signtx` / `signcall` in the N→M matrix → deferred_sigs
     // empty on both sides. No `send` yet → sends empty.
     // Pinning these guards against future opcode misroutes
     // silently emitting spurious deferred records or send queue

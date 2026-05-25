@@ -593,7 +593,7 @@ fn phase21_txlog_ordering_in_txresult() {
 }
 
 /// `TxResult.deferred_sigs` exposes the recorded `signtx` /
-/// `signrun` items to callers post-finalize. Verifier-side this
+/// `signcall` items to callers post-finalize. Verifier-side this
 /// is the post-verify audit shape: the caller can inspect which
 /// keys participated without re-running the VM.
 #[test]

@@ -105,7 +105,7 @@ const OP_CALL: u8 = 0x95;
 const OP_LOAD: u8 = 0x96;
 const OP_SAVE: u8 = 0x97;
 const OP_SIGNTX: u8 = 0x98;
-const OP_SIGNRUN: u8 = 0x99;
+const OP_SIGNCALL: u8 = 0x99;
 const OP_ACTORID: u8 = 0x9c;
 const OP_ANCHOR: u8 = 0x9d;
 const OP_CALLERID: u8 = 0xa0;
@@ -200,7 +200,7 @@ pub enum Instruction {
     Load,                  // ø load → dict
     Save,                  // dict save → ø
     Signtx,                // cell signtx → items… k
-    Signrun,               // cell script sig gas bytes args… m signrun → results… k'
+    Signcall,               // cell script sig gas bytes args… m signcall → results… k'
     Actorid,               // ø actorid → s
     Anchor,                // ø anchor → s
     Callerid,              // ø callerid → s
@@ -318,7 +318,7 @@ impl Instruction {
             Instruction::Load => out.push(OP_LOAD),
             Instruction::Save => out.push(OP_SAVE),
             Instruction::Signtx => out.push(OP_SIGNTX),
-            Instruction::Signrun => out.push(OP_SIGNRUN),
+            Instruction::Signcall => out.push(OP_SIGNCALL),
             Instruction::Actorid => out.push(OP_ACTORID),
             Instruction::Anchor => out.push(OP_ANCHOR),
             Instruction::Callerid => out.push(OP_CALLERID),
@@ -453,7 +453,7 @@ impl Instruction {
             OP_LOAD => Ok(Instruction::Load),
             OP_SAVE => Ok(Instruction::Save),
             OP_SIGNTX => Ok(Instruction::Signtx),
-            OP_SIGNRUN => Ok(Instruction::Signrun),
+            OP_SIGNCALL => Ok(Instruction::Signcall),
             OP_ACTORID => Ok(Instruction::Actorid),
             OP_ANCHOR => Ok(Instruction::Anchor),
             OP_CALLERID => Ok(Instruction::Callerid),
@@ -753,7 +753,7 @@ mod tests {
             Instruction::Input,
             Instruction::Cell,
             Instruction::Signtx,
-            Instruction::Signrun,
+            Instruction::Signcall,
         ];
         for c in cases {
             let mut buf = Vec::new();

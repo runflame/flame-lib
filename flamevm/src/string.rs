@@ -28,7 +28,7 @@ pub enum String {
     Predicate(Box<crate::cell::Predicate>),
     /// Prover-side sub-script: a decoded instruction stream with
     /// witness slots intact. Encodes to the compiled bytecode.
-    /// Consumed by `op_run`, `op_switch`, `op_signrun` via
+    /// Consumed by `op_run`, `op_switch`, `op_signcall` via
     /// [`String::to_instructions`] — verifier sees `Opaque(bytes)`
     /// and parses, prover keeps witnesses inline.
     Script(Vec<Instruction>),
@@ -67,7 +67,7 @@ impl String {
     /// Constructs a witness-bearing Script-String. Used by the
     /// prover when pushing a sub-script that contains witnesses
     /// (e.g. inner `alloc(Some(_))` calls) and will later be
-    /// consumed by `run` / `switch` / `signrun`.
+    /// consumed by `run` / `switch` / `signcall`.
     pub fn script(instructions: Vec<Instruction>) -> String {
         String::Script(instructions)
     }
@@ -213,7 +213,7 @@ impl String {
     /// variants since they're 32-byte points/scalars, not
     /// executable bytecode.
     ///
-    /// Used by `op_run`, `op_switch`, `op_signrun` to enter a
+    /// Used by `op_run`, `op_switch`, `op_signcall` to enter a
     /// sub-script — letting the prover keep witnesses inline
     /// across nested programs.
     pub fn to_instructions(self) -> Result<Vec<Instruction>, VMError> {

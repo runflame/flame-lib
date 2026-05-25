@@ -100,7 +100,7 @@ impl Program {
     /// `pushstr` (0x19) carrying a witness-bearing sub-script. The
     /// prover pushes the inner Program's instructions (witness
     /// slots intact) wrapped in `String::Script`; downstream
-    /// `op_run` / `op_switch` / `op_signrun` walk those
+    /// `op_run` / `op_switch` / `op_signcall` walk those
     /// instructions directly. Verifier-side bytecode encodes to
     /// the compiled bytes of `inner.to_bytecode()`, so both sides
     /// see the same wire form.
@@ -318,7 +318,7 @@ impl Program {
     pub fn output(mut self) -> Self { self.instructions.push(Instruction::Output); self }
     pub fn open(mut self) -> Self { self.instructions.push(Instruction::Open); self }
     pub fn signtx(mut self) -> Self { self.instructions.push(Instruction::Signtx); self }
-    pub fn signrun(mut self) -> Self { self.instructions.push(Instruction::Signrun); self }
+    pub fn signcall(mut self) -> Self { self.instructions.push(Instruction::Signcall); self }
 }
 
 // ── ProgramItem ─────────────────────────────────────────────────────

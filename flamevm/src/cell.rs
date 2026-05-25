@@ -89,7 +89,7 @@ impl Predicate {
         Predicate::Opaque(self.to_point())
     }
 
-    /// The 32-byte verification key for `signtx` / `signrun`.
+    /// The 32-byte verification key for `signtx` / `signcall`.
     /// Equal to the predicate's opaque point.
     pub fn verification_key(&self) -> CompressedRistretto {
         self.to_point()
@@ -406,7 +406,7 @@ impl Cell {
     /// from inputs forward) makes cell-ids unique without needing the
     /// payload to disambiguate; binding the payload bytes here is
     /// belt-and-suspenders to make `id()` a true commitment to the
-    /// cell's contents — needed for protocol messages (signtx/signrun)
+    /// cell's contents — needed for protocol messages (signtx/signcall)
     /// and for the txlog Output entry.
     ///
     /// Panics if a payload value's type has no canonical encoder

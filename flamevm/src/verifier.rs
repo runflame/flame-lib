@@ -112,7 +112,7 @@ impl Verifier {
                 let starsig = musig::Signature::from_bytes(*signature)
                     .map_err(|_| VMError::BadSignatureBytes)?;
                 let vk = musig::VerificationKey::from_compressed(*verification_key);
-                let mut t = merlin::Transcript::new(b"flamevm.signrun.v1");
+                let mut t = merlin::Transcript::new(b"flamevm.signcall.v1");
                 t.append_message(b"msg", message);
                 starsig.verify_batched(&mut t, vk, &mut verifier.batch);
             }

@@ -42,7 +42,7 @@ impl Anchor {
 
 /// Signature check deferred to `Delegate::finalize`. `TxBound` comes
 /// from `signtx` (aggregated MuSig verified against TxID); `Explicit`
-/// comes from `signrun` (single signature over a program transcript).
+/// comes from `signcall` (single signature over a program transcript).
 #[derive(Clone, Debug)]
 pub enum DeferredSig {
     TxBound {
@@ -676,7 +676,7 @@ impl VM {
             I::Load => self.op_load(registry),
             I::Save => self.op_save(registry),
             I::Signtx => self.op_signtx(),
-            I::Signrun => self.op_signrun(),
+            I::Signcall => self.op_signcall(),
 
             I::Actorid => self.op_actorid(),
             I::Anchor => self.op_anchor(),
@@ -1742,11 +1742,11 @@ impl VM {
     // (CallProof is now constructed from distinct stack pieces; see
     // `callproof_from_stack_pieces` below `op_open`. The earlier packed
     // bag-of-bytes layout was replaced per Architect's response on todo
-    /// Merlin message for `signrun`: binds the signature to the
+    /// Merlin message for `signcall`: binds the signature to the
     /// program bytes only. Programs add further context (anchor,
     /// actor identity) via explicit checks inside their script.
-    fn signrun_message(program: &[u8]) -> Vec<u8> {
-        let mut t = Transcript::new(b"flamevm.signrun.v1");
+    fn signcall_message(program: &[u8]) -> Vec<u8> {
+        let mut t = Transcript::new(b"flamevm.signcall.v1");
         t.append_message(b"program", program);
         let mut out = vec![0u8; 32];
         t.challenge_bytes(b"msg", &mut out);
@@ -2046,11 +2046,11 @@ impl VM {
         Ok(())
     }
 
-    /// _cell prog sig args… m_ **signrun** → _items… k_
+    /// _cell prog sig args… m_ **signcall** → _items… k_
     ///
     /// Defers an Explicit signature over `prog`, pours payload + args
     /// onto the stack, enters a new Run over `prog`.
-    fn op_signrun(&mut self) -> Result<(), VMError> {
+    fn op_signcall(&mut self) -> Result<(), VMError> {
         let m = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(m)?;
         let sig_str = self.pop_value()?.to_string()?;
@@ -2061,7 +2061,7 @@ impl VM {
         }
         let mut sig = [0u8; 64];
         sig.copy_from_slice(sig_str.as_bytes());
-        let msg = Self::signrun_message(&prog_str.bytes_view().into_owned());
+        let msg = Self::signcall_message(&prog_str.bytes_view().into_owned());
         self.deferred_sigs.push(DeferredSig::Explicit {
             verification_key: cell.predicate.verification_key(),
             message: msg,
