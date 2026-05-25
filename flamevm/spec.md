@@ -288,168 +288,825 @@ Withdrawn vbytes are recycled into the total pool. Recycling is subject to 100-b
 
 **Transient memory.** In addition to persistent storage, an actor may use transient memory during a call (scratch space released when the call ends). The cap is fixed at 4× the actor's current persistent vbyte size; the `memlimit` opcode returns this cap. Allocations that would push live memory past the cap fail the call.
 
+
 # Instruction set
 
-### Stack operations
+Each instruction is a one-byte **opcode** optionally followed by **immediate data** encoded inline in the bytecode. Stack effects are written in left-to-right bottom-to-top order: in `a b → c`, `b` is the top of the stack on entry, `c` is the top on exit.
 
-| Hex | Name | Stack diagram | Notes |
+**Failure modes.** A **hard fail** aborts the current call (and unwinds outwards on `op_break` boundaries). A **soft fail** is an in-band signal: the opcode pushes an optional shape `{value 1 | 0}` and leaves the consumed value(s) on the stack untouched so the script can branch. The two kinds are noted per opcode.
+
+**Context tags.**
+- **\[E\]** — external-only. Hard-fails `ExternalOnly` from internal context. Includes `input` and the CS-touching opcodes (`scalar`, `commit`, `intvar`, `expr`, `alloc`, `range`, `decrypt`, `mix`, `fee`, the CS branches of `borrow`).
+- **\[I\]** — internal-only. Needs a registry handle. Covers `call`, `send`, `load`, `save`.
+- Most opcodes work in either context.
+
+## Instruction table
+
+| Hex | Name | Stack | Effects |
 | --- | --- | --- | --- |
-| 0k | push:k | ø → int | Pushes an integer in range 0..15 |
-| 10, 11 | pushint8 | ø → int | Reads one more byte, sets the sign to s. |
-| 12, 13 | pushint16 | ø → int | Reads 2 more bytes little-endian, sets the sign to `s`. |
-| 14, 15 | pushint64 | ø → int | Reads 8 more bytes little-endian, sets the sign to `s`. |
-| 16, 17 | pushint128 | ø → int | Reads 16 more bytes little-endian, sets the sign to `s`. |
-| 18 | pushint | ø → int | Reads 32 more bytes; bytes are the sign-magnitude form (LE magnitude in bytes 0..31; highest bit of byte 31 is the sign). |
-| 19 | pushstr | ø → string | Pushes a string on stack. |
-| 1a | pushpoint | ø → point | Pushes a point on stack. |
-| 1b | pushtoken | flv → token | Pops an Int253 flavor and pushes a 0-qty ClearToken with that flavor. |
-| 1c | drop | x → ø | Drops any droppable item, including empty structs and zero-tokens. |
-| 1d | nop | ø → ø | Does nothing. |
-| 1e | dup | x… k → x ... x | Copies k-th item to the top of the stack, takes integer k from stack. |
-| 1f | roll | x… k → ... x | Rolls over k-th item to the top of the stack, takes integer k from stack. |
-| 2k | dup:k | x_k … x_0 → x_k ... x_0 x_k | Copies k-th item to the top of the stack. |
-| 3k | roll:k | x_k … x_0 → x_{k-1} ... x_0 x_k | Rolls over k-th item to the top of the stack. |
+| **Stack** | | | |
+| 0k | [push:k](#pushk-and-friends) | ø → int | |
+| 10–18 | [pushint8/16/64/128 \[s\], pushint](#pushk-and-friends) | ø → int | |
+| 19 | [pushstr](#pushstr) | ø → str | |
+| 1a | [pushpoint](#pushpoint) | ø → point | |
+| 1b | [pushtoken](#pushtoken) | flv → token | |
+| 1c | [drop](#drop) | x → ø | |
+| 1d | [nop](#nop) | ø → ø | |
+| 1e / 1f | [dup, roll](#dup--dupk--roll--rollk) | x… k → … | |
+| 2k / 3k | [dup:k, roll:k](#dup--dupk--roll--rollk) | x_k … x_0 → … | |
+| **String** | | | |
+| 40 | [readbits](#readbits) | s n → s' x 1 \| s 0 | |
+| 41 | [readint](#readint) | s → s' x 1 \| s 0 | |
+| 42 | [readstr](#readstr) | s n → s' s'' 1 \| s 0 | |
+| 43 | [readpoint](#readpoint) | s → s' p 1 \| s 0 | |
+| 44 | [writebits](#writebits) | s x n → s' | |
+| 45 | [writeint](#writeint) | s x → s' | |
+| 46 | [append](#append) | s s' → s'' | |
+| 47 | [writezeros](#writezeros) | s n → s' | |
+| 48 | [bitnot](#bitnot) | s → s' | |
+| 49 / 4a / 4b | [bitor / bitand / bitxor](#bitor--bitand--bitxor) | a b → c | |
+| 4c | [shiftleft](#shiftleft) | a n → b c | |
+| 4d | [shiftright](#shiftright) | a n → b c | |
+| 4e | [keccak256](#keccak256) | s → x | |
+| **Arithmetic & logic** | | | |
+| 50 | [abs](#abs) | x → \|x\| s | |
+| 51 | [eq](#eq) | a b → a b {0\|1} or constraint | |
+| 52 | [neg](#neg) | x → −x | |
+| 53 | [add](#add) | x y → z | Modifies CS (lifted) |
+| 54 | [mul](#mul) | x y → z | Modifies CS (lifted) |
+| 55 | [divmod](#divmod) | x z → d r | |
+| 56 | [mod252](#mod252) | s → int | |
+| 57 | [not](#not) | x → y | |
+| 58 | [and](#and) | a b → c | |
+| 59 | [or](#or) | a b → c | |
+| **Constraint system \[E\]** | | | |
+| 5a | [scalar](#scalar) | s → expr | |
+| 5b | [commit](#commit) | s → var | Modifies CS |
+| 5c | [alloc](#alloc) | ø → expr | Modifies CS |
+| 5d | [expr](#expr) | var → expr | Modifies CS |
+| 5e | [range](#range) | expr n → expr | Modifies CS |
+| 5f | [size](#size) | x → x n | |
+| **Dict** | | | |
+| 60 | [dict](#dict) | …kv… n → dict | |
+| 61 | [put](#put) | dict k v → dict' | |
+| 62 | [replace](#replace) | dict k v → dict' {prev 1 \| 0} | |
+| 63 | [get](#get) | dict k → dict' k v | |
+| 64 | [getopt](#getopt) | dict k → dict' {v 1 \| 0} | |
+| 65 | [getdup](#getdup) | dict k → dict {v 1 \| 0} | |
+| 66 | [first](#first--last--next) | dict → dict {k 1 \| 0} | |
+| 67 | [last](#first--last--next) | dict → dict {k 1 \| 0} | |
+| 68 | [next](#first--last--next) | dict k → dict {k' 1 \| 0} | |
+| **Cryptography** | | | |
+| 69 | [merlin](#merlin) | label → merlin | |
+| 6a | [merlinwrite](#merlinwrite) | m label s → m | |
+| 6b | [merlinread](#merlinread) | m label n → m s | |
+| 6c | [sha256](#sha256) | s → x | |
+| 6d | [sha512](#sha512) | s → x | |
+| 6e | [sha3](#sha3) | s → x | |
+| 6f | [log](#log) | s → ø | Modifies txlog |
+| **Tokens** | | | |
+| 70 | [amount](#amount) | t → t qty flv | |
+| 71 | [issue](#issue) | qty tag → T | Modifies txlog; actor ctx |
+| 72 | [retire](#retire) | t → ø | Modifies txlog |
+| 73 | [borrow](#borrow) | qty flv → −T +T | Modifies CS (CS branch) |
+| 74 | [merge](#merge) | a b → {c 1 \| a b 0} | |
+| 75 | [split](#split) | a q → a' b | |
+| 76 | [mix](#mix) \[E\] | tokens… cmts… m n → tokens | Modifies CS |
+| 77 | [decrypt](#decrypt) \[E\] | T f' f q' q → CT | Modifies CS |
+| 78 | [issueflv](#issueflv) | cid tag → int | |
+| **Control flow** | | | |
+| 79 | [verify](#verify) | x → ø | Modifies CS (Constraint) |
+| 7a | [fee](#fee) \[E\] | qty flv → −WT | Modifies CS, txlog, fee accumulator |
+| 7b | [run](#run) | s → … | Suspends current Run |
+| 7c | [loop](#loop) | ø → ø | Rewinds current Run |
+| 7d | [switch](#switch) | x a b → … | |
+| 7e | [return](#return) | a_{k-1} … a_0 k → ø | Pops call frame; refunds gas |
+| 7f | [type](#type) | x → x code | |
+| 8k | [break:k](#breakk) | ø → ø | Cascades through Runs |
+| **Cells, actors, sends** | | | |
+| 90 | [input](#input) \[E\] | s → cell | Modifies txlog; seeds last_anchor |
+| 91 | [cell](#cell) | items… k pred → cell | Advances last_anchor |
+| 92 | [output](#output) | items… k pred → ø | Modifies txlog |
+| 93 | [open](#open) | cell ik nbrs pos script gas bytes args… k → results… k' | New isolated CallFrame |
+| 94 | [send](#send) | args… k refund gas bytes method addr → ø | Modifies txlog; queues message |
+| 95 | [call](#call) \[I\] | args… k gas bytes method addr → results… k' | New isolated CallFrame; re-entrancy guard |
+| 96 | [load](#load) \[I\] | ø → dict | Marks actor for destruction |
+| 97 | [save](#save) \[I\] | dict → ø | Unmarks actor for destruction |
+| 98 | [signtx](#signtx) | cell → items… k | Defers TxBound signature |
+| 99 | [signcall](#signcall) | cell script sig gas bytes args… m → results… k' | Defers Explicit sig; new isolated CallFrame |
+| 9a | [timelock](#timelock) | ø → n {0\|1} | *planned* |
+| 9b | [version](#version) | ø → n | *planned* |
+| 9c | [actorid](#actorid) | ø → s | |
+| 9d | [anchor](#anchor) | ø → s | |
+| 9e | [gas](#gas) | ø → n | *planned* |
+| 9f | [bytes](#bytes) | ø → n | *planned* |
+| a0 | [callerid](#callerid) | ø → s | |
+| a1 | [method](#method) | ø → int | |
+| a2 | [gaslimit](#gaslimit) | ø → n | *planned* |
+| a3 | [memlimit](#memlimit) | ø → n | *planned* |
+| a4 | [newbytes](#newbytes) | ø → n | *planned* |
+| **Chain info \[I\]** | | | |
+| a5 | [height](#height) | ø → n | *planned* |
+| a6 | [blockhash](#blockhash) | h → s | *planned* |
+| a7 | [blockburn](#blockburn) | h → n | *planned*; maturity 100 |
+| a8 | [blockweight](#blockweight) | h → n | *planned*; maturity 100 |
+| a9 | [blockrate](#blockrate) | h → n | *planned*; maturity 100 |
+| aa | [chainstate](#chainstate) | n → dict | *planned*; maturity 100 |
 
-### String operations
+Opcodes marked *planned* are reserved in the byte map; their handlers are not yet wired. Scripts using them error `UnknownOpcode` until the corresponding implementation phase lands (see `flamevm/plan.md`).
 
-**Failure principle (bit/int read/write opcodes).** Violations of constraints derived from *external data* — string length, canonical magnitude, negative-zero — are **soft fails**: the opcode returns the optional-`0` shape and leaves the source string on the stack untouched, letting the script branch on the failure. Violations of *author-controlled* bounds — e.g. a static bit count `n > 256` — are **hard fails**: the script aborts with a programmer-error. The same principle applies to other read/write opcodes in this section: a hard-fail signals "the script is wrong", a soft-fail signals "the input doesn't fit".
+## Stack instructions
 
-| Hex | Name | Stack diagram | Notes |
-| --- | --- | --- | --- |
-| 40 | readbits | s n → s’ x 1 | s 0 | Reads `n ≤ 256` bits **LSB-first within byte** into bits 0..n-1 of a new `Int253`. Sign at fixed bit position 255 — only set when `n = 256` AND input bit 255 is 1. Soft-fails (`s 0`, string untouched) on insufficient bytes, magnitude ≥ ℓ (possible when `n ≥ 253`), or negative zero (possible when `n = 256`). **Hard-fails the script if `n > 256`** (programmer error). |
-| 41 | readint | s → s’ x 1 | s 0 | Equivalent to `readbits(s, 256)`. Reads the canonical 32-byte `Int253` (bit 255 = sign). Same soft-fail conditions: insufficient bytes, magnitude ≥ ℓ, or negative zero. |
-| 42 | readstr | s n → s’ s’’ 1  | s 0 | Reads n bytes in a new string, consuming them from the first string. |
-| 43 | readpoint | s → s’ point 1 | s 0 | Reads point |
-| 44 | writebits | s x n → s’ | Appends the low `n` bits of `x`'s canonical 32-byte `Int253` representation as bytes (LSB-first). `n` must be a multiple of 8 and `≤ 256`; **hard-fails** otherwise. The sign bit (bit 255) is included iff `n = 256`. |
-| 45 | writeint | s x → s’ | Appends the canonical 32-byte `Int253` representation of `x`. Equivalent to `writebits(s, x, 256)`. |
-| 46 | append | s s’ → s’’ | Appends s’ to s: s’’ = s || s’ |
-| 47 | writezeros | s n → s’ | Appends n zero-bytes. |
-| 48 | bitnot | s → s’ | Inverts all bits in a string. |
-| 49 | bitor | a b → c | Bitwise OR of two strings. Fails if strings are of different size. |
-| 4a | bitand | a b → c | Bitwise AND of two strings. Fails if strings are of different size. |
-| 4b | bitxor | a b → c | Bitwise XOR of two strings. Fails if strings are of different size. |
-| 4c | shiftleft | a n → b c | Shifts bits left by n≤256 bits. Returns removed bits as string zero-padded on the left. |
-| 4d | shiftright | a n → b c | Shifts bits right by n≤256 bits. Returns removed bits as string zero-padded on the right. |
-| 4e |  |  |  |
-| 4f |  |  |  |
+### push:k and friends
 
-### Ints, logic and constraints
+ø → _int_
 
-| Hex | Name | Stack diagram | Notes |
-| --- | --- | --- | --- |
-| 50 | abs | int → int’ s | Removes the sign from int, turning it into a canonical scalar. Puts sign s on stack. |
-| 51 | eq | x y → x y {0 | 1} | Checks equality of two types. |
-| 52 | neg | x → –x | Negates integer, varexpr or pointexpr. |
-| 53 | add | x y → z | Adds two integers modulo R255 group order; or adds two Expressions. |
-| 54 | mul | x y → z | Multiplies two integers modulo R255 group order; or multiplies two Expressions. |
-| 55 | divmod | x z → d r | Computes the quotient and the remainder for int. |
-| 56 | mod252 | str → int | Interprets 0..64-byte as a little-endian unsigned integer and mod-reduces to R255 group order. |
-| 57 | not | x → y | Numbers: 0 → 1, non-0 → 0; Constraints: returns inverse constraint. |
-| 58 | and | a b → c | Logical AND of two ints (one zero ⇒ 0, both non-zeroes ⇒ 1); or the same for constraints. |
-| 59 | or | a b → c | Logical OR of two ints (non-zero ⇒ 1, both zeroes ⇒ 0); or the same for constraints. |
+Pushes an [`Int253`](#int253). The encoder picks the narrowest of these forms:
 
-All constraint operations available on external transactions only.
+- `0x00..=0x0f` — immediate `push:k`, value `k ∈ 0..=15`, no payload.
+- `0x10`/`0x11` — `pushint8` positive/negative, 1-byte LE payload (magnitude 0..=255).
+- `0x12`/`0x13` — `pushint16` positive/negative, 2-byte LE payload.
+- `0x14`/`0x15` — `pushint64` positive/negative, 8-byte LE payload.
+- `0x16`/`0x17` — `pushint128` positive/negative, 16-byte LE payload.
+- `0x18` — `pushint` full form, 32-byte sign-magnitude payload.
 
-| Hex | Name | Stack diagram | Notes |
-| --- | --- | --- | --- |
-| 5a | scalar | string → expr | **[E]** Pops a 32-byte `String`, downcasts to `Int253` (`String::to_scalar`), pushes `Expression::Constant(int)`. For witness-bearing `String::Scalar(i)` the witness is extracted directly; for `String::Opaque(bytes)` the bytes are parsed as a canonical sign-magnitude `Int253`. |
-| 5b | commit | string → var | **[E]** Pops a 32-byte `String`, downcasts to `Commitment` (`String::to_commitment`), wraps in `Variable { commitment }`. Verifier: `String::Opaque(point bytes)` → `Commitment::Closed(point)`. Prover: `String::Commitment(Open(witness))` → witness preserved. Downstream `expr` opcode binds the resulting `Variable` into the CS via `Delegate::commit_variable`. |
-| 5c | intvar | ø → var | Allocates an internal variable in CS (non-committed via PC). |
-| 5d | expr | var → expr | Converts variable into an expression. |
-| 5e | range | expr n → expr | **[E]** Pops bit count `n: Int253` (must be in `[1, 64]`) and an `Expression`. For `Expression::Constant`, asserts the constant fits in `[0, 2ⁿ)` (cleartext check, no CS work). For `Expression::LinearCombination`, adds a bulletproofs range-proof gadget asserting `0 ≤ expr.value < 2ⁿ`. The Expression is pushed back unchanged. Hard-fails `BitCountOutOfRange` if `n ∉ [1, 64]`, `InvalidBitrange` on cleartext overflow, `R1CSError` on CS-construction failure. |
-| 5f | size | x → x n | (Internal+External) Returns length of string in bytes, or struct’s number of entries. |
+Width classes carve disjoint, offset-based value ranges so the encoding is canonical. The decoder rejects values that fit a narrower class. Negative zero is never representable.
 
-### Dicts
+### pushstr
 
-| Hex | Name | Stack diagram | Notes |
-| --- | --- | --- | --- |
-| 60 | dict | … val key val key n → dict | Creates a new dict with 2*n items as key-value pairs. |
-| 61 | put | dict k v → dict’ | Inserts the value at key, fails if the slot is already occupied. |
-| 62 | replace | dict k v → dict’ {prev 1 | 0 } | Set value at the key, returning previous value as optional. |
-| 63 | get | dict k → dict’ k v | Takes out value at key `k`, fails if the value is missing. |
-| 64 | getopt | dict k → dict’ {v 1 | 0} | Removes the value as optional. |
-| 65 | getdup | dict k → dict {v 1 | 0} | Copies the value at key. Returns 0 if key is missing, fails if value exists but not copyable. |
-| 66 | first | dict → dict {k 1 | 0} | First key in the dict |
-| 67 | last | dict → dict {k 1 | 0} | Last key in the dict |
-| 68 | next | dict k → dict {k’ 1 | 0} | Next key after the given one |
+ø → _string_
 
-### **Cryptography**
+Reads a sub-varint length prefix + payload bytes; pushes them as a [String](#string).
 
-| Hex | Name | Stack diagram | Notes |
-| --- | --- | --- | --- |
-| 69 | merlin | label → merlin | Creates a new transcript with a given label. |
-| 6a | merlinwrite | merlin label str → merlin | Writes byte string with a given label. |
-| 6b | merlinread | merlin label n → merlin str | Reads n bytes with a given label. |
-| 6c | sha256 | str → x | Returns a 256-bit string with sha256 digest of an input |
-| 6d | sha512 | str → x | Returns a 512-bit string with sha2-512 digest of an input |
-| 6e | sha3 | str → x | Returns a 256-bit string with sha3-256 (FIPS-202) digest of an input |
-| 4e | keccak256 | str → x | Returns a 256-bit string with Keccak-256 digest of an input (Ethereum compatibility). |
-| 6f | log | str → ø | **[E or I]** Pops a `String`, emits `TxEntry::Data(bytes)` into the txlog. Visible to the outer verifier; doesn't occupy persistent storage. Mirrors zkvm's `log` opcode (same byte). Witness-bearing String variants serialize via `to_bytes` so prover and verifier emit identical canonical bytes. (Earlier draft assigned `sigverify` to this byte; that role is now covered by the deferred-sig batch on `signtx` / `signcall` via the delegate's `BatchVerifier` — no separate opcode.) |
+### pushpoint
 
-### Tokens
+ø → _point_
 
-| Hex | Name | Stack diagram | Notes |
-| --- | --- | --- | --- |
-| 70 | amount | token → token qty flv | Peeks the top token-shaped value and pushes `(qty, flv)` above it. ClearToken: both as `Int253` (cleartext). Token: both as `Point` (the compressed commitment points; works without a live CS). WideToken: errors `TypeNotToken` — its quantity is not yet range-proven and so cannot be safely surfaced. |
-| 71 | issue | qty tag → T | Cleartext branch (`qty: Int253`): builds `ClearToken(qty, flavor_from_actor(current_actor, tag))`, emits `TxEntry::Issue(unblinded_qty, unblinded_flv)`. Encrypted branch (`qty: Point`): not yet wired — hard-fails `TokenRequiresCS`. Requires actor context (`OpcodeRequiresActorContext` from `ExternalRoot`); to compute a flavor without actor context use `issueflv`. |
-| 72 | retire | token → ø | Consumes a token; emits `TxEntry::Retire(qty_point, flv_point)`. ClearToken uses unblinded commitments; Token uses live commitment points. WideToken / other types: `TypeNotToken`. |
-| 73 | borrow | qty flv → –T +T | Cleartext branch (both `Int253`): pushes `(ClearToken(-qty, flv), ClearToken(qty, flv))` — the negative is non-portable bottom, the positive is portable top. Encrypted branch (both `Variable`): commits both to the CS, range-proves the positive `qty` 64-bit, allocates `-qty`, constrains the sum to zero, and pushes `(WideToken(-qty, flv), Token(qty, flv))`. Raw `Point` operand: `TokenRequiresCS` (legacy hint not accepted). |
-| 74 | merge | a b → {c 1 | a b 0} | ClearTokens only: on flavor match, pushes `(ClearToken(a.qty+b.qty, flv), 1)`. On flavor mismatch, restores `(a, b, 0)` (soft-fail). Non-ClearToken inputs error `TypeNotClearToken`. |
-| 75 | split | a q → a’ b | ClearTokens only: returns `(ClearToken(a.qty-q, flv), ClearToken(q, flv))`. Hard-fails `TokenSplitOutOfRange` if `q < 0`, `a.qty < 0`, or `q > a.qty`. Non-ClearToken inputs error `TypeNotClearToken`. |
-| 76 | mix | anytokens… commitments… m n → values | **[E]** Pops  (output count) and  (input count) as ; pops  output Pedersen commitment pairs (qty/flv Strings); pops  input token-shaped values; invokes the spacesuit cloak gadget to constrain that inputs balance with outputs per flavor (and range-proof each output); pushes  output s. |
-| 77 | decrypt | token f f’ q q’ → cleartoken | **[E]** Pops  (qty blinding),  (qty cleartext),  (flv blinding),  (flv cleartext), . Verifies that  and analogously for the flavor. On success, pushes . Hard-fails  on commitment mismatch. All scalar operands are . |
-| 78 | issueflv | cid tag → int | Pops a `tag` String and a `cid` String (must be exactly 32 bytes — actor id); pushes `flavor_from_actor(cid, tag)` as `Int253`. Pure helper: no CS, no txlog effect, no actor-context requirement. Domain separator `flamevm.token.flavor.v1` (consensus-fixed). |
+Reads 32 more bytes and pushes them as a [Point](#point). Bytes are not decompressed eagerly — invalid Ristretto encodings only fail when consumed by a downstream opcode.
 
-### Control flow
+### pushtoken
 
-| Hex | Name | Stack diagram | Notes |
-| --- | --- | --- | --- |
-| 79 | verify | scalar → ø | Fails if scalar or int is zero. Otherwise pops the number off the stack. |
-| 7a | fee | qty flv → widetoken | **[E]** Pops `qty: Int253` (non-negative, must fit `u64` and be `≤ MAX_FEE = 2²⁴`) and `flv: Int253`. Emits `TxEntry::Fee(qty)` into the txlog with `qty` as a bare `u64` (cleartext fee branch). Increments the per-tx `CheckedFee` accumulator; the running total is also bounded by `MAX_FEE`. Allocates a fresh `WideToken` in the CS with `q = -qty`, `f = flv` (both cleartext-constrained) and pushes it onto the stack so the script must balance the debt against real tokens (typically via `mix`). Hard-fails `FeeQtyNegative` on a negative `qty`, `FeeTooHigh` on a `qty > MAX_FEE` or aggregate overflow, `TypeNotInt253` on a non-`Int253` operand, and `ExternalOnly` if invoked from internal context. The blinded-fee branch (encrypted `qty`) is reserved for a future phase. |
-| 7b | run | str → … | Runs the popped bitstring as a script. |
-| 7c | loop | ø → ø | Re-evaluates the current script from its beginning. |
-| 7d | switch | x a b → … | Runs script `a` if `x` is non-zero, script `b` if `x` is zero. |
-| 7e | return | a_{k-1} … a_0 k → ø | Returns k items to the caller and finishes the **current call**. Pops `k`, asserts the callee's stack contains exactly `k` items, pops the call frame, refunds leftover gas to the parent, and pushes the `k` items onto the parent's stack — all atomically. **At the outermost call frame `return` always errors regardless of `k`** (`ReturnAtRoot`): there is no parent to receive values, even an empty tuple. Scripts that want to terminate early at root use `break:0` instead. |
-| 7f | type | x → x typecode | Pushes typecode (as int) of the item on stack. |
-| 8k | break:k | ø → ø | Stops execution of the current program and `k` more enclosing Runs. `break:0` stops only the current program. Attempting to break past the call boundary (`k` exceeds the run-stack depth) is a hard fail (`BreakOutOfCall`). When the cascade ends the entire call (e.g. `break:0` at the outermost Run of a frame), normal call-exit applies: the stack must be empty (`StackNotClean` otherwise); at root that ends the transaction cleanly. Unlike `return`, `break:0` is the safe way to short-circuit at the outermost frame: it has no recipient semantics and relies on the clean-stack invariant for correctness. |
+_flv_ → _token_
 
-### Actors & calls
+Pops an `Int253` flavor; pushes a zero-quantity `ClearToken { qty: 0, flv }`. Convenience for downstream `merge`/`mix` shapes that need a typed placeholder.
 
-| Hex | Name | Stack diagram | Notes |
-| --- | --- | --- | --- |
-| 90 | input | string → cell | **[E]** Decodes a wire-encoded cell from `string` and materializes a `cell` handle on the stack. Seeds the VM's `last_anchor` from the cell's identity (via `Cell::to_anchor()`, which ratchets internally) and emits a `TxEntry::Input(cell_id)` effect into the txlog committing the consumed cell's id. **The VM does not consult any Utreexo accumulator**: the caller is expected to have validated the supplied bytes against the Utreexo proof outside the VM before invoking the script. From the VM's perspective the bytes simply assert "this cell existed as a UTXO"; the txlog entry commits the script's reliance on that assertion so the outer verifier can cross-check it against Utreexo state. Hard-fails on a non-`String` top, on bytes that don't decode as a canonical cell (`MalformedCellEncoding`, including trailing bytes after the cell), or when invoked from internal context (`ExternalOnly`). |
-| 91 | cell | args… k pred → cell | Wraps a tuple of portable items into a linear `cell` handle. Consumes the VM's `last_anchor` for the new cell's anchor and advances it to the next anchor via `Cell::to_anchor()`. |
-| 92 | output | args… k pred → ø | Same construction as `cell` but emits an `Output` effect into the txlog instead of pushing the handle. |
-| 93 | open | cell internal_key neighbors position script gas bytes args… k → results… k' | Verifies the Taproot call-proof formed by `internal_key` (a Point), `neighbors` (list-style Dict of 32-byte Strings, leaf-to-root order), `position` (String of bit-packed sides), and `script` (String) against the cell's predicate. On success, creates a new **isolated call frame** with `gas` and `bytes` allotments from the caller, pours the cell's payload then the `k` args onto the new frame's stack, and enters the unlocked `script`. The frame has no actor identity, no `op_load`/`op_save`/`op_call`/`op_send` access by default — it is a pure script sandbox. Results return via `return k'` (refunds unused gas). Position bits are read LSB-first within byte, zero-extended past the end; bit value `0` = current hash on left / neighbor on right, `1` = swap. |
-| 94 | send | args… k gas bytes method addr → ø | Send message; similar to call, but does not expect results. |
-| 95 | call | args… k gas bytes method addr → results… k' | (Internal) Calls a method on an actor, transferring control. Creates an isolated `CallKind::ActorCall` frame; same shape as `open` but the callee is an actor and the frame carries the callee's identity. |
-| 96 | load | ø → dict | (Internal) Loads actor state and marks the actor for destruction (re-entry blocked until `save`). |
-| 97 | save | dict → ø | (Internal) Saves the actor state and unmarks it for destruction. |
-| 98 | signtx | cell → items… k | Pops the cell, defers a TxID-bound signature record (verification key = cell's predicate point; signature comes from the tx envelope at finalize), pours the cell's payload onto the current call's stack and pushes the count `k`. |
-| 99 | signcall | cell script sig gas bytes args… m → results… k' | Records a deferred signature commitment over `script` only (verification key = cell's predicate point; signature = the popped `sig` String, must be 64 bytes). Creates a new **isolated call frame** with `gas` and `bytes` allotments from the caller, pours the cell's payload then the `m` args onto the new frame's stack, and enters the signed `script`. Same frame shape and sandbox rules as `open` — the signed script runs as if revealed via taproot, just authenticated by signature instead of merkle path. Scripts bind themselves to context (anchor, actor identity, etc.) via explicit checks. |
-| 9a | timelock | ø → n {0 | 1} | Pushes timelock integer and a flag: 0 for block height, 1 for timestamp. |
-| 9b | version | ø → n | Version bits of the external transaction invoking this call. |
-| 9c | actorid | ø → string | Pushes actor ID. |
-| 9d | anchor | ø → string | Returns the unique 256-bit anchor for the current actor invocation. |
-| 9e | gas | ø → int | Remaining gas after execution of this instruction. |
-| 9f | bytes | ø → int | Remaining persistent storage (vbytes) after execution of this instruction. |
-| a0 | callerid | ø → string | Actor ID of the caller. All-zero for a message from external tx. |
-| a1 | method | ø → int | (Internal) Invoked method. |
-| a2 | gaslimit | ø → int | Maximum amount of gas for this call. |
-| a3 | memlimit | ø → int | Maximum amount of memory that can be used during the call. |
-| a4 | newbytes | ø → int | Received storage units during this call. |
+### drop
 
-### Chain info (Internal only)
+_x_ → ø
 
-| Hex | Name | Stack diagram | Notes |
-| --- | --- | --- | --- |
-| a5 | height | ø → int | Current block height. |
-| a6 | blockhash | h → string | Hash of the block at a given height. |
-| a7 | blockburn | h → int | Total amount of satoshis burned at height h. Fails for h > current-100 (maturity period). |
-| a8 | blockweight | h → int | Weight of the block |
-| a9 | blockrate | h → int | Average mint rate in terms of sparks per satoshi at block height h. |
-| aa | chainstate | n → dict | Pushes struct with block stats at height n. n must be 100 blocks behind the current block. |
-|  |  |  |  |
+Drops a [droppable](#types) value. Hard-fails `TypeNotDroppable` for linear types and non-empty containers.
+
+### nop
+
+ø → ø
+
+No effect.
+
+### dup / dup:k / roll / roll:k
+
+_x_k … x_0_ **dup:_k_** → _x_k … x_0 x_k_  
+_x_k … x_0_ **roll:_k_** → _x_{k-1} … x_0 x_k_
+
+`dup:k` and `roll:k` take `k ∈ 0..=15` as the low nibble of the opcode (`0x2k`, `0x3k`). The plain `dup`/`roll` forms (`0x1e`/`0x1f`) pop `k` as an `Int253` for larger reach at the cost of one extra byte.
+
+`dup` copies; the source must be a [copyable](#types) type. `roll` moves; any type works. Both hard-fail `IndexOutOfRange` when `k` exceeds the stack depth.
+
+## String instructions
+
+**Failure principle.** Constraints derived from *external data* — string length, canonical magnitude, negative zero — are **soft fails**. Constraints on *author-controlled* immediates (e.g. `n > 256`) are **hard fails**.
+
+### readbits
+
+_s n_ → _s' x 1_ | _s 0_
+
+Reads `n ≤ 256` bits **LSB-first within each byte** into bits `0..n-1` of a fresh `Int253`. The sign bit at position 255 is set only when `n = 256` and the input bit 255 is `1`; for `n < 256` the result is non-negative.
+
+Soft-fails on insufficient bytes, magnitude ≥ ℓ (reachable only when `n ≥ 253`), or negative zero (only when `n = 256`). **Hard-fails when `n > 256`** (programmer error).
+
+### readint
+
+_s_ → _s' x 1_ | _s 0_
+
+Equivalent to `readbits(s, 256)`. Reads the canonical 32-byte `Int253` (bit 255 = sign). Soft-fail conditions match `readbits`.
+
+### readstr
+
+_s n_ → _s' s'' 1_ | _s 0_
+
+Reads `n` bytes into a new String, consuming them from `s`. Soft-fails if `s` has fewer than `n` bytes.
+
+### readpoint
+
+_s_ → _s' p 1_ | _s 0_
+
+Reads 32 bytes as a [Point](#point). Soft-fail on insufficient bytes.
+
+### writebits
+
+_s x n_ → _s'_
+
+Appends the low `n` bits of `x`'s canonical 32-byte representation as bytes (LSB-first). `n` must be a multiple of 8 and `≤ 256`; **hard-fails** `BitCountOutOfRange` otherwise. The sign bit (bit 255) is written iff `n = 256`.
+
+### writeint
+
+_s x_ → _s'_
+
+Equivalent to `writebits(s, x, 256)`. Appends the canonical 32-byte sign-magnitude form.
+
+### append
+
+_s s'_ → _s''_
+
+Concatenates: `s'' = s || s'`.
+
+### writezeros
+
+_s n_ → _s'_
+
+Appends `n` zero-bytes.
+
+### bitnot
+
+_s_ → _s'_
+
+Inverts every bit of `s`. Output length matches input.
+
+### bitor / bitand / bitxor
+
+_a b_ → _c_
+
+Bytewise OR / AND / XOR. Operands must have the same length — mismatch hard-fails `BitwiseSizeMismatch`.
+
+### shiftleft
+
+_a n_ → _b c_
+
+Shifts bits of `a` left by `n ≤ 256`. `b` has the same length as `a`; `c` carries the displaced bits as a zero-padded-left string of `ceil(n/8)` bytes. Hard-fails `BitCountOutOfRange` if `n > 256`. Byte 0 is most significant.
+
+### shiftright
+
+_a n_ → _b c_
+
+Mirror of `shiftleft`; displaced low-end bits land in `c` zero-padded on the right.
+
+### keccak256
+
+_s_ → _x_
+
+Returns a 32-byte Keccak-256 digest (Ethereum compatibility). Distinct from [`sha3`](#sha3) (FIPS-202).
+
+## Arithmetic & logic instructions
+
+### abs
+
+_x_ → _|x| s_
+
+Pops `Int253` `x`; pushes the absolute value followed by the sign (`0` for non-negative, `1` for negative).
+
+### eq
+
+_a b_ **eq** → _a b {0|1}_ (cleartext) | → _constraint_ (CS branch)
+
+Two stack diagrams depending on operand types and context:
+
+1. **Cleartext branch.** When both operands are `Int253` (or both are non-CS types), peeks at the top two values and pushes `1` if equal or `0` otherwise. Operands stay on the stack. Equality is type-aware via `Value::try_eq`.
+2. **Lifted branch.** When at least one operand is `Expression` or `Variable` in external context, both operands are popped, lifted to `Expression` (Int253 → `Expression::Constant`), and the result is `Constraint::eq(a, b)`.
+
+### neg
+
+_x_ → _−x_
+
+`Int253` flips its sign bit (zero stays positive). `Expression` negates the linear combination. Other types hard-fail `TypeNotInt253`.
+
+### add
+
+_x y_ → _z_
+
+`Int253 + Int253` is signed-modular addition; magnitude wraps modulo ℓ. Mixed-type operands lift to `Expression` and produce an LC sum — external context only.
+
+### mul
+
+_x y_ → _z_
+
+Like [`add`](#add) but multiplicative. The lifted branch may add a multiplier gate to the CS (or constant-fold when one operand is `Expression::Constant`).
+
+### divmod
+
+_x z_ → _d r_
+
+Truncated division: `sign(d) = sign(x) XOR sign(z)`, `sign(r) = sign(x)`. Hard-fails `DivByZero` on a zero divisor. Both operands must be `Int253`.
+
+### mod252
+
+_s_ → _int_
+
+Reads up to 64 bytes of `s` as a little-endian unsigned integer, reduces modulo ℓ, pushes the result as a non-negative `Int253`. Hard-fails `StringTooLongForModReduction` when `s.len() > 64`.
+
+### not
+
+_x_ → _y_
+
+`Int253`: `0 → 1`, non-zero → `0`. `Constraint`: structural negation via `Constraint::not(c)`.
+
+### and
+
+_a b_ → _c_
+
+Cleartext logical AND when both operands are `Int253`. When at least one operand is a `Constraint` (external context only), both lift to `Constraint` (Int253 → `Cleartext(v != 0)`) and the result is `Constraint::and(a, b)`.
+
+### or
+
+_a b_ → _c_
+
+Mirror of [`and`](#and) for disjunction.
+
+## Constraint system instructions  *(external-only)*
+
+### scalar
+
+_s_ → _expr_
+
+Pops a 32-byte String, downcasts to `Int253` via `String::to_scalar`, pushes `Expression::Constant(int)`. Witness-bearing `String::Scalar(i)` extracts the witness directly; `String::Opaque(bytes)` parses canonical sign-magnitude bytes.
+
+### commit
+
+_s_ → _var_
+
+Pops a 32-byte String, downcasts to a [Commitment](#types), wraps in `Variable { commitment }`. Verifier: `String::Opaque(point bytes)` → `Commitment::Closed(point)`. Prover: `String::Commitment(Open(witness))` preserves the witness. Downstream [`expr`](#expr) binds the variable into the CS.
+
+### alloc
+
+ø → _expr_
+
+Allocates a low-level R1CS variable. The prover-side `Instruction::Alloc(Some(int))` carries the cleartext witness; the verifier sees `Alloc(None)` and the variable is left unassigned, constrained later by `eq`/`verify`. Pushes a one-term `Expression::LinearCombination([(var, 1)], witness?)`.
+
+### expr
+
+_var_ → _expr_
+
+Pops a `Variable`, commits it via the delegate's `commit_variable`, pushes a one-term Expression bound to the resulting R1CS variable.
+
+### range
+
+_expr n_ → _expr_
+
+Pops bit count `n: Int253` (must be in `[1, 64]`) and an `Expression`. For `Expression::Constant`, asserts the constant fits in `[0, 2ⁿ)` (cleartext check). For `Expression::LinearCombination`, adds a Bulletproofs range-proof gadget. The Expression is pushed back unchanged. Hard-fails `BitCountOutOfRange`, `InvalidBitrange`, or `R1CSError`.
+
+### size
+
+_x_ → _x n_
+
+Peeks at the top value and pushes its length: byte count for `String`, entry count for `Dict`. Hard-fails `TypeHasNoLength` for other types. Available in both contexts (CS-system grouping is for byte adjacency).
+
+## Dict instructions
+
+[Dict](#dict) keys are always `Int253`; values are any [Value](#types) subject to per-opcode copy/portability constraints.
+
+### dict
+
+_… val_{n-1} key_{n-1} … val_0 key_0 n_ → _dict_
+
+Pops `n` (Int253), then `n` `(value, key)` pairs (key on top of each pair). Builds a Dict. Hard-fails `DictKeyOccupied` on duplicate keys.
+
+### put
+
+_dict k v_ → _dict'_
+
+Inserts `v` at key `k`. Hard-fails `DictKeyOccupied` if the key already exists.
+
+### replace
+
+_dict k v_ → _dict' {prev 1 | 0}_
+
+Sets `v` at key `k`. If a prior value existed, pushes `prev 1`; otherwise pushes `0`.
+
+### get
+
+_dict k_ → _dict' k v_
+
+Removes the value at `k` and pushes `(k, v)` above the modified dict. Hard-fails `DictKeyNotFound` if absent.
+
+### getopt
+
+_dict k_ → _dict' {v 1 | 0}_
+
+Like [`get`](#get) but soft-fails when absent: pushes `0` instead of erroring.
+
+### getdup
+
+_dict k_ → _dict {v 1 | 0}_
+
+Copies the value at `k` without modifying the dict. Pushes `0` if absent. Hard-fails `TypeNotCopyable` when the value exists but is a linear type.
+
+### first / last / next
+
+_dict_ → _dict {k 1 | 0}_  (first / last)  
+_dict k_ → _dict {k' 1 | 0}_  (next)
+
+Iteration helpers. Push the first/last key of the dict, or the key after `k`, or `0` if the dict is empty / `k` is the last entry. Keys are visited in canonical `Int253` order.
+
+## Cryptography instructions
+
+### merlin
+
+_label_ → _merlin_
+
+Creates a fresh [Merlin transcript](#types) seeded with `label`. The transcript is a linear value (never copyable, never droppable) consumed by `merlinwrite` / `merlinread` to build custom ZKP statements.
+
+### merlinwrite
+
+_merlin label s_ → _merlin_
+
+Appends `(label, s)` to the transcript and returns the same transcript on top.
+
+### merlinread
+
+_merlin label n_ → _merlin s_
+
+Challenges `n` bytes under `label`; pushes the result as a String.
+
+### sha256
+
+_s_ → _x_
+
+Returns a 32-byte SHA-256 digest.
+
+### sha512
+
+_s_ → _x_
+
+Returns a 64-byte SHA-512 digest.
+
+### sha3
+
+_s_ → _x_
+
+Returns a 32-byte SHA3-256 (FIPS-202) digest. Distinct from [`keccak256`](#keccak256).
+
+### log
+
+_s_ → ø
+
+Pops a String, emits `TxEntry::Data(bytes)` into the txlog. Visible to the outer verifier; does not occupy persistent storage. Mirrors zkvm's `log` (same byte). Witness-bearing String variants serialize via `to_bytes` so prover and verifier emit identical bytes.
+
+## Token instructions
+
+See [Token / ClearToken / WideToken](#tokens) for type semantics.
+
+### amount
+
+_t_ → _t qty flv_
+
+Peeks the top token-shaped value and pushes `(qty, flv)` above it. `ClearToken`: both as `Int253` (cleartext). `Token`: both as `Point` (the compressed commitment points; works without a live CS). `WideToken`: hard-fails `TypeNotToken` — its quantity isn't yet range-proven.
+
+### issue
+
+_qty tag_ → _T_
+
+Cleartext branch (`qty: Int253`): builds `ClearToken(qty, flavor_from_actor(current_actor, tag))`, emits `TxEntry::Issue(unblinded_qty, unblinded_flv)`. Requires actor context — hard-fails `OpcodeRequiresActorContext` from `ExternalRoot`. Use [`issueflv`](#issueflv) to compute a flavor without actor context.
+
+Encrypted branch (`qty: Point`) is planned but not yet wired (hard-fails `TokenRequiresCS`).
+
+### retire
+
+_t_ → ø
+
+Consumes a token; emits `TxEntry::Retire(qty_point, flv_point)`. `ClearToken` uses unblinded commitments; `Token` uses the live commitment points. Other types hard-fail `TypeNotToken`.
+
+### borrow
+
+_qty flv_ → _−T +T_
+
+Cleartext branch (both `Int253`): pushes `(ClearToken(-qty, flv), ClearToken(qty, flv))`. The negative half is non-portable until balanced.
+
+Encrypted branch (both `Variable`, external context): commits both to the CS, range-proves the positive `qty` 64-bit, allocates `-qty`, constrains the sum to zero, pushes `(WideToken(-qty, flv), Token(qty, flv))`.
+
+Raw `Point` operand hard-fails `TokenRequiresCS` — lift to `Variable` via [`commit`](#commit) first.
+
+### merge
+
+_a b_ → _{c 1 | a b 0}_
+
+`ClearTokens` only. On flavor match, pushes `(ClearToken(a.qty+b.qty, flv), 1)`. On flavor mismatch, restores `(a, b, 0)` (soft-fail). Non-`ClearToken` operands hard-fail `TypeNotClearToken`.
+
+### split
+
+_a q_ → _a' b_
+
+`ClearTokens` only. Returns `(ClearToken(a.qty − q, flv), ClearToken(q, flv))`. Hard-fails `TokenSplitOutOfRange` when `q < 0`, `a.qty < 0`, or `q > a.qty`.
+
+### mix
+
+_tokens… commitments… m n_ → _tokens_
+
+Pops `n` (output count) and `m` (input count) as `Int253`; then `n` output Pedersen commitment pairs (qty/flv Strings); then `m` input token-shaped values (any of `Token`, `WideToken`, `ClearToken`). Invokes the [spacesuit cloak gadget](../spacesuit/spec.md) to constrain that inputs balance outputs per flavor and to 64-bit range-prove each output. Pushes `n` output `Token`s.
+
+Hard-fails `MixDegenerate` if `m == 0` or `n == 0`. Mirrors zkvm's `cloak:m:n`.
+
+### decrypt
+
+_T f' f q' q_ → _CT_
+
+Pops the cleartext blinding/value pairs (`q' q` for quantity, `f' f` for flavor) and the encrypted `Token`. Verifies that the supplied openings reconstruct the Token's commitment points; pushes a `ClearToken(q, f)` on success. Hard-fails on commitment mismatch.
+
+### issueflv
+
+_cid tag_ → _int_
+
+Pops `tag` (String) and `cid` (String, exactly 32 bytes — an actor id). Pushes `flavor_from_actor(cid, tag)` as `Int253`. Pure helper: no CS, no txlog entry, no actor-context requirement. Domain separator is `flamevm.token.flavor.v1` (consensus-fixed).
+
+## Control-flow instructions
+
+### verify
+
+_x_ → ø
+
+`Int253`: hard-fails `VerifyFailed` if zero; otherwise consumes the value. `Constraint`: enforces the constraint via the delegate's CS (external context only). Other types hard-fail `TypeNotInt253`.
+
+### fee
+
+_qty flv_ → _−WT_
+
+Pops `qty: Int253` (non-negative, must fit `u64` and be `≤ MAX_FEE = 2²⁴`) and `flv: Int253`. Emits `TxEntry::Fee(qty as u64)` and bumps the per-tx [`CheckedFee`](#fees) accumulator (also capped at `MAX_FEE`). Allocates a fresh `WideToken` debt with `q = −qty`, `f = flv` (both cleartext-constrained) and pushes it. The script must balance the debt against real tokens, typically via [`mix`](#mix).
+
+Hard-fails: `FeeQtyNegative`, `FeeTooHigh` (per-arg or aggregate overflow), `TypeNotInt253`, `ExternalOnly`. The blinded-fee branch is reserved for a future phase.
+
+### run
+
+_prog_ → _…_
+
+Pops a String, decodes it as bytecode (or extracts instructions directly from `String::Script(instrs)` on the prover side), suspends the current Run onto the run-stack, and switches to a fresh Run over the new instructions.
+
+**Same call frame** — see [`open`](#open) / [`signcall`](#signcall) for predicate-bound execution that creates a new frame.
+
+### loop
+
+ø → ø
+
+Rewinds the current Run's cursor to the start. Without a `break` or `return` reachable from inside, this is an unbounded loop; gas metering is the long-term cap.
+
+### switch
+
+_x a b_ → _…_
+
+Pops three values; if `x` is non-zero, enters `a` as the new Run, otherwise `b`. Same Run-level semantics as [`run`](#run).
+
+### return
+
+_a_{k-1} … a_0 k_ → ø
+
+Atomic cross-frame return:
+
+1. Pops `k` (Int253, non-negative).
+2. Asserts an enclosing call frame exists (otherwise `ReturnAtRoot`).
+3. Asserts the callee stack has exactly `k` items left (otherwise `BadReturnArity` or `StackNotClean`).
+4. Pops the call frame.
+5. Refunds leftover gas to the parent.
+6. Pushes the `k` items onto the parent's stack.
+
+At the outermost call frame, `return` always errors regardless of `k`. Use [`break:0`](#breakk) for early termination at root.
+
+### type
+
+_x_ → _x typecode_
+
+Pushes the type code of the top value as `Int253`, leaving the value on the stack. Type codes match the wire-tag column in [Types](#types).
+
+### break:k
+
+ø → ø
+
+Stops execution of the current program and `k` more enclosing Runs. `break:0` stops only the current Run. Hard-fails `BreakOutOfCall` if `k` exceeds the run-stack depth.
+
+When the cascade ends the entire call (e.g. `break:0` at the outermost Run of a frame), normal call-exit applies: the stack must be empty (`StackNotClean` otherwise); at root that ends the transaction cleanly. Unlike `return`, `break:0` is the safe way to short-circuit at the outermost frame — no recipient semantics, relies on the clean-stack invariant.
+
+## Cell, actor, and send instructions
+
+[`open`](#open), [`signcall`](#signcall), and [`call`](#call) all create isolated CallFrames — see the [Calls and isolation](../design.md) section of `design.md` and [ADR 0013](../decisions/0013-predicate-call-isolation.md) for the unified-call model.
+
+### input
+
+_s_ → _cell_
+
+Decodes a wire-encoded Cell from `s` and materializes a `cell` handle on the stack. Seeds the VM's `last_anchor` from the cell's identity (via `Cell::to_anchor()`, which ratchets internally) and emits `TxEntry::Input(cell_id)`.
+
+**The VM does not consult any Utreexo accumulator.** The caller must validate the supplied bytes against the Utreexo proof outside the VM before invoking the script. The txlog entry commits the script's reliance on that external check.
+
+Hard-fails on non-String top, malformed bytes (`MalformedCellEncoding`, including trailing bytes), or invocation from internal context.
+
+### cell
+
+_items… k pred_ → _cell_
+
+Pops `pred: Point`, then `k` portable items. Wraps them into a linear `cell` handle whose anchor is the VM's current `last_anchor`. Advances `last_anchor` to `cell.to_anchor()` for the next allocator.
+
+Hard-fails `AnchorMissing` if `last_anchor` is unset, `NonPortableInOutput` if any item isn't portable.
+
+### output
+
+_items… k pred_ → ø
+
+Same construction as [`cell`](#cell) but emits an `Output` effect into the txlog instead of pushing the handle.
+
+### open
+
+_cell internal_key neighbors position script gas bytes args… k_ → _results… k'_
+
+Verifies the Taproot call-proof against the cell's predicate:
+
+1. Pops `k` (Int253) and `args` (k portable values).
+2. Pops `bytes` and `gas` as `Int253` (vbyte and gas allotments).
+3. Pops `script` (String) — the revealed leaf bytes (or witness-bearing `String::Script` on the prover).
+4. Pops `position` (String, bit-packed path), `neighbors` (list-Dict of 32-byte Strings, leaf-to-root), `internal_key` (Point).
+5. Pops `cell`.
+6. Constructs a `CallProof` and verifies `predicate.verify_callproof` — checks the Merkle root and the tweaked-key relation `P = X + h(X, M)·B`.
+7. On success, creates a new isolated `CallKind::CellOpen { anchor: cell.to_anchor(), predicate: cell.predicate }` frame with the popped `gas` / `bytes` allotments, pours the cell's payload then the `args` onto the new frame's stack, and enters the unlocked `script`.
+
+The new frame has **no actor identity** by default — `op_load`/`op_save`/`op_call`/`op_send` all error from inside. The frame inherits CS access from the caller's context (external root → CS available; internal → not). Results return via `return k'`; leftover gas refunds to the parent.
+
+Position bits are read LSB-first within byte, zero-extended past the end; bit `0` = current hash on left, neighbor on right; bit `1` = swap.
+
+Hard-fails: `CallProofMismatch`, `MalformedCallProof`, plus the type errors from each pop.
+
+### send
+
+_args… k refund gas bytes method addr_ → ø
+
+Asynchronous message-send. Pops operands top-first:
+
+1. `addr` (32-byte String) — target [`ActorID::Hash`](#addresses).
+2. `method` (`Int253`) — target method key.
+3. `bytes` (`Int253`) — vbyte allotment.
+4. `gas` (`Int253`) — gas allotment.
+5. `refund` (32-byte String) — bounce predicate point.
+6. `k` (`Int253`) — args count.
+7. `args…` — k portable values, delivery payload.
+
+Ratchets the VM's `last_anchor` and uses it as the message anchor (the SendID — known at broadcast time). Emits `TxEntry::Send { anchor, target, method, refund_predicate, gas, vbytes, payload_hash }` and appends a `Message` to the VM's outbound send queue. The originator's actor id (if any) becomes the message's `caller`.
+
+Available in both contexts. Hard-fails `MalformedAddress` on wrong-size addr or refund, `NonPortableInSend` on non-portable args, `InvalidBitrange` on negative/overflowing allotments.
+
+On internal-tx failure during delivery, consensus seals the message payload into a fresh cell under `refund_predicate` and emits it as an Output effect — see [ADR 0011](../decisions/0011-send-id-and-internal-txid.md).
+
+### call
+
+_args… k gas bytes method addr_ → _results… k'_
+
+Synchronous actor-to-actor call. Same operand shape as [`send`](#send) minus `refund`.
+
+Verifies the **re-entrancy guard** — the target actor must not already appear on the current call stack ([ADR 0003](../decisions/0003-forbid-reentrancy.md); errors `ReentrancyDetected`). Resolves the callee's method bytes via the registry, snapshots the callee's pre-state hash, ratchets `last_anchor` to the callee anchor, and emits `TxEntry::Call { callee, method, pre_state_root, callee_anchor }`.
+
+Creates an isolated `CallKind::ActorCall { actor, method, caller, anchor }` frame with the popped `gas` / `bytes` allotments. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
+
+Returns via `return k'`. Hard-fails `RegistryUnavailable` outside an internal-tx execution.
+
+### load
+
+ø → _dict_
+
+Loads the current actor's `ActorState` from the registry, marks the actor as locked (re-entry blocked until `save`), and pushes the wrapper Dict.
+
+Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `LoadAlreadyMarked`, `ActorNotFound`, `ActorFrozen`.
+
+**Self-destruct.** A frame that returns without a matching `save` leaves the registry mark set; the tx-end commit hook removes the actor and recycles its vbytes through the maturity queue (100 blocks). See [ADR 0012](../decisions/0012-load-save-reentry-lock.md).
+
+### save
+
+_dict_ → ø
+
+Pops a Dict, parses it as an `ActorState` (the two-entry wrapper shape with keys `0x00` public and `0x01` private), persists it against the current actor, and clears the mark.
+
+Hard-fails: `SaveWithoutLoad`, `MalformedActorState`, `OpcodeRequiresActorContext`, `RegistryUnavailable`.
+
+### signtx
+
+_cell_ → _items… k_
+
+Pops the cell, records a `DeferredSig::TxBound { verification_key: cell.predicate.point, cell_id }` for the delegate to verify at finalize against the eventual TxID, pours the cell's payload onto the current frame's stack, and pushes the count `k`.
+
+**No new frame** — the cell-holder is authorizing the existing transaction in place.
+
+The deferred signature is verified at finalize: the prover aggregates all `TxBound` keys via MuSig and supplies the envelope signature; the verifier batches all `TxBound` items against the `flamevm.signtx.v1` transcript bound to TxID. Errors `BatchSignatureVerificationFailed` or `MissingTxBoundSignature` at finalize.
+
+### signcall
+
+_cell script sig gas bytes args… m_ → _results… k'_
+
+Same call-frame mechanics as [`open`](#open) — taproot reveal is replaced by signature verification:
+
+1. Pops `m` (Int253), `args` (m portable values), `bytes`, `gas`.
+2. Pops `sig` (String, exactly 64 bytes — Schnorr signature).
+3. Pops `script` (String) and `cell`.
+4. Records `DeferredSig::Explicit { verification_key: cell.predicate.point, message: signcall_message(script_bytes), signature }`. The message is built via a Merlin transcript labelled `flamevm.signcall.v1` over the script bytes only — scripts bind themselves to further context (anchor, actor identity, tx data) via explicit checks inside the script body.
+5. Creates a new isolated `CallKind::CellOpen` frame matching [`open`](#open), pours payload + args, enters the signed script.
+
+The deferred signatures are batch-verified at finalize alongside any `signtx` items.
+
+### timelock
+
+ø → _n {0|1}_
+
+Pushes the transaction's timelock (locktime field) and a flag distinguishing block-height (`0`) from Unix timestamp (`1`).
+
+### version
+
+ø → _n_
+
+Pushes the transaction version.
+
+### actorid
+
+ø → _s_
+
+Pushes the current frame's actor id as a 32-byte String. Hard-fails `OpcodeRequiresActorContext` from `ExternalRoot` or `CellOpen` (no actor identity).
+
+### anchor
+
+ø → _s_
+
+Pushes the current frame's anchor as a 32-byte String. Available from `InternalRoot`, `ActorCall`, and `CellOpen` frames. Hard-fails from `ExternalRoot`.
+
+### gas
+
+ø → _n_
+
+Pushes the remaining gas for the current call.
+
+### bytes
+
+ø → _n_
+
+Pushes the current actor's remaining persistent vbyte balance.
+
+### callerid
+
+ø → _s_
+
+Pushes the caller actor id as a 32-byte String. For `InternalRoot` triggered by an external send (caller = None), pushes the all-zero String. Hard-fails from `ExternalRoot` / `CellOpen` (no actor context).
+
+### method
+
+ø → _int_
+
+Pushes the dispatched method key as `Int253`. Hard-fails from non-actor frames.
+
+### gaslimit
+
+ø → _n_
+
+Pushes the call's gas budget cap (not the remaining amount).
+
+### memlimit
+
+ø → _n_
+
+Pushes the call's transient-memory cap (`4 × persistent_vbytes` per [ADR 0002](../decisions/0002-arena-memory-cap.md)).
+
+### newbytes
+
+ø → _n_
+
+Pushes the vbyte amount delivered with the current call (the send's `bytes` allotment).
+
+## Chain-info instructions  *(all planned, internal-only)*
+
+These opcodes read from the consensus-supplied `BlockContext`. All height-parameterized opcodes enforce the 100-block maturity window — querying `h > current_height − 100` hard-fails `BlockHeightImmature`.
+
+### height
+
+ø → _n_
+
+Pushes the current block height.
+
+### blockhash
+
+_h_ → _s_
+
+Pushes the 32-byte block hash at height `h`.
+
+### blockburn
+
+_h_ → _n_
+
+Pushes the total satoshis burned at height `h` (Bitcoin-coupled metric).
+
+### blockweight
+
+_h_ → _n_
+
+Pushes the block weight at height `h`.
+
+### blockrate
+
+_h_ → _n_
+
+Pushes the average mint rate (sparks per satoshi) at height `h`.
+
+### chainstate
+
+_n_ → _dict_
+
+Pushes a Dict of block stats at height `n`.
 
 ---
 
