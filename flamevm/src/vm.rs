@@ -2063,13 +2063,16 @@ impl VM {
         Ok(())
     }
 
-    /// _cell prog sig args… m_ **signcall** → _items… k_
+    /// _cell script sig gas bytes args… m_ **signcall** → _results… k'_
     ///
-    /// Defers an Explicit signature over `prog`, pours payload + args
-    /// onto the stack, enters a new Run over `prog`.
+    /// Defers an Explicit signature over `script` and enters it in an
+    /// isolated `CallKind::CellOpen` frame. Results return via
+    /// `return k'`. (ADR 0013.)
     fn op_signcall(&mut self) -> Result<(), VMError> {
         let m = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(m)?;
+        let bytes = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
+        let gas = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
         let sig_str = self.pop_value()?.to_string()?;
         let prog_str = self.pop_value()?.to_string()?;
         let cell = self.pop_value()?.to_cell()?;
@@ -2084,14 +2087,26 @@ impl VM {
             message: msg,
             signature: sig,
         });
+
+        let external_context = self.is_external();
+        let anchor = cell.to_anchor();
+        let instrs = prog_str.to_instructions()?;
+        let mut frame = CallFrame::new(
+            instrs,
+            CallKind::CellOpen { anchor, predicate: cell.predicate.clone(), external_context },
+            gas,
+            /*mem_limit=*/ bytes,
+            /*newbytes=*/ bytes,
+        );
         for v in cell.payload {
-            self.push_value(v);
+            frame.stack.push(v);
         }
         for v in args {
-            self.push_value(v);
+            frame.stack.push(v);
         }
-        let instrs = prog_str.to_instructions()?;
-        self.enter_run(instrs)
+        let parent = core::mem::replace(&mut self.current_call, frame);
+        self.call_stack.push(parent);
+        Ok(())
     }
 
     /// **actorid** → _string_

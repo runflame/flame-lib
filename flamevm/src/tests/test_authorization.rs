@@ -30,7 +30,9 @@ fn signtx_pours_payload_and_records_txbound_sig() {
 
 #[test]
 fn signcall_records_explicit_sig_and_runs_program() {
-    let prog = vec![0x1c]; // drop
+    // Inner script `drop, push:0, return` drains the payload and
+    // exits the isolated CellOpen frame (ADR 0013).
+    let prog = vec![0x1c, 0x00, 0x7e];
     let sig_bytes = [0u8; 64];
 
     let mut script = vec![0x05, 0x01];
@@ -38,6 +40,7 @@ fn signcall_records_explicit_sig_and_runs_program() {
     script.push(0x91); // cell
     push_string_bytes(&mut script, &prog);
     push_string_bytes(&mut script, &sig_bytes);
+    push_open_gas_bytes(&mut script);
     script.push(0x00); // m=0 args
     script.push(0x99); // signcall
     let mut vm = vm_with_script(script);
@@ -66,13 +69,14 @@ fn signcall_message_binds_only_to_program_not_to_cell() {
     // identical deferred-sig messages — confirms architect's
     // intent that signcall binds only to the program.
     fn run_signcall(predicate_byte: u8) -> DeferredSig {
-        let prog = vec![0x1c];
+        let prog = vec![0x1c, 0x00, 0x7e];
         let sig = [0u8; 64];
         let mut script = vec![0x05, 0x01];
         push_point_bytes(&mut script, &[predicate_byte; 32]);
         script.push(0x91);
         push_string_bytes(&mut script, &prog);
         push_string_bytes(&mut script, &sig);
+        push_open_gas_bytes(&mut script);
         script.push(0x00);
         script.push(0x99);
         let mut vm = vm_with_script(script);
@@ -94,12 +98,14 @@ fn signcall_message_binds_only_to_program_not_to_cell() {
 
 #[test]
 fn signcall_rejects_wrong_signature_length() {
-    // payload(5), count(1), predicate, cell, then signcall-with-bad-sig.
+    // payload(5), count(1), predicate, cell, prog, bad-sig, gas/bytes,
+    // m=0, signcall. signcall pops bad sig and errors before frame.
     let mut script = vec![0x05, 0x01];
     push_point_bytes(&mut script, &[0xaa; 32]);
     script.push(0x91); // cell
-    push_string_bytes(&mut script, &[0x1c]); // prog = drop
+    push_string_bytes(&mut script, &[0x1c, 0x00, 0x7e]); // prog
     push_string_bytes(&mut script, &[0u8; 63]); // sig of wrong length
+    push_open_gas_bytes(&mut script);
     script.push(0x00);
     script.push(0x99);
     let mut vm = vm_with_script(script);
