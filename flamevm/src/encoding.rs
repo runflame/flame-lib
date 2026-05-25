@@ -559,7 +559,7 @@ pub fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), WriteError> {
         Value::Dict(d) => write_dict(w, d),
         Value::Point(p) => {
             w.write_u8(b"point.tag", POINT_TAG)?;
-            w.write(b"point.data", p.as_bytes())
+            w.write(b"point.data", &p.to_bytes())
         }
         // Token (portable): tag + qty point (32 B) + flv point (32 B).
         Value::Token(t) => {
@@ -949,7 +949,7 @@ mod tests {
         buf.extend_from_slice(&[0xAA; 32]);
         let mut r = buf.as_slice();
         match read_value(&mut r).unwrap() {
-            Some(Value::Point(p)) => assert_eq!(p.as_bytes(), &[0xAA; 32]),
+            Some(Value::Point(p)) => assert_eq!(p.to_bytes(), [0xAA; 32]),
             _ => panic!("expected Point"),
         }
     }

@@ -1,25 +1,84 @@
 use curve25519_dalek::ristretto::CompressedRistretto;
 use merlin::Transcript;
 
-#[derive(Clone, Copy, Debug)]
-pub struct Point {
-    pub(crate) inner: CompressedRistretto,
+use crate::constraints::Commitment;
+use crate::errors::VMError;
+
+/// Ristretto255 group element on the stack — always 32 bytes on the
+/// wire, but on the prover side may carry typed witness data for
+/// downstream constraint-system or predicate ops.
+///
+/// `Opaque` is the verifier's view (and the prover's view when no
+/// witness is needed). `Commitment` and `Predicate` are prover-side
+/// variants that ride alongside the canonical 32-byte point. Boxed so
+/// the enum stays small and the common `Opaque` path is inline.
+#[derive(Clone, Debug)]
+pub enum Point {
+    /// Verifier-visible compressed point.
+    Opaque(CompressedRistretto),
+    /// Pedersen commitment witness; canonical bytes via `commitment.to_point()`.
+    Commitment(Box<Commitment>),
+    /// Taproot predicate witness; canonical bytes via `predicate.to_point()`.
+    Predicate(Box<crate::cell::Predicate>),
 }
 
 impl Point {
+    /// Wraps a `CompressedRistretto` as the verifier-visible `Opaque` variant.
     pub fn from_compressed(p: CompressedRistretto) -> Self {
-        Point { inner: p }
+        Point::Opaque(p)
     }
 
-    /// Constructs from a 32-byte compressed Ristretto encoding. Does not
-    /// validate decompressability; callers that need a valid group element
-    /// must check via `inner.decompress()`.
+    /// Wraps 32 raw bytes as `Opaque`. Does not validate decompressability;
+    /// callers that need a valid group element must check via
+    /// `to_compressed().decompress()`.
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Point { inner: CompressedRistretto(bytes) }
+        Point::Opaque(CompressedRistretto(bytes))
     }
 
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        self.inner.as_bytes()
+    /// Constructs a witness-bearing `Commitment` variant.
+    pub fn commitment(c: Commitment) -> Self {
+        Point::Commitment(Box::new(c))
+    }
+
+    /// Constructs a witness-bearing `Predicate` variant.
+    pub fn predicate(p: crate::cell::Predicate) -> Self {
+        Point::Predicate(Box::new(p))
+    }
+
+    /// Returns the canonical 32-byte compressed Ristretto point. Cheap
+    /// for `Opaque`; computes the point for witness-bearing variants.
+    pub fn to_compressed(&self) -> CompressedRistretto {
+        match self {
+            Point::Opaque(c) => *c,
+            Point::Commitment(c) => c.to_point(),
+            Point::Predicate(p) => p.to_point(),
+        }
+    }
+
+    /// Returns the canonical 32-byte form (owned). Convenience over
+    /// `to_compressed().to_bytes()` for sites that just need bytes.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        *self.to_compressed().as_bytes()
+    }
+
+    /// Downcasts to `Commitment`. `Opaque` → `Commitment::Closed`;
+    /// `Commitment` returns its witness directly; `Predicate` errors.
+    pub fn to_commitment(self) -> Result<Commitment, VMError> {
+        match self {
+            Point::Commitment(c) => Ok(*c),
+            Point::Opaque(c) => Ok(Commitment::Closed(c)),
+            Point::Predicate(_) => Err(VMError::TypeNotPoint),
+        }
+    }
+
+    /// Downcasts to `Predicate`. `Opaque` → `Predicate::Opaque`;
+    /// `Predicate` returns its witness directly; `Commitment` errors.
+    pub fn to_predicate(self) -> Result<crate::cell::Predicate, VMError> {
+        match self {
+            Point::Predicate(p) => Ok(*p),
+            Point::Opaque(c) => Ok(crate::cell::Predicate::Opaque(c)),
+            Point::Commitment(_) => Err(VMError::TypeNotPoint),
+        }
     }
 }
 

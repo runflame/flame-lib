@@ -1777,11 +1777,11 @@ impl VM {
 
     /// _args… k pred_ **cell** → _cell_
     fn op_cell(&mut self) -> Result<(), VMError> {
-        let pred_point = self.pop_value()?.to_point()?;
+        let pred = self.pop_value()?.to_point()?.to_predicate()?;
         let k = self.pop_byte_count(usize::MAX)?;
         let payload = self.pop_n_portable(k)?;
         let anchor = self.last_anchor.take().ok_or(VMError::AnchorMissing)?;
-        let cell = Cell::new(Predicate::Opaque(pred_point.inner), anchor, payload);
+        let cell = Cell::new(pred, anchor, payload);
         self.last_anchor = Some(cell.to_anchor());
         self.push_value(Value::Cell(cell));
         Ok(())
@@ -1789,11 +1789,11 @@ impl VM {
 
     /// _args… k pred_ **output** → ø
     fn op_output(&mut self) -> Result<(), VMError> {
-        let pred_point = self.pop_value()?.to_point()?;
+        let pred = self.pop_value()?.to_point()?.to_predicate()?;
         let k = self.pop_byte_count(usize::MAX)?;
         let payload = self.pop_n_portable(k)?;
         let anchor = self.last_anchor.take().ok_or(VMError::AnchorMissing)?;
-        let cell = Cell::new(Predicate::Opaque(pred_point.inner), anchor, payload);
+        let cell = Cell::new(pred, anchor, payload);
         self.last_anchor = Some(cell.to_anchor());
         self.txlog.push(crate::tx::TxEntry::Output(cell));
         Ok(())
@@ -1932,7 +1932,7 @@ impl VM {
             }
         }
         Ok(CallProof {
-            internal_key: internal_key.inner,
+            internal_key: internal_key.to_compressed(),
             neighbors: n_vec,
             position: position.bytes_view().into_owned(),
             program: program.bytes_view().into_owned(),

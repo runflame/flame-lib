@@ -140,7 +140,7 @@ impl Value {
         match self {
             Value::Int253(i) => Ok(Value::Int253(*i)),
             Value::String(s) => Ok(Value::String(s.clone())),
-            Value::Point(p) => Ok(Value::Point(*p)),
+            Value::Point(p) => Ok(Value::Point(p.clone())),
             Value::Dict(d) => Ok(Value::Dict(d.try_clone()?)),
             Value::Token(_)
             | Value::ClearToken(_)
@@ -218,7 +218,7 @@ impl Value {
             (Value::String(a), Value::String(b)) => {
                 Ok(a.bytes_view().as_ref() == b.bytes_view().as_ref())
             }
-            (Value::Point(a), Value::Point(b)) => Ok(a.as_bytes() == b.as_bytes()),
+            (Value::Point(a), Value::Point(b)) => Ok(a.to_bytes() == b.to_bytes()),
             // Cross-variant always unequal.
             (sa, sb) if core::mem::discriminant(sa) != core::mem::discriminant(sb) => Ok(false),
             // Same-variant non-primitives (Dict, tokens, cells, linear types):

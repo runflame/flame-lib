@@ -495,7 +495,7 @@ impl Cell {
 
         // Entry 0: predicate Point.
         let predicate = match read_value(r) {
-            Ok(Some(Value::Point(p))) => Predicate::Opaque(p.inner),
+            Ok(Some(Value::Point(p))) => Predicate::Opaque(p.to_compressed()),
             _ => return Err(VMError::MalformedCellEncoding),
         };
 
@@ -623,7 +623,7 @@ fn clone_portable_value(v: &Value) -> Result<Value, VMError> {
         Value::Int253(i) => Ok(Value::Int253(*i)),
         Value::String(s) => Ok(Value::String(s.clone())),
         Value::Dict(d) => Ok(Value::Dict(d.try_clone()?)),
-        Value::Point(p) => Ok(Value::Point(*p)),
+        Value::Point(p) => Ok(Value::Point(p.clone())),
         Value::Token(t) => Ok(Value::Token(Token::new(t.qty.clone(), t.flv.clone()))),
         Value::ClearToken(ct) => Ok(Value::ClearToken(*ct)),
         Value::Cell(c) => Ok(Value::Cell(c.try_clone_with_witnesses()?)),

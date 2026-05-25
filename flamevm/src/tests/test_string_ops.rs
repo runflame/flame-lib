@@ -260,7 +260,7 @@ fn read_point_success() {
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[0xaa]);
     match &vm.current_call.stack[1] {
-        Value::Point(p) => assert_eq!(p.as_bytes(), &[0x55u8; 32]),
+        Value::Point(p) => assert_eq!(p.to_bytes(), [0x55u8; 32]),
         other => panic!("expected Point, got {}", value_kind(other)),
     }
     assert_int(&vm.current_call.stack[2], Int253::from(1u64));

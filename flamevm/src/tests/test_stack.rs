@@ -116,7 +116,7 @@ fn pushpoint_roundtrip() {
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[0] {
-        Value::Point(p) => assert_eq!(p.as_bytes(), &bytes),
+        Value::Point(p) => assert_eq!(p.to_bytes(), bytes),
         other => panic!("expected Point, got {}", value_kind(other)),
     }
 }
