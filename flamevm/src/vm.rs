@@ -1801,14 +1801,12 @@ impl VM {
 
     /// _cell ik nbrs pos script gas bytes args… k_ **open** → _results… k'_
     ///
-    /// Verifies the call-proof and enters the unlocked script in an
-    /// isolated `CallKind::CellOpen` frame with caller-specified gas
-    /// and bytes budgets. Results return via `return k'`. (ADR 0013.)
+    /// Verifies the call-proof, then enters the unlocked script in an
+    /// isolated `CellOpen` frame via [`enter_cell_open_frame`].
     fn op_open(&mut self) -> Result<(), VMError> {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
-        let bytes = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
-        let gas = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
+        let (gas, bytes) = self.pop_gas_bytes()?;
         let prog = self.pop_value()?.to_string()?;
         let position = self.pop_value()?.to_string()?;
         let neighbors = self.pop_value()?.to_dict()?;
@@ -1823,12 +1821,60 @@ impl VM {
         )?;
         let _ = cell.predicate.verify_callproof(&cp)?;
         let instrs = prog.to_instructions()?;
+        self.enter_cell_open_frame(cell, instrs, gas, bytes, args);
+        Ok(())
+    }
 
+    /// _cell script sig gas bytes args… m_ **signcall** → _results… k'_
+    ///
+    /// Defers an Explicit signature over `script` and enters it in an
+    /// isolated `CellOpen` frame via [`enter_cell_open_frame`].
+    fn op_signcall(&mut self) -> Result<(), VMError> {
+        let m = self.pop_byte_count(usize::MAX)?;
+        let args = self.pop_n_values(m)?;
+        let (gas, bytes) = self.pop_gas_bytes()?;
+        let sig_str = self.pop_value()?.to_string()?;
+        let prog_str = self.pop_value()?.to_string()?;
+        let cell = self.pop_value()?.to_cell()?;
+        if sig_str.as_bytes().len() != 64 {
+            return Err(VMError::BadSignatureBytes);
+        }
+        let mut sig = [0u8; 64];
+        sig.copy_from_slice(sig_str.as_bytes());
+        let msg = Self::signcall_message(&prog_str.bytes_view().into_owned());
+        self.deferred_sigs.push(DeferredSig::Explicit {
+            verification_key: cell.predicate.verification_key(),
+            message: msg,
+            signature: sig,
+        });
+
+        let instrs = prog_str.to_instructions()?;
+        self.enter_cell_open_frame(cell, instrs, gas, bytes, args);
+        Ok(())
+    }
+
+    /// Shared tail of `op_open` / `op_signcall` (ADR 0013): build a
+    /// new `CellOpen` frame snapshotting the caller's CS context,
+    /// pour `cell.payload` then `args` onto the new stack, swap the
+    /// parent out. Memory cap equals `bytes` (no actor → no
+    /// `4 × vbytes` rule).
+    fn enter_cell_open_frame(
+        &mut self,
+        cell: Cell,
+        instrs: Vec<crate::ops::Instruction>,
+        gas: u64,
+        bytes: u64,
+        args: Vec<Value>,
+    ) {
         let external_context = self.is_external();
         let anchor = cell.to_anchor();
         let mut frame = CallFrame::new(
             instrs,
-            CallKind::CellOpen { anchor, predicate: cell.predicate.clone(), external_context },
+            CallKind::CellOpen {
+                anchor,
+                predicate: cell.predicate.clone(),
+                external_context,
+            },
             gas,
             /*mem_limit=*/ bytes,
             /*newbytes=*/ bytes,
@@ -1841,7 +1887,23 @@ impl VM {
         }
         let parent = core::mem::replace(&mut self.current_call, frame);
         self.call_stack.push(parent);
-        Ok(())
+    }
+
+    /// Pops `bytes` then `gas` (in that order — `gas` is deeper) as
+    /// non-negative `u64`. Shared by `op_open`, `op_signcall`,
+    /// `op_call`, `op_send`.
+    fn pop_gas_bytes(&mut self) -> Result<(u64, u64), VMError> {
+        let bytes = self
+            .pop_value()?
+            .to_int253()?
+            .to_u64()
+            .ok_or(VMError::InvalidBitrange)?;
+        let gas = self
+            .pop_value()?
+            .to_int253()?
+            .to_u64()
+            .ok_or(VMError::InvalidBitrange)?;
+        Ok((gas, bytes))
     }
 
     /// Builds a `CallProof` from the four stack-popped pieces. `neighbors`
@@ -1885,8 +1947,7 @@ impl VM {
     fn op_send(&mut self) -> Result<(), VMError> {
         let target = ActorID::Hash(self.pop_string_32()?);
         let method = Int253::from(self.pop_value()?.to_int253()?);
-        let vbytes = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
-        let gas = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
+        let (gas, vbytes) = self.pop_gas_bytes()?;
         let refund_predicate = Predicate::Opaque(
             curve25519_dalek::ristretto::CompressedRistretto(self.pop_string_32()?),
         );
@@ -1952,8 +2013,7 @@ impl VM {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let callee = ActorID::Hash(self.pop_string_32()?);
         let method = Int253::from(self.pop_value()?.to_int253()?);
-        let vbytes = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
-        let gas = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
+        let (gas, vbytes) = self.pop_gas_bytes()?;
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
 
@@ -2060,52 +2120,6 @@ impl VM {
             self.push_value(v);
         }
         self.push_value(Value::Int253(Int253::from(k as u64)));
-        Ok(())
-    }
-
-    /// _cell script sig gas bytes args… m_ **signcall** → _results… k'_
-    ///
-    /// Defers an Explicit signature over `script` and enters it in an
-    /// isolated `CallKind::CellOpen` frame. Results return via
-    /// `return k'`. (ADR 0013.)
-    fn op_signcall(&mut self) -> Result<(), VMError> {
-        let m = self.pop_byte_count(usize::MAX)?;
-        let args = self.pop_n_values(m)?;
-        let bytes = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
-        let gas = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
-        let sig_str = self.pop_value()?.to_string()?;
-        let prog_str = self.pop_value()?.to_string()?;
-        let cell = self.pop_value()?.to_cell()?;
-        if sig_str.as_bytes().len() != 64 {
-            return Err(VMError::BadSignatureBytes);
-        }
-        let mut sig = [0u8; 64];
-        sig.copy_from_slice(sig_str.as_bytes());
-        let msg = Self::signcall_message(&prog_str.bytes_view().into_owned());
-        self.deferred_sigs.push(DeferredSig::Explicit {
-            verification_key: cell.predicate.verification_key(),
-            message: msg,
-            signature: sig,
-        });
-
-        let external_context = self.is_external();
-        let anchor = cell.to_anchor();
-        let instrs = prog_str.to_instructions()?;
-        let mut frame = CallFrame::new(
-            instrs,
-            CallKind::CellOpen { anchor, predicate: cell.predicate.clone(), external_context },
-            gas,
-            /*mem_limit=*/ bytes,
-            /*newbytes=*/ bytes,
-        );
-        for v in cell.payload {
-            frame.stack.push(v);
-        }
-        for v in args {
-            frame.stack.push(v);
-        }
-        let parent = core::mem::replace(&mut self.current_call, frame);
-        self.call_stack.push(parent);
         Ok(())
     }
 
