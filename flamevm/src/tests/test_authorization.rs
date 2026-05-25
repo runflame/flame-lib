@@ -482,3 +482,25 @@ fn phase20_signature_over_wrong_txid_rejected() {
     assert!(matches!(err, VMError::BatchSignatureVerificationFailed));
 }
 
+/// `op_signcall` creates an isolated CallFrame with no actor identity,
+/// same as `op_open` (ADR 0013). Inside the signed leaf, `op_actorid`
+/// must error `OpcodeRequiresActorContext`.
+#[test]
+fn signcall_actorid_errors_no_actor_context() {
+    let prog = vec![0x9c]; // actorid
+    let sig_bytes = [0u8; 64];
+    let mut script = vec![0x05, 0x01];
+    push_point_bytes(&mut script, &[0xaa; 32]);
+    script.push(0x91); // cell
+    push_string_bytes(&mut script, &prog);
+    push_string_bytes(&mut script, &sig_bytes);
+    push_open_gas_bytes(&mut script);
+    script.push(0x00);
+    script.push(0x99); // signcall
+    let mut vm = vm_with_script(script);
+    vm.last_anchor = Some(Anchor([0x42; 32]));
+    assert!(matches!(
+        run_to_end(&mut vm).unwrap_err(),
+        VMError::OpcodeRequiresActorContext
+    ));
+}

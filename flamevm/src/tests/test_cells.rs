@@ -1051,3 +1051,80 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     );
 }
 
+// ── ADR 0013 isolation invariants ──────────────────────────────────
+
+/// `op_open` creates an isolated CallFrame with no actor identity;
+/// `op_actorid` inside the leaf must error `OpcodeRequiresActorContext`.
+#[test]
+fn op_open_actorid_errors_no_actor_context() {
+    let inner = vec![0x9c]; // actorid (would also need return, but errors first)
+    let (tree, cp) = build_predicate_with_program(&inner, 5);
+    let pred_point = tree.compute_point();
+    let mut script = vec![0x05, 0x01]; // payload=5, k=1
+    push_point_bytes(&mut script, pred_point.as_bytes());
+    script.push(0x91);                  // cell
+    push_callproof_pieces(&mut script, &cp);
+    push_open_gas_bytes(&mut script);
+    script.push(0x00);                  // k=0 args
+    script.push(0x93);                  // open
+    let mut vm = vm_with_script(script);
+    vm.last_anchor = Some(Anchor([0x42; 32]));
+    assert!(matches!(
+        run_to_end(&mut vm).unwrap_err(),
+        VMError::OpcodeRequiresActorContext
+    ));
+}
+
+/// `op_open` leaf returning the wrong arity must error `BadReturnArity`.
+/// Cell has no payload; leaf pushes 1 then `return` reads k=1 and finds
+/// the stack empty after popping k.
+#[test]
+fn op_open_return_arity_mismatch_errors() {
+    // push:1, return — pops k=1 from stack, then stack.len()(0) < 1.
+    let inner = vec![0x01, 0x7e];
+    let (tree, cp) = build_predicate_with_program(&inner, 0);
+    let pred_point = tree.compute_point();
+    let mut script = vec![0x00]; // payload count = 0
+    push_point_bytes(&mut script, pred_point.as_bytes());
+    script.push(0x91);
+    push_callproof_pieces(&mut script, &cp);
+    push_open_gas_bytes(&mut script);
+    script.push(0x00); // k=0 args
+    script.push(0x93);
+    let mut vm = vm_with_script(script);
+    vm.last_anchor = Some(Anchor([0x42; 32]));
+    assert!(matches!(
+        run_to_end(&mut vm).unwrap_err(),
+        VMError::BadReturnArity
+    ));
+}
+
+/// CS context propagates: a CellOpen frame with `external_context:
+/// false` (as if opened from inside an actor method) must reject
+/// `alloc` with `ExternalOnly`. Constructs the frame directly since
+/// the only path that produces `external_context: false` is opening
+/// from an internal-context parent.
+#[test]
+fn op_open_cs_blocked_when_external_context_false() {
+    use crate::vm::{Anchor, CallFrame, CallKind, VM};
+    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
+    // alloc is 0x5c — external-only CS op. push:0 + alloc + return.
+    let child_kind = CallKind::CellOpen {
+        anchor: Anchor([0u8; 32]),
+        predicate: Predicate::Opaque(CompressedRistretto([0u8; 32])),
+        external_context: false,
+    };
+    let child = CallFrame::new(
+        vec![crate::ops::Instruction::Alloc(None)],
+        child_kind,
+        500,
+        0,
+        0,
+    );
+    let mut vm = VM::new(dummy_header(), parent);
+    let parent_saved = std::mem::replace(&mut vm.current_call, child);
+    vm.call_stack.push(parent_saved);
+    let err = vm.step_internal().unwrap_err();
+    assert!(matches!(err, VMError::ExternalOnly));
+}
+
