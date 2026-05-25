@@ -6,7 +6,6 @@
 
 #![allow(dead_code, unused_imports)]
 
-// ── vm.rs items + vm.rs's own `use` aliases ───────────────
 // Tests are a descendant of `vm`, so `super::super::*` also
 // pulls in everything vm.rs imports privately
 // (CompressedRistretto, Scalar, Transcript, Cell, Commitment,
@@ -14,7 +13,6 @@
 // "defined multiple times".
 pub use super::super::*;
 
-// ── Items used by tests that vm.rs does NOT have in scope ─
 pub use bulletproofs::PedersenGens;
 pub use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 pub use crate::{
@@ -122,8 +120,6 @@ pub(crate) fn dummy_message(gas: u64) -> Message {
     }
 }
 
-// ── helpers ──────────────────────────────────────────
-
 /// Builds a VM running `script` as the entry Run of an InternalRoot.
 pub(crate) fn vm_with_script(script: Vec<u8>) -> VM {
     let kind = CallKind::InternalRoot {
@@ -171,8 +167,6 @@ pub(crate) fn value_kind(v: &Value) -> &'static str {
     }
 }
 
-// ── control flow helpers ────────────────────────────
-
 /// Runs `step_internal` until it reports the tx is done (Ok(false)).
 /// Used to exercise full programs including post-`run`/`switch`
 /// resumption and call-frame exit.
@@ -208,16 +202,12 @@ pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
     vm
 }
 
-// ── ──────────────────────────────────────────────────
-
 pub(crate) fn assert_str(v: &Value, expected: &[u8]) {
     match v {
         Value::String(s) => assert_eq!(s.as_bytes(), expected),
         other => panic!("expected String, got {}", value_kind(other)),
     }
 }
-
-// ── readbits (0x40) ──────────────────────────────────────────
 
 /// Helper: pushes integer `n` (`0 ≤ n ≤ 65535`) onto the script
 /// using the shortest available immediate.
@@ -248,8 +238,6 @@ pub(crate) fn writebits_bytes(value: &Int253, n_bits: usize) -> Vec<u8> {
     }
     out
 }
-
-// ── ──────────────────────────────────────────────────
 
 pub(crate) fn assert_dict_keys(v: &Value, expected: &[Int253]) {
     match v {
@@ -353,16 +341,12 @@ pub(crate) fn push_point_bytes(script: &mut Vec<u8>, bytes: &[u8; 32]) {
     script.extend_from_slice(bytes);
 }
 
-// ── tokens (port from zkvm) ─────────────────────────
-
 pub use crate::token::flavor_from_actor as test_flavor_from_actor;
 
 /// Convenience: builds a Token via the cleartext constructor for tests.
 pub(crate) fn make_cleartext_token(qty: u64, flv: u64) -> Token {
     Token::cleartext(Int253::from(qty), Int253::from(flv))
 }
-
-// ── Opcode tests ─────────────────────────────────────────────
 
 /// Builds a VM running `script` under InternalRoot with a specific
 /// actor identity (so `op_issue` has actor context).
@@ -396,8 +380,6 @@ pub(crate) fn drive_external(
     while vm.step_external(delegate)? {}
     Ok(())
 }
-
-// ── input opcode ───────────────────────────────────
 
 /// Builds a VM running `script` under `ExternalRoot`. Mirror of
 /// `vm_with_script` for the external-context opcode tests.
@@ -440,7 +422,6 @@ pub(crate) fn decode_cell_dropping_ok(bytes: &[u8]) -> Result<(), VMError> {
     }
 }
 
-// ── end-to-end external-tx workflow ───────────────
 //
 // The tests below assemble small but complete external-tx programs
 // — input → authorize → output — and drive them through the full
@@ -512,8 +493,6 @@ impl Delegate for StubDelegate {
     }
 }
 
-// ── op_fee + CheckedFee accumulator ────────────────
-
 /// Helper: build a VM in external context with a witness-bearing
 /// program (so the prover-side Alloc witnesses are intact), step
 /// `n_steps` instructions against a Prover, then return the VM
@@ -540,8 +519,6 @@ pub(crate) fn run_external_steps<'g>(
     }
     (vm, prover)
 }
-
-// ── TxBound multi-sig batch verification ───────────
 
 /// Helper: turn a scalar secret into a `(CompressedRistretto, sk)`
 /// pair. The CompressedRistretto is the verification key; the
@@ -575,8 +552,6 @@ pub(crate) fn make_signtx_script_with_cell(
     (script, cell_id)
 }
 
-// ── Input witness re-attachment ───────────────────
-
 /// Helper: build a witness-bearing cell with a single Token
 /// payload entry. Returns the cell (with `Open` commitments —
 /// not what's on the wire) plus the matching `InputWitnesses`
@@ -602,7 +577,6 @@ pub(crate) fn make_token_witness_pair(
     (token, witness)
 }
 
-// ── Confidential N→M end-to-end test harness ──────
 //
 // The whole point of the VM: take N input cells whose Token
 // payloads are confidential (Pedersen-committed qty + flv), run
@@ -707,7 +681,7 @@ pub(crate) fn build_confidential_nm_program(
     outputs: &[NMOutputSpec],
 ) -> Program {
     let mut program = Program::new();
-    // ── For each input: pushstr cell-bytes + input(witness) +
+
     //                    callproof pieces + push:0 + open. ──
     for inp in inputs {
         let (q_open, f_open) = open_commitments(inp);
@@ -728,7 +702,7 @@ pub(crate) fn build_confidential_nm_program(
         // push:0 args, open.
         program = program.push_int(0u64).open();
     }
-    // ── For each output: push qty commit String, push flv
+
     //                    commit String (witness-bearing). ──
     for out in outputs {
         let (q_open, f_open) = open_commitments_for_output(out);
@@ -736,7 +710,7 @@ pub(crate) fn build_confidential_nm_program(
             .push_str(crate::String::commitment(q_open))
             .push_str(crate::String::commitment(f_open));
     }
-    // ── push:M push:N mix. ──
+
     //
     // `op_mix` pops `n` first (top of stack), then `m`. The spec
     // notation `m n → values` reads bottom-to-top, so the
@@ -745,7 +719,7 @@ pub(crate) fn build_confidential_nm_program(
         .push_int(inputs.len() as u64) // m — input count
         .push_int(outputs.len() as u64) // n — output count (top)
         .mix();
-    // ── Emit M output cells with correct predicate/token pairing.
+
     //
     // After `mix`, the stack is [O_0, O_1, …, O_{M-1}] (bottom →
     // top, matching the `outputs[]` spec order). `op_output` pops

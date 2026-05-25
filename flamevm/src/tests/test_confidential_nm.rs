@@ -4,8 +4,6 @@
 
 use super::test_helpers::*;
 
-// ── Positive matrix: balanced N→M transfers ─────────────────
-
 /// N=1, M=1, 1 flavor: simplest possible confidential transfer.
 #[test]
 fn confidential_1_to_1_single_flavor() {
@@ -467,7 +465,6 @@ fn confidential_2_to_3_two_flavors() {
 fn confidential_1_to_1_with_fee() {
     let pc_gens = PedersenGens::default();
 
-    // ── Build the single input cell (qty=10, flv=0). ──
     let inp = NMInputSpec {
         qty: 10,
         flv: 0,
@@ -486,7 +483,6 @@ fn confidential_1_to_1_with_fee() {
         }],
     };
 
-    // ── Build the single output spec (qty=7, flv=0). ──
     let out = NMOutputSpec {
         qty: 7,
         flv: 0,
@@ -496,7 +492,6 @@ fn confidential_1_to_1_with_fee() {
     };
     let (q_out, f_out) = open_commitments_for_output(&out);
 
-    // ── Assemble the program. ──
     let mut program = Program::new();
     // Consume the input cell.
     program = program.push_str(crate::String::from(cell_bytes));
@@ -520,7 +515,6 @@ fn confidential_1_to_1_with_fee() {
         .push_point(*out_pred.as_bytes())
         .output();
 
-    // ── Prove + verify. ──
     let prover_result =
         Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove ok");
@@ -573,8 +567,6 @@ fn confidential_1_to_1_with_fee() {
     assert_eq!(v.txid, txid_p);
     assert_eq!(v.total_fee, 3);
 }
-
-// ── Negative tests ──────────────────────────────────────────
 
 /// Quantity imbalance: input sum ≠ output sum within a flavor.
 /// CS solve must fail → `R1CSError` or `InvalidR1CSProof` on

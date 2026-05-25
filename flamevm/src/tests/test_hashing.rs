@@ -4,10 +4,6 @@
 
 use super::test_helpers::*;
 
-// ── ──────────────────────────────────────────────────
-
-// ── merlin (0x69) ────────────────────────────────────────────
-
 #[test]
 fn merlin_creates_transcript() {
     // pushstr [], merlin → Merlin on top
@@ -43,8 +39,6 @@ fn merlin_is_noncopyable_and_nondroppable() {
         VMError::TypeNotDroppable
     ));
 }
-
-// ── merlinwrite / merlinread (0x6a, 0x6b) ────────────────────
 
 #[test]
 fn merlin_write_then_read_produces_bytes() {
@@ -148,8 +142,6 @@ fn merlin_write_requires_merlin_on_bottom() {
     ));
 }
 
-// ── sha256 (0x6c) ────────────────────────────────────────────
-
 #[test]
 fn sha256_empty() {
     let mut script = pushstr_bytes(b"");
@@ -174,8 +166,6 @@ fn sha256_abc() {
     assert_str(&vm.current_call.stack[0], &expected);
 }
 
-// ── sha512 (0x6d) ────────────────────────────────────────────
-
 #[test]
 fn sha512_empty() {
     let mut script = pushstr_bytes(b"");
@@ -188,8 +178,6 @@ fn sha512_empty() {
     );
     assert_str(&vm.current_call.stack[0], &expected);
 }
-
-// ── sha3 (0x6e) ──────────────────────────────────────────────
 
 #[test]
 fn sha3_empty() {
@@ -214,8 +202,6 @@ fn sha3_abc() {
     );
     assert_str(&vm.current_call.stack[0], &expected);
 }
-
-// ── keccak256 (0x4e) ─────────────────────────────────────────
 
 #[test]
 fn keccak256_empty() {

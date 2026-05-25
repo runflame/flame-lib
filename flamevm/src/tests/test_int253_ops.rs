@@ -4,10 +4,6 @@
 
 use super::test_helpers::*;
 
-// ── ──────────────────────────────────────────────────
-
-// ── abs (0x50) ───────────────────────────────────────────────
-
 #[test]
 fn abs_of_negative_pushes_magnitude_and_sign() {
     // pushint8(neg, 9), abs
@@ -33,8 +29,6 @@ fn abs_of_zero_is_sign_zero() {
     assert_int(&vm.current_call.stack[0], Int253::from(0u64));
     assert_int(&vm.current_call.stack[1], Int253::from(0u64));
 }
-
-// ── eq (0x51) ────────────────────────────────────────────────
 
 #[test]
 fn eq_pushes_one_for_equal_ints() {
@@ -94,8 +88,6 @@ fn eq_two_dicts_is_not_comparable() {
     ));
 }
 
-// ── neg (0x52) ───────────────────────────────────────────────
-
 #[test]
 fn neg_flips_sign() {
     let mut vm = vm_with_script(vec![0x05, 0x52]);
@@ -109,8 +101,6 @@ fn neg_of_zero_stays_positive() {
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(0u64));
 }
-
-// ── add (0x53), mul (0x54) ───────────────────────────────────
 
 #[test]
 fn add_basic() {
@@ -156,8 +146,6 @@ fn add_requires_int_operands() {
         VMError::TypeNotInt253
     ));
 }
-
-// ── divmod (0x55) ────────────────────────────────────────────
 
 #[test]
 fn divmod_basic() {
@@ -207,8 +195,6 @@ fn divmod_full_width_magnitude_succeeds() {
     assert_int(&vm.current_call.stack[1], Int253::zero());
 }
 
-// ── mod252 (0x56) ────────────────────────────────────────────
-
 #[test]
 fn mod252_empty_string_is_zero() {
     let script = vec![0x19, 0x00, 0x00, 0x56]; // pushstr "", mod252
@@ -256,8 +242,6 @@ fn mod252_too_long_errors() {
         VMError::StringTooLongForModReduction
     ));
 }
-
-// ── not / and / or (0x57..=0x59) ─────────────────────────────
 
 #[test]
 fn not_zero_to_one() {
@@ -308,8 +292,6 @@ fn or_truth_table() {
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(1u64));
 }
-
-// ── size (0x5f) ──────────────────────────────────────────────
 
 #[test]
 fn size_of_string() {

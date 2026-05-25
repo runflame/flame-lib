@@ -110,8 +110,6 @@ fn signrun_rejects_wrong_signature_length() {
     ));
 }
 
-// ── deferred-sig batch verification ────────────────
-
 #[test]
 fn signrun_explicit_sig_batch_verifies_correctly() {
     // Phase-14 unit test for the Explicit-deferred-sig batch path

@@ -4,8 +4,6 @@
 
 use super::test_helpers::*;
 
-// ── Type-shape tests ─────────────────────────────────────────
-
 #[test]
 fn token_cleartext_constructor_packs_unblinded_commitments() {
     let t = make_cleartext_token(123, 7);
@@ -70,8 +68,6 @@ fn flavor_from_actor_is_deterministic_and_diverges_on_inputs() {
     // Non-negative by construction (mod-order wide reduction).
     assert!(!f_aa.is_negative());
 }
-
-// ── ClearToken arithmetic tests ──────────────────────────────
 
 #[test]
 fn cleartoken_merge_into_same_flavor_sums_qtys() {

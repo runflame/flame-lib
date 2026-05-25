@@ -4,8 +4,6 @@
 
 use super::test_helpers::*;
 
-// ── TxID + log opcode ────────────────────
-
 #[test]
 fn log_opcode_emits_txentry_data() {
     // pushstr "hello", log → txlog has Header + TxEntry::Data(b"hello").

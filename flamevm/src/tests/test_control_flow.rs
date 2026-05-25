@@ -4,8 +4,6 @@
 
 use super::test_helpers::*;
 
-// ── verify (0x79) ────────────────────────────────────────────
-
 #[test]
 fn verify_truthy_pops() {
     // push:1, verify — succeeds, stack empties.
@@ -35,8 +33,6 @@ fn verify_requires_int() {
         VMError::TypeNotInt253
     ));
 }
-
-// ── run (0x7b) ───────────────────────────────────────────────
 
 #[test]
 fn run_creates_nested_run() {
@@ -172,8 +168,6 @@ fn switch_preserves_alloc_witnesses_via_script_string() {
     .expect("verify ok");
 }
 
-// ── loop (0x7c) ──────────────────────────────────────────────
-
 #[test]
 fn loop_resets_run_cursor_to_start() {
     // nop, loop — after `loop` the Run cursor is back at the start,
@@ -185,8 +179,6 @@ fn loop_resets_run_cursor_to_start() {
     let next = vm.current_call.current_run.next_instruction().unwrap();
     assert!(matches!(next, Some(crate::ops::Instruction::Nop)));
 }
-
-// ── switch (0x7d) ────────────────────────────────────────────
 
 #[test]
 fn switch_picks_a_when_x_nonzero() {
@@ -245,8 +237,6 @@ fn switch_picks_b_when_x_zero() {
     // x=0 → runs branch b (push:8, drop) → empty stack at end → ok.
     VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block).unwrap();
 }
-
-// ── return (0x7e) ────────────────────────────────────────────
 
 #[test]
 fn return_zero_at_root_errors() {
@@ -348,8 +338,6 @@ fn return_transfers_values_to_parent() {
     assert_int(&vm.current_call.stack[0], Int253::from(7u64));
 }
 
-// ── break:k (0x80..=0x8f) ────────────────────────────────────
-
 #[test]
 fn break_zero_ends_current_run_only() {
     // Outer: pushstr [break:0, pushint8 99], run
@@ -398,8 +386,6 @@ fn break_zero_at_root_ends_cleanly() {
     let mut vm = vm_with_script(vec![0x80]);
     run_until_tx_done(&mut vm).unwrap();
 }
-
-// ── type (0x7f) ──────────────────────────────────────────────
 
 #[test]
 fn type_pushes_int253_code() {

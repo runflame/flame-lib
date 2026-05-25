@@ -4,8 +4,6 @@
 
 use super::test_helpers::*;
 
-// ── anchor ratchet ──────────────────────────────────
-
 #[test]
 fn anchor_ratchet_changes_value_and_is_deterministic() {
     let a = Anchor([0xaa; 32]);
@@ -294,8 +292,6 @@ fn open_passes_args_after_payload() {
     assert!(vm.current_call.stack.is_empty());
 }
 
-// ── Multi-leaf PredicateTree (item 9.10) ─────────────────────
-
 #[test]
 fn predicate_tree_new_validates_inputs() {
     // Empty programs → EmptyPredicateTree.
@@ -443,7 +439,6 @@ fn callproof_for_out_of_range_index_errors() {
     ));
 }
 
-// ── Re-packaging guard: cells can't be sealed into other cells ───
 //
 // A cell's payload bytes can only return to the stack via `open`,
 // `signtx`, or `signrun` — each of which consumes the source cell
@@ -791,7 +786,7 @@ fn input_via_step_external_dispatch() {
 
 #[test]
 fn external_tx_one_input_one_output_via_signtx() {
-    // ── Scenario ─────────────────────────────────────────────
+
     // A single external transaction consumes one cell (authorized
     // via signtx — the cell holder signs the whole tx via the
     // envelope) and emits a single fresh cell.
@@ -904,7 +899,7 @@ fn external_tx_one_input_one_output_via_signtx() {
 
 #[test]
 fn external_tx_two_inputs_two_outputs_via_open() {
-    // ── Scenario ─────────────────────────────────────────────
+
     // External tx consumes two distinct cells via `open` (each
     // unlocked by a valid Taproot CallProof against its predicate
     // tree), then emits two fresh output cells. No `signtx` /
@@ -915,7 +910,6 @@ fn external_tx_two_inputs_two_outputs_via_open() {
 
     let prog = vec![0x1c]; // drop
 
-    // ── Cell 1 ────────────────────────────────────────────────
     let (tree1, cp1) = build_predicate_with_program(&prog, 11);
     let cell1 = Cell::new(
         Predicate::Opaque(tree1.compute_point()),
@@ -925,7 +919,6 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     let cell1_id = cell1.id();
     let cell1_bytes = encode_cell_to_bytes(&cell1);
 
-    // ── Cell 2 ────────────────────────────────────────────────
     let (tree2, cp2) = build_predicate_with_program(&prog, 22);
     let cell2 = Cell::new(
         Predicate::Opaque(tree2.compute_point()),
@@ -936,7 +929,6 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     let cell2_anchor_post = cell2.to_anchor();
     let cell2_bytes = encode_cell_to_bytes(&cell2);
 
-    // ── Script ────────────────────────────────────────────────
     //
     //   ┌─── consume cell 1 ─────────────────────────────────┐
     //   │ pushstr <cell1_bytes>                              │
@@ -990,7 +982,6 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     push_point_bytes(&mut script, &out2_pred_bytes);
     script.push(0x92); // output
 
-    // ── Run + assert ─────────────────────────────────────────
     let vm = run_external_workflow(script);
 
     // Clean stack.

@@ -153,8 +153,6 @@ fn read_bits_roundtrip_negative_at_n_256() {
     assert_int(&vm.current_call.stack[2], Int253::from(1u64));
 }
 
-// ── readint (0x41) ───────────────────────────────────────────
-
 #[test]
 fn read_int_positive_roundtrip() {
     let value = Int253::from(1u64);
@@ -229,8 +227,6 @@ fn read_int_negative_zero_soft_fails() {
     assert_int(&vm.current_call.stack[1], Int253::from(0u64));
 }
 
-// ── readstr (0x42) ───────────────────────────────────────────
-
 #[test]
 fn read_str_success() {
     let mut script = pushstr_bytes(&[1, 2, 3, 4, 5]);
@@ -253,8 +249,6 @@ fn read_str_too_short_preserves() {
     assert_str(&vm.current_call.stack[0], &[1]);
     assert_int(&vm.current_call.stack[1], Int253::from(0u64));
 }
-
-// ── readpoint (0x43) ─────────────────────────────────────────
 
 #[test]
 fn read_point_success() {
@@ -280,8 +274,6 @@ fn read_point_too_short() {
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[1], Int253::from(0u64));
 }
-
-// ── writebits (0x44) ─────────────────────────────────────────
 
 #[test]
 fn write_bits_full_byte() {
@@ -389,8 +381,6 @@ fn write_then_read_bits_roundtrip_negative_n_256() {
     assert_int(&vm.current_call.stack[2], Int253::from(1u64));
 }
 
-// ── writeint (0x45) ──────────────────────────────────────────
-
 #[test]
 fn write_int_appends_full_32_bytes() {
     let mut script = pushstr_bytes(&[]);
@@ -445,8 +435,6 @@ fn write_then_read_int_roundtrip_signs_and_extremes() {
     }
 }
 
-// ── append (0x46) ────────────────────────────────────────────
-
 #[test]
 fn append_concatenates() {
     let mut script = pushstr_bytes(&[1, 2]);
@@ -457,8 +445,6 @@ fn append_concatenates() {
     assert_str(&vm.current_call.stack[0], &[1, 2, 3, 4, 5]);
 }
 
-// ── writezeros (0x47) ────────────────────────────────────────
-
 #[test]
 fn write_zeros_appends_n_zero_bytes() {
     let mut script = pushstr_bytes(&[0xaa]);
@@ -468,8 +454,6 @@ fn write_zeros_appends_n_zero_bytes() {
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[0xaa, 0, 0, 0]);
 }
-
-// ── bit ops (0x48..=0x4b) ────────────────────────────────────
 
 #[test]
 fn bit_not_inverts() {
@@ -522,8 +506,6 @@ fn bit_or_size_mismatch_errors() {
     ));
 }
 
-// ── shiftleft (0x4c) ─────────────────────────────────────────
-
 #[test]
 fn shift_left_by_byte() {
     let mut script = pushstr_bytes(&[0xa0, 0xb1, 0xc2, 0xd3]);
@@ -557,8 +539,6 @@ fn shift_left_zero_is_noop() {
     assert_str(&vm.current_call.stack[0], &[0xab, 0xcd]);
     assert_str(&vm.current_call.stack[1], &[]);
 }
-
-// ── shiftright (0x4d) ────────────────────────────────────────
 
 #[test]
 fn shift_right_by_byte() {

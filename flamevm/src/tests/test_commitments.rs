@@ -4,8 +4,6 @@
 
 use super::test_helpers::*;
 
-// ── rich String + scalar / commit / decrypt ────────
-
 #[test]
 fn string_witness_commitment_encodes_to_point() {
     // String::Commitment(witness) serializes to the 32-byte

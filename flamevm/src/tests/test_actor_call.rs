@@ -1,6 +1,4 @@
-//! Tests for `op_call` — synchronous actor-to-actor call,
-//! re-entrancy guard, and the `TxEntry::Call` binding into
-//! Internal TxID.
+//! Tests for op_call, re-entrancy guard, and TxEntry::Call.
 
 #![allow(unused_imports)]
 
@@ -83,8 +81,6 @@ fn push_int_bytes(n: u64) -> Vec<u8> {
     }
 }
 
-// ── op_call happy paths ──────────────────────────────────────────
-
 #[test]
 fn call_a_to_b_creates_new_frame_with_callee_identity() {
     let mut reg = MemRegistry::new();
@@ -145,8 +141,6 @@ fn call_emits_txentry_call_with_pre_state_root_and_anchor() {
     // (non-empty) state of B.
     assert_ne!(root, [0u8; 32]);
 }
-
-// ── re-entrancy guard ────────────────────────────────────────────
 
 #[test]
 fn direct_self_call_rejected_as_reentrancy() {
@@ -238,8 +232,6 @@ fn sibling_calls_to_same_actor_allowed_after_return() {
     // Step the whole way — no errors, no panic.
     while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
 }
-
-// ── failure modes ────────────────────────────────────────────────
 
 #[test]
 fn call_without_registry_errors() {

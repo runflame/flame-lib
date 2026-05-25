@@ -1,13 +1,9 @@
-//! Tests for `op_send` — async message-send, anchor ratchet,
-//! payload-hash binding, refund-predicate carry-through, and the
-//! SendID/External-TxID coverage property (Q5).
+//! Tests for op_send, anchor ratchet, payload_hash, refund predicate.
 
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
 use crate::{ActorID, ActorRegistry, MethodKey};
-
-// ── helpers ──────────────────────────────────────────────────────
 
 /// Builds bytecode that pushes the operands for `op_send` and
 /// executes it. Spec stack (bottom→top):
@@ -81,8 +77,6 @@ fn vm_internal(actor: ActorID, script: Vec<u8>) -> VM {
         ),
     )
 }
-
-// ── op_send happy path ───────────────────────────────────────────
 
 #[test]
 fn send_queues_message_and_emits_txentry() {
@@ -241,8 +235,6 @@ fn external_txid_includes_send_entry() {
 
     assert_ne!(txid_with, txid_without, "send must affect TxID");
 }
-
-// ── op_send failure modes ────────────────────────────────────────
 
 #[test]
 fn send_with_non_32_byte_addr_errors() {

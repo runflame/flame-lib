@@ -4,8 +4,6 @@
 
 use super::test_helpers::*;
 
-// ── encrypted borrow + mix ───────────────────────
-
 #[test]
 fn encrypted_borrow_produces_widetoken_and_token_pair() {
     // pushstr(open commitment for qty=42) commit
@@ -133,8 +131,6 @@ fn cleartext_borrow_unaffected_by_overload() {
     run_to_end(&mut vm).expect("cleartext borrow ok");
     assert_eq!(vm.current_call.stack.len(), 2);
 }
-
-// ── hygiene sweep ──────────────────────────────────
 
 #[test]
 fn op_mix_m_zero_rejects() {

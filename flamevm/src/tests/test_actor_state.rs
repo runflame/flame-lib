@@ -1,13 +1,10 @@
-//! Tests for `op_load` / `op_save` + the Q6 self-destruct
-//! commit hook.
+//! Tests for op_load / op_save + tx-end self-destruct.
 
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
 
 use crate::{ActorID, ActorState, MemRegistry, MethodKey, RECV_METHOD_KEY};
-
-// ── helpers ──────────────────────────────────────────────────────
 
 /// Builds an empty state with a single `recv` method that runs the
 /// caller-supplied bytes. Returns (state, id).
@@ -49,8 +46,6 @@ fn vm_for(actor: ActorID, script: Vec<u8>) -> VM {
         ),
     )
 }
-
-// ── op_load happy path ───────────────────────────────────────────
 
 #[test]
 fn load_pushes_wrapper_dict_and_marks_actor() {
@@ -94,8 +89,6 @@ fn load_then_save_round_trips_and_clears_mark() {
     // Frame flag cleared.
     assert!(!vm.current_call.loaded);
 }
-
-// ── op_load failure modes ────────────────────────────────────────
 
 #[test]
 fn load_in_external_root_errors_actor_context() {
@@ -170,8 +163,6 @@ fn load_against_frozen_actor_errors() {
     assert!(matches!(err, VMError::ActorFrozen));
 }
 
-// ── op_save failure modes ────────────────────────────────────────
-
 #[test]
 fn save_without_load_errors() {
     let mut reg = MemRegistry::new();
@@ -216,8 +207,6 @@ fn save_with_malformed_dict_errors_malformed_actor_state() {
         .expect_err("save must error");
     assert!(matches!(err, VMError::MalformedActorState), "got {:?}", err);
 }
-
-// ── Q6 self-destruct on commit ───────────────────────────────────
 
 #[test]
 fn load_without_save_then_commit_tx_destroys_actor_and_queues_vbytes() {

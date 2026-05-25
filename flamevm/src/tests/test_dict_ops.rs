@@ -4,8 +4,6 @@
 
 use super::test_helpers::*;
 
-// ── dict (0x60) ──────────────────────────────────────────────
-
 #[test]
 fn dict_construction_zero_pairs() {
     // push:0, dict — empty dict
@@ -51,8 +49,6 @@ fn dict_construction_duplicate_keys_errors() {
     ));
 }
 
-// ── put (0x61) ───────────────────────────────────────────────
-
 #[test]
 fn put_inserts_into_empty() {
     // push:0, dict (empty)  →  put k=3, v=99
@@ -90,8 +86,6 @@ fn put_on_occupied_key_errors() {
     ));
 }
 
-// ── replace (0x62) ───────────────────────────────────────────
-
 #[test]
 fn replace_existing_returns_prev() {
     // Build {5: 50}, then replace v at key 5 with 99.
@@ -124,8 +118,6 @@ fn replace_absent_returns_zero() {
     assert_int(&vm.current_call.stack[1], Int253::from(0u64));
 }
 
-// ── get (0x63) ───────────────────────────────────────────────
-
 #[test]
 fn get_existing_returns_dict_k_v() {
     // {5: 50}, get key 5.
@@ -155,8 +147,6 @@ fn get_missing_errors() {
     ));
 }
 
-// ── getopt (0x64) ────────────────────────────────────────────
-
 #[test]
 fn getopt_existing() {
     let mut vm = vm_with_script(vec![
@@ -178,8 +168,6 @@ fn getopt_missing() {
     assert_eq!(vm.current_call.stack.len(), 2);
     assert_int(&vm.current_call.stack[1], Int253::from(0u64));
 }
-
-// ── getdup (0x65) ────────────────────────────────────────────
 
 #[test]
 fn getdup_copyable() {
@@ -224,8 +212,6 @@ fn getdup_noncopyable_errors() {
         VMError::TypeNotCopyable
     ));
 }
-
-// ── first/last/next (0x66-0x68) ──────────────────────────────
 
 #[test]
 fn first_of_empty_pushes_zero() {
@@ -282,8 +268,6 @@ fn next_past_last_pushes_zero() {
     assert_eq!(vm.current_call.stack.len(), 2);
     assert_int(&vm.current_call.stack[1], Int253::from(0u64));
 }
-
-// ── Flag propagation ─────────────────────────────────────────
 
 #[test]
 fn dict_with_token_is_noncopyable() {

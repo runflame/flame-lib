@@ -4,8 +4,6 @@
 
 use super::test_helpers::*;
 
-// ── range proofs + Constraint composition ──────────
-
 #[test]
 fn range_proof_accepts_in_range_value() {
     // alloc(42) push:64 range — 42 fits in 64 bits.

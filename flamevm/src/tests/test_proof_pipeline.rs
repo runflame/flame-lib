@@ -327,8 +327,6 @@ fn shared_bp_gens_is_singleton() {
         .expect("prove #2 succeeds with shared gens");
 }
 
-// ── TxID transcript binding ────────────────────────
-
 /// Building a trivial program twice with the same header must
 /// yield the same TxID — proves the txlog (= Header alone, here)
 /// is reproducible bit-for-bit.
@@ -468,8 +466,6 @@ fn phase18_verifier_rejects_proof_under_different_header() {
     .expect_err("must reject under different header");
     assert!(matches!(err, VMError::InvalidR1CSProof));
 }
-
-// ── TxResult shape + finalize return values ────────
 
 /// Trivial prover/verifier round-trip: every TxResult field is
 /// populated as expected. This is the headline Phase-21 test —

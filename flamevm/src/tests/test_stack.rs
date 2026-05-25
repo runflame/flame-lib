@@ -4,8 +4,6 @@
 
 use super::test_helpers::*;
 
-// ── push:k (0x00..=0x0f) ─────────────────────────────────────
-
 #[test]
 fn push_immediate_k_roundtrips_0_to_15() {
     for k in 0..=15u8 {
@@ -15,8 +13,6 @@ fn push_immediate_k_roundtrips_0_to_15() {
         assert_int(&vm.current_call.stack[0], Int253::from(k as u64));
     }
 }
-
-// ── pushint{8,16,64,128,full} (0x10..=0x18) ──────────────────
 
 #[test]
 fn pushint8_positive_and_negative() {
@@ -92,8 +88,6 @@ fn pushint8_at_end_of_script_errors() {
     assert!(matches!(err, VMError::UnexpectedEndOfScript));
 }
 
-// ── pushstr (0x19) ───────────────────────────────────────────
-
 #[test]
 fn pushstr_immediate_length() {
     // sub-varint tag 0, then byte 4 = length 4, then 4 bytes
@@ -114,8 +108,6 @@ fn pushstr_short_input_errors() {
     assert!(matches!(err, VMError::UnexpectedEndOfScript));
 }
 
-// ── pushpoint (0x1a) ─────────────────────────────────────────
-
 #[test]
 fn pushpoint_roundtrip() {
     let bytes = [0x42u8; 32];
@@ -128,8 +120,6 @@ fn pushpoint_roundtrip() {
         other => panic!("expected Point, got {}", value_kind(other)),
     }
 }
-
-// ── pushtoken (0x1b) ─────────────────────────────────────────
 
 #[test]
 fn pushtoken_zero_qty_with_flavor() {
@@ -175,8 +165,6 @@ fn pushtoken_full_flavor_via_pushint_full() {
     }
 }
 
-// ── drop (0x1c) ──────────────────────────────────────────────
-
 #[test]
 fn drop_droppable_int() {
     let mut vm = vm_with_script(vec![0x05, 0x1c]); // push:5, drop
@@ -192,8 +180,6 @@ fn drop_underflow_errors() {
         VMError::StackUnderflow
     ));
 }
-
-// ── dup / dup:k (0x1e, 0x20..=0x2f) ──────────────────────────
 
 #[test]
 fn dup_immediate_zero_copies_top() {
@@ -241,8 +227,6 @@ fn dup_noncopyable_errors() {
         VMError::TypeNotCopyable
     ));
 }
-
-// ── roll / roll:k (0x1f, 0x30..=0x3f) ────────────────────────
 
 #[test]
 fn roll_immediate_moves_kth_to_top() {

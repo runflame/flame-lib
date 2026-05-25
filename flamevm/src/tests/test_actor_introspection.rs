@@ -1,13 +1,9 @@
-//! Tests for the identity-readout opcodes:
-//! `actorid` (0x9c), `anchor` (0x9d), `callerid` (0xa0),
-//! `method` (0xa1).
+//! Tests for actorid / anchor / callerid / method.
 
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
 use crate::{ActorID, ActorRegistry, MethodKey};
-
-// ── helpers ──────────────────────────────────────────────────────
 
 /// Builds an InternalRoot VM with explicit identity fields.
 fn vm_internal_with(
@@ -48,8 +44,6 @@ fn vm_external(script: Vec<u8>) -> VM {
         ),
     )
 }
-
-// ── actorid ──────────────────────────────────────────────────────
 
 #[test]
 fn actorid_in_internal_root_pushes_hash_string() {
@@ -96,8 +90,6 @@ fn actorid_in_constructor_form_uses_canonical_hash_seed() {
     }
 }
 
-// ── anchor ───────────────────────────────────────────────────────
-
 #[test]
 fn anchor_in_internal_root_pushes_frame_anchor() {
     let id = ActorID::Hash([0u8; 32]);
@@ -122,8 +114,6 @@ fn anchor_in_external_root_errors_actor_context() {
     let err = vm.step_internal().expect_err("must error");
     assert!(matches!(err, VMError::OpcodeRequiresActorContext));
 }
-
-// ── callerid ─────────────────────────────────────────────────────
 
 #[test]
 fn callerid_with_some_caller_pushes_hash_string() {
@@ -165,8 +155,6 @@ fn callerid_in_external_root_errors_actor_context() {
     let err = vm.step_internal().expect_err("must error");
     assert!(matches!(err, VMError::OpcodeRequiresActorContext));
 }
-
-// ── method ───────────────────────────────────────────────────────
 
 #[test]
 fn method_pushes_int253_key() {
