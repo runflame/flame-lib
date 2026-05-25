@@ -1813,8 +1813,8 @@ impl VM {
     /// branch for CS-bound operands.
     fn op_borrow<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         let flv_val = self.pop_value()?;
-        let qty_val = self.pop_value()?;
-        match (qty_val, flv_val) {
+        let qty_v = self.pop_value()?;
+        match (qty_v, flv_val) {
             (Value::Int253(qty), Value::Int253(flv)) => {
                 let pos = ClearToken::new(qty, flv);
                 let neg = pos.negated();
@@ -2019,22 +2019,22 @@ impl VM {
     fn op_open(&mut self) -> Result<(), VMError> {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
-        let program_str = self.pop_value()?.to_string()?;
-        let position_str = self.pop_value()?.to_string()?;
-        let neighbors_dict = self.pop_value()?.to_dict()?;
-        let internal_key_pt = self.pop_value()?.to_point()?;
+        let prog = self.pop_value()?.to_string()?;
+        let position = self.pop_value()?.to_string()?;
+        let neighbors = self.pop_value()?.to_dict()?;
+        let internal_key = self.pop_value()?.to_point()?;
         let cell = self.pop_value()?.to_cell()?;
 
         let cp = Self::callproof_from_stack_pieces(
-            internal_key_pt,
-            &neighbors_dict,
-            &position_str,
-            &program_str,
+            internal_key,
+            &neighbors,
+            &position,
+            &prog,
         )?;
-        // verify_callproof succeeds iff program_str's bytes match the leaf,
-        // so we can use the witness-bearing program_str directly.
+        // verify_callproof succeeds iff prog's bytes match the leaf,
+        // so we can use the witness-bearing prog directly.
         let _ = cell.predicate.verify_callproof(&cp)?;
-        let instrs = program_str.to_instructions()?;
+        let instrs = prog.to_instructions()?;
 
         for v in cell.payload {
             self.push_value(v);
