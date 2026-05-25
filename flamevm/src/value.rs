@@ -9,72 +9,19 @@ use crate::{ClearToken, Token, WideToken};
 use crate::{Constraint, Expression, Variable};
 
 impl Value {
-    /// Downcasts to `Int253`.
-    pub fn to_int253(self) -> Result<Int253, VMError> {
-        match self {
-            Value::Int253(i) => Ok(i),
-            _ => Err(VMError::TypeNotInt253),
-        }
-    }
+    // Plain variant extractors. One-line match body keeps the whole
+    // family scannable; the method name and error variant together
+    // say everything the doc comment used to.
+    #[rustfmt::skip] pub fn to_int253(self)      -> Result<Int253,      VMError> { match self { Value::Int253(x)      => Ok(x), _ => Err(VMError::TypeNotInt253) } }
+    #[rustfmt::skip] pub fn to_string(self)      -> Result<String,      VMError> { match self { Value::String(x)      => Ok(x), _ => Err(VMError::TypeNotString) } }
+    #[rustfmt::skip] pub fn to_dict(self)        -> Result<Dict,        VMError> { match self { Value::Dict(x)        => Ok(x), _ => Err(VMError::TypeNotDict) } }
+    #[rustfmt::skip] pub fn to_point(self)       -> Result<Point,       VMError> { match self { Value::Point(x)       => Ok(x), _ => Err(VMError::TypeNotPoint) } }
+    #[rustfmt::skip] pub fn to_cell(self)        -> Result<Cell,        VMError> { match self { Value::Cell(x)        => Ok(x), _ => Err(VMError::TypeNotCell) } }
+    #[rustfmt::skip] pub fn to_merlin(self)      -> Result<Merlin,      VMError> { match self { Value::Merlin(x)      => Ok(x), _ => Err(VMError::TypeNotMerlin) } }
+    #[rustfmt::skip] pub fn to_variable(self)    -> Result<Variable,    VMError> { match self { Value::Variable(x)    => Ok(x), _ => Err(VMError::TypeNotVariable) } }
+    #[rustfmt::skip] pub fn to_clear_token(self) -> Result<ClearToken,  VMError> { match self { Value::ClearToken(x)  => Ok(x), _ => Err(VMError::TypeNotClearToken) } }
 
-    /// Downcasts to `String`.
-    pub fn to_string(self) -> Result<String, VMError> {
-        match self {
-            Value::String(s) => Ok(s),
-            _ => Err(VMError::TypeNotString),
-        }
-    }
-
-    /// Downcasts to `Dict`.
-    pub fn to_dict(self) -> Result<Dict, VMError> {
-        match self {
-            Value::Dict(d) => Ok(d),
-            _ => Err(VMError::TypeNotDict),
-        }
-    }
-
-    /// Downcasts to `Point`.
-    pub fn to_point(self) -> Result<Point, VMError> {
-        match self {
-            Value::Point(p) => Ok(p),
-            _ => Err(VMError::TypeNotPoint),
-        }
-    }
-
-    /// Downcasts to `Cell`.
-    pub fn to_cell(self) -> Result<Cell, VMError> {
-        match self {
-            Value::Cell(c) => Ok(c),
-            _ => Err(VMError::TypeNotCell),
-        }
-    }
-
-    /// Downcasts to `Merlin` transcript.
-    pub fn to_merlin(self) -> Result<Merlin, VMError> {
-        match self {
-            Value::Merlin(m) => Ok(m),
-            _ => Err(VMError::TypeNotMerlin),
-        }
-    }
-
-    /// Downcasts to `Variable`.
-    pub fn to_variable(self) -> Result<Variable, VMError> {
-        match self {
-            Value::Variable(v) => Ok(v),
-            _ => Err(VMError::TypeNotVariable),
-        }
-    }
-
-    /// Downcasts to `ClearToken`.
-    pub fn to_clear_token(self) -> Result<ClearToken, VMError> {
-        match self {
-            Value::ClearToken(t) => Ok(t),
-            _ => Err(VMError::TypeNotClearToken),
-        }
-    }
-
-    /// Lifts to `Expression`. `Int253` folds to `Expression::Constant`;
-    /// `Expression` passes through. Other variants error.
+    /// Lift to Expression — Int253 folds to a constant; Expression passes through.
     pub fn to_expression(self) -> Result<Expression, VMError> {
         match self {
             Value::Expression(e) => Ok(e),
@@ -83,9 +30,7 @@ impl Value {
         }
     }
 
-    /// Lifts to `Constraint`. `Constraint` passes through; `Int253`
-    /// folds to `Constraint::Cleartext(value != 0)`. Other variants
-    /// error.
+    /// Lift to Constraint — Int253 folds to `Cleartext(v != 0)`; Constraint passes through.
     pub fn to_constraint(self) -> Result<Constraint, VMError> {
         match self {
             Value::Constraint(c) => Ok(c),
