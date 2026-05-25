@@ -22,8 +22,8 @@ mod witness;
 
 pub use actor::{
     grace_window, vbyte_size, Actor, ActorID, ActorRegistry, ActorState,
-    MemRegistry, VbytePool, ACTOR_ID_DOMAIN,
-    ACTOR_LIFECYCLE_OVERHEAD_VBYTES, GRACE_BLOCKS_CAP, RECV_METHOD,
+    MemRegistry, VbytePool,
+    GRACE_BLOCKS_CAP, RECV_METHOD,
     VBYTES_PER_BLOCK, VBYTE_MATURITY_BLOCKS,
 };
 pub use address::Address;

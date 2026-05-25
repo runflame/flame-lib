@@ -10,20 +10,6 @@ use crate::int253::Int253;
 use crate::string::String;
 use crate::value::Value;
 
-// ── Domain constants ─────────────────────────────────────────────
-
-/// Transcript label for canonical `ActorID::Hash` derivation from
-/// initial `ActorState`. Per Q1 (forthcoming ADR
-/// `0010-actor-data-model`): `flamevm.actorid`.
-pub const ACTOR_ID_DOMAIN: &[u8] = b"flamevm.actorid";
-
-/// Fixed vbyte overhead added on top of `encode(state).len()` for
-/// the per-actor lifecycle counters (`vbytes`, `active_blocks`,
-/// `last_activation_height`, `frozen_since`). Sized at 32 bytes —
-/// four `u64`s worth, the worst case when all four fields are
-/// present. Per Q2: `vbyte = wire_len(state) + this constant`.
-pub const ACTOR_LIFECYCLE_OVERHEAD_VBYTES: u64 = 32;
-
 /// Reserved method key in `ActorState.public`. Dispatched for every
 /// inbound message send (`recv`); other keys are reachable only via
 /// `op_call` between actors.
@@ -76,15 +62,11 @@ impl ActorID {
     /// Returns this id's canonical 32-byte hash. Both enum variants
     /// resolve to the **same** value when they refer to the same
     /// actor — that's the equivalence invariant from the type docs.
-    ///
-    /// - [`ActorID::Hash`] returns the hash directly (free).
-    /// - [`ActorID::Constructor`] hashes the bytes under
-    ///   [`ACTOR_ID_DOMAIN`].
     pub fn to_hash(&self) -> [u8; 32] {
         match self {
             ActorID::Hash(h) => *h,
             ActorID::Constructor(bytes) => {
-                let mut t = Transcript::new(ACTOR_ID_DOMAIN);
+                let mut t = Transcript::new(b"flamevm.actorid");
                 t.append_message(b"constructor", bytes);
                 let mut h = [0u8; 32];
                 t.challenge_bytes(b"id", &mut h);
@@ -368,18 +350,19 @@ impl core::fmt::Debug for Actor {
 // ── Vbyte sizing ──────────────────────────────────────────────────
 
 /// Computes the canonical vbyte size of an actor's state, per Q2:
-/// `wire_len(ActorState::encode()) + ACTOR_LIFECYCLE_OVERHEAD_VBYTES`.
+/// `wire_len(ActorState::encode()) + STORAGE_OVERHEAD`.
 /// The lifecycle overhead covers the protocol-managed counters
 /// every actor carries regardless of state shape.
 ///
 /// Returns `Err(VMError::MalformedActorState)` if the state can't
 /// be encoded (a `private` payload containing non-portable values).
 pub fn vbyte_size(state: &ActorState) -> Result<u64, VMError> {
+    const STORAGE_OVERHEAD: u64 = 32;
     let mut buf = Vec::new();
     state
         .encode(&mut buf)
         .map_err(|_| VMError::MalformedActorState)?;
-    Ok(buf.len() as u64 + ACTOR_LIFECYCLE_OVERHEAD_VBYTES)
+    Ok(buf.len() as u64 + STORAGE_OVERHEAD)
 }
 
 // ── Lifecycle constants ───────────────────────────────────────────

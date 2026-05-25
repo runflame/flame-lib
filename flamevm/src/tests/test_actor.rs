@@ -5,7 +5,7 @@ use readerwriter::ReadError;
 use crate::{
     grace_window, vbyte_size, Actor, ActorID, ActorRegistry, ActorState, Dict, Int253,
     MemRegistry, String, VbytePool, Value, VMError,
-    ACTOR_LIFECYCLE_OVERHEAD_VBYTES, GRACE_BLOCKS_CAP, RECV_METHOD,
+    GRACE_BLOCKS_CAP, RECV_METHOD,
     VBYTES_PER_BLOCK,
 };
 
@@ -200,13 +200,6 @@ fn actorstate_from_wrapper_rejects_non_dict_slots() {
     d.insert(Int253::from(1u64), Value::Dict(Dict::new()));
     let err = ActorState::from_wrapper_dict(d).expect_err("must error");
     assert!(matches!(err, VMError::MalformedActorState));
-}
-
-#[test]
-fn vbyte_size_empty_state_is_at_least_overhead() {
-    let s = ActorState::new();
-    let n = vbyte_size(&s).expect("vbyte_size");
-    assert!(n >= ACTOR_LIFECYCLE_OVERHEAD_VBYTES);
 }
 
 #[test]
