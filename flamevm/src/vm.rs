@@ -22,21 +22,13 @@ use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
 pub use crate::actor::{ActorID, ActorRegistry, ActorState, MethodKey};
 pub use crate::send::Message;
 
-// ── Identifiers and metadata ──────────────────────────────────────
-
-/// 32-byte anchor unique to a tx-initiated send or cell identity.
-///
-/// Anchors form chains: each output's anchor is derived by `ratchet`-ing
-/// from the previous one, guaranteeing uniqueness across all outputs in
-/// a transaction.
+/// 32-byte anchor. Chained via `ratchet` to make outputs unique
+/// within a transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Anchor(pub [u8; 32]);
 
 impl Anchor {
-    /// Derives the next anchor from this one using a domain-separated
-    /// Merlin transcript. Used by `cell` / `output` to chain anchors
-    /// uniquely across a transaction without colliding with anchors from
-    /// inputs or other sources.
+    /// Ratchets the anchor into a new anchor.
     pub fn ratchet(&self) -> Anchor {
         let mut t = Transcript::new(b"flamevm.anchor.ratchet.v1");
         t.append_message(b"prev", &self.0);
@@ -48,40 +40,15 @@ impl Anchor {
 
 // `Predicate` lives in `cell::predicate`; re-exported via `crate::Predicate`.
 
-// ── Deferred signature records ────────────────────────────────────
-
-/// Signature check whose verification is deferred to `Delegate::finalize`.
-///
-/// Two flavors:
-///
-/// - **`TxBound`** — created by `signtx`. The cell-holder authorizes the
-///   *whole transaction*; the actual signature lives in the tx envelope
-///   and the message comes from the eventually-computed TxID. At
-///   finalize, the delegate aggregates all `TxBound` keys (via MuSig)
-///   and verifies the envelope signature against the TxID-bound message.
-///
-/// - **`Explicit`** — created by `signrun`. The cell-holder signed a
-///   specific program at run time; both the message (a transcript over
-///   the program bytes) and the signature are known immediately. The
-///   delegate batch-verifies them at finalize.
+/// Signature check deferred to `Delegate::finalize`. `TxBound` comes
+/// from `signtx` (aggregated MuSig verified against TxID); `Explicit`
+/// comes from `signrun` (single signature over a program transcript).
 #[derive(Clone, Debug)]
 pub enum DeferredSig {
-    /// Cell-holder must sign the transaction's TxID. The signature is
-    /// supplied via the tx envelope (not on the stack).
-    ///
-    /// Carries the consumed cell's id so the multi-message context
-    /// can give each signer a distinct message — the same
-    /// pattern zkvm uses for `signtx_items: Vec<(VerificationKey,
-    /// ContractID)>`. The aggregate signature is verified against
-    /// `Vec<(verification_key, cell_id)>` with the transcript bound
-    /// to the TxID.
     TxBound {
         verification_key: CompressedRistretto,
         cell_id: crate::cell::CellID,
     },
-
-    /// Cell-holder signed an explicit message at run time. The signature
-    /// is on the stack at the time the record is created.
     Explicit {
         verification_key: CompressedRistretto,
         message: Vec<u8>,
@@ -89,76 +56,37 @@ pub enum DeferredSig {
     },
 }
 
-// ── Inbound message and context ──────────────────────────────────
-
-// `Message`, `ActorID`, `MethodKey`, and `ActorRegistry` live in
-// `actor.rs` and `send.rs`; re-exported above for legacy import
-// paths. Only `BlockContext` (the VM-only chain-info struct) stays
-// here.
-
 /// Block-level immutable context (height, chain stats).
 pub struct BlockContext {
     pub height: u64,
 }
 
-// ── Delegate ─────────────────────────────────────────────────────
-
-/// External-context user-task abstraction.
-///
-/// Two implementations: a prover that builds an R1CS proof + signs, and a
-/// verifier that verifies a proof + batch-checks signatures. Both thread
-/// the same VM over the same opcodes; only the proof-machinery differs.
+/// External-context user-task abstraction: prover or verifier. Owns the
+/// R1CS constraint system and finalizes proofs and signatures.
 pub trait Delegate {
     type CS: r1cs::RandomizableConstraintSystem;
-    /// Per-side batched scalar-point check accumulator. Mirrors zkvm's
-    /// `Delegate::BatchVerifier`. Built up by `signtx`/`signrun` (and,
-    /// later, `unblind` / `issue`'s flavor check); drained by
-    /// `Verifier::verify_proof` via `batch.verify()`.
+    /// Per-side batched scalar-point check accumulator.
     type BatchVerifier: musig::BatchVerification;
 
-    /// Mutable access to the constraint system.
+    /// Returns the delegate's underlying constraint system.
     fn cs(&mut self) -> &mut Self::CS;
 
-    /// Mutable access to the batch verifier. Used by deferred-sig
-    /// finalization on the verifier side; the prover's
-    /// `BatchVerifier` accumulates the same items (used by the
-    /// `Explicit` deferred-sig path's batch check on the prover, too,
-    /// since proving doesn't change the algebraic check shape).
+    /// Returns the delegate's batch verifier.
     fn batch_verifier(&mut self) -> &mut Self::BatchVerifier;
 
-    /// Allocates an R1CS variable backed by a Pedersen commitment.
-    ///
-    /// Prover-side: the `Commitment::Open(witness)` case carries the
-    /// cleartext value and blinding factor; the prover calls
-    /// `cs.commit(value, blinding)` to bind both into the proof.
-    /// Verifier-side: `Commitment::Closed(point)` is the only thing
-    /// the verifier sees; it calls `cs.commit(point)` to bind the
-    /// point into the proof. Both return the same `(point, variable)`
-    /// pair so downstream opcode logic is agnostic to which side it's
-    /// running on.
+    /// Adds a Commitment to the CS, producing a high-level variable.
     fn commit_variable(
         &mut self,
         commitment: &crate::Commitment,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError>;
 
     /// Consumes the delegate after VM execution finishes cleanly.
-    ///
-    /// Prover: builds the Bulletproofs proof, processes deferred sigs as
-    /// signing material. Verifier: verifies the supplied proof, processes
-    /// deferred sigs as a batched check.
+    /// Prover builds the proof; verifier checks it.
     fn finalize(self, deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError>;
 }
 
-/// No-op [`Delegate`] used by [`VM::step_internal`].
-///
-/// Internal-context transactions never run CS-touching opcodes —
-/// every external-only handler (`op_alloc`, `op_expr`, `op_range`,
-/// `op_scalar`, `op_commit`, `op_decrypt`, `op_mix`, `op_fee`,
-/// `op_input`) calls [`VM::require_external`] at its top and
-/// returns `ExternalOnly` before any `delegate.cs()` access. The
-/// `cs` / `batch_verifier` / `commit_variable` methods therefore
-/// `unreachable!()` in this impl — they exist only to satisfy the
-/// trait so a single `step<D: Delegate>` can serve both contexts.
+/// No-op [`Delegate`] used by internal-context steps. CS opcodes
+/// route through `require_external()` and never reach these methods.
 struct InternalDelegate;
 
 impl Delegate for InternalDelegate {
@@ -166,52 +94,25 @@ impl Delegate for InternalDelegate {
     type BatchVerifier = musig::BatchVerifier<rand::rngs::ThreadRng>;
 
     fn cs(&mut self) -> &mut Self::CS {
-        unreachable!(
-            "InternalDelegate::cs is unreachable — CS opcodes call \
-             `require_external()` first and error before reaching here",
-        )
+        unreachable!("InternalDelegate::cs — CS opcodes are external-only")
     }
-
     fn batch_verifier(&mut self) -> &mut Self::BatchVerifier {
-        unreachable!(
-            "InternalDelegate::batch_verifier is unreachable — \
-             signature-batching opcodes are external-only",
-        )
+        unreachable!("InternalDelegate::batch_verifier — sig batching is external-only")
     }
-
     fn commit_variable(
         &mut self,
         _commitment: &crate::Commitment,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError> {
-        unreachable!(
-            "InternalDelegate::commit_variable is unreachable — \
-             `commit`/`expr`/`mix` are external-only",
-        )
+        unreachable!("InternalDelegate::commit_variable — commit/expr/mix are external-only")
     }
-
     fn finalize(self, _deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError> {
         Ok(())
     }
 }
 
-// ── Run ──────────────────────────────────────────────────────────
-
-/// Multiple Runs may nest within one call (via `run` / `loop` /
-/// `switch`); each pushes onto `CallFrame.run_stack` and is resumed
-/// on `break` / `return` / end-of-program.
-///
-/// A single executable script slice the VM is currently walking —
-/// always a pre-decoded `Vec<Instruction>` plus a cursor.
-///
-/// Prover and verifier feed the VM through the same shape: the
-/// prover hands in instructions with their witness slots populated
-/// (`Instruction::Input(Some(_))`, `Alloc(Some(_))`, …), the
-/// verifier hands in instructions parsed from bytecode (witness
-/// slots all `None`). Nested programs (entered via `op_run`,
-/// `op_open`, etc.) decode the bytes-on-stack via `Program::parse`
-/// the same way on both sides — `String` payloads can't carry
-/// witnesses so the inner Run is always witness-free regardless of
-/// which side is running.
+/// One executable script slice: a decoded instruction stream plus a
+/// cursor. Multiple Runs nest within one CallFrame (`run` / `loop` /
+/// `switch`); each new Run pushes the old one onto `run_stack`.
 pub struct Run {
     instructions: Vec<crate::ops::Instruction>,
     cursor: usize,
@@ -225,11 +126,7 @@ impl Run {
         Run { instructions, cursor: 0 }
     }
 
-    /// Returns the next [`Instruction`] in this Run, advancing the
-    /// cursor. `Ok(None)` at end of program. Result-shaped to keep
-    /// the call-site uniform with the previous bytecode-on-the-fly
-    /// parsing path — Phase-19 bytecode errors that used to surface
-    /// here now surface at `Program::parse` entry instead.
+    /// Returns the next instruction; `Ok(None)` at end of program.
     pub(crate) fn next_instruction(
         &mut self,
     ) -> Result<Option<crate::ops::Instruction>, VMError> {
@@ -251,24 +148,18 @@ impl Run {
         self.cursor = 0;
     }
 
-    /// Jumps the cursor past the end of the Run, so the next call to
-    /// `next_instruction` returns `None`. Used by `break:k`.
+    /// Jumps past the end of the Run. Used by `break:k`.
     fn jump_to_end(&mut self) {
         self.cursor = self.instructions.len();
     }
 }
 
-// ── CallFrame ────────────────────────────────────────────────────
-
-/// What kind of scope a [`CallFrame`] represents. Drives identity, the
-/// re-entrancy check, and dispatch of identity-aware opcodes (`actorid`,
-/// `callerid`, `method`, `anchor`).
+/// Identity-bearing scope tag carried by every CallFrame.
 pub enum CallKind {
     /// Outer scope of an external transaction.
     ExternalRoot,
 
-    /// Outer scope of an internal transaction, entered by dispatching to
-    /// the target actor's method.
+    /// Outer scope of an internal tx; dispatched to the target's method.
     InternalRoot {
         actor: ActorID,
         method: MethodKey,
@@ -276,12 +167,7 @@ pub enum CallKind {
         anchor: Anchor,
     },
 
-    /// Synchronous actor-to-actor `call` inside an internal tx.
-    ///
-    /// `anchor` is the ratcheted anchor emitted by `op_call` at
-    /// entry; the same value lands in the matching
-    /// `TxEntry::Call.callee_anchor`. Surfaces via `op_anchor`
-    /// from inside the callee.
+    /// Synchronous actor-to-actor call inside an internal tx.
     ActorCall {
         actor: ActorID,
         method: MethodKey,
@@ -342,9 +228,8 @@ impl CallKind {
 }
 
 /// Iterates over the actor ids of every live frame — current call
-/// first, then suspended frames innermost-out. Used by the
-/// re-entrancy guard inside `op_call` (ADR 0003): the target id
-/// must not appear anywhere in the walk.
+/// Walks actor ids of every live frame — current first, then suspended
+/// innermost-out. Used by the re-entrancy guard inside `op_call`.
 fn iter_actor_ids_on_stack<'a>(
     current: &'a CallFrame,
     suspended: &'a [CallFrame],
@@ -352,6 +237,19 @@ fn iter_actor_ids_on_stack<'a>(
     core::iter::once(&current.kind)
         .chain(suspended.iter().map(|f| &f.kind))
         .filter_map(|k| k.actor())
+}
+
+/// Hashes an `ActorState` to its canonical 32-byte root via the
+/// `flamevm.actor.state.root` transcript domain. Used by `op_call`
+/// to bind the callee's pre-call state into `TxEntry::Call`.
+fn state_root(state: &ActorState) -> Result<[u8; 32], VMError> {
+    let mut buf = Vec::new();
+    state.encode(&mut buf).map_err(|_| VMError::MalformedActorState)?;
+    let mut t = Transcript::new(b"flamevm.actor.state.root");
+    t.append_message(b"state", &buf);
+    let mut h = [0u8; 32];
+    t.challenge_bytes(b"root", &mut h);
+    Ok(h)
 }
 
 /// An isolated execution scope. Holds its own stack, run, gas budget, and
@@ -381,21 +279,13 @@ pub struct CallFrame {
     /// Vbytes delivered with this call (queryable by `newbytes` opcode).
     pub(crate) newbytes: u64,
 
-    /// Per-frame load/save pairing flag. `true` from `op_load`
-    /// returning successfully until the next `op_save` clears it
-    /// — a second `op_load` on the same frame errors
-    /// `LoadAlreadyMarked`. Saved Q6 self-destruct: a frame that
-    /// finishes with `loaded == true` leaves the actor marked in
-    /// the registry, and the tx-end commit hook drops the actor +
-    /// recycles its vbytes.
+    /// Per-frame load/save pairing flag. Set by `op_load`, cleared by
+    /// `op_save`. Unmatched load self-destructs the actor at tx commit.
     pub(crate) loaded: bool,
 }
 
 impl CallFrame {
-    /// Builds a fresh CallFrame whose Run walks `instructions`. The
-    /// caller has already decoded the script bytes (verifier via
-    /// `Program::parse`) or is supplying a witness-bearing Program
-    /// (prover) — either way the Run shape is the same.
+    /// Builds a fresh CallFrame whose Run walks `instructions`.
     pub fn new(
         instructions: Vec<crate::ops::Instruction>,
         kind: CallKind,
@@ -418,25 +308,8 @@ impl CallFrame {
     }
 }
 
-// ── Result ───────────────────────────────────────────────────────
-
 /// Outcome of a successful transaction execution. Returned by both
-/// `Prover::prove` (with `proof: Some(...)`) and `Verifier::verify`
-/// (with `proof: None` — proof has already been verified by then).
-///
-/// Carries the full "observed effects" of the tx: the canonical
-/// TxID, the txlog, the running fee total, the resource usage, the
-/// deferred signature records, and the optional R1CS proof.
-/// Downstream consumers (mempool, validator, wallet) read from a
-/// single value rather than reassembling fields from a multi-tuple
-/// return.
-///
-/// Linear-value variants in `TxEntry::Output(Cell)` prevent
-/// `#[derive(Clone, Debug, Serialize, Deserialize)]` here — see the
-/// matching note on `TxEntry`. A custom `Debug` impl on the carrier
-/// vectors would address most needs; for now the struct itself is
-/// `Debug`-skipped and callers project out the fields they want to
-/// log.
+/// `Prover::prove` and `Verifier::verify`.
 pub struct TxResult {
     /// Canonical 32-byte transaction id.
     pub txid: crate::tx::TxID,
@@ -478,8 +351,7 @@ pub struct TxResult {
     pub sends: Vec<Message>,
 }
 
-/// Manual `Debug` — same reason as `TxEntry`'s manual impl: the
-/// linear `Cell` inside `txlog` blocks `#[derive(Debug)]`.
+/// Manual Debug — the linear `Cell` in `txlog` blocks `#[derive]`.
 impl core::fmt::Debug for TxResult {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("TxResult")
@@ -496,8 +368,6 @@ impl core::fmt::Debug for TxResult {
     }
 }
 
-// ── VM ───────────────────────────────────────────────────────────
-
 pub struct VM {
     #[allow(dead_code)]
     header: TxHeader,
@@ -509,33 +379,22 @@ pub struct VM {
     current_call: CallFrame,
     call_stack: Vec<CallFrame>,
 
-    /// Effects emitted during execution. Outputs, data entries, future
-    /// issuances/retirements/fees/sends. Used at finalize to compute TxID.
+    /// Effects emitted during execution; used to compute TxID.
     pub(crate) txlog: Vec<crate::tx::TxEntry>,
 
-    /// Running per-tx fee accumulator. Each `op_fee` increments it;
-    /// overflow → `FeeTooHigh`. Surfaced through
-    /// `TxResult.total_fee`.
+    /// Running per-tx fee accumulator (overflow → `FeeTooHigh`).
     total_fee: crate::fees::CheckedFee,
 
-    /// Signature checks deferred to `Delegate::finalize`. Always empty in
-    /// internal mode.
+    /// Signature checks deferred to `Delegate::finalize`.
     deferred_sigs: Vec<DeferredSig>,
 
-    /// Outbound messages queued by `op_send`. Drained into
-    /// `TxResult.sends` for the consensus layer to dispatch as
-    /// internal transactions after this tx commits.
+    /// Outbound messages queued by `op_send`.
     sends: Vec<Message>,
 }
 
 impl VM {
-    /// Executes an external transaction script with the given delegate.
-    /// Consumes the delegate (calls `finalize` at the end). Returns
-    /// the full Phase-21 [`TxResult`] with `proof = None` — this
-    /// entry point is for callers that don't care about ZK shape
-    /// (integration tests, stub delegates, …); the
-    /// [`crate::Prover::prove`] / [`crate::Verifier::verify`] entry
-    /// points are the real ZK boundaries.
+    /// Executes an external transaction script with the given delegate,
+    /// then calls `delegate.finalize`.
     pub fn execute_external<D: Delegate>(
         header: TxHeader,
         script: Vec<u8>,
@@ -556,28 +415,15 @@ impl VM {
             ),
         );
         while vm.step_external(&mut delegate)? {}
-        // Finalize the delegate first (signatures, proof verification
-        // on real delegates; no-op on the stub). On success, drain
-        // the VM state into a TxResult.
         let sigs = mem::take(&mut vm.deferred_sigs);
         delegate.finalize(sigs.clone())?;
-        // Re-attach the drained sigs into TxResult so callers can
-        // inspect them post-finalize. The clone above lets `finalize`
-        // own its copy without losing the audit trail here.
         vm.deferred_sigs = sigs;
         Ok(vm.into_result(bytecode, None))
     }
 
-    /// Runs an external-root program through the VM to completion
-    /// without calling `Delegate::finalize`. Single entry point for
-    /// both prover and verifier — the prover passes a `Program`
-    /// with witnesses inline, the verifier passes one decoded from
-    /// raw bytecode via `Program::parse`. Either way the VM walks
-    /// the resulting `Vec<Instruction>` through one dispatch.
-    ///
-    /// Returns the full Phase-21 [`TxResult`] (with `proof = None`
-    /// — the caller, typically [`crate::Verifier::verify`] or
-    /// [`crate::Prover::prove`], attaches the proof afterward).
+    /// Runs an external-root program through the VM without finalizing
+    /// the delegate. Used by `Prover` / `Verifier` which take a Program
+    /// (with witnesses inline on the prover side).
     pub(crate) fn run<D: Delegate>(
         header: TxHeader,
         program: crate::program::Program,
@@ -600,14 +446,8 @@ impl VM {
         Ok(vm.into_result(bytecode, None))
     }
 
-    /// Executes an internal transaction triggered by `message`. Resolves
-    /// the target method's bytecode and the target actor's vbyte balance
-    /// from `registry`; provides chain info from `block`.
-    ///
-    /// On clean exit, runs the Q6 self-destruct commit hook at
-    /// `block.height`: any actor still marked for destruction
-    /// (script loaded without saving) is removed from the registry
-    /// and its vbytes recycled with the standard maturity delay.
+    /// Executes an internal transaction. On clean exit runs the tx-end
+    /// self-destruct sweep against `registry`.
     pub fn execute_internal(
         header: TxHeader,
         message: Message,
@@ -634,17 +474,12 @@ impl VM {
             ),
         );
         while vm.step_internal_with_registry(registry)? {}
-        // Q6: any actor still marked at clean exit is self-destructed.
-        // Failures roll back before reaching here, so this only runs
-        // for successful tx commits.
         let _cleared = registry.commit_tx_destructions(block.height);
-        // Internal context produces no proof and no deferred sigs.
         Ok(vm.into_result(Vec::new(), None))
     }
 
     fn new(header: TxHeader, initial_call: CallFrame) -> Self {
-        // Header is the first txlog entry so TxID::from_log binds to
-        // version + locktime alongside the effects. Mirrors zkvm.
+        // Header is the first txlog entry so TxID binds to version + locktime.
         let mut txlog = Vec::new();
         txlog.push(crate::tx::TxEntry::Header(header));
         Self {
@@ -661,16 +496,7 @@ impl VM {
         }
     }
 
-    /// Drain the VM into a Phase-21 [`TxResult`]. Computes
-    /// `TxID::from_log(&txlog)` from the accumulated log so the
-    /// returned struct is self-contained — every consumer reads it
-    /// off the result without re-running the merkle root.
-    ///
-    /// `bytecode` and `proof` are filled by the caller (the VM
-    /// doesn't always have the bytecode — `VM::run`
-    /// walked a `Run::Queue` over `Instructions` instead of raw
-    /// bytes — and the proof is constructed by the Prover after the
-    /// run finishes).
+    /// Drains the VM into a `TxResult`, computing TxID from the txlog.
     fn into_result(
         mut self,
         bytecode: Vec<u8>,
@@ -693,15 +519,7 @@ impl VM {
         }
     }
 
-    // ── Dispatch ─────────────────────────────────────────────────
-
-    /// Returns `Ok(())` iff the current call frame is in external
-    /// context (`ExternalRoot` or `CellOpen` — see `CallKind`).
-    /// External-only opcode handlers call this at the top to gate
-    /// CS-touching work; internal context errors `ExternalOnly`
-    /// before the handler reaches `delegate.cs()`. Centralising the
-    /// check here means dispatch stays flat and per-opcode rules
-    /// live in handlers (zkvm pattern).
+    /// Gate for external-only opcodes (CS-touching handlers).
     fn require_external(&self) -> Result<(), VMError> {
         if self.is_external() {
             Ok(())
@@ -710,11 +528,7 @@ impl VM {
         }
     }
 
-    /// True iff the current frame is `ExternalRoot` or a `CellOpen`
-    /// nested inside one. Used by polymorphic handlers (`eq`,
-    /// `neg`, …) to know whether the Expression / Constraint
-    /// branches are even reachable — those require a constraint
-    /// system, which only external context provides.
+    /// True iff the current frame is `ExternalRoot` or a `CellOpen`.
     fn is_external(&self) -> bool {
         matches!(
             self.current_call.kind,
@@ -722,14 +536,7 @@ impl VM {
         )
     }
 
-    /// External-context step: thin wrapper around the unified
-    /// [`Self::step`]. Retained as a stable name for callers that
-    /// already drive the VM step-by-step with an explicit delegate
-    /// (tests, prover/verifier internals).
-    ///
-    /// External context has no actor registry — `op_load` / `op_save`
-    /// are internal-only and route through the
-    /// [`Self::step_internal_with_registry`] entry point instead.
+    /// External-context step.
     pub(crate) fn step_external<D: Delegate>(
         &mut self,
         delegate: &mut D,
@@ -737,19 +544,14 @@ impl VM {
         self.step(delegate, None)
     }
 
-    /// Internal-context step without a registry — for tests
-    /// that exercise opcodes that don't touch actor state. `op_load` /
-    /// `op_save` / future `op_call` / `op_send` error
-    /// `RegistryUnavailable` on this path.
+    /// Internal-context step without a registry — registry-touching
+    /// opcodes error `RegistryUnavailable`.
     pub(crate) fn step_internal(&mut self) -> Result<bool, VMError> {
         let mut stub = InternalDelegate;
         self.step(&mut stub, None)
     }
 
-    /// Internal-context step with a live registry handle. The
-    /// normal entry point for real internal-tx execution — the
-    /// consensus crate's executor wraps this in a loop just like
-    /// `execute_internal` does.
+    /// Internal-context step with a live registry handle.
     pub(crate) fn step_internal_with_registry(
         &mut self,
         registry: &mut dyn ActorRegistry,
@@ -758,17 +560,8 @@ impl VM {
         self.step(&mut stub, Some(registry))
     }
 
-    /// Executes one [`Instruction`]. Returns `Ok(true)` to keep
-    /// running, `Ok(false)` to stop. The flat match is the only
-    /// dispatch — no external/internal/common split, no `if` peeks
-    /// on the stack. Per-opcode context and operand rules live
-    /// inside each handler.
-    ///
-    /// `registry`: `None` for external context and registry-free
-    /// internal-context tests; `Some(_)` for real internal-tx
-    /// execution. Opcodes that mutate the actor registry (`load`,
-    /// `save`, future `call` / `send`) check for `Some(_)` and
-    /// hard-fail `RegistryUnavailable` otherwise.
+    /// Executes one instruction. Returns `Ok(true)` to continue,
+    /// `Ok(false)` to stop.
     fn step<D: Delegate>(
         &mut self,
         delegate: &mut D,
@@ -779,7 +572,7 @@ impl VM {
         };
         use crate::ops::Instruction as I;
         match instr {
-            // ── Stack literals & manipulation ─────────────────────
+
             I::PushInt(i) => {
                 self.push_value(Value::Int253(i));
                 Ok(())
@@ -799,7 +592,7 @@ impl VM {
             I::Roll => self.op_roll(),
             I::DupK(k) => self.op_dup_k(k as usize),
             I::RollK(k) => self.op_roll_k(k as usize),
-            // ── String ops ────────────────────────────────────────
+
             I::ReadBits => self.op_read_bits(),
             I::ReadInt => self.op_read_int(),
             I::ReadStr => self.op_read_str(),
@@ -815,7 +608,7 @@ impl VM {
             I::ShiftLeft => self.op_shift_left(),
             I::ShiftRight => self.op_shift_right(),
             I::Keccak256 => self.op_keccak256(),
-            // ── Int253 / polymorphic arithmetic ───────────────────
+
             I::Abs => self.op_abs(),
             I::Eq => self.op_eq(delegate),
             I::Neg => self.op_neg(delegate),
@@ -827,7 +620,7 @@ impl VM {
             I::And => self.op_and(delegate),
             I::Or => self.op_or(delegate),
             I::Size => self.op_size(),
-            // ── Dict ops ──────────────────────────────────────────
+
             I::Dict => self.op_dict(),
             I::Put => self.op_put(),
             I::Replace => self.op_replace(),
@@ -837,7 +630,7 @@ impl VM {
             I::First => self.op_first(),
             I::Last => self.op_last(),
             I::Next => self.op_next(),
-            // ── Hash & Merlin ─────────────────────────────────────
+
             I::Merlin => self.op_merlin(),
             I::MerlinWrite => self.op_merlin_write(),
             I::MerlinRead => self.op_merlin_read(),
@@ -845,7 +638,7 @@ impl VM {
             I::Sha512 => self.op_sha512(),
             I::Sha3 => self.op_sha3(),
             I::Log => self.op_log(),
-            // ── Tokens ────────────────────────────────────────────
+
             I::Amount => self.op_amount(),
             I::Issue => self.op_issue(),
             I::Retire => self.op_retire(),
@@ -853,7 +646,7 @@ impl VM {
             I::Merge => self.op_merge(),
             I::Split => self.op_split(),
             I::IssueFlv => self.op_issueflv(),
-            // ── CS-bound (external-only via `require_external`) ──
+
             I::Alloc(w) => self.op_alloc(w, delegate),
             I::Expr => self.op_expr(delegate),
             I::Range => self.op_range(delegate),
@@ -863,14 +656,14 @@ impl VM {
             I::Mix => self.op_mix(delegate),
             I::Fee => self.op_fee(delegate),
             I::Verify => self.op_verify(delegate),
-            // ── Control flow ──────────────────────────────────────
+
             I::Run => self.op_run(),
             I::Loop => self.op_loop(),
             I::Switch => self.op_switch(),
             I::Return => self.op_return(),
             I::Type => self.op_type(),
             I::BreakK(k) => self.op_break_k(k as usize),
-            // ── Cells / cell-open / signtx / signrun / input ──────
+
             I::Input(w) => self.op_input(w.as_deref()),
             I::Cell => self.op_cell(),
             I::Output => self.op_output(),
@@ -881,12 +674,12 @@ impl VM {
             I::Save => self.op_save(registry),
             I::Signtx => self.op_signtx(),
             I::Signrun => self.op_signrun(),
-            // ── Identity / call-context readouts ──────────────────
+
             I::Actorid => self.op_actorid(),
             I::Anchor => self.op_anchor(),
             I::Callerid => self.op_callerid(),
             I::Method => self.op_method(),
-            // ── Extension / unknown ───────────────────────────────
+
             I::Ext(b) => Err(VMError::UnknownOpcode(b)),
         }?;
         Ok(true)
@@ -901,18 +694,9 @@ impl VM {
         self.finish_call()
     }
 
-    /// Pops the current call frame back to its caller after a clean exit.
-    ///
-    /// Strict semantics: the callee's stack must already be empty. Values
-    /// destined for the caller cross the boundary *only* via the explicit
-    /// `return` opcode, which pops them from the callee, pops this frame,
-    /// and pushes them onto the caller's stack as a single atomic step.
-    /// This routine never moves stack items between frames; reaching it
-    /// with a non-empty stack is a script bug, not a salvage opportunity.
-    ///
-    /// Gas refund, by contrast, is a structural property of `call` (per
-    /// design.md §Gas: "Unused gas in a call remains with the caller").
-    /// It happens here unconditionally on clean exit.
+    /// Pops the current frame back to its caller on clean exit. Stack
+    /// must be empty (use `return k` to send values across the boundary).
+    /// Leftover gas is refunded to the parent.
     fn finish_call(&mut self) -> Result<bool, VMError> {
         if !self.current_call.stack.is_empty() {
             return Err(VMError::StackNotClean);
@@ -933,8 +717,6 @@ impl VM {
         // Outermost call returned: entire tx complete.
         Ok(false)
     }
-
-    // ── Stack helpers ────────────────────────────────────────────
 
     /// Pushes a value onto the current call's stack.
     fn push_value(&mut self, v: Value) {
@@ -965,8 +747,6 @@ impl VM {
         }
         Ok(idx)
     }
-
-    // ── opcode handlers ─────────────────────────────────
 
     // `pushint`/`pushstr`/`pushpoint` are now inline in
     // `dispatch_common`: `Instruction::parse` decodes their inline
@@ -1034,8 +814,6 @@ impl VM {
         stack.push(v);
         Ok(())
     }
-
-    // ── Hash & Merlin ───────────────────────────────────
 
     /// Pops the top value, asserting it is a `Merlin` transcript.
     fn pop_merlin(&mut self) -> Result<Merlin, VMError> {
@@ -1127,8 +905,6 @@ impl VM {
         self.txlog.push(crate::tx::TxEntry::Data(s.to_bytes()));
         Ok(())
     }
-
-    // ── Dict ops ────────────────────────────────────────
 
     /// Pops the top value, asserting it is a `Dict`.
     fn pop_dict(&mut self) -> Result<Dict, VMError> {
@@ -1296,8 +1072,6 @@ impl VM {
         Ok(())
     }
 
-    // ── String ops ──────────────────────────────────────
-
     /// Helper: converts a stack-popped count into a `usize` ≤ `max`.
     /// Returns `IndexOutOfRange` on overflow or above `max`.
     fn pop_byte_count(&mut self, max: usize) -> Result<usize, VMError> {
@@ -1317,7 +1091,6 @@ impl VM {
         self.push_value(Value::String(original));
         self.push_value(Value::Int253(Int253::zero()));
     }
-
 
     /// `0x40` `readbits` — `s n → s' x 1 | s 0`. Reads `n ≤ 256` bits
     /// from the front of `s`, **LSB-first within each byte**, into bits
@@ -1547,8 +1320,6 @@ impl VM {
         self.push_value(Value::String(removed));
         Ok(())
     }
-
-    // ── Int253 arithmetic, logic, size ──────────────────
 
     /// `0x50` `abs` — pops an `Int253`, pushes its magnitude (positive
     /// `Int253`), then pushes the original sign as `Int253` (`0` for
@@ -1810,8 +1581,6 @@ impl VM {
         Ok(())
     }
 
-    // ── control flow ────────────────────────────────────
-
     /// `0x79 verify` — pop one and assert truthiness.
     ///
     /// - `Int253`: errors `VerifyFailed` if zero, else pops.
@@ -1954,14 +1723,24 @@ impl VM {
         Ok(())
     }
 
-    // ── helpers ──────────────────────────────────────────
-
     /// Pops the top value, asserting it is a `String`.
     fn pop_string(&mut self) -> Result<String, VMError> {
         match self.pop_value()? {
             Value::String(s) => Ok(s),
             _ => Err(VMError::TypeNotString),
         }
+    }
+
+    /// Pops a 32-byte String and returns it as a fixed array. Used by
+    /// opcodes that consume canonical-hash payloads (`send`, `call`).
+    fn pop_string_32(&mut self) -> Result<[u8; 32], VMError> {
+        let s = self.pop_string()?;
+        if s.len() != 32 {
+            return Err(VMError::MalformedAddress);
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&s.bytes_view());
+        Ok(out)
     }
 
     /// Pushes the current Run onto the run-stack and replaces it
@@ -1983,8 +1762,6 @@ impl VM {
         Ok(())
     }
 
-    // ── token helpers ───────────────────────────────────
-
     /// Pops a `ClearToken` from the stack. Errors `TypeNotClearToken`
     /// for any other variant (including encrypted `Token` /
     /// `WideToken` — those have separate cleartext-vs-CS code paths).
@@ -2005,23 +1782,8 @@ impl VM {
             .ok_or(VMError::OpcodeRequiresActorContext)
     }
 
-    // ── token opcode handlers ───────────────────────────
-
-    /// `0x70 amount` — peeks the top token-shaped value and pushes its
-    /// `qty` then `flv` underneath/above it, leaving the source token
-    /// on the stack untouched (`token → token qty flv`).
-    ///
-    /// - `ClearToken`: pushes both as `Int253` (cleartext).
-    /// - `Token`: pushes both as `Point` (the compressed commitment
-    ///   point of each component — works without a live CS).
-    /// - `WideToken`: errors `TypeNotToken` — the encrypted
-    ///   intermediate is produced and consumed only by CS opcodes
-    ///   and is never inspected via `amount`.
-    /// - Other types: `TypeNotToken`.
+    /// _token_ **amount** → _token qty flv_
     fn op_amount(&mut self) -> Result<(), VMError> {
-        // The spec diagram leaves the original token on the stack and
-        // adds qty + flv above it. We pop the token (to inspect by
-        // value), then push back token, qty, flv in that order.
         let token = self.pop_value()?;
         match token {
             Value::ClearToken(t) => {
@@ -2041,53 +1803,33 @@ impl VM {
                 Ok(())
             }
             other => {
-                // Restore the value before erroring so the caller's
-                // stack isn't silently mutated (matches `op_drop`).
                 self.push_value(other);
                 Err(VMError::TypeNotToken)
             }
         }
     }
 
-    /// `0x71 issue` — `qty tag → T`. Cleartext branch: pops a tag
-    /// `String` and a qty `Int253`; computes the flavor from
-    /// `(current actor id, tag)`; emits `TxEntry::Issue` with the
-    /// two unblinded commitment points; pushes a fresh `ClearToken`.
+    /// _qty tag_ **issue** → _token_
     ///
-    /// Hard-fails with `TokenRequiresCS` if `qty` is a `Point` (the
-    /// encrypted branch is not yet wired). Hard-fails with
-    /// `OpcodeRequiresActorContext` if the current frame has no actor
-    /// identity. Hard-fails with `TypeNotInt253` for any other qty
-    /// type.
+    /// Cleartext branch only; encrypted `qty: Point` errors `TokenRequiresCS`.
     fn op_issue(&mut self) -> Result<(), VMError> {
         let tag = self.pop_string()?;
-        let qty_val = self.pop_value()?;
-        let qty = match qty_val {
+        let qty = match self.pop_value()? {
             Value::Int253(i) => i,
-            // Encrypted branch: defer to a later phase that wires CS.
             Value::Point(_) => return Err(VMError::TokenRequiresCS),
             _ => return Err(VMError::TypeNotInt253),
         };
-        // `ActorID` is no longer `Copy` (the Constructor form holds
-        // a Vec) — clone the borrowed id so we can drop the
-        // `require_actor` borrow before mutating `self`.
         let actor = self.require_actor()?.clone();
         let flv = flavor_from_actor(&actor, &tag);
-        let qty_commit = Commitment::unblinded(qty);
-        let flv_commit = Commitment::unblinded(flv);
         self.txlog.push(crate::tx::TxEntry::Issue(
-            qty_commit.to_point(),
-            flv_commit.to_point(),
+            Commitment::unblinded(qty).to_point(),
+            Commitment::unblinded(flv).to_point(),
         ));
         self.push_value(Value::ClearToken(ClearToken::new(qty, flv)));
         Ok(())
     }
 
-    /// `0x72 retire` — `token → ø`. Consumes a token off the stack and
-    /// emits `TxEntry::Retire(qty_point, flv_point)`. Works for both
-    /// `ClearToken` (unblinded commitments) and `Token` (the live
-    /// commitment points). `WideToken` and other types error
-    /// `TypeNotToken`.
+    /// _token_ **retire** → ø
     fn op_retire(&mut self) -> Result<(), VMError> {
         let val = self.pop_value()?;
         match val {
@@ -2114,20 +1856,10 @@ impl VM {
         }
     }
 
-    /// `0x73 borrow` — pop `(qty, flv)` and produce a debit/credit
-    /// pair.
+    /// _qty flv_ **borrow** → _widetoken token_
     ///
-    /// - Both `Int253`: cleartext borrow — pushes
-    ///   `ClearToken(-qty, flv)` on the bottom and
-    ///   `ClearToken(qty, flv)` on top.
-    /// - Both `Variable`: encrypted borrow — commits both
-    ///   commitments to the CS, range-proves the positive `qty`,
-    ///   allocates `-qty`, constrains the sum to zero, and pushes
-    ///   `WideToken(-qty, flv)` + `Token(qty, flv)`. External
-    ///   context only (CS allocation).
-    /// - `Point` operand: legacy encrypted-via-point hint, no
-    ///   longer accepted — errors `TokenRequiresCS`.
-    /// - Anything else: `TypeNotInt253`.
+    /// Cleartext branch for `Int253` operands; encrypted (`Variable`)
+    /// branch for CS-bound operands.
     fn op_borrow<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         let flv_val = self.pop_value()?;
         let qty_val = self.pop_value()?;
@@ -2148,10 +1880,7 @@ impl VM {
         }
     }
 
-    /// `0x74 merge` — `a b → {c 1 | a b 0}`. Both operands must be
-    /// `ClearToken`s. On flavor match, sums quantities and pushes
-    /// `(merged, 1)`. On mismatch, restores the originals and pushes
-    /// `(a, b, 0)` (soft-fail per spec).
+    /// _a b_ **merge** → _{c 1 | a b 0}_
     fn op_merge(&mut self) -> Result<(), VMError> {
         let b = self.pop_clear_token()?;
         let a = self.pop_clear_token()?;
@@ -2169,13 +1898,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x75 split` — `a q → a' b`. Takes `q` from `a.qty`, returns
-    /// the remainder `a' = ClearToken(a.qty - q, a.flv)` (bottom) and
-    /// the carved-off `b = ClearToken(q, a.flv)` (top). Both produced
-    /// tokens share `a.flv`.
-    ///
-    /// Hard-fails `TokenSplitOutOfRange` if `q > a.qty`, if `q < 0`,
-    /// or if `a.qty < 0`.
+    /// _a q_ **split** → _a' b_
     fn op_split(&mut self) -> Result<(), VMError> {
         let q = self.pop_int253()?;
         let a = self.pop_clear_token()?;
@@ -2189,34 +1912,21 @@ impl VM {
         }
     }
 
-    /// `0x78 issueflv` — `cid tag → int`. Pops a tag `String` and an
-    /// actor-id `String` (must be exactly 32 bytes), pushes
-    /// `flavor_from_actor(cid, tag)` as `Int253`.
+    /// _cid tag_ **issueflv** → _int_
     ///
-    /// Pure helper — no CS, no txlog effect, no actor-context
-    /// requirement. Hard-fails with `MalformedCellEncoding`-style
-    /// errors for wrong-length cid: we reuse `TypeNotString` semantics
-    /// since the spec doesn't mandate a specific error, by checking
-    /// length and erroring `IndexOutOfRange` if cid isn't 32 bytes.
+    /// Pure helper: no CS, no txlog effect, no actor-context requirement.
     fn op_issueflv(&mut self) -> Result<(), VMError> {
         let tag = self.pop_string()?;
-        let cid_str = self.pop_string()?;
-        if cid_str.len() != 32 {
+        let cid = self.pop_string()?;
+        if cid.len() != 32 {
             return Err(VMError::IndexOutOfRange);
         }
-        let mut actor_bytes = [0u8; 32];
-        actor_bytes.copy_from_slice(cid_str.as_bytes());
-        // Treat the 32-byte string as a canonical actor-id hash —
-        // the only form scripts can construct directly. Constructor
-        // form is reserved for the deploy-on-send path (Q4) and
-        // doesn't enter here.
-        let actor = ActorID::Hash(actor_bytes);
-        let flv = flavor_from_actor(&actor, &tag);
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(cid.as_bytes());
+        let flv = flavor_from_actor(&ActorID::Hash(bytes), &tag);
         self.push_value(Value::Int253(flv));
         Ok(())
     }
-
-    // ── cell helpers ────────────────────────────────────
 
     /// Pops a `Point` from the stack.
     fn pop_point(&mut self) -> Result<Point, VMError> {
@@ -2281,55 +1991,15 @@ impl VM {
         out
     }
 
-    // ── input opcode ───────────────────────────────────
-
-    /// `0x90 input` **[E]** — `string → cell`. Decodes a canonical
-    /// wire-encoded cell from `string`, pushes the resulting `Cell`
-    /// handle, seeds `last_anchor` from the cell's identity, and emits
-    /// a `TxEntry::Input(cell_id)` effect into the txlog.
+    /// _string_ **input** → _cell_
     ///
-    /// **VM is stateless w.r.t. Utreexo.** The opcode does not consult
-    /// any accumulator — the caller is expected to have validated the
-    /// supplied bytes against the Utreexo proof *outside* the VM
-    /// before invoking the script. From the VM's perspective the bytes
-    /// simply assert "this cell existed as a UTXO"; the txlog entry
-    /// commits the script's reliance on that assertion so the outer
-    /// verifier can cross-check it against Utreexo state.
+    /// External-only. Decodes a wire-encoded `Cell`, emits
+    /// `TxEntry::Input`, seeds `last_anchor`. The VM does not consult
+    /// Utreexo — the caller validates the bytes externally.
     ///
-    /// External-context only — internal transactions cannot consume
-    /// Utreexo entries (`step_internal` errors `ExternalOnly` on
-    /// `0x90`).
-    ///
-    /// Hard-fails on:
-    /// - non-`String` top of stack (`TypeNotString`),
-    /// - bytes that do not decode as a canonical cell
-    ///   (`MalformedCellEncoding`), including trailing bytes after the
-    ///   cell's last byte.
-    /// `0x90 input` — `string → cell`. **[E]** external-only.
-    ///
-    /// Decodes a wire-encoded `Cell` from a `String` on top of the
-    /// stack and pushes the resulting `Cell` handle. Emits
-    /// `TxEntry::Input(cell.id())` and seeds the VM's anchor chain
-    /// at the cell's ratcheted post-anchor.
-    ///
-    /// `witness` is `Some` on the prover side when the
-    /// consumed cell's payload contains any `Token` entries that
-    /// participate in a downstream `mix`. On the wire, witnesses
-    /// don't exist — `Cell::decode` always rebuilds Tokens as
-    /// `Commitment::Closed(point)`. The prover-side witness queue
-    /// pairs each Token entry with its Open `(value, blinding)` so
-    /// `value_to_allocated` can later call
-    /// `r1cs::Prover::commit(value, blinding)` instead of bailing
-    /// `WitnessMissing`.
-    ///
-    /// Witness validation:
-    /// - The witness queue length must equal the number of `Token`
-    ///   entries in the decoded payload (`WitnessCountMismatch`).
-    /// - Each Open commitment's compressed point must equal the
-    ///   decoded Closed commitment's point
-    ///   (`WitnessPointMismatch`). This guards against a buggy
-    ///   prover passing the wrong blinding factor (the resulting
-    ///   proof would silently fail R1CS otherwise).
+    /// `witness` is `Some` on the prover side when the consumed cell
+    /// holds Token entries; the witness re-attaches their
+    /// `Commitment::Open` payloads after `Cell::decode` strips them.
     fn op_input(
         &mut self,
         witness: Option<&crate::witness::InputWitnesses>,
@@ -2342,44 +2012,23 @@ impl VM {
         if !reader.is_empty() {
             return Err(VMError::MalformedCellEncoding);
         }
-        // Re-attach prover-side witnesses to Token payload entries.
-        // Verifier-side this branch is dormant (witness is None),
-        // so the payload retains its decoded Closed Tokens.
         if let Some(w) = witness {
             self.attach_input_witnesses(&mut cell, w)?;
         }
-        let cell_id = cell.id();
-        self.txlog.push(crate::tx::TxEntry::Input(cell_id));
-        // `Cell::to_anchor()` already ratchets, so this seeds the anchor
-        // chain at the post-ratchet point — matching zkvm's
-        // `contract_id.to_anchor().ratchet()` semantics.
+        self.txlog.push(crate::tx::TxEntry::Input(cell.id()));
         self.last_anchor = Some(cell.to_anchor());
         self.push_value(Value::Cell(cell));
         Ok(())
     }
 
-    /// Walks `cell.payload` and swaps each `Value::Token`'s
-    /// `Commitment::Closed` for the matching `Commitment::Open`
-    /// from `witness`. Non-Token entries are passed through; the
-    /// witness queue is consumed in payload order.
-    ///
-    /// Errors:
-    /// - `WitnessCountMismatch` if the queue length doesn't equal
-    ///   the count of Token entries.
-    /// - `WitnessPointMismatch` if any Open commitment's
-    ///   compressed point differs from the decoded Closed point.
+    /// Swaps each Token payload's `Commitment::Closed` for the matching
+    /// `Commitment::Open` from the prover's witness queue.
     fn attach_input_witnesses(
         &self,
         cell: &mut Cell,
         witness: &crate::witness::InputWitnesses,
     ) -> Result<(), VMError> {
-        // Count Tokens to verify queue length up-front. Cheaper than
-        // discovering a mismatch mid-walk.
-        let token_count = cell
-            .payload
-            .iter()
-            .filter(|v| matches!(v, Value::Token(_)))
-            .count();
+        let token_count = cell.payload.iter().filter(|v| matches!(v, Value::Token(_))).count();
         if witness.tokens.len() != token_count {
             return Err(VMError::WitnessCountMismatch);
         }
@@ -2388,24 +2037,9 @@ impl VM {
             if let Value::Token(t) = v {
                 let tw = &witness.tokens[wi];
                 wi += 1;
-                // Both witness commitments must be `Commitment::Open`
-                // — the whole point of the witness path is to
-                // re-attach openings, so a Closed witness here is a
-                // caller bug. Without this check the silent
-                // failure cascade would be: copy Closed → Closed
-                // (no-op) → `mix` calls `commit_variable` →
-                // `commitment.witness()` → `None` →
-                // `WitnessMissing` raised far from the real cause.
-                // Fail loudly at attach time instead.
-                if tw.qty.witness().is_none() || tw.flv.witness().is_none()
-                {
+                if tw.qty.witness().is_none() || tw.flv.witness().is_none() {
                     return Err(VMError::WitnessNotOpen);
                 }
-                // Point-equality check: the witnessed Open commitment
-                // must agree with the on-wire Closed commitment.
-                // Mismatch is a prover bug — fail loudly so it's
-                // caught at test time rather than as a silent
-                // InvalidR1CSProof later.
                 if tw.qty.to_point() != t.qty.to_point()
                     || tw.flv.to_point() != t.flv.to_point()
                 {
@@ -2418,12 +2052,7 @@ impl VM {
         Ok(())
     }
 
-    // ── cell opcode handlers ────────────────────────────
-
-    /// `0x91 cell` — `args… k pred → cell`. Builds a transient `Cell`
-    /// on the stack. Predicate comes in as a `Point` (opaque); payload
-    /// items must all be portable. Consumes the VM's `last_anchor`,
-    /// then advances it to the new cell's anchor.
+    /// _args… k pred_ **cell** → _cell_
     fn op_cell(&mut self) -> Result<(), VMError> {
         let pred_point = self.pop_point()?;
         let k = self.pop_byte_count(usize::MAX)?;
@@ -2435,9 +2064,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x92 output` — `args… k pred → ø`. Same construction as `cell`,
-    /// but instead of pushing the handle, emits a `TxEntry::Output(cell)`
-    /// into the txlog.
+    /// _args… k pred_ **output** → ø
     fn op_output(&mut self) -> Result<(), VMError> {
         let pred_point = self.pop_point()?;
         let k = self.pop_byte_count(usize::MAX)?;
@@ -2449,15 +2076,11 @@ impl VM {
         Ok(())
     }
 
-    /// `0x93 open` — `cell internal_key neighbors position program args… k → results…`.
+    /// _cell internal_key neighbors position program args… k_ **open** → _results…_
     ///
-    /// CallProof components are passed as distinct stack values rather
-    /// than a packed blob, so scripts can compose proofs dynamically and
-    /// the existing String/Dict/Point machinery is reused for free.
-    /// On success, pours the cell's payload then the args onto the
-    /// current frame's stack and enters a new Run over the unlocked
-    /// program. No new call frame — the program shares the current
-    /// call's stack, gas, mem, and identity (Run-level cell-open).
+    /// Verifies the call-proof against the cell's predicate, pours the
+    /// payload + args onto the current stack, and enters a new Run
+    /// over the unlocked program. Run-level (no new CallFrame).
     fn op_open(&mut self) -> Result<(), VMError> {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
@@ -2473,16 +2096,8 @@ impl VM {
             &position_str,
             &program_str,
         )?;
-        // `verify_callproof` succeeds iff `program_str`'s canonical
-        // bytes match the predicate tree's leaf (the merkle path
-        // was built from `program_str` in `callproof_from_stack_pieces`).
-        // So once it's accepted, we can use the witness-bearing
-        // `program_str.to_instructions()` instead of re-parsing the
-        // leaf bytes — the two are byte-identical, but the former
-        // preserves any `String::Script(instrs)` witness slots the
-        // prover wrapped the unlock into. Verifier-side
-        // (`String::Opaque(bytes)`) falls back to `Program::parse`,
-        // same as before.
+        // verify_callproof succeeds iff program_str's bytes match the leaf,
+        // so we can use the witness-bearing program_str directly.
         let _ = cell.predicate.verify_callproof(&cp)?;
         let instrs = program_str.to_instructions()?;
 
@@ -2495,19 +2110,14 @@ impl VM {
         self.enter_run(instrs)
     }
 
-    /// Builds a `CallProof` from the four stack-popped pieces.
-    ///
-    /// `neighbors` is expected to be a list-style Dict (keys `0..n-1`)
-    /// of 32-byte String values. Any deviation → `MalformedCallProof`.
+    /// Builds a `CallProof` from the four stack-popped pieces. `neighbors`
+    /// must be a list-style Dict of 32-byte Strings.
     fn callproof_from_stack_pieces(
         internal_key: Point,
         neighbors: &Dict,
         position: &String,
         program: &String,
     ) -> Result<CallProof, VMError> {
-        // Use `bytes_view` throughout — `as_bytes` panics for any
-        // witness-bearing String variant, and the prover can push
-        // any of them (e.g. `String::Script` for the unlock script).
         let mut n_vec = Vec::with_capacity(neighbors.len());
         for (i, (k, v)) in neighbors.entries().enumerate() {
             if *k != Int253::from(i as u64) {
@@ -2533,93 +2143,34 @@ impl VM {
         })
     }
 
-    /// `0x94 send` — `args… k refund gas bytes method addr → ø`.
-    /// Asynchronous message-send: queues a [`Message`] for the
-    /// consensus layer to instantiate as an internal tx after this
-    /// tx commits, and emits a [`crate::tx::TxEntry::Send`] entry.
+    /// _args… k refund gas bytes method addr_ **send** → ø
     ///
-    /// Operand layout (top first at pop):
-    /// - `addr`: 32-byte String — target actor id (Hash variant).
-    ///   The Constructor-form id is reserved for the deploy-on-send
-    ///   path; consensus handles transparent deployment at delivery
-    ///   time (Q4) — the VM just records the bytes.
-    /// - `method`: `Int253` — target method key.
-    /// - `bytes`: `Int253` — vbyte allotment to deliver.
-    /// - `gas`: `Int253` — gas allotment for the future internal tx.
-    /// - `refund`: 32-byte String — bounce predicate for the
-    ///   bounce-Output emitted by consensus on internal-tx failure
-    ///   (Q3). Decoded as `Predicate::Opaque(point)`.
-    /// - `k`: `Int253` — count of args below.
-    /// - `args…`: `k` portable values to deliver as the payload.
-    ///
-    /// Per Q5: ratchet `last_anchor` *before* appending the Send
-    /// entry, so the entry's `anchor` field is deterministic from
-    /// the script's instruction stream alone — that's the SendID
-    /// external observers can use to identify the future internal
-    /// tx at broadcast time.
-    ///
-    /// Available in both external and internal context (an actor
-    /// may emit further sends; the originator's gas allotment is
-    /// the source for sub-sends per spec.md §Block resource pools).
-    /// Payload values must be portable — non-portable types
-    /// (linear tokens-with-witness, cells, etc.) fail
-    /// `NonPortableInSend`.
+    /// Queues a [`Message`] for the consensus layer to instantiate as a
+    /// future internal tx and emits a `TxEntry::Send`. The anchor is
+    /// ratcheted from `last_anchor` before the entry is appended.
     fn op_send(&mut self) -> Result<(), VMError> {
-        // ── pop operands ────────────────────────────────────────
-        let addr_str = self.pop_string()?;
-        if addr_str.len() != 32 {
-            return Err(VMError::MalformedAddress);
-        }
-        let mut addr_bytes = [0u8; 32];
-        addr_bytes.copy_from_slice(&addr_str.bytes_view());
-        let target = ActorID::Hash(addr_bytes);
-
-        let method_int = self.pop_int253()?;
-        let method = MethodKey::from(method_int);
-
-        let bytes_alloc = self
-            .pop_int253()?
-            .to_u64()
-            .ok_or(VMError::InvalidBitrange)?;
-        let gas_alloc = self
-            .pop_int253()?
-            .to_u64()
-            .ok_or(VMError::InvalidBitrange)?;
-
-        let refund_str = self.pop_string()?;
-        if refund_str.len() != 32 {
-            return Err(VMError::MalformedAddress);
-        }
-        let mut refund_bytes = [0u8; 32];
-        refund_bytes.copy_from_slice(&refund_str.bytes_view());
+        let target = ActorID::Hash(self.pop_string_32()?);
+        let method = MethodKey::from(self.pop_int253()?);
+        let vbytes = self.pop_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
+        let gas = self.pop_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
         let refund_predicate = Predicate::Opaque(
-            curve25519_dalek::ristretto::CompressedRistretto(refund_bytes),
+            curve25519_dalek::ristretto::CompressedRistretto(self.pop_string_32()?),
         );
-
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
 
-        // Portability check: non-portable args can't be sealed
-        // into a delivery payload (no defined wire encoding).
         for v in &args {
             if !v.is_portable() {
                 return Err(VMError::NonPortableInSend);
             }
         }
 
-        // ── ratchet anchor (Q5) ─────────────────────────────────
-        let prev_anchor = self.last_anchor.unwrap_or(Anchor([0u8; 32]));
-        let anchor = prev_anchor.ratchet();
+        let anchor = self.last_anchor.unwrap_or(Anchor([0u8; 32])).ratchet();
         self.last_anchor = Some(anchor);
 
-        // ── compute payload hash ────────────────────────────────
-        // Bind every payload value's canonical wire bytes into a
-        // single hash, so TxEntry::Send (fixed-size) commits to
-        // the args without inlining them.
         let payload_hash = {
             let mut t = merlin::Transcript::new(b"flamevm.send.payload");
-            let len = args.len() as u64;
-            t.append_message(b"len", &len.to_le_bytes());
+            t.append_message(b"len", &(args.len() as u64).to_le_bytes());
             let mut buf = Vec::new();
             for v in &args {
                 buf.clear();
@@ -2632,14 +2183,13 @@ impl VM {
             h
         };
 
-        // ── emit txlog entry + queue message ────────────────────
         self.txlog.push(crate::tx::TxEntry::Send {
             anchor,
             target: target.clone(),
             method,
             refund_predicate: refund_predicate.clone(),
-            gas: gas_alloc,
-            vbytes: bytes_alloc,
+            gas,
+            vbytes,
             payload_hash,
         });
         let caller = self.current_call.kind.actor().cloned();
@@ -2649,102 +2199,40 @@ impl VM {
             caller,
             anchor,
             payload: args,
-            gas: gas_alloc,
-            vbytes: bytes_alloc,
+            gas,
+            vbytes,
             refund_predicate,
         });
         Ok(())
     }
 
-    /// `0x95 call` — `args… k gas bytes method addr → results…`.
-    /// Internal-only synchronous call into another actor's method.
+    /// _args… k gas bytes method addr_ **call** → _results…_
     ///
-    /// Operand order (top first when popped):
-    /// - `addr`: 32-byte String — the callee's `ActorID::Hash`.
-    /// - `method`: `Int253` — the target method key.
-    /// - `bytes`: `Int253` — vbyte allotment to credit on entry
-    ///   (currently delivered as `newbytes`; full transfer
-    ///   semantics arrive with the wider resource model).
-    /// - `gas`: `Int253` — gas allotment for the callee frame.
-    /// - `k`: `Int253` — count of args below.
-    /// - `args…`: `k` values to push onto the callee's stack.
-    ///
-    /// Re-entrancy guard (ADR 0003): walks the current frame and
-    /// the call stack; if the callee id already appears,
-    /// `ReentrancyDetected` aborts the enclosing internal tx. The
-    /// re-entrancy check applies to both direct self-calls and
-    /// indirect cycles (A → B → A).
-    ///
-    /// Emits `TxEntry::Call { callee, method, pre_state_root,
-    /// callee_anchor }` so the Internal TxID merkle root binds to
-    /// the exact callee state observed at entry (Q5).
+    /// Synchronous actor-to-actor call. Re-entrancy guard rejects direct
+    /// or indirect cycles. Emits `TxEntry::Call` binding the callee's
+    /// pre-state hash and ratcheted anchor into the Internal TxID.
     fn op_call(
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<(), VMError> {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
-
-        // ── pop operands ────────────────────────────────────────
-        let addr_str = self.pop_string()?;
-        if addr_str.len() != 32 {
-            return Err(VMError::MalformedAddress);
-        }
-        let mut addr_bytes = [0u8; 32];
-        addr_bytes.copy_from_slice(&addr_str.bytes_view());
-        let callee = ActorID::Hash(addr_bytes);
-
-        let method_int = self.pop_int253()?;
-        let method = MethodKey::from(method_int);
-
-        let bytes_alloc = self
-            .pop_int253()?
-            .to_u64()
-            .ok_or(VMError::InvalidBitrange)?;
-        let gas_alloc = self
-            .pop_int253()?
-            .to_u64()
-            .ok_or(VMError::InvalidBitrange)?;
+        let callee = ActorID::Hash(self.pop_string_32()?);
+        let method = MethodKey::from(self.pop_int253()?);
+        let vbytes = self.pop_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
+        let gas = self.pop_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
 
-        // ── re-entrancy guard ──────────────────────────────────
-        // Walk the current call + suspended frames looking for the
-        // callee id. Direct cycles (A → A) and indirect cycles
-        // (A → B → A) both surface here. Per ADR 0003: hard fail.
         if iter_actor_ids_on_stack(&self.current_call, &self.call_stack)
             .any(|id| id == &callee)
         {
             return Err(VMError::ReentrancyDetected);
         }
 
-        // ── resolve method bytes + capture pre-state hash ──────
         let script = registry.resolve_method(&callee, method)?;
-        let pre_state_root = {
-            // Hash the callee's state at the moment of call. The
-            // VM only needs the root; we don't carry the snapshot
-            // forward (the callee re-loads via `op_load` if it
-            // needs the state on the stack).
-            let snapshot = registry.load_state(&callee)?;
-            // No re-entrancy mark side-effect: load_state doesn't
-            // mark, only op_load does. We needed read access; the
-            // callee's own op_load (if it runs one) will set the
-            // mark separately.
-            let mut buf = Vec::new();
-            snapshot
-                .encode(&mut buf)
-                .map_err(|_| VMError::MalformedActorState)?;
-            let mut t = merlin::Transcript::new(b"flamevm.actor.state.root");
-            t.append_message(b"state", &buf);
-            let mut h = [0u8; 32];
-            t.challenge_bytes(b"root", &mut h);
-            h
-        };
+        let pre_state_root = state_root(&registry.load_state(&callee)?)?;
 
-        // ── derive callee anchor + emit Call entry ─────────────
-        // Per Q5: ratchet the anchor chain at entry. Use the
-        // current `last_anchor` (or a zero seed if none).
-        let prev_anchor = self.last_anchor.unwrap_or(Anchor([0u8; 32]));
-        let callee_anchor = prev_anchor.ratchet();
+        let callee_anchor = self.last_anchor.unwrap_or(Anchor([0u8; 32])).ratchet();
         self.last_anchor = Some(callee_anchor);
         self.txlog.push(crate::tx::TxEntry::Call {
             callee: callee.clone(),
@@ -2753,20 +2241,15 @@ impl VM {
             callee_anchor,
         });
 
-        // ── parse callee script ────────────────────────────────
-        let program = crate::program::Program::parse(&script)?;
-
-        // ── create and switch to new CallFrame ─────────────────
-        let mem_limit = registry
-            .actor_vbytes(&callee)?
-            .saturating_mul(4);
+        let mem_limit = registry.actor_vbytes(&callee)?.saturating_mul(4);
         let caller = self
             .current_call
             .kind
             .actor()
             .cloned()
             .unwrap_or(ActorID::Hash([0u8; 32]));
-        let mut new_frame = CallFrame::new(
+        let program = crate::program::Program::parse(&script)?;
+        let mut frame = CallFrame::new(
             program.into_instructions(),
             CallKind::ActorCall {
                 actor: callee,
@@ -2774,54 +2257,31 @@ impl VM {
                 caller,
                 anchor: callee_anchor,
             },
-            gas_alloc,
+            gas,
             mem_limit,
-            bytes_alloc,
+            vbytes,
         );
-        // Push args onto the new frame's stack in original
-        // (deepest-first) order — `pop_n_values` already returned
-        // them that way.
         for v in args {
-            new_frame.stack.push(v);
+            frame.stack.push(v);
         }
 
-        // Suspend the current frame and switch.
-        let parent = core::mem::replace(&mut self.current_call, new_frame);
+        let parent = core::mem::replace(&mut self.current_call, frame);
         self.call_stack.push(parent);
         Ok(())
     }
 
-    /// `0x96 load` — `ø → dict`. Internal-only. Loads the current
-    /// actor's `ActorState`, marks the actor for destruction in the
-    /// registry (re-entry blocked until `op_save` clears it), and
-    /// pushes the wrapper Dict onto the stack.
+    /// **load** → _dict_
     ///
-    /// Failure modes (all hard):
-    /// - `OpcodeRequiresActorContext` if the current frame has no
-    ///   actor identity (external root, cell-open under external).
-    /// - `RegistryUnavailable` if invoked through a step path with
-    ///   no registry.
-    /// - `LoadAlreadyMarked` if this frame already loaded (or
-    ///   another sibling frame holds the lock).
-    /// - `ActorNotFound` / `ActorFrozen` per the registry.
-    ///
-    /// Q6 self-destruct: a frame that returns without a matching
-    /// `op_save` leaves the registry mark set. The tx-end commit
-    /// hook drops the actor and recycles its vbytes.
+    /// Loads the current actor's state, marks the actor for destruction
+    /// (re-entry blocked until `save`), and pushes the wrapper Dict.
+    /// An unmatched load destroys the actor at tx commit (Q6).
     fn op_load(
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<(), VMError> {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let actor = self.require_actor()?.clone();
-        if self.current_call.loaded {
-            return Err(VMError::LoadAlreadyMarked);
-        }
-        if registry.is_marked_for_destruction(&actor) {
-            // Cross-frame lock: a sibling frame (or an earlier
-            // `load` whose `save` was lost to a panic) still holds
-            // the mark. Same error variant as the per-frame check
-            // — both surface "load while already locked".
+        if self.current_call.loaded || registry.is_marked_for_destruction(&actor) {
             return Err(VMError::LoadAlreadyMarked);
         }
         let state = registry.load_state(&actor)?;
@@ -2831,18 +2291,10 @@ impl VM {
         Ok(())
     }
 
-    /// `0x97 save` — `dict → ø`. Internal-only. Pops a Dict, parses
-    /// it as an `ActorState` (must be the 2-entry wrapper shape),
-    /// persists it against the current actor, and clears the
-    /// re-entrancy mark.
+    /// _dict_ **save** → ø
     ///
-    /// Failure modes (all hard):
-    /// - `OpcodeRequiresActorContext`, `RegistryUnavailable` —
-    ///   same as `op_load`.
-    /// - `SaveWithoutLoad` if this frame hasn't called `op_load`.
-    /// - `MalformedActorState` if the popped Dict isn't the
-    ///   2-entry wrapper.
-    /// - `ActorNotFound` per the registry.
+    /// Pops a wrapper Dict, persists it as the current actor's state,
+    /// and clears the re-entrancy mark set by `load`.
     fn op_save(
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
@@ -2852,32 +2304,23 @@ impl VM {
         if !self.current_call.loaded {
             return Err(VMError::SaveWithoutLoad);
         }
-        let state_dict = self.pop_dict()?;
-        let state = ActorState::from_wrapper_dict(state_dict)?;
+        let state = ActorState::from_wrapper_dict(self.pop_dict()?)?;
         registry.save_state(&actor, state)?;
         registry.unmark_for_destruction(&actor);
         self.current_call.loaded = false;
         Ok(())
     }
 
-    /// `0x98 signtx` — `cell → items… k`. Pops the cell, records a
-    /// **TxBound** deferred signature (the cell holder must sign the
-    /// transaction's TxID via the tx envelope; no message is built
-    /// here), pours the cell's payload onto the current stack, and
-    /// pushes the count `k`. No new Run, no new frame — the cell holder
-    /// is just authorizing the existing transaction.
+    /// _cell_ **signtx** → _items… k_
+    ///
+    /// Defers a TxID-bound signature for the cell's predicate, pours
+    /// the cell's payload onto the stack, pushes `k`.
     fn op_signtx(&mut self) -> Result<(), VMError> {
         let cell = self.pop_cell()?;
         let k = cell.payload.len();
-        // Record both the verification key (the predicate's NUMS-Taproot
-        // root point) and the cell id. The id becomes the per-signer
-        // message in the Phase-20 multi-message context, so the same
-        // (key, cell_id) pair can be signed once across many TxBound
-        // items by a single multi-signature.
-        let cell_id = cell.id();
         self.deferred_sigs.push(DeferredSig::TxBound {
             verification_key: cell.predicate.verification_key(),
-            cell_id,
+            cell_id: cell.id(),
         });
         for v in cell.payload {
             self.push_value(v);
@@ -2886,32 +2329,22 @@ impl VM {
         Ok(())
     }
 
-    /// `0x99 signrun` — `cell prog sig args… m → items… k`.
+    /// _cell prog sig args… m_ **signrun** → _items… k_
     ///
-    /// Records an **Explicit** deferred-sig commitment over `prog` only
-    /// (the program is responsible for binding further context via
-    /// explicit checks inside its code), then pours the cell's payload
-    /// and the `m` args onto the current stack and enters a new Run
-    /// over `prog`.
+    /// Defers an Explicit signature over `prog`, pours payload + args
+    /// onto the stack, enters a new Run over `prog`.
     fn op_signrun(&mut self) -> Result<(), VMError> {
         let m = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(m)?;
         let sig_str = self.pop_string()?;
         let prog_str = self.pop_string()?;
         let cell = self.pop_cell()?;
-        let sig_bytes = sig_str.as_bytes();
-        if sig_bytes.len() != 64 {
+        if sig_str.as_bytes().len() != 64 {
             return Err(VMError::BadSignatureBytes);
         }
         let mut sig = [0u8; 64];
-        sig.copy_from_slice(sig_bytes);
-        // The deferred-sig message commits to the script's CANONICAL
-        // wire bytes — same on both sides regardless of whether
-        // the prover pushed `String::Script(instrs)` or raw bytes.
-        // Materialise via `bytes_view` so both `Script` and
-        // `Opaque` produce identical message bytes.
-        let program_bytes = prog_str.bytes_view().into_owned();
-        let msg = Self::signrun_message(&program_bytes);
+        sig.copy_from_slice(sig_str.as_bytes());
+        let msg = Self::signrun_message(&prog_str.bytes_view().into_owned());
         self.deferred_sigs.push(DeferredSig::Explicit {
             verification_key: cell.predicate.verification_key(),
             message: msg,
@@ -2923,77 +2356,41 @@ impl VM {
         for v in args {
             self.push_value(v);
         }
-        // Witness-preserving path: `Script(instrs)` returns instrs
-        // verbatim; `Opaque(bytes)` parses them.
         let instrs = prog_str.to_instructions()?;
         self.enter_run(instrs)
     }
 
-    // ── Identity / call-context readouts ────────────────────────
-    //
-    // Four opcodes that just read fields out of `current_call.kind`
-    // and push the result onto the stack. All four hard-fail
-    // `OpcodeRequiresActorContext` outside an actor-bearing frame
-    // (ExternalRoot, CellOpen).
-
-    /// `0x9c actorid` — pushes the current frame's actor id as a
-    /// 32-byte String. Errors `OpcodeRequiresActorContext` from
-    /// `ExternalRoot` / `CellOpen`.
+    /// **actorid** → _string_
     fn op_actorid(&mut self) -> Result<(), VMError> {
         let actor = self.require_actor()?.clone();
         self.push_value(Value::String(String::from(actor.to_hash().to_vec())));
         Ok(())
     }
 
-    /// `0x9d anchor` — pushes the current frame's anchor as a
-    /// 32-byte String. Available in `InternalRoot`, `ActorCall`,
-    /// and `CellOpen`; errors `OpcodeRequiresActorContext` from
-    /// `ExternalRoot` (no anchor concept at root).
+    /// **anchor** → _string_
     fn op_anchor(&mut self) -> Result<(), VMError> {
-        let a = self
-            .current_call
-            .kind
-            .anchor()
-            .ok_or(VMError::OpcodeRequiresActorContext)?;
+        let a = self.current_call.kind.anchor().ok_or(VMError::OpcodeRequiresActorContext)?;
         self.push_value(Value::String(String::from(a.0.to_vec())));
         Ok(())
     }
 
-    /// `0xa0 callerid` — pushes the caller actor id as a 32-byte
-    /// String. For `InternalRoot` triggered by an external send,
-    /// the caller is `None` and we push the all-zero String per
-    /// spec.md. For `ActorCall` the caller is always present.
-    /// Errors `OpcodeRequiresActorContext` from `ExternalRoot` /
-    /// `CellOpen`.
+    /// **callerid** → _string_
+    ///
+    /// Pushes the caller actor id, or all-zero String when the
+    /// originator is an external send.
     fn op_callerid(&mut self) -> Result<(), VMError> {
-        // Require an actor-bearing frame first, so `ExternalRoot`
-        // still errors loudly even though `caller()` returns None.
         self.require_actor()?;
-        let zero = [0u8; 32];
-        let id_bytes = self
-            .current_call
-            .kind
-            .caller()
-            .map(|c| c.to_hash())
-            .unwrap_or(zero);
-        self.push_value(Value::String(String::from(id_bytes.to_vec())));
+        let bytes = self.current_call.kind.caller().map(|c| c.to_hash()).unwrap_or([0u8; 32]);
+        self.push_value(Value::String(String::from(bytes.to_vec())));
         Ok(())
     }
 
-    /// `0xa1 method` — pushes the current frame's method key as an
-    /// `Int253`. Errors `OpcodeRequiresActorContext` from
-    /// `ExternalRoot` / `CellOpen`.
+    /// **method** → _int_
     fn op_method(&mut self) -> Result<(), VMError> {
-        let m = self
-            .current_call
-            .kind
-            .method()
-            .ok_or(VMError::OpcodeRequiresActorContext)?;
+        let m = self.current_call.kind.method().ok_or(VMError::OpcodeRequiresActorContext)?;
         self.push_value(Value::Int253(*m.as_int()));
         Ok(())
     }
-
-    // ── CS opcode handlers + Expression overloads ──────
 
     /// Pops a `Variable` from the stack.
     fn pop_variable(&mut self) -> Result<crate::Variable, VMError> {
@@ -3062,8 +2459,6 @@ impl VM {
         self.push_value(Value::Expression(expr));
         Ok(())
     }
-
-    // ── range proofs ───────────────────────────────────
 
     /// Legacy helper kept only for `op_range`'s Constraint
     /// lift-from-Int253 case. The polymorphic `and` / `or` / `not`
@@ -3136,8 +2531,6 @@ impl VM {
             }
         }
     }
-
-    // ── scalar / commit / decrypt / encrypted token ops ────
 
     /// `0x5a scalar` — `string → expr`. Pops a String, downcasts to
     /// `Int253` via `String::to_scalar`, pushes `Expression::Constant`.
@@ -3454,8 +2847,6 @@ impl VM {
     }
 }
 
-// ── helpers ─────────────────────────────────────────────────
-
 /// Returns `true` iff `value` is non-negative and fits in `[0, 2^n)`.
 /// Used by `op_range` to short-circuit cleartext Expression::Constant
 /// arguments without touching the CS.
@@ -3474,11 +2865,8 @@ fn int_fits_in_n_bits(value: Int253, n: usize) -> bool {
     }
 }
 
-/// Converts an `Int253` witness into a `spacesuit::SignedInteger` if it
-/// fits the [-(2^64), 2^64] range spacesuit operates over. Out-of-range
-/// witnesses on the prover side error `InvalidBitrange` here (the
-/// `range_proof` gadget itself would reject the assignment downstream,
-/// but failing early gives a clearer error code).
+/// Converts an `Int253` to `spacesuit::SignedInteger` if it fits the
+/// `±2^64` range. Out-of-range values error `InvalidBitrange`.
 fn int253_to_signed_integer(value: Int253) -> Result<spacesuit::SignedInteger, VMError> {
     if value.is_negative() {
         let mag = value.abs();
