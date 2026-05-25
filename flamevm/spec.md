@@ -198,17 +198,26 @@ Each string acts as a builder and a reader.
 
 **Prover-side witness variants.** On the prover side a String may carry a typed witness payload that encodes to the same canonical wire bytes the verifier sees but preserves the underlying witness data through `dup` / `run` / payload-pour boundaries:
 
-- `String::Commitment(Open(value, blinding))` — used before `commit`, `scalar`, `expr`.
+- `String::Point(Point)` — point-shaped witness; the inner [`Point`](#point) is `Opaque`, `Commitment(Open(value, blinding))` (used before `commit`, `scalar`, `expr`), or `Predicate(p)` (used before `signtx`, `signcall`, `cell`, `output`).
 - `String::Scalar(int)` — used before `scalar`.
-- `String::Predicate(p)` — used before `signtx`, `signcall`, `cell`, `output`.
 - `String::Script(instructions)` — used before `run`, `switch`, `signcall`.
 - `String::Cell(c)` — used before `input`, carrying open commitments on Token payloads.
 
 The verifier always sees `String::Opaque(bytes)`; the downcasts (`to_commitment`, `to_scalar`, `to_predicate`, `to_instructions`, `to_cell`) handle both shapes uniformly. There is no separate witness queue or per-opcode witness operand — witnesses ride on the pushed value itself.
 
+**`pushpoint` also carries witnesses.** Because the `pushpoint` instruction's in-memory operand is a `Point` (not a raw `[u8; 32]`), the prover can attach a `Point::Commitment` / `Point::Predicate` witness to a literal point pushed via `pushpoint` — not only via `pushstr` + `String::Point`. The wire encoding stays the canonical 32 bytes regardless.
+
 ### Point
 
-Ristretto255 group element. Stored as compressed 32-byte encoding. Used to represent public keys and Pedersen commitments.
+Ristretto255 group element. Stored as compressed 32-byte encoding. Used to represent public keys, Pedersen commitments, and Taproot predicates.
+
+**Prover-side variants.** On the prover side a Point may carry typed witness data while still serializing to the same canonical 32 bytes:
+
+- `Point::Opaque(CompressedRistretto)` — verifier's view; no witness.
+- `Point::Commitment(Commitment::Open(value, blinding))` — Pedersen commitment with cleartext opening (used by [`commit`](#commit) / [`expr`](#expr) to skip re-opening).
+- `Point::Predicate(PredicateTree)` — Taproot predicate with merkle tree (used by [`cell`](#cell) / [`output`](#output) to attach an unlock witness, and by [`signtx`](#signtx) / [`signcall`](#signcall) for the verification key).
+
+A Point on the value stack downcasts via `to_commitment` / `to_predicate` to extract its witness (preserved through `Point::Commitment` / `Point::Predicate`) or to wrap an `Opaque` as the verifier's `Closed` / `Opaque` form.
 
 ### Dict
 
@@ -682,7 +691,7 @@ Pops a 32-byte String, downcasts to `Int253` via `String::to_scalar`, pushes `Ex
 
 _s_ → _var_
 
-Pops a 32-byte String, downcasts to a [Commitment](#types), wraps in `Variable { commitment }`. Verifier: `String::Opaque(point bytes)` → `Commitment::Closed(point)`. Prover: `String::Commitment(Open(witness))` preserves the witness. Downstream [`expr`](#expr) binds the variable into the CS.
+Pops a 32-byte String, downcasts to a [Commitment](#types), wraps in `Variable { commitment }`. Verifier: `String::Opaque(point bytes)` → `Commitment::Closed(point)`. Prover: `String::Point(Point::Commitment(Open(witness)))` preserves the witness. Downstream [`expr`](#expr) binds the variable into the CS.
 
 ### alloc
 
