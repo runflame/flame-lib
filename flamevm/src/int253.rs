@@ -107,11 +107,17 @@ impl Int253 {
         Int253 { bytes: abs_bytes }
     }
 
-    /// The additive identity as a compile-time constant. Same value
-    /// as [`Self::zero`] but usable in `const` contexts (e.g. as the
-    /// `RECV` method-key key, where the surrounding constant cannot
-    /// invoke a regular function).
+    /// The additive identity. `const`-usable counterpart of [`Self::zero`].
     pub const ZERO: Int253 = Int253 { bytes: [0u8; 32] };
+
+    /// The multiplicative identity. `const`-usable counterpart of [`Self::one`].
+    pub const ONE: Int253 = Int253 {
+        bytes: {
+            let mut b = [0u8; 32];
+            b[0] = 1;
+            b
+        },
+    };
 
     /// Returns the additive identity.
     pub fn zero() -> Int253 {
@@ -120,7 +126,7 @@ impl Int253 {
 
     /// Returns the multiplicative identity.
     pub fn one() -> Int253 {
-        Int253::from(1u64)
+        Self::ONE
     }
 
     /// Returns `true` if the value is zero.
@@ -558,6 +564,9 @@ mod tests {
         assert_eq!(Int253::zero(), Int253::from(0u64));
         assert_eq!(Int253::one(), Int253::from(1u64));
         assert!(!Int253::one().is_zero());
+        // Const counterparts match the function returns.
+        assert_eq!(Int253::ZERO, Int253::zero());
+        assert_eq!(Int253::ONE, Int253::one());
     }
 
     #[test]

@@ -63,7 +63,7 @@ fn dirty_stack_at_call_exit_is_an_error() {
     // Re-create what `execute_internal` would, but pre-load the stack.
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
-        method: MethodKey::from(0u64),
+        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -87,7 +87,7 @@ fn callkind_actor_identity() {
     assert_eq!(
         CallKind::InternalRoot {
             actor: aid.clone(),
-            method: MethodKey::from(0u64),
+            method: Int253::from(0u64),
             caller: None,
             anchor: Anchor([0u8; 32]),
         }

@@ -92,7 +92,7 @@ pub enum TxEntry {
     /// reference into the call chain.
     Call {
         callee: crate::actor::ActorID,
-        method: crate::actor::MethodKey,
+        method: crate::Int253,
         pre_state_root: [u8; 32],
         callee_anchor: crate::vm::Anchor,
     },
@@ -110,7 +110,7 @@ pub enum TxEntry {
     Send {
         anchor: crate::vm::Anchor,
         target: crate::actor::ActorID,
-        method: crate::actor::MethodKey,
+        method: crate::Int253,
         refund_predicate: crate::cell::Predicate,
         gas: u64,
         vbytes: u64,
@@ -225,7 +225,7 @@ impl MerkleItem for TxEntry {
                 // Internal TxID unique to the exact actor states
                 // observed during execution.
                 t.append_message(b"call.callee", &callee.to_bytes());
-                t.append_message(b"call.method", &method.as_int().to_bytes());
+                t.append_message(b"call.method", &method.to_bytes());
                 t.append_message(b"call.pre_state_root", pre_state_root);
                 t.append_message(b"call.callee_anchor", &callee_anchor.0);
             }
@@ -244,7 +244,7 @@ impl MerkleItem for TxEntry {
                 // the future internal tx will be delivered with.
                 t.append_message(b"send.anchor", &anchor.0);
                 t.append_message(b"send.target", &target.to_bytes());
-                t.append_message(b"send.method", &method.as_int().to_bytes());
+                t.append_message(b"send.method", &method.to_bytes());
                 t.append_message(
                     b"send.refund_predicate",
                     refund_predicate.to_point().as_bytes(),

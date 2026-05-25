@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::{ActorID, ActorRegistry, MethodKey};
+use crate::{ActorID, ActorRegistry, Int253};
 
 /// Builds bytecode that pushes the operands for `op_send` and
 /// executes it. Spec stack (bottom→top):
@@ -62,7 +62,7 @@ fn push_int_bytes(n: u64) -> Vec<u8> {
 fn vm_internal(actor: ActorID, script: Vec<u8>) -> VM {
     let kind = CallKind::InternalRoot {
         actor,
-        method: MethodKey::from(0u64),
+        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -110,7 +110,7 @@ fn send_queues_message_and_emits_txentry() {
     let (t, method, gas, vbytes, refund, anchor, _hash) =
         send_entry.expect("Send entry present");
     assert_eq!(t, target);
-    assert_eq!(method, MethodKey::from(3u64));
+    assert_eq!(method, Int253::from(3u64));
     assert_eq!(gas, 10_000);
     assert_eq!(vbytes, 500);
     assert_eq!(refund.to_point().as_bytes(), &refund_bytes);
@@ -122,7 +122,7 @@ fn send_queues_message_and_emits_txentry() {
     assert_eq!(vm.sends.len(), 1);
     let msg = &vm.sends[0];
     assert_eq!(msg.target, target);
-    assert_eq!(msg.method, MethodKey::from(3u64));
+    assert_eq!(msg.method, Int253::from(3u64));
     assert_eq!(msg.gas, 10_000);
     assert_eq!(msg.vbytes, 500);
     assert_eq!(msg.anchor, anchor);

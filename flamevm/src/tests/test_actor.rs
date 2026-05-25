@@ -4,8 +4,8 @@ use readerwriter::ReadError;
 
 use crate::{
     grace_window, vbyte_size, Actor, ActorID, ActorRegistry, ActorState, Dict, Int253,
-    MemRegistry, MethodKey, String, VbytePool, Value, VMError,
-    ACTOR_LIFECYCLE_OVERHEAD_VBYTES, GRACE_BLOCKS_CAP, RECV_METHOD_KEY,
+    MemRegistry, String, VbytePool, Value, VMError,
+    ACTOR_LIFECYCLE_OVERHEAD_VBYTES, GRACE_BLOCKS_CAP, RECV_METHOD,
     VBYTES_PER_BLOCK,
 };
 
@@ -99,19 +99,8 @@ fn actorid_unresolved_for_constructor_form() {
 }
 
 #[test]
-fn methodkey_constructors_match() {
-    let a: MethodKey = 5u64.into();
-    let b: MethodKey = 5i64.into();
-    let c: MethodKey = Int253::from(5u64).into();
-    assert_eq!(a, b);
-    assert_eq!(b, c);
-    assert_eq!(*a.as_int(), Int253::from(5u64));
-}
-
-#[test]
-fn recv_method_key_is_zero() {
-    assert_eq!(RECV_METHOD_KEY, MethodKey::from(0u64));
-    assert_eq!(*RECV_METHOD_KEY.as_int(), Int253::zero());
+fn recv_method_is_zero() {
+    assert_eq!(RECV_METHOD, Int253::zero());
 }
 
 #[test]
@@ -128,7 +117,7 @@ fn actorstate_resolve_method_returns_script() {
         Int253::from(7u64),
         Value::String(String::from(b"\x1d".to_vec())),
     );
-    let m = MethodKey::from(7u64);
+    let m = Int253::from(7u64);
     assert!(s.has_method(&m));
     let script = s.resolve_method(&m).expect("present");
     assert_eq!(script.bytes_view().as_ref(), b"\x1d");
@@ -137,7 +126,7 @@ fn actorstate_resolve_method_returns_script() {
 #[test]
 fn actorstate_resolve_method_missing_returns_none() {
     let s = ActorState::new();
-    assert!(s.resolve_method(&MethodKey::from(42u64)).is_none());
+    assert!(s.resolve_method(&Int253::from(42u64)).is_none());
 }
 
 #[test]
@@ -145,7 +134,7 @@ fn actorstate_resolve_method_wrong_type_returns_none() {
     let mut s = ActorState::new();
     s.public
         .insert(Int253::from(0u64), Value::Int253(Int253::from(99u64)));
-    assert!(s.resolve_method(&RECV_METHOD_KEY).is_none());
+    assert!(s.resolve_method(&RECV_METHOD).is_none());
 }
 
 #[test]
@@ -159,7 +148,7 @@ fn actorstate_wrapper_dict_roundtrip() {
     let back = ActorState::from_wrapper_dict(d).expect("from_wrapper_dict");
     assert_eq!(back.public.len(), 1);
     assert_eq!(back.private.len(), 1);
-    assert!(back.resolve_method(&RECV_METHOD_KEY).is_some());
+    assert!(back.resolve_method(&RECV_METHOD).is_some());
 }
 
 #[test]
@@ -304,7 +293,7 @@ fn grace_window_capped_at_six_months() {
 fn fixture_state() -> ActorState {
     let mut s = ActorState::new();
     s.public.insert(
-        *RECV_METHOD_KEY.as_int(),
+        RECV_METHOD,
         Value::String(String::from(b"\x1d".to_vec())),
     );
     s
@@ -323,7 +312,7 @@ fn memregistry_deploy_load_roundtrip() {
     let id = fixture_id(0xab);
     r.deploy(id.clone(), s, 1000, 5).expect("deploy");
     let loaded = r.load_state(&id).expect("load");
-    assert!(loaded.has_method(&RECV_METHOD_KEY));
+    assert!(loaded.has_method(&RECV_METHOD));
     assert!(r.exists(&id));
     assert_eq!(r.actor_vbytes(&id).expect("vbytes"), 1000);
 }
@@ -361,7 +350,7 @@ fn memregistry_save_persists_state() {
     r.save_state(&id, updated).expect("save");
     let loaded = r.load_state(&id).expect("load");
     assert_eq!(loaded.private.len(), 1);
-    assert!(!loaded.has_method(&RECV_METHOD_KEY));
+    assert!(!loaded.has_method(&RECV_METHOD));
 }
 
 #[test]
@@ -369,7 +358,7 @@ fn memregistry_resolve_method_returns_script() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([2u8; 32]);
     r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
-    let script = r.resolve_method(&id, RECV_METHOD_KEY).expect("resolve");
+    let script = r.resolve_method(&id, RECV_METHOD).expect("resolve");
     assert_eq!(script, vec![0x1d]);
 }
 
@@ -379,7 +368,7 @@ fn memregistry_resolve_method_missing_errors() {
     let id = ActorID::Hash([3u8; 32]);
     r.deploy(id.clone(), ActorState::new(), 100, 0).expect("deploy");
     let err = r
-        .resolve_method(&id, MethodKey::from(42u64))
+        .resolve_method(&id, Int253::from(42u64))
         .expect_err("must error");
     assert!(matches!(err, VMError::MethodNotFound));
 }

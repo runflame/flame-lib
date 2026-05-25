@@ -36,7 +36,7 @@ impl ActorRegistry for StubRegistry {
     fn resolve_method(
         &self,
         _actor: &ActorID,
-        _method: MethodKey,
+        _method: Int253,
     ) -> Result<Vec<u8>, VMError> {
         Ok(self.script.clone())
     }
@@ -107,7 +107,7 @@ pub(crate) fn dummy_header() -> TxHeader {
 pub(crate) fn dummy_message(gas: u64) -> Message {
     Message {
         target: ActorID::Hash([0u8; 32]),
-        method: MethodKey::from(0u64),
+        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
         payload: Vec::new(),
@@ -124,7 +124,7 @@ pub(crate) fn dummy_message(gas: u64) -> Message {
 pub(crate) fn vm_with_script(script: Vec<u8>) -> VM {
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
-        method: MethodKey::from(0u64),
+        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -353,7 +353,7 @@ pub(crate) fn make_cleartext_token(qty: u64, flv: u64) -> Token {
 pub(crate) fn vm_internal_with_actor(script: Vec<u8>, actor: ActorID) -> VM {
     let kind = CallKind::InternalRoot {
         actor,
-        method: MethodKey::from(0u64),
+        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };

@@ -2,7 +2,7 @@
 
 use readerwriter::{Reader, WriteError, Writer};
 
-use crate::actor::{ActorID, MethodKey};
+use crate::actor::ActorID;
 use crate::cell::Predicate;
 use crate::crypto::Point;
 use crate::dict::Dict;
@@ -28,7 +28,7 @@ pub enum Address {
     /// it concerns the *send*, not the destination shape.
     MessageTarget {
         dst: ActorID,
-        method: MethodKey,
+        method: Int253,
         args: Dict,
         gas: u64,
     },
@@ -76,7 +76,7 @@ impl Address {
                 let mut dst_bytes = Vec::new();
                 dst.encode(&mut dst_bytes)?;
                 write_value(w, &Value::String(String::from(dst_bytes)))?;
-                write_value(w, &Value::Int253(*method.as_int()))?;
+                write_value(w, &Value::Int253(*method))?;
                 // `try_clone` is cheap on portable Dicts; a Dict
                 // with non-copyable entries (e.g. a linear Token
                 // inside a payload arg) errors at encode time.
@@ -131,7 +131,7 @@ impl Address {
                 }
                 // method: Int253.
                 let method = match read_value(r) {
-                    Ok(Some(Value::Int253(i))) => MethodKey::from(i),
+                    Ok(Some(Value::Int253(i))) => i,
                     _ => return Err(VMError::MalformedAddress),
                 };
                 // args: Dict.
@@ -221,7 +221,7 @@ mod tests {
 
         let addr = Address::MessageTarget {
             dst: ActorID::Hash([0x11; 32]),
-            method: MethodKey::from(3u64),
+            method: Int253::from(3u64),
             args,
             gas: 10_000,
         };
@@ -233,7 +233,7 @@ mod tests {
                 dst, method, args, gas,
             } => {
                 assert_eq!(dst, ActorID::Hash([0x11; 32]));
-                assert_eq!(method, MethodKey::from(3u64));
+                assert_eq!(method, Int253::from(3u64));
                 assert_eq!(args.len(), 2);
                 assert_eq!(gas, 10_000);
             }
@@ -246,7 +246,7 @@ mod tests {
     fn address_message_target_with_constructor_dst() {
         let addr = Address::MessageTarget {
             dst: ActorID::Constructor(vec![0xde, 0xad]),
-            method: MethodKey::from(0u64),
+            method: Int253::from(0u64),
             args: Dict::new(),
             gas: 0,
         };
@@ -302,7 +302,7 @@ mod tests {
     fn address_decode_rejects_negative_gas() {
         let addr = Address::MessageTarget {
             dst: ActorID::Hash([0u8; 32]),
-            method: MethodKey::from(0u64),
+            method: Int253::from(0u64),
             args: Dict::new(),
             gas: 0,
         };

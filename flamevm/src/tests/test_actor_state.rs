@@ -4,7 +4,7 @@
 
 use super::test_helpers::*;
 
-use crate::{ActorID, ActorState, MemRegistry, MethodKey, RECV_METHOD_KEY};
+use crate::{ActorID, ActorState, MemRegistry, Int253, RECV_METHOD};
 
 /// Builds an empty state with a single `recv` method that runs the
 /// caller-supplied bytes. Returns (state, id).
@@ -13,7 +13,7 @@ fn deploy_with_recv(reg: &mut MemRegistry, recv: Vec<u8>, vbytes: u64, height: u
 {
     let mut state = ActorState::new();
     state.public.insert(
-        *RECV_METHOD_KEY.as_int(),
+        RECV_METHOD,
         Value::String(String::from(recv.clone())),
     );
     // Derive the id from the recv bytes (stand-in for the
@@ -29,7 +29,7 @@ fn deploy_with_recv(reg: &mut MemRegistry, recv: Vec<u8>, vbytes: u64, height: u
 fn vm_for(actor: ActorID, script: Vec<u8>) -> VM {
     let kind = CallKind::InternalRoot {
         actor,
-        method: MethodKey::from(0u64),
+        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -251,7 +251,7 @@ fn load_followed_by_save_preserves_actor() {
     let block = BlockContext { height: 100 };
     let msg = Message {
         target: id.clone(),
-        method: RECV_METHOD_KEY,
+        method: RECV_METHOD,
         caller: None,
         anchor: Anchor([0x02; 32]),
         payload: Vec::new(),

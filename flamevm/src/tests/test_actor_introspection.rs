@@ -3,12 +3,12 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::{ActorID, ActorRegistry, MethodKey};
+use crate::{ActorID, ActorRegistry, Int253};
 
 /// Builds an InternalRoot VM with explicit identity fields.
 fn vm_internal_with(
     actor: ActorID,
-    method: MethodKey,
+    method: Int253,
     caller: Option<ActorID>,
     anchor: Anchor,
     script: Vec<u8>,
@@ -50,7 +50,7 @@ fn actorid_in_internal_root_pushes_hash_string() {
     let id = ActorID::Hash([0xab; 32]);
     let mut vm = vm_internal_with(
         id.clone(),
-        MethodKey::from(0u64),
+        Int253::from(0u64),
         None,
         Anchor([0u8; 32]),
         vec![0x9c],
@@ -78,7 +78,7 @@ fn actorid_in_constructor_form_uses_canonical_hash_seed() {
     let expected = ctor.to_hash();
     let mut vm = vm_internal_with(
         ctor,
-        MethodKey::from(0u64),
+        Int253::from(0u64),
         None,
         Anchor([0u8; 32]),
         vec![0x9c],
@@ -96,7 +96,7 @@ fn anchor_in_internal_root_pushes_frame_anchor() {
     let anc = Anchor([0xff; 32]);
     let mut vm = vm_internal_with(
         id,
-        MethodKey::from(0u64),
+        Int253::from(0u64),
         None,
         anc,
         vec![0x9d],
@@ -120,7 +120,7 @@ fn callerid_with_some_caller_pushes_hash_string() {
     let caller = ActorID::Hash([0x33; 32]);
     let mut vm = vm_internal_with(
         ActorID::Hash([0x44; 32]),
-        MethodKey::from(0u64),
+        Int253::from(0u64),
         Some(caller),
         Anchor([0u8; 32]),
         vec![0xa0],
@@ -137,7 +137,7 @@ fn callerid_with_none_caller_pushes_zero_string() {
     // External originator → caller None → push zeros (not error).
     let mut vm = vm_internal_with(
         ActorID::Hash([0x44; 32]),
-        MethodKey::from(0u64),
+        Int253::from(0u64),
         None,
         Anchor([0u8; 32]),
         vec![0xa0],
@@ -160,7 +160,7 @@ fn callerid_in_external_root_errors_actor_context() {
 fn method_pushes_int253_key() {
     let mut vm = vm_internal_with(
         ActorID::Hash([0u8; 32]),
-        MethodKey::from(42u64),
+        Int253::from(42u64),
         None,
         Anchor([0u8; 32]),
         vec![0xa1],

@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::{ActorID, ActorRegistry, ActorState, MemRegistry, MethodKey, RECV_METHOD_KEY};
+use crate::{ActorID, ActorRegistry, ActorState, MemRegistry, Int253, RECV_METHOD};
 
 /// Helper: deploys an actor whose `recv` method runs `script`.
 /// Derives the actor's id from the script bytes (treats `script`
@@ -12,7 +12,7 @@ use crate::{ActorID, ActorRegistry, ActorState, MemRegistry, MethodKey, RECV_MET
 fn deploy_recv(reg: &mut MemRegistry, script: Vec<u8>, vbytes: u64) -> ActorID {
     let mut state = ActorState::new();
     state.public.insert(
-        *RECV_METHOD_KEY.as_int(),
+        RECV_METHOD,
         Value::String(String::from(script.clone())),
     );
     let id = ActorID::Hash(ActorID::Constructor(script).to_hash());
@@ -25,7 +25,7 @@ fn deploy_recv(reg: &mut MemRegistry, script: Vec<u8>, vbytes: u64) -> ActorID {
 fn vm_for_actor(actor: ActorID, script: Vec<u8>) -> VM {
     let kind = CallKind::InternalRoot {
         actor,
-        method: MethodKey::from(0u64),
+        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -147,7 +147,7 @@ fn direct_self_call_rejected_as_reentrancy() {
     let mut reg = MemRegistry::new();
     let mut state = ActorState::new();
     state.public.insert(
-        *RECV_METHOD_KEY.as_int(),
+        RECV_METHOD,
         Value::String(String::from(b"\x1d".to_vec())),
     );
     let id = ActorID::Hash([0xa1; 32]);
@@ -179,14 +179,14 @@ fn indirect_cycle_rejected_as_reentrancy() {
 
     let mut a_state = ActorState::new();
     a_state.public.insert(
-        *RECV_METHOD_KEY.as_int(),
+        RECV_METHOD,
         Value::String(String::from(b"\x1d".to_vec())),
     );
     reg.deploy(a_id.clone(), a_state, 100_000, 0).expect("deploy A");
 
     let mut b_state = ActorState::new();
     b_state.public.insert(
-        *RECV_METHOD_KEY.as_int(),
+        RECV_METHOD,
         Value::String(String::from(b"\x1d".to_vec())),
     );
     reg.deploy(b_id.clone(), b_state, 100_000, 0).expect("deploy B");
@@ -195,7 +195,7 @@ fn indirect_cycle_rejected_as_reentrancy() {
     let b_recv = call_script(&a_id, 0, 1_000);
     let mut new_b_state = ActorState::new();
     new_b_state.public.insert(
-        *RECV_METHOD_KEY.as_int(),
+        RECV_METHOD,
         Value::String(String::from(b_recv)),
     );
     reg.save_state(&b_id, new_b_state).expect("update B");

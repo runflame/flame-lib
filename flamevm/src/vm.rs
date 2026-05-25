@@ -19,7 +19,7 @@ use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
 // test helpers, which inherit `super::super::*`) keep their
 // existing import shape. The types themselves live in `actor.rs`
 // and `send.rs`; vm.rs just plumbs them.
-pub use crate::actor::{ActorID, ActorRegistry, ActorState, MethodKey};
+pub use crate::actor::{ActorID, ActorRegistry, ActorState};
 pub use crate::send::Message;
 
 /// 32-byte anchor. Chained via `ratchet` to make outputs unique
@@ -162,7 +162,7 @@ pub enum CallKind {
     /// Outer scope of an internal tx; dispatched to the target's method.
     InternalRoot {
         actor: ActorID,
-        method: MethodKey,
+        method: Int253,
         caller: Option<ActorID>,
         anchor: Anchor,
     },
@@ -170,7 +170,7 @@ pub enum CallKind {
     /// Synchronous actor-to-actor call inside an internal tx.
     ActorCall {
         actor: ActorID,
-        method: MethodKey,
+        method: Int253,
         caller: ActorID,
         anchor: Anchor,
     },
@@ -194,7 +194,7 @@ impl CallKind {
 
     /// Returns the dispatched method key, if the frame has one.
     /// `op_method` reads this; pure read.
-    pub fn method(&self) -> Option<MethodKey> {
+    pub fn method(&self) -> Option<Int253> {
         match self {
             Self::InternalRoot { method, .. } | Self::ActorCall { method, .. } => Some(*method),
             Self::ExternalRoot | Self::CellOpen { .. } => None,
@@ -2085,7 +2085,7 @@ impl VM {
     /// ratcheted from `last_anchor` before the entry is appended.
     fn op_send(&mut self) -> Result<(), VMError> {
         let target = ActorID::Hash(self.pop_string_32()?);
-        let method = MethodKey::from(self.pop_value()?.to_int253()?);
+        let method = Int253::from(self.pop_value()?.to_int253()?);
         let vbytes = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
         let gas = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
         let refund_predicate = Predicate::Opaque(
@@ -2152,7 +2152,7 @@ impl VM {
     ) -> Result<(), VMError> {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let callee = ActorID::Hash(self.pop_string_32()?);
-        let method = MethodKey::from(self.pop_value()?.to_int253()?);
+        let method = Int253::from(self.pop_value()?.to_int253()?);
         let vbytes = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
         let gas = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
         let k = self.pop_byte_count(usize::MAX)?;
@@ -2323,7 +2323,7 @@ impl VM {
     /// **method** → _int_
     fn op_method(&mut self) -> Result<(), VMError> {
         let m = self.current_call.kind.method().ok_or(VMError::OpcodeRequiresActorContext)?;
-        self.push_value(Value::Int253(*m.as_int()));
+        self.push_value(Value::Int253(m));
         Ok(())
     }
 

@@ -27,46 +27,11 @@ pub const ACTOR_LIFECYCLE_OVERHEAD_VBYTES: u64 = 32;
 /// Reserved method key in `ActorState.public`. Dispatched for every
 /// inbound message send (`recv`); other keys are reachable only via
 /// `op_call` between actors.
-pub const RECV_METHOD_KEY: MethodKey = MethodKey(Int253::ZERO);
+pub const RECV_METHOD: Int253 = Int253::ZERO;
 
 /// Reserved dict keys inside the `ActorState` wrapper Dict.
 pub const ACTOR_STATE_PUBLIC_KEY_RAW: u64 = 0x00;
 pub const ACTOR_STATE_PRIVATE_KEY_RAW: u64 = 0x01;
-
-// ── MethodKey ────────────────────────────────────────────────────
-
-/// Method index within an actor's `public` Dict. Typed as `Int253`
-/// to match the underlying Dict key type — `public` is
-/// `Dict<Int253 → String>`, so two layers of integer types would be
-/// gratuitous. Convenient constructors via `From<u64>` / `From<i64>`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct MethodKey(pub Int253);
-
-impl MethodKey {
-    /// Returns the underlying scalar key. Convenient for
-    /// passing into `Dict::get` without an explicit deconstruction.
-    pub fn as_int(&self) -> &Int253 {
-        &self.0
-    }
-}
-
-impl From<u64> for MethodKey {
-    fn from(n: u64) -> Self {
-        MethodKey(Int253::from(n))
-    }
-}
-
-impl From<i64> for MethodKey {
-    fn from(n: i64) -> Self {
-        MethodKey(Int253::from(n))
-    }
-}
-
-impl From<Int253> for MethodKey {
-    fn from(i: Int253) -> Self {
-        MethodKey(i)
-    }
-}
 
 // ── ActorID ──────────────────────────────────────────────────────
 
@@ -231,16 +196,16 @@ impl ActorState {
 
     /// Looks up a method script by key. Returns `None` if the key
     /// is absent or the value at that key isn't a `String`.
-    pub fn resolve_method(&self, key: &MethodKey) -> Option<&String> {
-        match self.public.get(key.as_int())? {
+    pub fn resolve_method(&self, key: &Int253) -> Option<&String> {
+        match self.public.get(key)? {
             Value::String(s) => Some(s),
             _ => None,
         }
     }
 
     /// True iff `public` contains a method at `key`.
-    pub fn has_method(&self, key: &MethodKey) -> bool {
-        self.public.get(key.as_int()).is_some()
+    pub fn has_method(&self, key: &Int253) -> bool {
+        self.public.get(key).is_some()
     }
 
     /// Writes the canonical wire form — the wrapper Dict
@@ -561,7 +526,7 @@ pub trait ActorRegistry {
     fn resolve_method(
         &self,
         actor: &ActorID,
-        method: MethodKey,
+        method: Int253,
     ) -> Result<Vec<u8>, VMError>;
 
     /// Returns the actor's persistent vbyte balance. Used by the
@@ -737,7 +702,7 @@ impl ActorRegistry for MemRegistry {
     fn resolve_method(
         &self,
         actor: &ActorID,
-        method: MethodKey,
+        method: Int253,
     ) -> Result<Vec<u8>, VMError> {
         let a = self
             .actors

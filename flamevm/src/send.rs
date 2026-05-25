@@ -1,6 +1,7 @@
 //! Outbound message sends and SendID identity.
 
-use crate::actor::{ActorID, MethodKey};
+use crate::actor::ActorID;
+use crate::int253::Int253;
 use crate::cell::Predicate;
 use crate::value::Value;
 use crate::vm::Anchor;
@@ -42,9 +43,9 @@ pub struct Message {
     /// per Q4).
     pub target: ActorID,
 
-    /// Which method on `target` to dispatch. `MethodKey(0)` is
+    /// Which method on `target` to dispatch. `Int253(0)` is
     /// `recv`, the only method an external sender can target.
-    pub method: MethodKey,
+    pub method: Int253,
 
     /// Originating actor's id if this send was emitted by an
     /// internal tx; `None` if it was emitted by an external tx
@@ -125,7 +126,7 @@ mod tests {
     fn message_id_equals_anchor() {
         let m = Message {
             target: ActorID::Hash([0x11; 32]),
-            method: MethodKey::from(0u64),
+            method: Int253::from(0u64),
             caller: None,
             anchor: Anchor([0x99; 32]),
             payload: Vec::new(),
