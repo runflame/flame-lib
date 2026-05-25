@@ -11,19 +11,19 @@ use crate::{Constraint, Expression, Variable};
 #[rustfmt::skip]
 impl Value {
     /// Downcast to Int253.
-    pub fn to_int253(self)      -> Result<Int253,     VMError> { match self { Value::Int253(x)     => Ok(x), _ => Err(VMError::TypeNotInt253) } }
+    pub fn to_int253(self)      -> Result<Int253, VMError>     { match self { Value::Int253(x) => Ok(x),     _ => Err(VMError::TypeNotInt253) } }
     /// Downcast to String.
-    pub fn to_string(self)      -> Result<String,     VMError> { match self { Value::String(x)     => Ok(x), _ => Err(VMError::TypeNotString) } }
+    pub fn to_string(self)      -> Result<String, VMError>     { match self { Value::String(x) => Ok(x),     _ => Err(VMError::TypeNotString) } }
     /// Downcast to Dict.
-    pub fn to_dict(self)        -> Result<Dict,       VMError> { match self { Value::Dict(x)       => Ok(x), _ => Err(VMError::TypeNotDict) } }
+    pub fn to_dict(self)        -> Result<Dict, VMError>       { match self { Value::Dict(x) => Ok(x),       _ => Err(VMError::TypeNotDict) } }
     /// Downcast to Point.
-    pub fn to_point(self)       -> Result<Point,      VMError> { match self { Value::Point(x)      => Ok(x), _ => Err(VMError::TypeNotPoint) } }
+    pub fn to_point(self)       -> Result<Point, VMError>      { match self { Value::Point(x) => Ok(x),      _ => Err(VMError::TypeNotPoint) } }
     /// Downcast to Cell.
-    pub fn to_cell(self)        -> Result<Cell,       VMError> { match self { Value::Cell(x)       => Ok(x), _ => Err(VMError::TypeNotCell) } }
+    pub fn to_cell(self)        -> Result<Cell, VMError>       { match self { Value::Cell(x) => Ok(x),       _ => Err(VMError::TypeNotCell) } }
     /// Downcast to Merlin transcript.
-    pub fn to_merlin(self)      -> Result<Merlin,     VMError> { match self { Value::Merlin(x)     => Ok(x), _ => Err(VMError::TypeNotMerlin) } }
+    pub fn to_merlin(self)      -> Result<Merlin, VMError>     { match self { Value::Merlin(x) => Ok(x),     _ => Err(VMError::TypeNotMerlin) } }
     /// Downcast to Variable.
-    pub fn to_variable(self)    -> Result<Variable,   VMError> { match self { Value::Variable(x)   => Ok(x), _ => Err(VMError::TypeNotVariable) } }
+    pub fn to_variable(self)    -> Result<Variable, VMError>   { match self { Value::Variable(x) => Ok(x),   _ => Err(VMError::TypeNotVariable) } }
     /// Downcast to ClearToken.
     pub fn to_clear_token(self) -> Result<ClearToken, VMError> { match self { Value::ClearToken(x) => Ok(x), _ => Err(VMError::TypeNotClearToken) } }
 }
