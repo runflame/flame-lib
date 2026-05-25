@@ -295,125 +295,125 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 
 **Failure modes.** A **hard fail** aborts the current call (and unwinds outwards on `op_break` boundaries). A **soft fail** is an in-band signal: the opcode pushes an optional shape `{value 1 | 0}` and leaves the consumed value(s) on the stack untouched so the script can branch. The two kinds are noted per opcode.
 
-**Context tags.**
-- **\[E\]** — external-only. Hard-fails `ExternalOnly` from internal context. Includes `input` and the CS-touching opcodes (`scalar`, `commit`, `intvar`, `expr`, `alloc`, `range`, `decrypt`, `mix`, `fee`, the CS branches of `borrow`).
-- **\[I\]** — internal-only. Needs a registry handle. Covers `call`, `send`, `load`, `save`.
-- Most opcodes work in either context.
+**Context column.** The **Ctx** column in the instruction table marks opcodes that fail outside their supported context:
+- **ext.** — external-only. Hard-fails `ExternalOnly` from internal context. Covers `input`, the constraint-system opcodes (`scalar`, `commit`, `alloc`, `expr`, `range`, the CS branches of `borrow`), and the CS-consuming opcodes (`mix`, `decrypt`, `fee`).
+- **int.** — internal-only. Needs a registry handle. Covers `call`, `load`, `save`, and the chain-info family.
+- *(blank)* — works in either context. Most opcodes, including `send` (which emits messages from external txs too).
 
 ## Instruction table
 
-| Hex | Name | Stack | Description |
-| --- | --- | --- | --- |
-| **Stack** | | | |
-| 0k | [push:k](#pushk-and-friends) | ø → int | Push a small literal int 0–15 inline. |
-| 10–18 | [pushint8/16/64/128 \[s\], pushint](#pushk-and-friends) | ø → int | Push an int with a width-class payload (signed, canonical). |
-| 19 | [pushstr](#pushstr) | ø → str | Push a literal byte string with a length prefix. |
-| 1a | [pushpoint](#pushpoint) | ø → point | Push a literal 32-byte Ristretto point. |
-| 1b | [pushtoken](#pushtoken) | flv → token | Mint a zero-qty `ClearToken` of the given flavor (placeholder). |
-| 1c | [drop](#drop) | x → ø | Discard a droppable value off the top of the stack. |
-| 1d | [nop](#nop) | ø → ø | Do nothing — useful as a padding / alignment hook. |
-| 1e | [dup](#dup) | x_k … x_0 k → x_k … x_0 x_k | Copy the value at depth `k` onto the top (`k` popped as int). |
-| 1f | [roll](#roll) | x_k … x_0 k → x_{k-1} … x_0 x_k | Move the value at depth `k` to the top (`k` popped as int). |
-| 2k | [dup:k](#dupk) | x_k … x_0 → x_k … x_0 x_k | One-byte `dup` with `k` ∈ 0..=15 baked into the opcode. |
-| 3k | [roll:k](#rollk) | x_k … x_0 → x_{k-1} … x_0 x_k | One-byte `roll` with `k` ∈ 0..=15 baked into the opcode. |
-| **String** | | | |
-| 40 | [readbits](#readbits) | s n → s' x 1 \| s 0 | Pull `n` bits off the head of a string as an int (soft-fail if short). |
-| 41 | [readint](#readint) | s → s' x 1 \| s 0 | Pull a canonical 32-byte int off the head of a string. |
-| 42 | [readstr](#readstr) | s n → s' s'' 1 \| s 0 | Pull `n` bytes off the head of a string as a substring. |
-| 43 | [readpoint](#readpoint) | s → s' p 1 \| s 0 | Pull a 32-byte Ristretto point off the head of a string. |
-| 44 | [writebits](#writebits) | s x n → s' | Append the low `n` bits of `x` to a string. |
-| 45 | [writeint](#writeint) | s x → s' | Append the canonical 32-byte form of `x` to a string. |
-| 46 | [append](#append) | s s' → s'' | Concatenate two strings. |
-| 47 | [writezeros](#writezeros) | s n → s' | Append `n` zero-bytes to a string. |
-| 48 | [bitnot](#bitnot) | s → s' | Invert every bit of a string (length preserved). |
-| 49 / 4a / 4b | [bitor / bitand / bitxor](#bitor--bitand--bitxor) | a b → c | Bytewise OR / AND / XOR of two equal-length strings. |
-| 4c | [shiftleft](#shiftleft) | a n → b c | Shift a string left by `n` bits; `c` carries the displaced high bits. |
-| 4d | [shiftright](#shiftright) | a n → b c | Shift a string right by `n` bits; `c` carries the displaced low bits. |
-| 4e | [keccak256](#keccak256) | s → x | 32-byte Keccak-256 digest (Ethereum compatibility). |
-| **Arithmetic & logic** | | | |
-| 50 | [abs](#abs) | x → \|x\| s | Push magnitude and sign-bit of an int (`s` ∈ {0,1}). |
-| 51 | [eq](#eq) | a b → a b {0\|1} or constraint | Equality test — cleartext peek, or lifted Constraint in the CS. |
-| 52 | [neg](#neg) | x → −x | Flip sign of an int or Expression. |
-| 53 | [add](#add) | x y → z | Add two ints; lifts to linear combination when CS types involved. |
-| 54 | [mul](#mul) | x y → z | Multiply two ints; lifts to a CS multiplier gate when needed. |
-| 55 | [divmod](#divmod) | x z → d r | Truncated division — push quotient and remainder. |
-| 56 | [mod252](#mod252) | s → int | Reduce a ≤64-byte LE string modulo ℓ and push as non-negative int. |
-| 57 | [not](#not) | x → y | Logical NOT for ints; structural negation for Constraints. |
-| 58 | [and](#and) | a b → c | Logical AND for ints; lifts to Constraint conjunction in CS. |
-| 59 | [or](#or) | a b → c | Logical OR for ints; lifts to Constraint disjunction in CS. |
-| **Constraint system \[E\]** | | | |
-| 5a | [scalar](#scalar) | s → expr | Lift a 32-byte scalar string to a constant Expression. |
-| 5b | [commit](#commit) | s → var | Wrap a 32-byte Pedersen-commitment point as a CS Variable. |
-| 5c | [alloc](#alloc) | ø → expr | Allocate a fresh R1CS variable and push it as a one-term Expression. |
-| 5d | [expr](#expr) | var → expr | Bind a Variable into the CS and push it as a one-term Expression. |
-| 5e | [range](#range) | expr n → expr | Range-prove an Expression to `n` ∈ 1..=64 bits. |
-| 5f | [size](#size) | x → x n | Push length of a String / entry count of a Dict (peek). |
-| **Dict** | | | |
-| 60 | [dict](#dict) | …kv… n → dict | Build a Dict from `n` `(value, key)` pairs already on the stack. |
-| 61 | [put](#put) | dict k v → dict' | Insert `v` at fresh key `k`. |
-| 62 | [replace](#replace) | dict k v → dict' {prev 1 \| 0} | Set `v` at key `k`; push prior value if any. |
-| 63 | [get](#get) | dict k → dict' k v | Remove and return the value at `k` (fails if absent). |
-| 64 | [getopt](#getopt) | dict k → dict' {v 1 \| 0} | Optional `get` — soft-fail if key absent. |
-| 65 | [getdup](#getdup) | dict k → dict {v 1 \| 0} | Peek-copy the value at `k` without removing it. |
-| 66 | [first](#first--last--next) | dict → dict {k 1 \| 0} | Push the smallest key, or `0` for an empty dict. |
-| 67 | [last](#first--last--next) | dict → dict {k 1 \| 0} | Push the largest key, or `0` for an empty dict. |
-| 68 | [next](#first--last--next) | dict k → dict {k' 1 \| 0} | Push the smallest key strictly greater than `k`. |
-| **Cryptography** | | | |
-| 69 | [merlin](#merlin) | label → merlin | Open a new Merlin transcript seeded with `label`. |
-| 6a | [merlinwrite](#merlinwrite) | m label s → m | Append a labeled byte string to a transcript. |
-| 6b | [merlinread](#merlinread) | m label n → m s | Challenge `n` bytes from a transcript under `label`. |
-| 6c | [sha256](#sha256) | s → x | 32-byte SHA-256 digest. |
-| 6d | [sha512](#sha512) | s → x | 64-byte SHA-512 digest. |
-| 6e | [sha3](#sha3) | s → x | 32-byte SHA3-256 (FIPS-202) digest. |
-| 6f | [log](#log) | s → ø | Emit a byte string as a data entry into the transaction log. |
-| **Tokens** | | | |
-| 70 | [amount](#amount) | t → t qty flv | Peek the quantity and flavor of a token without consuming it. |
-| 71 | [issue](#issue) | qty tag → T | Mint a token under the current actor's identity + `tag`. |
-| 72 | [retire](#retire) | t → ø | Burn a token (emits a retire entry to the txlog). |
-| 73 | [borrow](#borrow) | qty flv → −T +T | Borrow balanced ±token pair; debt must be balanced before tx end. |
-| 74 | [merge](#merge) | a b → {c 1 \| a b 0} | Combine two same-flavor cleartokens; soft-fail on flavor mismatch. |
-| 75 | [split](#split) | a q → a' b | Split quantity `q` off a cleartoken. |
-| 76 | [mix](#mix) \[E\] | tokens… cmts… m n → tokens | Cloak: prove `m` input tokens balance `n` output commitments per flavor. |
-| 77 | [decrypt](#decrypt) \[E\] | T f' f q' q → CT | Open an encrypted Token to a ClearToken using cleartext openings. |
-| 78 | [issueflv](#issueflv) | cid tag → int | Compute the canonical flavor scalar for an actor id + tag. |
-| **Control flow** | | | |
-| 79 | [verify](#verify) | x → ø | Assert: hard-fail if int is zero, or enforce a Constraint. |
-| 7a | [fee](#fee) \[E\] | qty flv → −WT | Pay tx fee; push the balancing WideToken debt to net out via `mix`. |
-| 7b | [run](#run) | s → … | Execute a sub-program in the *same* call frame. |
-| 7c | [loop](#loop) | ø → ø | Rewind current Run to its start (loop body needs `break` to exit). |
-| 7d | [switch](#switch) | x a b → … | Pick the truthy branch: run `a` if `x ≠ 0`, else `b`. |
-| 7e | [return](#return) | a_{k-1} … a_0 k → ø | Exit current call frame, returning `k` items to the parent. |
-| 7f | [type](#type) | x → x code | Push the type code of the top value (peek). |
-| 8k | [break:k](#breakk) | ø → ø | Exit current Run and `k` more enclosing Runs. |
-| **Cells, actors, sends** | | | |
-| 90 | [input](#input) \[E\] | s → cell | Materialize a cell from a Utreexo-validated input encoding. |
-| 91 | [cell](#cell) | items… k pred → cell | Build a new cell from `k` portable items under predicate `pred`. |
-| 92 | [output](#output) | items… k pred → ø | Like `cell`, but emits the cell directly as a tx Output. |
-| 93 | [open](#open) | cell ik nbrs pos script gas bytes args… k → results… k' | Reveal a taproot leaf and run it in an isolated call frame. |
-| 94 | [send](#send) | args… k refund gas bytes method addr → ø | Queue an asynchronous message to an actor. |
-| 95 | [call](#call) \[I\] | args… k gas bytes method addr → results… k' | Synchronous actor-to-actor call (isolated frame, no re-entry). |
-| 96 | [load](#load) \[I\] | ø → dict | Load the current actor's state dict (locks against re-entry). |
-| 97 | [save](#save) \[I\] | dict → ø | Persist the actor's state dict (unlocks; required to survive). |
-| 98 | [signtx](#signtx) | cell → items… k | Authorize the tx with the cell predicate's signature; pour payload. |
-| 99 | [signcall](#signcall) | cell script sig gas bytes args… m → results… k' | Run a script signed by the cell predicate in an isolated frame. |
-| 9a | [timelock](#timelock) | ø → n {0\|1} | Push tx locktime and a flag for height (`0`) vs. timestamp (`1`). *planned* |
-| 9b | [version](#version) | ø → n | Push tx version. *planned* |
-| 9c | [actorid](#actorid) | ø → s | Push the current actor's id (32-byte string). |
-| 9d | [anchor](#anchor) | ø → s | Push the current frame's anchor (32-byte string). |
-| 9e | [gas](#gas) | ø → n | Push remaining gas budget for the current call. *planned* |
-| 9f | [bytes](#bytes) | ø → n | Push the actor's remaining persistent vbyte balance. *planned* |
-| a0 | [callerid](#callerid) | ø → s | Push the caller actor's id (zero string if invoked externally). |
-| a1 | [method](#method) | ø → int | Push the method key the current call is dispatched under. |
-| a2 | [gaslimit](#gaslimit) | ø → n | Push the call's total gas budget cap. *planned* |
-| a3 | [memlimit](#memlimit) | ø → n | Push the transient-memory cap (`4 × persistent_vbytes`). *planned* |
-| a4 | [newbytes](#newbytes) | ø → n | Push vbytes delivered with the current call. *planned* |
-| **Chain info \[I\]** | | | |
-| a5 | [height](#height) | ø → n | Push the current block height. *planned* |
-| a6 | [blockhash](#blockhash) | h → s | Push the block hash at height `h`. *planned* |
-| a7 | [blockburn](#blockburn) | h → n | Push satoshis burned at height `h` (Bitcoin-coupled). *planned; maturity 100* |
-| a8 | [blockweight](#blockweight) | h → n | Push block weight at height `h`. *planned; maturity 100* |
-| a9 | [blockrate](#blockrate) | h → n | Push sparks-per-satoshi mint rate at height `h`. *planned; maturity 100* |
-| aa | [chainstate](#chainstate) | n → dict | Push a dict of block stats at height `n`. *planned; maturity 100* |
+| Hex | Name | Ctx | Stack | Description |
+| --- | --- | --- | --- | --- |
+| **Stack** | | | | |
+| 0k | [push:k](#pushk-and-friends) | | ø → int | Push a small literal int 0–15 inline. |
+| 10–18 | [pushint8/16/64/128 \[s\], pushint](#pushk-and-friends) | | ø → int | Push an int with a width-class payload (signed, canonical). |
+| 19 | [pushstr](#pushstr) | | ø → str | Push a literal byte string with a length prefix. |
+| 1a | [pushpoint](#pushpoint) | | ø → point | Push a literal 32-byte Ristretto point. |
+| 1b | [pushtoken](#pushtoken) | | flv → token | Mint a zero-qty `ClearToken` of the given flavor (placeholder). |
+| 1c | [drop](#drop) | | x → ø | Discard a droppable value off the top of the stack. |
+| 1d | [nop](#nop) | | ø → ø | Do nothing — useful as a padding / alignment hook. |
+| 1e | [dup](#dup) | | x_k … x_0 k → x_k … x_0 x_k | Copy the value at depth `k` onto the top (`k` popped as int). |
+| 1f | [roll](#roll) | | x_k … x_0 k → x_{k-1} … x_0 x_k | Move the value at depth `k` to the top (`k` popped as int). |
+| 2k | [dup:k](#dupk) | | x_k … x_0 → x_k … x_0 x_k | One-byte `dup` with `k` ∈ 0..=15 baked into the opcode. |
+| 3k | [roll:k](#rollk) | | x_k … x_0 → x_{k-1} … x_0 x_k | One-byte `roll` with `k` ∈ 0..=15 baked into the opcode. |
+| **String** | | | | |
+| 40 | [readbits](#readbits) | | s n → s' x 1 \| s 0 | Pull `n` bits off the head of a string as an int (soft-fail if short). |
+| 41 | [readint](#readint) | | s → s' x 1 \| s 0 | Pull a canonical 32-byte int off the head of a string. |
+| 42 | [readstr](#readstr) | | s n → s' s'' 1 \| s 0 | Pull `n` bytes off the head of a string as a substring. |
+| 43 | [readpoint](#readpoint) | | s → s' p 1 \| s 0 | Pull a 32-byte Ristretto point off the head of a string. |
+| 44 | [writebits](#writebits) | | s x n → s' | Append the low `n` bits of `x` to a string. |
+| 45 | [writeint](#writeint) | | s x → s' | Append the canonical 32-byte form of `x` to a string. |
+| 46 | [append](#append) | | s s' → s'' | Concatenate two strings. |
+| 47 | [writezeros](#writezeros) | | s n → s' | Append `n` zero-bytes to a string. |
+| 48 | [bitnot](#bitnot) | | s → s' | Invert every bit of a string (length preserved). |
+| 49 / 4a / 4b | [bitor / bitand / bitxor](#bitor--bitand--bitxor) | | a b → c | Bytewise OR / AND / XOR of two equal-length strings. |
+| 4c | [shiftleft](#shiftleft) | | a n → b c | Shift a string left by `n` bits; `c` carries the displaced high bits. |
+| 4d | [shiftright](#shiftright) | | a n → b c | Shift a string right by `n` bits; `c` carries the displaced low bits. |
+| 4e | [keccak256](#keccak256) | | s → x | 32-byte Keccak-256 digest (Ethereum compatibility). |
+| **Arithmetic & logic** | | | | |
+| 50 | [abs](#abs) | | x → \|x\| s | Push magnitude and sign-bit of an int (`s` ∈ {0,1}). |
+| 51 | [eq](#eq) | | a b → a b {0\|1} or constraint | Equality test — cleartext peek, or lifted Constraint in the CS. |
+| 52 | [neg](#neg) | | x → −x | Flip sign of an int or Expression. |
+| 53 | [add](#add) | | x y → z | Add two ints; lifts to linear combination when CS types involved. |
+| 54 | [mul](#mul) | | x y → z | Multiply two ints; lifts to a CS multiplier gate when needed. |
+| 55 | [divmod](#divmod) | | x z → d r | Truncated division — push quotient and remainder. |
+| 56 | [mod252](#mod252) | | s → int | Reduce a ≤64-byte LE string modulo ℓ and push as non-negative int. |
+| 57 | [not](#not) | | x → y | Logical NOT for ints; structural negation for Constraints. |
+| 58 | [and](#and) | | a b → c | Logical AND for ints; lifts to Constraint conjunction in CS. |
+| 59 | [or](#or) | | a b → c | Logical OR for ints; lifts to Constraint disjunction in CS. |
+| **Constraint system** | | | | |
+| 5a | [scalar](#scalar) | ext. | s → expr | Lift a 32-byte scalar string to a constant Expression. |
+| 5b | [commit](#commit) | ext. | s → var | Wrap a 32-byte Pedersen-commitment point as a CS Variable. |
+| 5c | [alloc](#alloc) | ext. | ø → expr | Allocate a fresh R1CS variable and push it as a one-term Expression. |
+| 5d | [expr](#expr) | ext. | var → expr | Bind a Variable into the CS and push it as a one-term Expression. |
+| 5e | [range](#range) | ext. | expr n → expr | Range-prove an Expression to `n` ∈ 1..=64 bits. |
+| 5f | [size](#size) | | x → x n | Push length of a String / entry count of a Dict (peek). |
+| **Dict** | | | | |
+| 60 | [dict](#dict) | | …kv… n → dict | Build a Dict from `n` `(value, key)` pairs already on the stack. |
+| 61 | [put](#put) | | dict k v → dict' | Insert `v` at fresh key `k`. |
+| 62 | [replace](#replace) | | dict k v → dict' {prev 1 \| 0} | Set `v` at key `k`; push prior value if any. |
+| 63 | [get](#get) | | dict k → dict' k v | Remove and return the value at `k` (fails if absent). |
+| 64 | [getopt](#getopt) | | dict k → dict' {v 1 \| 0} | Optional `get` — soft-fail if key absent. |
+| 65 | [getdup](#getdup) | | dict k → dict {v 1 \| 0} | Peek-copy the value at `k` without removing it. |
+| 66 | [first](#first--last--next) | | dict → dict {k 1 \| 0} | Push the smallest key, or `0` for an empty dict. |
+| 67 | [last](#first--last--next) | | dict → dict {k 1 \| 0} | Push the largest key, or `0` for an empty dict. |
+| 68 | [next](#first--last--next) | | dict k → dict {k' 1 \| 0} | Push the smallest key strictly greater than `k`. |
+| **Cryptography** | | | | |
+| 69 | [merlin](#merlin) | | label → merlin | Open a new Merlin transcript seeded with `label`. |
+| 6a | [merlinwrite](#merlinwrite) | | m label s → m | Append a labeled byte string to a transcript. |
+| 6b | [merlinread](#merlinread) | | m label n → m s | Challenge `n` bytes from a transcript under `label`. |
+| 6c | [sha256](#sha256) | | s → x | 32-byte SHA-256 digest. |
+| 6d | [sha512](#sha512) | | s → x | 64-byte SHA-512 digest. |
+| 6e | [sha3](#sha3) | | s → x | 32-byte SHA3-256 (FIPS-202) digest. |
+| 6f | [log](#log) | | s → ø | Emit a byte string as a data entry into the transaction log. |
+| **Tokens** | | | | |
+| 70 | [amount](#amount) | | t → t qty flv | Peek the quantity and flavor of a token without consuming it. |
+| 71 | [issue](#issue) | | qty tag → T | Mint a token under the current actor's identity + `tag`. |
+| 72 | [retire](#retire) | | t → ø | Burn a token (emits a retire entry to the txlog). |
+| 73 | [borrow](#borrow) | | qty flv → −T +T | Borrow balanced ±token pair; debt must be balanced before tx end. |
+| 74 | [merge](#merge) | | a b → {c 1 \| a b 0} | Combine two same-flavor cleartokens; soft-fail on flavor mismatch. |
+| 75 | [split](#split) | | a q → a' b | Split quantity `q` off a cleartoken. |
+| 76 | [mix](#mix) | ext. | tokens… cmts… m n → tokens | Cloak: prove `m` input tokens balance `n` output commitments per flavor. |
+| 77 | [decrypt](#decrypt) | ext. | T f' f q' q → CT | Open an encrypted Token to a ClearToken using cleartext openings. |
+| 78 | [issueflv](#issueflv) | | cid tag → int | Compute the canonical flavor scalar for an actor id + tag. |
+| **Control flow** | | | | |
+| 79 | [verify](#verify) | | x → ø | Assert: hard-fail if int is zero, or enforce a Constraint. |
+| 7a | [fee](#fee) | ext. | qty flv → −WT | Pay tx fee; push the balancing WideToken debt to net out via `mix`. |
+| 7b | [run](#run) | | s → … | Execute a sub-program in the *same* call frame. |
+| 7c | [loop](#loop) | | ø → ø | Rewind current Run to its start (loop body needs `break` to exit). |
+| 7d | [switch](#switch) | | x a b → … | Pick the truthy branch: run `a` if `x ≠ 0`, else `b`. |
+| 7e | [return](#return) | | a_{k-1} … a_0 k → ø | Exit current call frame, returning `k` items to the parent. |
+| 7f | [type](#type) | | x → x code | Push the type code of the top value (peek). |
+| 8k | [break:k](#breakk) | | ø → ø | Exit current Run and `k` more enclosing Runs. |
+| **Cells, actors, sends** | | | | |
+| 90 | [input](#input) | ext. | s → cell | Materialize a cell from a Utreexo-validated input encoding. |
+| 91 | [cell](#cell) | | items… k pred → cell | Build a new cell from `k` portable items under predicate `pred`. |
+| 92 | [output](#output) | | items… k pred → ø | Like `cell`, but emits the cell directly as a tx Output. |
+| 93 | [open](#open) | | cell ik nbrs pos script gas bytes args… k → results… k' | Reveal a taproot leaf and run it in an isolated call frame. |
+| 94 | [send](#send) | | args… k refund gas bytes method addr → ø | Queue an asynchronous message to an actor. |
+| 95 | [call](#call) | int. | args… k gas bytes method addr → results… k' | Synchronous actor-to-actor call (isolated frame, no re-entry). |
+| 96 | [load](#load) | int. | ø → dict | Load the current actor's state dict (locks against re-entry). |
+| 97 | [save](#save) | int. | dict → ø | Persist the actor's state dict (unlocks; required to survive). |
+| 98 | [signtx](#signtx) | | cell → items… k | Authorize the tx with the cell predicate's signature; pour payload. |
+| 99 | [signcall](#signcall) | | cell script sig gas bytes args… m → results… k' | Run a script signed by the cell predicate in an isolated frame. |
+| 9a | [timelock](#timelock) | | ø → n {0\|1} | Push tx locktime and a flag for height (`0`) vs. timestamp (`1`). *planned* |
+| 9b | [version](#version) | | ø → n | Push tx version. *planned* |
+| 9c | [actorid](#actorid) | | ø → s | Push the current actor's id (32-byte string). |
+| 9d | [anchor](#anchor) | | ø → s | Push the current frame's anchor (32-byte string). |
+| 9e | [gas](#gas) | | ø → n | Push remaining gas budget for the current call. *planned* |
+| 9f | [bytes](#bytes) | | ø → n | Push the actor's remaining persistent vbyte balance. *planned* |
+| a0 | [callerid](#callerid) | | ø → s | Push the caller actor's id (zero string if invoked externally). |
+| a1 | [method](#method) | | ø → int | Push the method key the current call is dispatched under. |
+| a2 | [gaslimit](#gaslimit) | | ø → n | Push the call's total gas budget cap. *planned* |
+| a3 | [memlimit](#memlimit) | | ø → n | Push the transient-memory cap (`4 × persistent_vbytes`). *planned* |
+| a4 | [newbytes](#newbytes) | | ø → n | Push vbytes delivered with the current call. *planned* |
+| **Chain info** | | | | |
+| a5 | [height](#height) | int. | ø → n | Push the current block height. *planned* |
+| a6 | [blockhash](#blockhash) | int. | h → s | Push the block hash at height `h`. *planned* |
+| a7 | [blockburn](#blockburn) | int. | h → n | Push satoshis burned at height `h` (Bitcoin-coupled). *planned; maturity 100* |
+| a8 | [blockweight](#blockweight) | int. | h → n | Push block weight at height `h`. *planned; maturity 100* |
+| a9 | [blockrate](#blockrate) | int. | h → n | Push sparks-per-satoshi mint rate at height `h`. *planned; maturity 100* |
+| aa | [chainstate](#chainstate) | int. | n → dict | Push a dict of block stats at height `n`. *planned; maturity 100* |
 
 Opcodes marked *planned* are reserved in the byte map; their handlers are not yet wired. Scripts using them error `UnknownOpcode` until the corresponding implementation phase lands (see `flamevm/plan.md`).
 
