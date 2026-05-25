@@ -113,248 +113,289 @@ const OP_METHOD: u8 = 0xa1;
 
 // ── Instruction enum ─────────────────────────────────────────────────
 
-/// A high-level VM instruction. One variant per opcode, with typed
-/// inline parameters. `Alloc(Option<Int253>)` carries a witness slot
-/// the prover fills (encoded byte is the opcode only — witness flows
-/// through the [`crate::vm::Delegate`]'s side-channel queue).
+/// A decoded instruction.
 #[derive(Clone, Debug)]
 pub enum Instruction {
-    // ── stack literals & manipulation ─────────────────────
-    /// `push:k` (0x00..=0x0f), `pushint8/16/64/128 [neg]`, or
-    /// `pushint` (0x18) — the encoder picks the narrowest form for
-    /// this `Int253`.
+    /// **push:_k_** / **pushint_n_** / **pushint** → _int_
+    ///
+    /// Pushes an `Int253`. Encoder picks the narrowest opcode width.
     PushInt(Int253),
-    /// `pushstr` (0x19) — opcode + sub-varint length + bytes.
+
+    /// **pushstr:_n_:_x_** → _string_
+    ///
+    /// Pushes a String of `n` bytes.
     PushStr(String),
-    /// `pushpoint` (0x1a) — opcode + 32 bytes.
+
+    /// **pushpoint** → _point_
     PushPoint([u8; 32]),
-    /// `pushtoken` (0x1b).
+
+    /// _flv_ **pushtoken** → _token_
     PushToken,
-    /// `drop` (0x1c).
+
+    /// _x_ **drop** → ø
+    ///
+    /// Fails if `x` is not a droppable type.
     Drop,
-    /// `nop` (0x1d).
+
+    /// **nop** → ø
     Nop,
-    /// `dup` (0x1e) — pops `k` from the stack, then duplicates.
+
+    /// _x(k) … x(0) k_ **dup** → _x(k) … x(0) x(k)_
     Dup,
-    /// `roll` (0x1f) — pops `k`, then rolls.
+
+    /// _x(k) … x(0) k_ **roll** → _x(k-1) … x(0) x(k)_
     Roll,
-    /// `dup:k` (0x20..=0x2f) — `k` ∈ 0..=15.
+
+    /// _x(k) … x(0)_ **dup:_k_** → _x(k) … x(0) x(k)_
     DupK(u8),
-    /// `roll:k` (0x30..=0x3f) — `k` ∈ 0..=15.
+
+    /// _x(k) … x(0)_ **roll:_k_** → _x(k-1) … x(0) x(k)_
     RollK(u8),
 
-    // ── String ops ────────────────────────────────────────
-    /// `readbits` (0x40).
+    /// _s n_ **readbits** → _s' x 1_ | _s 0_
     ReadBits,
-    /// `readint` (0x41).
+
+    /// _s_ **readint** → _s' x 1_ | _s 0_
     ReadInt,
-    /// `readstr` (0x42).
+
+    /// _s n_ **readstr** → _s' s'' 1_ | _s 0_
     ReadStr,
-    /// `readpoint` (0x43).
+
+    /// _s_ **readpoint** → _s' point 1_ | _s 0_
     ReadPoint,
-    /// `writebits` (0x44).
+
+    /// _s x n_ **writebits** → _s'_
     WriteBits,
-    /// `writeint` (0x45).
+
+    /// _s x_ **writeint** → _s'_
     WriteInt,
-    /// `append` (0x46).
+
+    /// _a b_ **append** → _c_
     Append,
-    /// `writezeros` (0x47).
+
+    /// _s n_ **writezeros** → _s'_
     WriteZeros,
-    /// `bitnot` (0x48).
+
+    /// _s_ **bitnot** → _s'_
     BitNot,
-    /// `bitor` (0x49).
+
+    /// _a b_ **bitor** → _c_
     BitOr,
-    /// `bitand` (0x4a).
+
+    /// _a b_ **bitand** → _c_
     BitAnd,
-    /// `bitxor` (0x4b).
+
+    /// _a b_ **bitxor** → _c_
     BitXor,
-    /// `shiftleft` (0x4c).
+
+    /// _a n_ **shiftleft** → _b c_
     ShiftLeft,
-    /// `shiftright` (0x4d).
+
+    /// _a n_ **shiftright** → _b c_
     ShiftRight,
-    /// `keccak256` (0x4e).
+
+    /// _s_ **keccak256** → _hash_
     Keccak256,
 
-    // ── Int253 arithmetic / logic / size ──────────────────
-    /// `abs` (0x50).
+    /// _x_ **abs** → _|x| sign_
     Abs,
-    /// `eq` (0x51).
+
+    /// _x y_ **eq** → _x y {0|1}_
     Eq,
-    /// `neg` (0x52).
+
+    /// _x_ **neg** → _-x_
     Neg,
-    /// `add` (0x53).
+
+    /// _x y_ **add** → _z_
     Add,
-    /// `mul` (0x54).
+
+    /// _x y_ **mul** → _z_
     Mul,
-    /// `divmod` (0x55).
+
+    /// _x z_ **divmod** → _d r_
     DivMod,
-    /// `mod252` (0x56).
+
+    /// _s_ **mod252** → _int_
     Mod252,
-    /// `not` (0x57).
+
+    /// _x_ **not** → _y_
     Not,
-    /// `and` (0x58).
+
+    /// _a b_ **and** → _c_
     And,
-    /// `or` (0x59).
+
+    /// _a b_ **or** → _c_
     Or,
-    /// `size` (0x5f).
+
+    /// _x_ **size** → _x n_
     Size,
 
-    // ── CS opcodes ────────────────────────────────────
-    /// `scalar` (0x5a) — `string → expr`. Pops a String, downcasts to
-    /// `Int253`, pushes `Expression::Constant(int)`.
+    /// _s_ **scalar** → _expr_
     Scalar,
-    /// `commit` (0x5b) — `string → var`. Pops a String, downcasts to
-    /// `Commitment`, wraps in `Variable { commitment }`. The Variable
-    /// later flows through `expr` to bind the commitment into the CS.
+
+    /// _s_ **commit** → _var_
     Commit,
-    /// `alloc` (0x5c) — witness in `Option<Int253>` is consumed by the
-    /// prover; verifier sees `None` and allocates an unassigned R1CS
-    /// variable.
+
+    /// **alloc** → _expr_
+    ///
+    /// Witness in `Option<Int253>` is filled by the prover; verifier
+    /// sees `None` and allocates an unassigned R1CS variable.
     Alloc(Option<Int253>),
-    /// `expr` (0x5d).
+
+    /// _var_ **expr** → _expr_
     Expr,
-    /// `range` (0x5e) — `expr n → expr`. Adds an `n`-bit non-negativity
-    /// range proof on the Expression (n ∈ [1, 64]; pops `n` as `Int253`).
+
+    /// _expr n_ **range** → _expr_
     Range,
 
-    // ── Dict ops ──────────────────────────────────────────
-    /// `dict` (0x60).
+    /// _… val key val key n_ **dict** → _dict_
     Dict,
-    /// `put` (0x61).
+
+    /// _dict k v_ **put** → _dict'_
     Put,
-    /// `replace` (0x62).
+
+    /// _dict k v_ **replace** → _dict' {prev 1|0}_
     Replace,
-    /// `get` (0x63).
+
+    /// _dict k_ **get** → _dict' v_
     Get,
-    /// `getopt` (0x64).
+
+    /// _dict k_ **getopt** → _dict' {v 1|0}_
     GetOpt,
-    /// `getdup` (0x65).
+
+    /// _dict k_ **getdup** → _dict {v 1|0}_
     GetDup,
-    /// `first` (0x66).
+
+    /// _dict_ **first** → _dict {k 1|0}_
     First,
-    /// `last` (0x67).
+
+    /// _dict_ **last** → _dict {k 1|0}_
     Last,
-    /// `next` (0x68).
+
+    /// _dict k_ **next** → _dict {k' 1|0}_
     Next,
 
-    // ── Merlin + SHA ──────────────────────────────────────
-    /// `merlin` (0x69).
+    /// _label_ **merlin** → _merlin_
     Merlin,
-    /// `merlinwrite` (0x6a).
+
+    /// _merlin label data_ **merlinwrite** → _merlin_
     MerlinWrite,
-    /// `merlinread` (0x6b).
+
+    /// _merlin label n_ **merlinread** → _merlin string_
     MerlinRead,
-    /// `sha256` (0x6c).
+
+    /// _s_ **sha256** → _hash_
     Sha256,
-    /// `sha512` (0x6d).
+
+    /// _s_ **sha512** → _hash_
     Sha512,
-    /// `sha3` (0x6e).
+
+    /// _s_ **sha3** → _hash_
     Sha3,
-    /// `log` (0x6f) — `str → ø`. Pops a String, emits
-    /// `TxEntry::Data(bytes)` into the txlog. Visible to the outer
-    /// verifier; doesn't occupy persistent storage. Mirrors zkvm's
-    /// `op_log` (also 0x6f).
+
+    /// _data_ **log** → ø
     Log,
 
-    // ── Tokens ────────────────────────────────────────────
-    /// `amount` (0x70).
+    /// _token_ **amount** → _token qty flv_
     Amount,
-    /// `issue` (0x71).
+
+    /// _qty tag_ **issue** → _token_
     Issue,
-    /// `retire` (0x72).
+
+    /// _token_ **retire** → ø
     Retire,
-    /// `borrow` (0x73).
+
+    /// _qty flv_ **borrow** → _widetoken token_
     Borrow,
-    /// `merge` (0x74).
+
+    /// _token1 token2_ **merge** → _token_
     Merge,
-    /// `split` (0x75).
+
+    /// _token qty_ **split** → _token1 token2_
     Split,
-    /// `mix` (0x76) — `anytokens… commitments… m n → values`. Pops
-    /// `n` (output count) and `m` (input count) as `Int253`, then `n`
-    /// output commitment Strings + `m` input token-shaped values;
-    /// invokes the spacesuit cloak gadget; pushes `n` output Tokens.
+
+    /// _anytokens… commitments… m n_ **mix** → _tokens_
     Mix,
-    /// `decrypt` (0x77) — `token f f' q q' → cleartoken`. Reveals a
-    /// cleartext quantity and flavor for an encrypted Token by
-    /// supplying the cleartext values and their Pedersen blinding
-    /// factors; verifies that the supplied (value, blinding) pair
-    /// matches the Token's commitments and pushes the resulting
-    /// `ClearToken`.
+
+    /// _token f f' q q'_ **decrypt** → _cleartoken_
     Decrypt,
-    /// `issueflv` (0x78).
+
+    /// _cid tag_ **issueflv** → _int_
     IssueFlv,
 
-    // ── control flow ──────────────────────────────────────
-    /// `verify` (0x79).
+    /// _x_ **verify** → ø
     Verify,
-    /// `fee` (0x7a) — external-only. Pops `qty: Int253` (non-negative,
-    /// ≤ MAX_FEE) and `flv: Int253`, records `TxEntry::Fee(qty as u64)`,
-    /// pushes a `WideToken` debt with `q = -qty`, `f = flv`.
+
+    /// _qty flv_ **fee** → _widetoken_
     Fee,
-    /// `run` (0x7b).
+
+    /// _prog_ **run** → _results…_
     Run,
-    /// `loop` (0x7c).
+
+    /// _prog_ **loop** → ø
     Loop,
-    /// `switch` (0x7d).
+
+    /// _i prog…_ **switch** → _results…_
     Switch,
-    /// `return` (0x7e).
+
+    /// _x(k-1) … x(0) k_ **return** → ø
     Return,
-    /// `type` (0x7f).
+
+    /// _x_ **type** → _x n_
     Type,
-    /// `break:k` (0x80..=0x8f) — `k` ∈ 0..=15.
+
+    /// **break:_k_** → ø
+    ///
+    /// Stops the current program and `k` more enclosing Runs.
     BreakK(u8),
 
-    // ── Cell + I/O ──────────────────────────────────
-    /// `input` (0x90) — external-only.
+    /// _string_ **input** → _cell_
     ///
-    /// The optional inner [`crate::witness::InputWitnesses`] carries
-    /// prover-side commitment witnesses for any `Token` entries in
-    /// the consumed cell's payload. Verifier-side parsing
-    /// always reconstructs `Input(None)`; the witness never crosses
-    /// the wire. `Box` keeps the enum tag cheap when witness is
-    /// `None`. Same shape as `Alloc(Option<Int253>)`.
+    /// Optional inner `InputWitnesses` carries prover-side
+    /// commitment witnesses for Token payload entries; verifier-side
+    /// parsing always reconstructs `Input(None)`.
     Input(Option<Box<crate::witness::InputWitnesses>>),
-    /// `cell` (0x91).
+
+    /// _items… pred_ **cell** → _cell_
     Cell,
-    /// `output` (0x92).
+
+    /// _items… pred_ **output** → ø
     Output,
-    /// `open` (0x93).
+
+    /// _cell internal_key neighbors position script args… k_ **open** → _results…_
     Open,
-    /// `send` (0x94) — asynchronous message-send. Queues a
-    /// `Message` for delivery as a future internal tx; emits
-    /// `TxEntry::Send` recording the send's identity.
-    /// `args… k refund gas bytes method addr → ø`.
+
+    /// _args… k refund gas bytes method addr_ **send** → ø
     Send,
-    /// `call` (0x95) — internal-only synchronous call into another
-    /// actor's method. `args… k gas bytes method addr → results… k'`.
+
+    /// _args… k gas bytes method addr_ **call** → _results…_
     Call,
-    /// `load` (0x96) — internal-only. Pops nothing; pushes the
-    /// current actor's `ActorState` as a Dict and marks the actor
-    /// for destruction. `op_save` clears the mark.
+
+    /// **load** → _dict_
     Load,
-    /// `save` (0x97) — internal-only. Pops a Dict, persists it as
-    /// the current actor's `ActorState`, and clears the
-    /// mark-for-destruction flag set by `op_load`.
+
+    /// _dict_ **save** → ø
     Save,
-    /// `signtx` (0x98).
+
+    /// _cell_ **signtx** → _items… k_
     Signtx,
-    /// `signrun` (0x99).
+
+    /// _cell prog sig args… m_ **signrun** → _items… k_
     Signrun,
-    /// `actorid` (0x9c) — pushes the current frame's actor id as
-    /// a 32-byte String. Internal-only.
+
+    /// **actorid** → _string_
     Actorid,
-    /// `anchor` (0x9d) — pushes the current frame's anchor as a
-    /// 32-byte String.
+
+    /// **anchor** → _string_
     Anchor,
-    /// `callerid` (0xa0) — pushes the caller's actor id, or
-    /// all-zero String if the originator is external. Internal-only.
+
+    /// **callerid** → _string_
     Callerid,
-    /// `method` (0xa1) — pushes the current frame's method key as
-    /// `Int253`. Internal-only.
+
+    /// **method** → _int_
     Method,
 
-    /// Unknown opcode byte — used by the parser for any byte not yet
-    /// in the spec. Mirrors zkvm's extension-opcode handling.
+    /// Unknown opcode byte; used by the parser for any unassigned tag.
     Ext(u8),
 }
 
