@@ -253,7 +253,7 @@ impl String {
         String::Opaque(bytes.iter().map(|b| !b).collect())
     }
 
-    /// Bytewise OR. Returns `None` if operand lengths differ.
+    /// Bitwise OR. Returns `None` if operand lengths differ.
     pub fn bit_or(self, other: &String) -> Option<String> {
         let a = self.to_bytes();
         let b = other.bytes_view();
@@ -265,7 +265,7 @@ impl String {
         ))
     }
 
-    /// Bytewise AND. Returns `None` if operand lengths differ.
+    /// Bitwise AND. Returns `None` if operand lengths differ.
     pub fn bit_and(self, other: &String) -> Option<String> {
         let a = self.to_bytes();
         let b = other.bytes_view();
@@ -277,7 +277,7 @@ impl String {
         ))
     }
 
-    /// Bytewise XOR. Returns `None` if operand lengths differ.
+    /// Bitwise XOR. Returns `None` if operand lengths differ.
     pub fn bit_xor(self, other: &String) -> Option<String> {
         let a = self.to_bytes();
         let b = other.bytes_view();

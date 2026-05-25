@@ -1229,7 +1229,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x49` `bitor` — `a b → c`. Bytewise OR. Fails if sizes differ.
+    /// `0x49` `bitor` — `a b → c`. Bitwise OR. Fails if sizes differ.
     fn op_bit_or(&mut self) -> Result<(), VMError> {
         let b = self.pop_value()?.to_string()?;
         let a = self.pop_value()?.to_string()?;
@@ -1238,7 +1238,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x4a` `bitand` — `a b → c`. Bytewise AND. Fails on size mismatch.
+    /// `0x4a` `bitand` — `a b → c`. Bitwise AND. Fails on size mismatch.
     fn op_bit_and(&mut self) -> Result<(), VMError> {
         let b = self.pop_value()?.to_string()?;
         let a = self.pop_value()?.to_string()?;
@@ -1247,7 +1247,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x4b` `bitxor` — `a b → c`. Bytewise XOR. Fails on size mismatch.
+    /// `0x4b` `bitxor` — `a b → c`. Bitwise XOR. Fails on size mismatch.
     fn op_bit_xor(&mut self) -> Result<(), VMError> {
         let b = self.pop_value()?.to_string()?;
         let a = self.pop_value()?.to_string()?;

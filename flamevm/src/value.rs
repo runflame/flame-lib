@@ -250,7 +250,7 @@ impl Value {
     ///
     /// - Cross-variant: always `Ok(false)` (different types are not equal).
     /// - Same-variant for plain-data types (`Int253`, `String`, `Point`):
-    ///   bytewise / by-value comparison.
+    ///   bitwise / by-value comparison.
     /// - Same-variant for `Dict`: recursive entry-wise comparison.
     /// - Same-variant for linear types (tokens, cells, variables,
     ///   expressions, constraints, transcripts): `Err(TypeNotComparable)`
