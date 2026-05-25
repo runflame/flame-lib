@@ -324,7 +324,9 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 46 | [append](#append) | | s s' → s'' | Concatenate two strings. |
 | 47 | [writezeros](#writezeros) | | s n → s' | Append `n` zero-bytes to a string. |
 | 48 | [bitnot](#bitnot) | | s → s' | Invert every bit of a string (length preserved). |
-| 49 / 4a / 4b | [bitor / bitand / bitxor](#bitor--bitand--bitxor) | | a b → c | Bytewise OR / AND / XOR of two equal-length strings. |
+| 49 | [bitor](#bitor) | | a b → c | Bytewise OR of two equal-length strings. |
+| 4a | [bitand](#bitand) | | a b → c | Bytewise AND of two equal-length strings. |
+| 4b | [bitxor](#bitxor) | | a b → c | Bytewise XOR of two equal-length strings. |
 | 4c | [shiftleft](#shiftleft) | | a n → b c | Shift a string left by `n` bits; `c` carries the displaced high bits. |
 | 4d | [shiftright](#shiftright) | | a n → b c | Shift a string right by `n` bits; `c` carries the displaced low bits. |
 | 4e | [keccak256](#keccak256) | | s → x | 32-byte Keccak-256 digest (Ethereum compatibility). |
@@ -557,11 +559,23 @@ _s_ → _s'_
 
 Inverts every bit of `s`. Output length matches input.
 
-### bitor / bitand / bitxor
+### bitor
 
 _a b_ → _c_
 
-Bytewise OR / AND / XOR. Operands must have the same length — mismatch hard-fails `BitwiseSizeMismatch`.
+Bytewise OR of two strings. Operands must have the same length — mismatch hard-fails `BitwiseSizeMismatch`.
+
+### bitand
+
+_a b_ → _c_
+
+Bytewise AND of two strings. Same length rule and failure mode as [`bitor`](#bitor).
+
+### bitxor
+
+_a b_ → _c_
+
+Bytewise XOR of two strings. Same length rule and failure mode as [`bitor`](#bitor).
 
 ### shiftleft
 
