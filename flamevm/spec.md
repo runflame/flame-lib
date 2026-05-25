@@ -310,10 +310,10 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 1b | [pushtoken](#pushtoken) | | flv → token | Mint a zero-qty `ClearToken` of the given flavor (placeholder). |
 | 1c | [drop](#drop) | | x → ø | Discard a droppable value off the top of the stack. |
 | 1d | [nop](#nop) | | ø → ø | Do nothing — useful as a padding / alignment hook. |
-| 1e | [dup](#dup) | | x_k … x_0 k → x_k … x_0 x_k | Copy the value at depth `k` onto the top (`k` popped as int). |
-| 1f | [roll](#roll) | | x_k … x_0 k → x_{k-1} … x_0 x_k | Move the value at depth `k` to the top (`k` popped as int). |
-| 2k | [dup:k](#dupk) | | x_k … x_0 → x_k … x_0 x_k | One-byte `dup` with `k` ∈ 0..=15 baked into the opcode. |
-| 3k | [roll:k](#rollk) | | x_k … x_0 → x_{k-1} … x_0 x_k | One-byte `roll` with `k` ∈ 0..=15 baked into the opcode. |
+| 1e | [dup](#dup) | | x\_k … x\_0 k → x\_k … x\_0 x\_k | Copy the value at depth `k` onto the top (`k` popped as int). |
+| 1f | [roll](#roll) | | x\_k … x\_0 k → x\_{k-1} … x\_0 x\_k | Move the value at depth `k` to the top (`k` popped as int). |
+| 2k | [dup:k](#dupk) | | x\_k … x\_0 → x\_k … x\_0 x\_k | One-byte `dup` with `k` ∈ 0..=15 baked into the opcode. |
+| 3k | [roll:k](#rollk) | | x\_k … x\_0 → x\_{k-1} … x\_0 x\_k | One-byte `roll` with `k` ∈ 0..=15 baked into the opcode. |
 | **String** | | | | |
 | 40 | [readbits](#readbits) | | s n → s' x 1 \| s 0 | Pull `n` bits off the head of a string as an int (soft-fail if short). |
 | 41 | [readint](#readint) | | s → s' x 1 \| s 0 | Pull a canonical 32-byte int off the head of a string. |
@@ -380,7 +380,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 7b | [run](#run) | | s → … | Execute a sub-program in the *same* call frame. |
 | 7c | [loop](#loop) | | ø → ø | Rewind current Run to its start (loop body needs `break` to exit). |
 | 7d | [switch](#switch) | | x a b → … | Pick the truthy branch: run `a` if `x ≠ 0`, else `b`. |
-| 7e | [return](#return) | | a_{k-1} … a_0 k → ø | Exit current call frame, returning `k` items to the parent. |
+| 7e | [return](#return) | | a\_{k-1} … a\_0 k → ø | Exit current call frame, returning `k` items to the parent. |
 | 7f | [type](#type) | | x → x code | Push the type code of the top value (peek). |
 | 8k | [break:k](#breakk) | | ø → ø | Exit current Run and `k` more enclosing Runs. |
 | **Cells, actors, sends** | | | | |
@@ -471,7 +471,7 @@ No effect.
 
 ### dup
 
-_x_k … x_0 k_ → _x_k … x_0 x_k_
+_x\_k … x\_0 k_ → _x\_k … x\_0 x\_k_
 
 Pops `k` as `Int253`, copies the value at depth `k` (zero-indexed from the top) onto the stack. Source must be a [copyable](#types) type — hard-fails `TypeNotCopyable` otherwise. Hard-fails `IndexOutOfRange` when `k < 0` or exceeds the stack depth.
 
@@ -479,7 +479,7 @@ Prefer the immediate [`dup:k`](#dupk) form for `k ∈ 0..=15` (one byte instead 
 
 ### roll
 
-_x_k … x_0 k_ → _x_{k-1} … x_0 x_k_
+_x\_k … x\_0 k_ → _x\_{k-1} … x\_0 x\_k_
 
 Pops `k` as `Int253`, moves the value at depth `k` to the top of the stack. Any type works (no copy required). Hard-fails `IndexOutOfRange` when `k < 0` or exceeds the stack depth.
 
@@ -487,13 +487,13 @@ Prefer the immediate [`roll:k`](#rollk) form for `k ∈ 0..=15`.
 
 ### dup:k
 
-_x_k … x_0_ → _x_k … x_0 x_k_
+_x\_k … x\_0_ → _x\_k … x\_0 x\_k_
 
 Immediate-encoded `dup` with `k ∈ 0..=15` taken from the low nibble of the opcode byte (`0x2k`). One-byte equivalent of `pushint8 k; dup` — saves a byte over [`dup`](#dup) for shallow depths. Same copyability and bounds rules as `dup`.
 
 ### roll:k
 
-_x_k … x_0_ → _x_{k-1} … x_0 x_k_
+_x\_k … x\_0_ → _x\_{k-1} … x\_0 x\_k_
 
 Immediate-encoded `roll` with `k ∈ 0..=15` taken from the low nibble of the opcode byte (`0x3k`). One-byte equivalent of `pushint8 k; roll`. Same bounds rules as `roll`.
 
@@ -690,7 +690,7 @@ Peeks at the top value and pushes its length: byte count for `String`, entry cou
 
 ### dict
 
-_… val_{n-1} key_{n-1} … val_0 key_0 n_ → _dict_
+_… val\_{n-1} key\_{n-1} … val\_0 key\_0 n_ → _dict_
 
 Pops `n` (Int253), then `n` `(value, key)` pairs (key on top of each pair). Builds a Dict. Hard-fails `DictKeyOccupied` on duplicate keys.
 
