@@ -302,7 +302,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 
 | Hex | Name | Ctx | Stack | Description |
 | --- | --- | --- | --- | --- |
-| **Stack** | | | | |
+|     | **Stack**  | | | |
 | 0k | [push:k](#pushk-and-friends) | | ø → int | Push a small literal int 0–15 inline. |
 | 10–18 | [pushint8/16/64/128 \[s\], pushint](#pushk-and-friends) | | ø → int | Push an int with a width-class payload (signed, canonical). |
 | 19 | [pushstr](#pushstr) | | ø → str | Push a literal byte string with a length prefix. |
@@ -314,7 +314,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 1f | [roll](#roll) | | x\_k … x\_0 k → x\_{k-1} … x\_0 x\_k | Move the value at depth `k` to the top (`k` popped as int). |
 | 2k | [dup:k](#dupk) | | x\_k … x\_0 → x\_k … x\_0 x\_k | One-byte `dup` with `k` ∈ 0..=15 baked into the opcode. |
 | 3k | [roll:k](#rollk) | | x\_k … x\_0 → x\_{k-1} … x\_0 x\_k | One-byte `roll` with `k` ∈ 0..=15 baked into the opcode. |
-| **String** | | | | |
+|    |  **String**  | | | |
 | 40 | [readbits](#readbits) | | s n → s' x 1 \| s 0 | Pull `n` bits off the head of a string as an int (soft-fail if short). |
 | 41 | [readint](#readint) | | s → s' x 1 \| s 0 | Pull a canonical 32-byte int off the head of a string. |
 | 42 | [readstr](#readstr) | | s n → s' s'' 1 \| s 0 | Pull `n` bytes off the head of a string as a substring. |
@@ -328,7 +328,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 4c | [shiftleft](#shiftleft) | | a n → b c | Shift a string left by `n` bits; `c` carries the displaced high bits. |
 | 4d | [shiftright](#shiftright) | | a n → b c | Shift a string right by `n` bits; `c` carries the displaced low bits. |
 | 4e | [keccak256](#keccak256) | | s → x | 32-byte Keccak-256 digest (Ethereum compatibility). |
-| **Arithmetic & logic** | | | | |
+|    | **Math & logic**  | | | |
 | 50 | [abs](#abs) | | x → \|x\| s | Push magnitude and sign-bit of an int (`s` ∈ {0,1}). |
 | 51 | [eq](#eq) | | a b → a b {0\|1} or constraint | Equality test — cleartext peek, or lifted Constraint in the CS. |
 | 52 | [neg](#neg) | | x → −x | Flip sign of an int or Expression. |
@@ -339,14 +339,14 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 57 | [not](#not) | | x → y | Logical NOT for ints; structural negation for Constraints. |
 | 58 | [and](#and) | | a b → c | Logical AND for ints; lifts to Constraint conjunction in CS. |
 | 59 | [or](#or) | | a b → c | Logical OR for ints; lifts to Constraint disjunction in CS. |
-| **Constraint system** | | | | |
+|    | **Constraints**  | | | |
 | 5a | [scalar](#scalar) | ext. | s → expr | Lift a 32-byte scalar string to a constant Expression. |
 | 5b | [commit](#commit) | ext. | s → var | Wrap a 32-byte Pedersen-commitment point as a CS Variable. |
 | 5c | [alloc](#alloc) | ext. | ø → expr | Allocate a fresh R1CS variable and push it as a one-term Expression. |
 | 5d | [expr](#expr) | ext. | var → expr | Bind a Variable into the CS and push it as a one-term Expression. |
 | 5e | [range](#range) | ext. | expr n → expr | Range-prove an Expression to `n` ∈ 1..=64 bits. |
 | 5f | [size](#size) | | x → x n | Push length of a String / entry count of a Dict (peek). |
-| **Dict** | | | | |
+|    | **Dict**  | | | |
 | 60 | [dict](#dict) | | …kv… n → dict | Build a Dict from `n` `(value, key)` pairs already on the stack. |
 | 61 | [put](#put) | | dict k v → dict' | Insert `v` at fresh key `k`. |
 | 62 | [replace](#replace) | | dict k v → dict' {prev 1 \| 0} | Set `v` at key `k`; push prior value if any. |
@@ -356,7 +356,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 66 | [first](#first--last--next) | | dict → dict {k 1 \| 0} | Push the smallest key, or `0` for an empty dict. |
 | 67 | [last](#first--last--next) | | dict → dict {k 1 \| 0} | Push the largest key, or `0` for an empty dict. |
 | 68 | [next](#first--last--next) | | dict k → dict {k' 1 \| 0} | Push the smallest key strictly greater than `k`. |
-| **Cryptography** | | | | |
+|    | **Cryptography**  | | | |
 | 69 | [merlin](#merlin) | | label → merlin | Open a new Merlin transcript seeded with `label`. |
 | 6a | [merlinwrite](#merlinwrite) | | m label s → m | Append a labeled byte string to a transcript. |
 | 6b | [merlinread](#merlinread) | | m label n → m s | Challenge `n` bytes from a transcript under `label`. |
@@ -364,7 +364,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 6d | [sha512](#sha512) | | s → x | 64-byte SHA-512 digest. |
 | 6e | [sha3](#sha3) | | s → x | 32-byte SHA3-256 (FIPS-202) digest. |
 | 6f | [log](#log) | | s → ø | Emit a byte string as a data entry into the transaction log. |
-| **Tokens** | | | | |
+|    | **Tokens** | | | | |
 | 70 | [amount](#amount) | | t → t qty flv | Peek the quantity and flavor of a token without consuming it. |
 | 71 | [issue](#issue) | | qty tag → T | Mint a token under the current actor's identity + `tag`. |
 | 72 | [retire](#retire) | | t → ø | Burn a token (emits a retire entry to the txlog). |
@@ -374,7 +374,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 76 | [mix](#mix) | ext. | tokens… cmts… m n → tokens | Cloak: prove `m` input tokens balance `n` output commitments per flavor. |
 | 77 | [decrypt](#decrypt) | ext. | T f' f q' q → CT | Open an encrypted Token to a ClearToken using cleartext openings. |
 | 78 | [issueflv](#issueflv) | | cid tag → int | Compute the canonical flavor scalar for an actor id + tag. |
-| **Control flow** | | | | |
+|    | **Control flow** | | | |
 | 79 | [verify](#verify) | | x → ø | Assert: hard-fail if int is zero, or enforce a Constraint. |
 | 7a | [fee](#fee) | ext. | qty flv → −WT | Pay tx fee; push the balancing WideToken debt to net out via `mix`. |
 | 7b | [run](#run) | | s → … | Execute a sub-program in the *same* call frame. |
@@ -383,7 +383,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 7e | [return](#return) | | a\_{k-1} … a\_0 k → ø | Exit current call frame, returning `k` items to the parent. |
 | 7f | [type](#type) | | x → x code | Push the type code of the top value (peek). |
 | 8k | [break:k](#breakk) | | ø → ø | Exit current Run and `k` more enclosing Runs. |
-| **Cells, actors, sends** | | | | |
+|    | **Contracts** | | | |
 | 90 | [input](#input) | ext. | s → cell | Materialize a cell from a Utreexo-validated input encoding. |
 | 91 | [cell](#cell) | | items… k pred → cell | Build a new cell from `k` portable items under predicate `pred`. |
 | 92 | [output](#output) | | items… k pred → ø | Like `cell`, but emits the cell directly as a tx Output. |
@@ -405,7 +405,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | a2 | [gaslimit](#gaslimit) | | ø → n | Push the call's total gas budget cap. *planned* |
 | a3 | [memlimit](#memlimit) | | ø → n | Push the transient-memory cap (`4 × persistent_vbytes`). *planned* |
 | a4 | [newbytes](#newbytes) | | ø → n | Push vbytes delivered with the current call. *planned* |
-| **Chain info** | | | | |
+|    | **Chain info** | | | |
 | a5 | [height](#height) | int. | ø → n | Push the current block height. *planned* |
 | a6 | [blockhash](#blockhash) | int. | h → s | Push the block hash at height `h`. *planned* |
 | a7 | [blockburn](#blockburn) | int. | h → n | Push satoshis burned at height `h` (Bitcoin-coupled). *planned; maturity 100* |
