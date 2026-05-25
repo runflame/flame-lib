@@ -1064,23 +1064,12 @@ impl VM {
         self.push_value(Value::Int253(Int253::zero()));
     }
 
-    /// `0x40` `readbits` — `s n → s' x 1 | s 0`. Reads `n ≤ 256` bits
-    /// from the front of `s`, **LSB-first within each byte**, into bits
-    /// `0..n-1` of a fresh `Int253`. The sign bit (in-memory bit 255) is
-    /// only set when `n = 256` AND the input's bit 255 is `1`; for any
-    /// `n < 256` the result is non-negative.
+    /// _s n_ **readbits** → _s' x 1_ | _s 0_
     ///
-    /// Soft-fails (`s 0`, string left untouched) on:
-    /// - insufficient bytes in `s` (need `ceil(n/8)` bytes),
-    /// - magnitude ≥ ℓ (only reachable when `n ≥ 253`),
-    /// - negative zero (only reachable when `n = 256`, magnitude = 0,
-    ///   sign bit = 1).
-    ///
-    /// **Hard-fails** the script (programmer error) when `n > 256`.
+    /// Reads `n ≤ 256` bits LSB-first into a fresh `Int253`. Hard-fails
+    /// when `n > 256` (programmer error); soft-fails on short input,
+    /// non-canonical magnitude, or negative zero.
     fn op_read_bits(&mut self) -> Result<(), VMError> {
-        // Hard-fail at n > 256 (script abort). `pop_byte_count` returns
-        // `IndexOutOfRange` if n exceeds the cap, which is the
-        // hard-fail path.
         let n = self.pop_byte_count(256)?;
         let s = self.pop_value()?.to_string()?;
         let n_bytes = (n + 7) / 8;
@@ -1184,13 +1173,10 @@ impl VM {
         Ok(())
     }
 
-    /// `0x44` `writebits` — `s x n → s'`. Appends the low `n` bits of
-    /// `x`'s canonical 32-byte `Int253` representation to `s`. `n` must
-    /// be a multiple of 8 and `≤ 256` (byte-aligned strings only —
-    /// non-multiples-of-8 hard-fail with `BitCountOutOfRange`).
+    /// _s x n_ **writebits** → _s'_
     ///
-    /// The sign bit lives at bit 7 of byte 31; it is included in the
-    /// output iff `n = 256`.
+    /// Appends the low `n` bits of `x` (LSB-first) to `s`. `n` must be
+    /// a multiple of 8 and ≤ 256. Sign bit included iff `n = 256`.
     fn op_write_bits(&mut self) -> Result<(), VMError> {
         // Hard-fail at n > 256 (script abort) via the `pop_byte_count` cap.
         let n = self.pop_byte_count(256)?;
@@ -1305,19 +1291,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x51` `eq` — peeks the top two stack values and pushes `1` if
-    /// equal, `0` otherwise. The operands themselves stay on the stack.
-    /// `0x51 eq` — pop two and test equality.
-    ///
-    /// - Both `Int253` (or other cleartext-comparable cross types):
-    ///   peeks both, pushes `1` if equal, `0` otherwise. Operands
-    ///   stay on the stack — `a b → a b {0|1}` per spec.
-    /// - At least one `Expression` / `Variable` (only possible in
-    ///   external context): pops both, lifts each to
-    ///   `Expression-or-Constant`, and pushes a `Constraint::eq` —
-    ///   different stack diagram (`a b → constraint`) because the
-    ///   equality becomes a CS constraint, not an immediate
-    ///   boolean.
+    /// _a b_ **eq** → _a b {0|1}_ (cleartext) | _a b_ **eq** → _constraint_ (CS)
     fn op_eq<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
         let n = self.current_call.stack.len();
         if n < 2 {
@@ -1340,13 +1314,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x52 neg` — pop one and negate.
-    ///
-    /// - `Int253`: cleartext negation (zero stays positive).
-    /// - `Expression`: structural negation of the LC (external
-    ///   context only; an Expression can only exist on the stack
-    ///   after `alloc` / `scalar` / `expr`, all of which require
-    ///   external context).
+    /// _x_ **neg** → _-x_  (Int253 cleartext or Expression LC negate)
     fn op_neg<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
         match self.pop_value()? {
             Value::Int253(v) => {
@@ -1364,12 +1332,7 @@ impl VM {
         }
     }
 
-    /// `0x53 add` — pop two and sum.
-    ///
-    /// - Both `Int253`: cleartext sum modulo ℓ.
-    /// - Otherwise: lift each operand to `Expression` (with Int253
-    ///   folding into `Expression::Constant`) and emit an
-    ///   LC-addition Expression. Requires external context.
+    /// _x y_ **add** → _z_  (cleartext modulo ℓ, or LC sum)
     fn op_add<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
         let b = self.pop_value()?;
         let a = self.pop_value()?;
@@ -1388,13 +1351,7 @@ impl VM {
         }
     }
 
-    /// `0x54 mul` — pop two and multiply.
-    ///
-    /// - Both `Int253`: cleartext product modulo ℓ.
-    /// - Otherwise: lift each to `Expression` and emit a CS
-    ///   multiplication (constant-folded where both are
-    ///   constants, allocates a multiplier gate otherwise).
-    ///   Requires external context (needs `delegate.cs()`).
+    /// _x y_ **mul** → _z_  (cleartext modulo ℓ, or CS multiplier)
     fn op_mul<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         let b = self.pop_value()?;
         let a = self.pop_value()?;
@@ -1476,12 +1433,7 @@ impl VM {
         }
     }
 
-    /// `0x58 and` — pop two and conjoin.
-    ///
-    /// - Both `Int253`: logical AND, `1` iff both non-zero.
-    /// - At least one `Constraint` (only possible in external
-    ///   context): structural `Constraint::and`, with Int253
-    ///   operands lifted to `Constraint::Cleartext`.
+    /// _a b_ **and** → _c_  (Int253 logical, or Constraint conjunction)
     fn op_and<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
         let n = self.current_call.stack.len();
         if n < 2 {
@@ -1578,32 +1530,20 @@ impl VM {
         }
     }
 
-    /// `0x7b` `run` — pops a `String`, suspends the current Run onto
-    /// the run-stack, and switches to a fresh Run over the string's
-    /// instructions. For `String::Script(instrs)` the witness slots
-    /// (`Alloc(Some(_))`, nested `Input(Some(_))`, …) survive into
-    /// the new Run; for `String::Opaque(bytes)` the verifier-side
-    /// path parses the bytes and the witness slots default to
-    /// `None`. Both sides hash to the same bytecode for the proof
-    /// transcript.
+    /// _prog_ **run** → _results…_
     fn op_run(&mut self) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
         let instrs = s.to_instructions()?;
         self.enter_run(instrs)
     }
 
-    /// `0x7c` `loop` — resets the current Run's cursor to the start.
-    /// Without a `break`/`return` reachable from inside, this is an
-    /// unbounded loop; gas metering is the long-term cap.
+    /// **loop** → ø — rewinds the current Run to the start.
     fn op_loop(&mut self) -> Result<(), VMError> {
         self.current_call.current_run.rewind();
         Ok(())
     }
 
-    /// `0x7d` `switch` — pops three values `x a b` (top is `b`), chooses
-    /// `a` if `x` is non-zero and `b` if `x` is zero, then enters the
-    /// chosen script as a new Run (same semantics as `run`,
-    /// including the witness-preserving path for `String::Script`).
+    /// _x a b_ **switch** → enters `a` if `x != 0`, else `b`.
     fn op_switch(&mut self) -> Result<(), VMError> {
         let b = self.pop_value()?.to_string()?;
         let a = self.pop_value()?.to_string()?;
@@ -1613,21 +1553,10 @@ impl VM {
         self.enter_run(instrs)
     }
 
-    /// `0x7e` `return k` — atomic cross-frame return:
+    /// _x(k-1) … x(0) k_ **return** → ø
     ///
-    /// 1. pop the `k` count (must be a non-negative `Int253`),
-    /// 2. assert there is an enclosing call frame to return into
-    ///    (otherwise `ReturnAtRoot` — see below),
-    /// 3. assert the callee's stack has *exactly* `k` items left,
-    /// 4. pop the call frame,
-    /// 5. refund leftover gas to the parent,
-    /// 6. push the `k` items onto the parent's stack.
-    ///
-    /// **At the outermost call frame, `return` always errors regardless
-    /// of `k`** — `return` semantically requires a recipient, and at
-    /// root there is none. Scripts that want to exit early use `break:0`
-    /// (end the current Run; if the stack is clean and the run-stack is
-    /// empty, the call exits cleanly).
+    /// Pops the frame, refunds leftover gas, pushes the `k` items onto
+    /// the caller's stack. Errors `ReturnAtRoot` at the outermost frame.
     fn op_return(&mut self) -> Result<(), VMError> {
         let k_int = self.pop_value()?.to_int253()?;
         let k_u64 = k_int.to_u64().ok_or(VMError::BadReturnArity)?;
@@ -1707,14 +1636,8 @@ impl VM {
         Ok(out)
     }
 
-    /// Pushes the current Run onto the run-stack and replaces it
-    /// with a fresh Run over the supplied instructions. Callers
-    /// that have raw bytecode (`op_open`'s CallProof leaf,
-    /// `op_signrun`'s wire-message script) parse via
-    /// `Program::parse` first and pass `Vec<Instruction>` here;
-    /// callers with a stack `String` go through
-    /// [`String::to_instructions`], which preserves witnesses for
-    /// `String::Script` and parses bytes for `String::Opaque`.
+    /// Pushes the current Run onto the run-stack, switches to a
+    /// fresh Run over `instructions`.
     fn enter_run(&mut self, instructions: Vec<crate::ops::Instruction>) -> Result<(), VMError> {
         let new_run = Run::new(instructions);
         let old_run = mem::replace(&mut self.current_call.current_run, new_run);
@@ -1727,8 +1650,7 @@ impl VM {
     }
 
     /// Returns the current call's actor identity, or
-    /// `OpcodeRequiresActorContext` if the frame has none
-    /// (`ExternalRoot` or a `CellOpen` not nested in an actor call).
+    /// `OpcodeRequiresActorContext` if the frame has none.
     fn require_actor(&self) -> Result<&ActorID, VMError> {
         self.current_call
             .kind
@@ -1907,20 +1829,9 @@ impl VM {
     // (CallProof is now constructed from distinct stack pieces; see
     // `callproof_from_stack_pieces` below `op_open`. The earlier packed
     // bag-of-bytes layout was replaced per Architect's response on todo
-    // item 9.5.)
-
-    // `signtx` no longer builds a message at op-time — the TxID-bound
-    // message is constructed by the delegate at finalize, when TxID is
-    // known. See `DeferredSig::TxBound`.
-
-    /// Constructs the Merlin transcript message for `signrun`.
-    ///
-    /// Binds the signature to **the program bytes only**. The program is
-    /// expected to bind itself to any further context (cell anchor,
-    /// actor identity, tx anchor) by including explicit checks
-    /// (e.g. `anchor pushstr<expected> eq verify`). This pushes the
-    /// binding policy into the program author's hands rather than
-    /// pre-baking a fixed envelope; see todo item 9.2 for the rationale.
+    /// Merlin message for `signrun`: binds the signature to the
+    /// program bytes only. Programs add further context (anchor,
+    /// actor identity) via explicit checks inside their script.
     fn signrun_message(program: &[u8]) -> Vec<u8> {
         let mut t = Transcript::new(b"flamevm.signrun.v1");
         t.append_message(b"program", program);
@@ -1931,13 +1842,8 @@ impl VM {
 
     /// _string_ **input** → _cell_
     ///
-    /// External-only. Decodes a wire-encoded `Cell`, emits
-    /// `TxEntry::Input`, seeds `last_anchor`. The VM does not consult
-    /// Utreexo — the caller validates the bytes externally.
-    ///
-    /// `witness` is `Some` on the prover side when the consumed cell
-    /// holds Token entries; the witness re-attaches their
-    /// `Commitment::Open` payloads after `Cell::decode` strips them.
+    /// External-only. Witness `Some` re-attaches `Commitment::Open`
+    /// to Token payloads after `Cell::decode` strips them.
     fn op_input(
         &mut self,
         witness: Option<&crate::witness::InputWitnesses>,
@@ -2330,13 +2236,10 @@ impl VM {
         Ok(())
     }
 
-    /// `0x5c alloc` — allocates a low-level R1CS variable. The witness
-    /// comes from `Instruction::Alloc(Option<Int253>)`: `Some(i)` on
-    /// the prover side (cleartext value the CS uses when proving),
-    /// `None` on the verifier side (no assignment — the variable is
-    /// algebraically constrained later by `eq` / `verify`). Pushes
-    /// `Expression::LinearCombination([(v, 1)], witness?)` so
-    /// downstream arithmetic / equality ops see a one-term Expression.
+    /// **alloc** → _expr_
+    ///
+    /// Allocates a low-level R1CS variable. Witness `Some(i)` on the
+    /// prover; `None` on the verifier.
     fn op_alloc<D: Delegate>(
         &mut self,
         witness: Option<Int253>,
@@ -2439,12 +2342,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x5b commit` — `string → var`. Pops a String, downcasts to
-    /// `Commitment`, wraps in `Variable { commitment }`. Verifier:
-    /// `String::Opaque(point bytes)` → `Commitment::Closed(point)`.
-    /// Prover: `String::Commitment(Open(witness))` → witness preserved.
-    /// Downstream `expr` opcode then calls `commit_variable` on the
-    /// resulting Variable to bind it into the CS.
+    /// _s_ **commit** → _var_
     fn op_commit(&mut self) -> Result<(), VMError> {
         self.require_external()?;
         let s = self.pop_value()?.to_string()?;
@@ -2512,106 +2410,49 @@ impl VM {
         Ok(())
     }
 
-    /// `0x7a fee` — `qty flv → widetoken`. **[E]** external-only.
+    /// _qty flv_ **fee** → _widetoken_
     ///
-    /// Pops a non-negative `qty: Int253` (must fit in `u64` and be
-    /// `≤ MAX_FEE`) and a `flv: Int253`. Records `TxEntry::Fee(qty)`
-    /// into the txlog and bumps `VM::total_fee`. Allocates a fresh
-    /// `WideToken` in the CS with `q = -qty` and `f = flv`, constrains
-    /// both to their cleartext values (unblinded), and pushes the
-    /// debt token to the stack so the script must balance it against
-    /// real tokens (typically via `mix`).
-    ///
-    /// Cleartext-only: the qty is exposed as a `u64` (recorded in
-    /// `TxEntry::Fee`). A future blinded-fee branch — gated by ADR
-    /// — would carry a Pedersen commitment instead, mirroring how
-    /// `issue` evolved from cleartext to encrypted.
-    ///
-    /// Hard-fails:
-    /// - `FeeQtyNegative` if `qty < 0`.
-    /// - `FeeTooHigh` if `qty > MAX_FEE` or the per-tx accumulator
-    ///   would exceed `MAX_FEE`.
-    /// - `TypeNotInt253` if either operand isn't an `Int253`.
+    /// External-only. Records `TxEntry::Fee(qty)`, allocates a WideToken
+    /// debt with `q = -qty`, `f = flv`, pushes it.
     fn op_fee<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         self.require_external()?;
         use bulletproofs::r1cs::ConstraintSystem;
-        // Stack convention: flv on top, qty below — matches spec
-        // `qty flv → widetoken` and the `borrow` opcode pattern.
         let flv = self.pop_value()?.to_int253()?;
         let qty = self.pop_value()?.to_int253()?;
-        // Reject negative qty up front. A negative fee would be a
-        // refund and Flame has no refund mechanism — the negative
-        // half is the debt token returned to the caller, not the
-        // recorded fee amount.
         if qty.is_negative() {
             return Err(VMError::FeeQtyNegative);
         }
-        // Pack `qty` into u64 for the txlog. `Int253::to_u64()`
-        // returns `None` for magnitudes >= 2^64; reject those before
-        // CheckedFee even sees them — keeps the cap policy a single
-        // `if fee > MAX_FEE` check instead of two-stage cap math.
         let qty_u64 = qty.to_u64().ok_or(VMError::FeeTooHigh)?;
-        // Aggregate into the per-tx accumulator. Errors `FeeTooHigh`
-        // if the single arg or the running total exceeds `MAX_FEE`.
         self.total_fee.add(qty_u64)?;
-        // Build the WideToken debt half in the CS. Mirrors the
-        // (cleartext) zkvm pattern: allocate q + f, constrain to
-        // `-qty` and `flv` respectively. The cleartext branch leaves
-        // the witness side fully known to both prover and verifier;
-        // no Pedersen commitment needed.
         let qty_scalar: curve25519_dalek::scalar::Scalar = qty.into();
         let flv_scalar: curve25519_dalek::scalar::Scalar = flv.into();
-        // Allocate `q` with witness = -qty. Constrain `q + qty = 0`
-        // so `q == -qty`. (Bulletproofs needs an explicit linear
-        // constraint; you can't just assign the scalar.)
-        let q_var = delegate
-            .cs()
-            .allocate(Some(-qty_scalar))
-            .map_err(VMError::R1CSError)?;
+        let q_var = delegate.cs().allocate(Some(-qty_scalar)).map_err(VMError::R1CSError)?;
         delegate.cs().constrain(q_var + qty_scalar);
-        // Allocate `f` with witness = flv. Constrain `f - flv = 0`.
-        let f_var = delegate
-            .cs()
-            .allocate(Some(flv_scalar))
-            .map_err(VMError::R1CSError)?;
+        let f_var = delegate.cs().allocate(Some(flv_scalar)).map_err(VMError::R1CSError)?;
         delegate.cs().constrain(f_var - flv_scalar);
-        // Witness assignment (prover side): match the constraint
-        // shape so downstream `mix` sees a fully-witnessed
-        // AllocatedValue. Verifier side: assignment = None.
         let assignment = Some(spacesuit::Value {
             q: -spacesuit::SignedInteger::from(qty_u64),
             f: flv_scalar,
         });
-        // Push debt WideToken.
         let wide = crate::WideToken(spacesuit::AllocatedValue {
             q: q_var,
             f: f_var,
             assignment,
         });
         self.push_value(Value::WideToken(wide));
-        // Record TxEntry::Fee *after* CS allocation: keeps the
-        // ordering predictable in the merkle tree if a future variant
-        // needs to commit the qty/flv points instead.
         self.txlog.push(crate::tx::TxEntry::Fee(qty_u64));
         Ok(())
     }
 
     /// Converts a stack value into a `spacesuit::AllocatedValue` for
-    /// the cloak gadget. Mirrors zkvm's `item_to_wide_value`:
-    /// - `Token`: commit both Commitments to the CS, build AllocatedValue.
-    /// - `WideToken`: unwrap the inner AllocatedValue (already in CS).
-    /// - `ClearToken`: promote to unblinded `Token`, then commit.
-    /// - Other types: error `TypeNotToken`.
+    /// the cloak gadget. Token/ClearToken commit to the CS; WideToken
+    /// unwraps in place.
     fn value_to_allocated<D: Delegate>(
         &mut self,
         value: Value,
         delegate: &mut D,
     ) -> Result<spacesuit::AllocatedValue, VMError> {
         match value {
-            // Use the `allocated()` accessor (rather than `.0`) so the
-            // wrapper stays the only public surface for inspecting a
-            // WideToken's CS-bound shape — keeps the spacesuit
-            // dependency from leaking through `w.0` callsites.
             Value::WideToken(w) => Ok(*w.allocated()),
             Value::Token(t) => {
                 let (_, qty_var) = delegate.commit_variable(&t.qty)?;
@@ -2638,15 +2479,10 @@ impl VM {
         }
     }
 
-    /// `0x76 mix` — `anytokens… commitments… m n → values`. Pops
-    /// `n` (output count) then `m` (input count) as `Int253`; then
-    /// `n` output commitment String pairs (qty / flv on top of each
-    /// pair); then `m` input token-shaped values. Invokes
-    /// `spacesuit::cloak` to constrain that inputs balance with
-    /// outputs per flavor (each output range-proven 64-bit, all
-    /// values shuffled consistently). Pushes `n` output `Token`s.
+    /// _anytokens… commitments… m n_ **mix** → _tokens_
     ///
-    /// Mirrors zkvm's `cloak(m, n)` opcode exactly.
+    /// Invokes the spacesuit cloak gadget to balance `m` input tokens
+    /// against `n` range-proven output tokens per flavor.
     fn op_mix<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         self.require_external()?;
         // Pop n (output count) and m (input count).
