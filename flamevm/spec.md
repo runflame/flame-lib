@@ -290,27 +290,6 @@ Withdrawn vbytes are recycled into the total pool. Recycling is subject to 100-b
 
 # Instruction set
 
-Layout of all the instructions:
-
-|  | 00 | 10 | 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | A0 | B0 | C0 | D0 | E0 | F0 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 | push0 | pushi8 | dup0 | roll0 | readbits | abs | dict | amount | break0 | input | callerid |  |  |  |  |  |
-| 1 | push1 | pushi8s | dup1 | roll1 | readint | eq | put | issue | break1 | object | method |  |  |  |  |  |
-| 2 | push2 | pushi16 | dup2 | roll2 | readstr | neg | replace | retire | break2 | output | gaslimit |  |  |  |  |  |
-| 3 | push3 | pushi16s | dup3 | roll3 | readpoint | add | get | borrow | break3 | open | memlimit |  |  |  |  |  |
-| 4 | push4 | pushi64 | dup4 | roll4 | writebits | mul | getopt | merge | break4 | send | newbytes |  |  |  |  |  |
-| 5 | push5 | pushi64s | dup5 | roll5 | writeint | divmod | getdup | split | break5 | call | height |  |  |  |  |  |
-| 6 | push6 | pushi128 | dup6 | roll6 | append | mod252 | first | mix | break6 | load | blockhash |  |  |  |  |  |
-| 7 | push7 | pushi128s | dup7 | roll7 | writezeros | not | last | decrypt | break7 | save | blockburn |  |  |  |  |  |
-| 8 | push8 | pushint | dup8 | roll8 | bitnot | and | next | issueflv | break8 | signtx | blockweight |  |  |  |  |  |
-| 9 | push9 | pushstr | dup9 | roll9 | bitor | or | merlin | verify | break9 | signcall | blockrate |  |  |  |  |  |
-| A | push10 | pushpoint | dup10 | roll10 | bitand | const | merlinwrite | fee | break10 | timelock | chainstate |  |  |  |  |  |
-| B | push11 | pushtoken | dup11 | roll11 | bitxor | extvar | merlinread | run | break11 | version |  |  |  |  |  |  |
-| C | push12 | drop | dup12 | roll12 | shiftleft | intvar | sha256 | loop | break12 | actorid |  |  |  |  |  |  |
-| D | push13 | nop | dup13 | roll13 | shiftright | expr | sha512 | switch | break13 | anchor |  |  |  |  |  |  |
-| E | push14 | dup | dup14 | roll14 | keccak256 | range | sha3 | return | break14 | gas |  |  |  |  |  |  |
-| F | push15 | roll | dup15 | roll15 |  | size | sigverify | type | break15 | bytes |  |  |  |  |  |  |
-
 ### Stack operations
 
 | Hex | Name | Stack diagram | Notes |
