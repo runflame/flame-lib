@@ -293,8 +293,6 @@ Withdrawn vbytes are recycled into the total pool. Recycling is subject to 100-b
 
 Each instruction is a one-byte **opcode** optionally followed by **immediate data** encoded inline in the bytecode. Stack effects are written in left-to-right bottom-to-top order: in `a b → c`, `b` is the top of the stack on entry, `c` is the top on exit.
 
-**Failure modes.** A **hard fail** aborts the current call (and unwinds outwards on `op_break` boundaries). A **soft fail** is an in-band signal: the opcode pushes an optional shape `{value 1 | 0}` and leaves the consumed value(s) on the stack untouched so the script can branch. The two kinds are noted per opcode.
-
 **Context column.** The **Ctx** column in the instruction table marks opcodes that fail outside their supported context:
 - **ext.** — external-only. Hard-fails `ExternalOnly` from internal context. Covers `input`, the constraint-system opcodes (`scalar`, `commit`, `alloc`, `expr`, `range`, the CS branches of `borrow`), and the CS-consuming opcodes (`mix`, `decrypt`, `fee`).
 - **int.** — internal-only. Needs a registry handle. Covers `call`, `load`, `save`, and the chain-info family.
@@ -416,6 +414,13 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | aa | [chainstate](#chainstate) | int. | n → dict | Push a dict of block stats at height `n`. *planned; maturity 100* |
 
 Opcodes marked *planned* are reserved in the byte map; their handlers are not yet wired. Scripts using them error `UnknownOpcode` until the corresponding implementation phase lands (see `flamevm/plan.md`).
+
+## Failure modes
+
+A **hard fail** aborts the current call (and unwinds outwards on `op_break` boundaries).
+
+A **soft fail** is an in-band signal: the opcode pushes an optional shape `{value 1 | 0}` and leaves the consumed value(s) on the stack untouched so the script can branch. The two kinds are noted per opcode.
+
 
 ## Stack instructions
 
