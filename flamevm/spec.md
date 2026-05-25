@@ -122,12 +122,7 @@ Stack-only types (non-portable, never encoded on the wire):
 | Variable | Secret value in the constraint system, tied to a Pedersen commitment. |
 | Expression | Linear combination of variables. |
 | Constraint | Logical combination of boolean conditions. |
-
-Note: an earlier draft listed a `MultiscalarMul` stack-only type for
-deferred scalar-point checks. The implementation places that role on
-the delegate-internal `musig::BatchVerifier` instead (mirrors zkvm),
-so `MultiscalarMul` is no longer a user-visible type — no opcode
-produces or consumes one. The row was removed.
+| MultiscalarMul | Lazy `sum(s_i · P_i)` accumulator; consumed by `verify` which appends it to the same batch as Schnorr/Musig sigs (assertion: `sum == identity`). |
 
 **Encoding**
 
@@ -218,6 +213,30 @@ Ristretto255 group element. Stored as compressed 32-byte encoding. Used to repre
 - `Point::Predicate(PredicateTree)` — Taproot predicate with merkle tree (used by [`cell`](#cell) / [`output`](#output) to attach an unlock witness, and by [`signtx`](#signtx) / [`signcall`](#signcall) for the verification key).
 
 A Point on the value stack downcasts via `to_commitment` / `to_predicate` to extract its witness (preserved through `Point::Commitment` / `Point::Predicate`) or to wrap an `Opaque` as the verifier's `Closed` / `Opaque` form.
+
+### MultiscalarMul
+
+Lazy multi-scalar-multiplication: a vector of `(scalar_i, point_i)` pairs that the VM defers as the assertion `sum(s_i · P_i) == identity`. Linear (non-copyable, non-droppable), stack-only, **not** wire-encodable — exactly like [Expression](#types) and [Constraint](#types).
+
+**Purpose: custom Sigma-protocols.** Together with [Merlin](#cryptography-instructions) transcripts (Fiat–Shamir challenges), `MultiscalarMul` lets contract authors express any Schnorr-style relation over Pedersen-committed data — proof of knowledge of discrete log, equality of two encryptions, proof of correct re-encryption, etc. The verification equation always reduces to "this weighted sum of group elements is the identity point".
+
+**Batched verification.** `verify` on an MSM does **not** decompress or check anything immediately — it appends the term vector to the same `BatchVerifier` that holds the transaction's Schnorr / Musig signatures (with `basepoint_scalar = 0` so the MSM contributes only its dynamic terms). At finalize the entire batch is verified with a single Dalek `vartime_multiscalar_mul` (Strauss algorithm), amortising the ~4× speedup of batched MSM across every Sigma-protocol assertion and every signature in the transaction.
+
+**Construction.** MSM has no dedicated constructor opcode. Instead, the arithmetic opcodes lift Point/MSM operands implicitly:
+
+| Operation | Result |
+|---|---|
+| `Point + Point` | MSM with two unit-scalar terms |
+| `Point + MSM` / `MSM + Point` | MSM with the point appended (coefficient 1) |
+| `MSM + MSM` | concatenated term lists |
+| `Int253 * Point` / `Point * Int253` | MSM with one term `(int_as_scalar, point)` |
+| `Int253 * MSM` / `MSM * Int253` | MSM with all coefficients scaled |
+| `-Point` | MSM with one term `(-1, point)` |
+| `-MSM` | MSM with all coefficients negated |
+
+Quadratic group-element products (`Point * Point`, `MSM * Point`, `MSM * MSM`) hard-fail `TypeNotInt253` — no Sigma-protocol semantics.
+
+**Random factor.** The `BatchVerifier` multiplies each appended statement (MSM, single-sig, multi-sig) by a fresh random scalar before summing, so a failing MSM cannot be cancelled out by other batch members (probability `< 2^-252` per statement). See `starsig::BatchVerification` for the exact construction.
 
 ### Dict
 
@@ -352,9 +371,9 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 |    | **Math & logic**  | | | |
 | 50 | [abs](#abs) | | x → \|x\| s | Push magnitude and sign-bit of an int (`s` ∈ {0,1}). |
 | 51 | [eq](#eq) | | a b → a b {0\|1} or constraint | Equality test — cleartext peek, or lifted Constraint in the CS. |
-| 52 | [neg](#neg) | | x → −x | Flip sign of an int or Expression. |
-| 53 | [add](#add) | | x y → z | Add two ints; lifts to linear combination when CS types involved. |
-| 54 | [mul](#mul) | | x y → z | Multiply two ints; lifts to a CS multiplier gate when needed. |
+| 52 | [neg](#neg) | | x → −x | Flip sign of int / Expression / MSM (Point lifts to MSM). |
+| 53 | [add](#add) | | x y → z | Add ints (or Expressions); Point/MSM operands lift to MSM. |
+| 54 | [mul](#mul) | | x y → z | Multiply ints (or CS gate); Int·Point or Int·MSM lift to MSM. |
 | 55 | [divmod](#divmod) | | x z → d r | Truncated division — push quotient and remainder. |
 | 56 | [mod252](#mod252) | | s → int | Reduce a ≤64-byte LE string modulo ℓ and push as non-negative int. |
 | 57 | [not](#not) | | x → y | Logical NOT for ints; structural negation for Constraints. |
@@ -396,7 +415,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 77 | [decrypt](#decrypt) | ext. | T f' f q' q → CT | Open an encrypted Token to a ClearToken using cleartext openings. |
 | 78 | [issueflv](#issueflv) | | cid tag → int | Compute the canonical flavor scalar for an actor id + tag. |
 |    | **Control flow** | | | |
-| 79 | [verify](#verify) | | x → ø | Assert: hard-fail if int is zero, or enforce a Constraint. |
+| 79 | [verify](#verify) | | x → ø | Assert: hard-fail if int is zero, enforce a Constraint, or batch an MSM. |
 | 7a | [fee](#fee) | ext. | qty flv → −WT | Pay tx fee; push the balancing WideToken debt to net out via `mix`. |
 | 7b | [run](#run) | | s → … | Execute a sub-program in the *same* call frame. |
 | 7c | [loop](#loop) | | ø → ø | Rewind current Run to its start (loop body needs `break` to exit). |
@@ -635,19 +654,27 @@ Two stack diagrams depending on operand types and context:
 
 _x_ → _−x_
 
-`Int253` flips its sign bit (zero stays positive). `Expression` negates the linear combination. Other types hard-fail `TypeNotInt253`.
+`Int253` flips its sign bit (zero stays positive). `Expression` negates the linear combination. `Point` / `MultiscalarMul` lift to MSM (see [MultiscalarMul](#multiscalarmul)) with negated coefficients. Other types hard-fail `TypeNotInt253`.
 
 ### add
 
 _x y_ → _z_
 
-`Int253 + Int253` is signed-modular addition; magnitude wraps modulo ℓ. Mixed-type operands lift to `Expression` and produce an LC sum — external context only.
+Dispatch by operand types:
+- `Int253 + Int253` → signed-modular addition mod ℓ.
+- `Point + Point` / `Point + MSM` / `MSM + Point` / `MSM + MSM` → [MultiscalarMul](#multiscalarmul) with concatenated terms (works in either context).
+- Mixed Int/Expression in external context → lifts to `Expression` LC sum.
 
 ### mul
 
 _x y_ → _z_
 
-Like [`add`](#add) but multiplicative. The lifted branch may add a multiplier gate to the CS (or constant-fold when one operand is `Expression::Constant`).
+Dispatch by operand types:
+- `Int253 * Int253` → signed-modular multiplication mod ℓ.
+- `Int253 * Point` / `Point * Int253` → [MultiscalarMul](#multiscalarmul) with one `(scalar, point)` term.
+- `Int253 * MSM` / `MSM * Int253` → MSM with scaled coefficients.
+- Mixed Int/Expression in external context → may add a CS multiplier gate (or constant-fold when one side is `Expression::Constant`).
+- `Point * Point`, `MSM * Point`, `MSM * MSM` → hard-fail `TypeNotInt253` (quadratic in group elements, no Sigma-protocol semantics).
 
 ### divmod
 
@@ -880,7 +907,10 @@ Pops `tag` (String) and `cid` (String, exactly 32 bytes — an actor id). Pushes
 
 _x_ → ø
 
-`Int253`: hard-fails `VerifyFailed` if zero; otherwise consumes the value. `Constraint`: enforces the constraint via the delegate's CS (external context only). Other types hard-fail `TypeNotInt253`.
+- `Int253`: hard-fails `VerifyFailed` if zero; otherwise consumes the value.
+- `Constraint`: enforces the constraint via the delegate's CS (external context only).
+- `MultiscalarMul`: appends `sum(s_i · P_i) == identity` to the delegate's `BatchVerifier` alongside any Schnorr/Musig sigs (external context only). Returns success immediately; the batched check runs at finalize and on failure surfaces as `BatchSignatureVerificationFailed`. See [MultiscalarMul](#multiscalarmul).
+- Other types hard-fail `TypeNotInt253`.
 
 ### fee
 
