@@ -176,38 +176,54 @@ pub enum CallKind {
         caller: ActorID,
         anchor: Anchor,
     },
+
+    /// `open` of a cell predicate (either context).
+    CellOpen {
+        anchor: Anchor,
+        predicate: Predicate,
+    },
 }
 
 impl CallKind {
-    /// Returns the actor identity of this frame, if any.
+    /// Returns the actor identity of this frame, if any. Used by the
+    /// re-entrancy guard.
     pub fn actor(&self) -> Option<&ActorID> {
         match self {
             Self::InternalRoot { actor, .. } | Self::ActorCall { actor, .. } => Some(actor),
-            Self::ExternalRoot => None,
+            Self::ExternalRoot | Self::CellOpen { .. } => None,
         }
     }
 
     /// Returns the dispatched method key, if the frame has one.
+    /// `op_method` reads this; pure read.
     pub fn method(&self) -> Option<Int253> {
         match self {
             Self::InternalRoot { method, .. } | Self::ActorCall { method, .. } => Some(*method),
-            Self::ExternalRoot => None,
+            Self::ExternalRoot | Self::CellOpen { .. } => None,
         }
     }
 
-    /// Returns the caller's actor id, if any.
+    /// Returns the caller's actor id, if any. `op_callerid` reads
+    /// this — for `InternalRoot` with a `None` caller (the
+    /// originating tx came from an external sender) we surface
+    /// `Some(&zero_id)` via the dedicated method [`Self::caller_or_zero`]
+    /// so the opcode can push all-zeros instead of erroring.
     pub fn caller(&self) -> Option<&ActorID> {
         match self {
             Self::InternalRoot { caller, .. } => caller.as_ref(),
             Self::ActorCall { caller, .. } => Some(caller),
-            Self::ExternalRoot => None,
+            Self::ExternalRoot | Self::CellOpen { .. } => None,
         }
     }
 
-    /// Returns the frame's entry anchor, if any.
+    /// Returns the frame's anchor (cell-open anchor or call-entry
+    /// anchor). `op_anchor` reads this. `ExternalRoot` and
+    /// `ActorCall`-by-error have no anchor concept.
     pub fn anchor(&self) -> Option<Anchor> {
         match self {
-            Self::InternalRoot { anchor, .. } | Self::ActorCall { anchor, .. } => Some(*anchor),
+            Self::InternalRoot { anchor, .. }
+            | Self::ActorCall { anchor, .. }
+            | Self::CellOpen { anchor, .. } => Some(*anchor),
             Self::ExternalRoot => None,
         }
     }
@@ -514,9 +530,12 @@ impl VM {
         }
     }
 
-    /// True iff the current frame is `ExternalRoot`.
+    /// True iff the current frame is `ExternalRoot` or a `CellOpen`.
     fn is_external(&self) -> bool {
-        matches!(self.current_call.kind, CallKind::ExternalRoot)
+        matches!(
+            self.current_call.kind,
+            CallKind::ExternalRoot | CallKind::CellOpen { .. },
+        )
     }
 
     /// External-context step.
