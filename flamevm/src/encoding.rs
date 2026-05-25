@@ -326,8 +326,10 @@ pub fn write_string(w: &mut impl Writer, s: &String) -> Result<(), WriteError> {
     w.write(b"str.data", &bytes)
 }
 
-/// Reads a compact-encoded `String`.
-pub fn read_string(r: &mut impl Reader) -> Result<String, ReadError> {
+/// Reads a compact-encoded `String`. Test-only — production code
+/// goes through `read_value` which dispatches on the type tag.
+#[cfg(test)]
+fn read_string(r: &mut impl Reader) -> Result<String, ReadError> {
     let tag = r.read_u8()?;
     read_string_with_tag(r, tag)
 }
@@ -389,8 +391,10 @@ pub fn write_dict_prefix(w: &mut impl Writer, count: usize) -> Result<(), WriteE
     }
 }
 
-/// Reads the count from a dict tag (with optional sub-varint).
-pub fn read_dict_prefix(r: &mut impl Reader) -> Result<usize, ReadError> {
+/// Reads the count from a dict tag. Test-only — production code
+/// goes through `read_value` which dispatches on the type tag.
+#[cfg(test)]
+fn read_dict_prefix(r: &mut impl Reader) -> Result<usize, ReadError> {
     let tag = r.read_u8()?;
     read_dict_count_with_tag(r, tag)
 }

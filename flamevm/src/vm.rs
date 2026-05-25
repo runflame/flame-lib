@@ -138,7 +138,9 @@ impl Run {
         Ok(Some(instr))
     }
 
-    /// True iff the Run has reached its end.
+    /// True iff the Run has reached its end. Test-only — production
+    /// code drives the run to completion via the dispatch loop.
+    #[cfg(test)]
     pub(crate) fn is_finished(&self) -> bool {
         self.cursor >= self.instructions.len()
     }
@@ -545,7 +547,8 @@ impl VM {
     }
 
     /// Internal-context step without a registry — registry-touching
-    /// opcodes error `RegistryUnavailable`.
+    /// opcodes error `RegistryUnavailable`. Test-only.
+    #[cfg(test)]
     pub(crate) fn step_internal(&mut self) -> Result<bool, VMError> {
         let mut stub = InternalDelegate;
         self.step(&mut stub, None)
