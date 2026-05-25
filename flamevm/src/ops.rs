@@ -117,95 +117,95 @@ const OP_METHOD: u8 = 0xa1;
 /// variant's inline comment shows its stack diagram.
 #[derive(Clone, Debug)]
 pub enum Instruction {
-    PushInt(Int253),                                       // ø push → int
-    PushStr(String),                                       // ø pushstr → str
-    PushPoint([u8; 32]),                                   // ø pushpoint → point
-    PushToken,                                             // flv pushtoken → token
-    Drop,                                                  // x drop → ø
-    Nop,                                                   // ø nop → ø
-    Dup,                                                   // x(k) … x(0) k dup → x(k) … x(0) x(k)
-    Roll,                                                  // x(k) … x(0) k roll → x(k-1) … x(0) x(k)
-    DupK(u8),                                              // x(k) … x(0) dup:k → x(k) … x(0) x(k)
-    RollK(u8),                                             // x(k) … x(0) roll:k → x(k-1) … x(0) x(k)
-    ReadBits,                                              // s n readbits → s' x 1 | s 0
-    ReadInt,                                               // s readint → s' x 1 | s 0
-    ReadStr,                                               // s n readstr → s' s'' 1 | s 0
-    ReadPoint,                                             // s readpoint → s' p 1 | s 0
-    WriteBits,                                             // s x n writebits → s'
-    WriteInt,                                              // s x writeint → s'
-    Append,                                                // s s' append → s''
-    WriteZeros,                                            // s n writezeros → s'
-    BitNot,                                                // s bitnot → s'
-    BitOr,                                                 // a b bitor → c
-    BitAnd,                                                // a b bitand → c
-    BitXor,                                                // a b bitxor → c
-    ShiftLeft,                                             // a n shiftleft → b c
-    ShiftRight,                                            // a n shiftright → b c
-    Keccak256,                                             // s keccak256 → x
-    Abs,                                                   // x abs → |x| s
-    Eq,                                                    // a b eq → a b {0|1} or constraint
-    Neg,                                                   // x neg → -x
-    Add,                                                   // x y add → z
-    Mul,                                                   // x y mul → z
-    DivMod,                                                // x z divmod → d r
-    Mod252,                                                // s mod252 → int
-    Not,                                                   // x not → y
-    And,                                                   // a b and → c
-    Or,                                                    // a b or → c
-    Size,                                                  // x size → x n
-    Scalar,                                                // s scalar → expr
-    Commit,                                                // s commit → var
-    Alloc(Option<Int253>),                                 // ø alloc → expr
-    Expr,                                                  // var expr → expr
-    Range,                                                 // expr n range → expr
-    Dict,                                                  // val key … val key n dict → dict
-    Put,                                                   // dict k v put → dict'
-    Replace,                                               // dict k v replace → dict' {prev 1 | 0}
-    Get,                                                   // dict k get → dict' k v
-    GetOpt,                                                // dict k getopt → dict' {v 1 | 0}
-    GetDup,                                                // dict k getdup → dict {v 1 | 0}
-    First,                                                 // dict first → dict {k 1 | 0}
-    Last,                                                  // dict last → dict {k 1 | 0}
-    Next,                                                  // dict k next → dict {k' 1 | 0}
-    Merlin,                                                // label merlin → merlin
-    MerlinWrite,                                           // m label s merlinwrite → m
-    MerlinRead,                                            // m label n merlinread → m s
-    Sha256,                                                // s sha256 → x
-    Sha512,                                                // s sha512 → x
-    Sha3,                                                  // s sha3 → x
-    Log,                                                   // s log → ø
-    Amount,                                                // t amount → t qty flv
-    Issue,                                                 // qty tag issue → T
-    Retire,                                                // t retire → ø
-    Borrow,                                                // qty flv borrow → -T +T
-    Merge,                                                 // a b merge → {c 1 | a b 0}
-    Split,                                                 // a q split → a' b
-    Mix,                                                   // tokens… cmts… m n mix → tokens
-    Decrypt,                                               // T f' f q' q decrypt → CT
-    IssueFlv,                                              // cid tag issueflv → int
-    Verify,                                                // x verify → ø
-    Fee,                                                   // qty flv fee → -WT
-    Run,                                                   // s run → …
-    Loop,                                                  // ø loop → ø
-    Switch,                                                // x a b switch → …
-    Return,                                                // a(k-1) … a(0) k return → ø
-    Type,                                                  // x type → x code
-    BreakK(u8),                                            // ø break:k → ø
-    Input,                                                 // s input → cell
-    Cell,                                                  // items… k pred cell → cell
-    Output,                                                // items… k pred output → ø
-    Open,                                                  // cell ik nbrs pos script gas bytes args… k open → results… k'
-    Send,                                                  // args… k refund gas bytes method addr send → ø
-    Call,                                                  // args… k gas bytes method addr call → results… k'
-    Load,                                                  // ø load → dict
-    Save,                                                  // dict save → ø
-    Signtx,                                                // cell signtx → items… k
-    Signrun,                                               // cell script sig gas bytes args… m signrun → results… k'
-    Actorid,                                               // ø actorid → s
-    Anchor,                                                // ø anchor → s
-    Callerid,                                              // ø callerid → s
-    Method,                                                // ø method → int
-    Ext(u8),                                               // unknown opcode byte; produced by the parser for any unassigned tag
+    PushInt(Int253),       // ø push → int
+    PushStr(String),       // ø pushstr → str
+    PushPoint([u8; 32]),   // ø pushpoint → point
+    PushToken,             // flv pushtoken → token
+    Drop,                  // x drop → ø
+    Nop,                   // ø nop → ø
+    Dup,                   // x(k) … x(0) k dup → x(k) … x(0) x(k)
+    Roll,                  // x(k) … x(0) k roll → x(k-1) … x(0) x(k)
+    DupK(u8),              // x(k) … x(0) dup:k → x(k) … x(0) x(k)
+    RollK(u8),             // x(k) … x(0) roll:k → x(k-1) … x(0) x(k)
+    ReadBits,              // s n readbits → s' x 1 | s 0
+    ReadInt,               // s readint → s' x 1 | s 0
+    ReadStr,               // s n readstr → s' s'' 1 | s 0
+    ReadPoint,             // s readpoint → s' p 1 | s 0
+    WriteBits,             // s x n writebits → s'
+    WriteInt,              // s x writeint → s'
+    Append,                // s s' append → s''
+    WriteZeros,            // s n writezeros → s'
+    BitNot,                // s bitnot → s'
+    BitOr,                 // a b bitor → c
+    BitAnd,                // a b bitand → c
+    BitXor,                // a b bitxor → c
+    ShiftLeft,             // a n shiftleft → b c
+    ShiftRight,            // a n shiftright → b c
+    Keccak256,             // s keccak256 → x
+    Abs,                   // x abs → |x| s
+    Eq,                    // a b eq → a b {0|1} or constraint
+    Neg,                   // x neg → -x
+    Add,                   // x y add → z
+    Mul,                   // x y mul → z
+    DivMod,                // x z divmod → d r
+    Mod252,                // s mod252 → int
+    Not,                   // x not → y
+    And,                   // a b and → c
+    Or,                    // a b or → c
+    Size,                  // x size → x n
+    Scalar,                // s scalar → expr
+    Commit,                // s commit → var
+    Alloc(Option<Int253>), // ø alloc → expr
+    Expr,                  // var expr → expr
+    Range,                 // expr n range → expr
+    Dict,                  // val key … val key n dict → dict
+    Put,                   // dict k v put → dict'
+    Replace,               // dict k v replace → dict' {prev 1 | 0}
+    Get,                   // dict k get → dict' k v
+    GetOpt,                // dict k getopt → dict' {v 1 | 0}
+    GetDup,                // dict k getdup → dict {v 1 | 0}
+    First,                 // dict first → dict {k 1 | 0}
+    Last,                  // dict last → dict {k 1 | 0}
+    Next,                  // dict k next → dict {k' 1 | 0}
+    Merlin,                // label merlin → merlin
+    MerlinWrite,           // m label s merlinwrite → m
+    MerlinRead,            // m label n merlinread → m s
+    Sha256,                // s sha256 → x
+    Sha512,                // s sha512 → x
+    Sha3,                  // s sha3 → x
+    Log,                   // s log → ø
+    Amount,                // t amount → t qty flv
+    Issue,                 // qty tag issue → T
+    Retire,                // t retire → ø
+    Borrow,                // qty flv borrow → -T +T
+    Merge,                 // a b merge → {c 1 | a b 0}
+    Split,                 // a q split → a' b
+    Mix,                   // tokens… cmts… m n mix → tokens
+    Decrypt,               // T f' f q' q decrypt → CT
+    IssueFlv,              // cid tag issueflv → int
+    Verify,                // x verify → ø
+    Fee,                   // qty flv fee → -WT
+    Run,                   // s run → …
+    Loop,                  // ø loop → ø
+    Switch,                // x a b switch → …
+    Return,                // a(k-1) … a(0) k return → ø
+    Type,                  // x type → x code
+    BreakK(u8),            // ø break:k → ø
+    Input,                 // s input → cell
+    Cell,                  // items… k pred cell → cell
+    Output,                // items… k pred output → ø
+    Open,                  // cell ik nbrs pos script gas bytes args… k open → results… k'
+    Send,                  // args… k refund gas bytes method addr send → ø
+    Call,                  // args… k gas bytes method addr call → results… k'
+    Load,                  // ø load → dict
+    Save,                  // dict save → ø
+    Signtx,                // cell signtx → items… k
+    Signrun,               // cell script sig gas bytes args… m signrun → results… k'
+    Actorid,               // ø actorid → s
+    Anchor,                // ø anchor → s
+    Callerid,              // ø callerid → s
+    Method,                // ø method → int
+    Ext(u8),               // unknown opcode byte; produced by the parser for any unassigned tag
 }
 
 impl Instruction {
