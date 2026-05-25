@@ -177,10 +177,14 @@ pub enum CallKind {
         anchor: Anchor,
     },
 
-    /// `open` of a cell predicate (either context).
+    /// `open` / `signcall` of a cell predicate. `external_context`
+    /// snapshots the caller's `is_external()` at frame creation so
+    /// `require_external` propagates correctly across the isolation
+    /// boundary (ADR 0013).
     CellOpen {
         anchor: Anchor,
         predicate: Predicate,
+        external_context: bool,
     },
 }
 
@@ -530,12 +534,14 @@ impl VM {
         }
     }
 
-    /// True iff the current frame is `ExternalRoot` or a `CellOpen`.
+    /// True iff CS-touching opcodes are permitted. `ExternalRoot` is
+    /// always external; `CellOpen` inherits the caller's snapshot.
     fn is_external(&self) -> bool {
-        matches!(
-            self.current_call.kind,
-            CallKind::ExternalRoot | CallKind::CellOpen { .. },
-        )
+        match self.current_call.kind {
+            CallKind::ExternalRoot => true,
+            CallKind::CellOpen { external_context, .. } => external_context,
+            _ => false,
+        }
     }
 
     /// External-context step.

@@ -317,6 +317,7 @@ fn return_transfers_values_to_parent() {
     let child_kind = CallKind::CellOpen {
         anchor: Anchor([0u8; 32]),
         predicate: Predicate::Opaque(CompressedRistretto([0u8; 32])),
+        external_context: true,
     };
     let child_frame = CallFrame::new(
         Program::parse(&child_script).expect("parse").into_instructions(),

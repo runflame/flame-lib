@@ -193,6 +193,7 @@ pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
     let child_kind = CallKind::CellOpen {
         anchor: Anchor([0u8; 32]),
         predicate: Predicate::Opaque(CompressedRistretto([0u8; 32])),
+        external_context: true,
     };
     let child = CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), child_kind, 500, 0, 0);
     let mut vm = VM::new(dummy_header(), parent);
