@@ -8,19 +8,27 @@ use crate::String;
 use crate::{ClearToken, Token, WideToken};
 use crate::{Constraint, Expression, Variable};
 
+#[rustfmt::skip]
 impl Value {
-    // Plain variant extractors. One-line match body keeps the whole
-    // family scannable; the method name and error variant together
-    // say everything the doc comment used to.
-    #[rustfmt::skip] pub fn to_int253(self)      -> Result<Int253,      VMError> { match self { Value::Int253(x)      => Ok(x), _ => Err(VMError::TypeNotInt253) } }
-    #[rustfmt::skip] pub fn to_string(self)      -> Result<String,      VMError> { match self { Value::String(x)      => Ok(x), _ => Err(VMError::TypeNotString) } }
-    #[rustfmt::skip] pub fn to_dict(self)        -> Result<Dict,        VMError> { match self { Value::Dict(x)        => Ok(x), _ => Err(VMError::TypeNotDict) } }
-    #[rustfmt::skip] pub fn to_point(self)       -> Result<Point,       VMError> { match self { Value::Point(x)       => Ok(x), _ => Err(VMError::TypeNotPoint) } }
-    #[rustfmt::skip] pub fn to_cell(self)        -> Result<Cell,        VMError> { match self { Value::Cell(x)        => Ok(x), _ => Err(VMError::TypeNotCell) } }
-    #[rustfmt::skip] pub fn to_merlin(self)      -> Result<Merlin,      VMError> { match self { Value::Merlin(x)      => Ok(x), _ => Err(VMError::TypeNotMerlin) } }
-    #[rustfmt::skip] pub fn to_variable(self)    -> Result<Variable,    VMError> { match self { Value::Variable(x)    => Ok(x), _ => Err(VMError::TypeNotVariable) } }
-    #[rustfmt::skip] pub fn to_clear_token(self) -> Result<ClearToken,  VMError> { match self { Value::ClearToken(x)  => Ok(x), _ => Err(VMError::TypeNotClearToken) } }
+    /// Downcast to Int253.
+    pub fn to_int253(self)      -> Result<Int253,     VMError> { match self { Value::Int253(x)     => Ok(x), _ => Err(VMError::TypeNotInt253) } }
+    /// Downcast to String.
+    pub fn to_string(self)      -> Result<String,     VMError> { match self { Value::String(x)     => Ok(x), _ => Err(VMError::TypeNotString) } }
+    /// Downcast to Dict.
+    pub fn to_dict(self)        -> Result<Dict,       VMError> { match self { Value::Dict(x)       => Ok(x), _ => Err(VMError::TypeNotDict) } }
+    /// Downcast to Point.
+    pub fn to_point(self)       -> Result<Point,      VMError> { match self { Value::Point(x)      => Ok(x), _ => Err(VMError::TypeNotPoint) } }
+    /// Downcast to Cell.
+    pub fn to_cell(self)        -> Result<Cell,       VMError> { match self { Value::Cell(x)       => Ok(x), _ => Err(VMError::TypeNotCell) } }
+    /// Downcast to Merlin transcript.
+    pub fn to_merlin(self)      -> Result<Merlin,     VMError> { match self { Value::Merlin(x)     => Ok(x), _ => Err(VMError::TypeNotMerlin) } }
+    /// Downcast to Variable.
+    pub fn to_variable(self)    -> Result<Variable,   VMError> { match self { Value::Variable(x)   => Ok(x), _ => Err(VMError::TypeNotVariable) } }
+    /// Downcast to ClearToken.
+    pub fn to_clear_token(self) -> Result<ClearToken, VMError> { match self { Value::ClearToken(x) => Ok(x), _ => Err(VMError::TypeNotClearToken) } }
+}
 
+impl Value {
     /// Lift to Expression — Int253 folds to a constant; Expression passes through.
     pub fn to_expression(self) -> Result<Expression, VMError> {
         match self {
