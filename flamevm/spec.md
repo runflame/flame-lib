@@ -312,8 +312,10 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 1b | [pushtoken](#pushtoken) | flv → token | |
 | 1c | [drop](#drop) | x → ø | |
 | 1d | [nop](#nop) | ø → ø | |
-| 1e / 1f | [dup, roll](#dup--dupk--roll--rollk) | x… k → … | |
-| 2k / 3k | [dup:k, roll:k](#dup--dupk--roll--rollk) | x_k … x_0 → … | |
+| 1e | [dup](#dup) | x_k … x_0 k → x_k … x_0 x_k | |
+| 1f | [roll](#roll) | x_k … x_0 k → x_{k-1} … x_0 x_k | |
+| 2k | [dup:k](#dupk) | x_k … x_0 → x_k … x_0 x_k | |
+| 3k | [roll:k](#rollk) | x_k … x_0 → x_{k-1} … x_0 x_k | |
 | **String** | | | |
 | 40 | [readbits](#readbits) | s n → s' x 1 \| s 0 | |
 | 41 | [readint](#readint) | s → s' x 1 \| s 0 | |
@@ -462,14 +464,33 @@ Drops a [droppable](#types) value. Hard-fails `TypeNotDroppable` for linear type
 
 No effect.
 
-### dup / dup:k / roll / roll:k
+### dup
 
-_x_k … x_0_ **dup:_k_** → _x_k … x_0 x_k_  
-_x_k … x_0_ **roll:_k_** → _x_{k-1} … x_0 x_k_
+_x_k … x_0 k_ → _x_k … x_0 x_k_
 
-`dup:k` and `roll:k` take `k ∈ 0..=15` as the low nibble of the opcode (`0x2k`, `0x3k`). The plain `dup`/`roll` forms (`0x1e`/`0x1f`) pop `k` as an `Int253` for larger reach at the cost of one extra byte.
+Pops `k` as `Int253`, copies the value at depth `k` (zero-indexed from the top) onto the stack. Source must be a [copyable](#types) type — hard-fails `TypeNotCopyable` otherwise. Hard-fails `IndexOutOfRange` when `k < 0` or exceeds the stack depth.
 
-`dup` copies; the source must be a [copyable](#types) type. `roll` moves; any type works. Both hard-fail `IndexOutOfRange` when `k` exceeds the stack depth.
+Prefer the immediate [`dup:k`](#dupk) form for `k ∈ 0..=15` (one byte instead of two).
+
+### roll
+
+_x_k … x_0 k_ → _x_{k-1} … x_0 x_k_
+
+Pops `k` as `Int253`, moves the value at depth `k` to the top of the stack. Any type works (no copy required). Hard-fails `IndexOutOfRange` when `k < 0` or exceeds the stack depth.
+
+Prefer the immediate [`roll:k`](#rollk) form for `k ∈ 0..=15`.
+
+### dup:k
+
+_x_k … x_0_ → _x_k … x_0 x_k_
+
+Immediate-encoded `dup` with `k ∈ 0..=15` taken from the low nibble of the opcode byte (`0x2k`). One-byte equivalent of `pushint8 k; dup` — saves a byte over [`dup`](#dup) for shallow depths. Same copyability and bounds rules as `dup`.
+
+### roll:k
+
+_x_k … x_0_ → _x_{k-1} … x_0 x_k_
+
+Immediate-encoded `roll` with `k ∈ 0..=15` taken from the low nibble of the opcode byte (`0x3k`). One-byte equivalent of `pushint8 k; roll`. Same bounds rules as `roll`.
 
 ## String instructions
 
