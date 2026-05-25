@@ -8,6 +8,88 @@ use crate::String;
 use crate::{ClearToken, Token, WideToken};
 use crate::{Constraint, Expression, Variable};
 
+impl Value {
+    /// Downcasts to `Int253`.
+    pub fn to_int253(self) -> Result<Int253, VMError> {
+        match self {
+            Value::Int253(i) => Ok(i),
+            _ => Err(VMError::TypeNotInt253),
+        }
+    }
+
+    /// Downcasts to `String`.
+    pub fn to_string(self) -> Result<String, VMError> {
+        match self {
+            Value::String(s) => Ok(s),
+            _ => Err(VMError::TypeNotString),
+        }
+    }
+
+    /// Downcasts to `Dict`.
+    pub fn to_dict(self) -> Result<Dict, VMError> {
+        match self {
+            Value::Dict(d) => Ok(d),
+            _ => Err(VMError::TypeNotDict),
+        }
+    }
+
+    /// Downcasts to `Point`.
+    pub fn to_point(self) -> Result<Point, VMError> {
+        match self {
+            Value::Point(p) => Ok(p),
+            _ => Err(VMError::TypeNotPoint),
+        }
+    }
+
+    /// Downcasts to `Cell`.
+    pub fn to_cell(self) -> Result<Cell, VMError> {
+        match self {
+            Value::Cell(c) => Ok(c),
+            _ => Err(VMError::TypeNotCell),
+        }
+    }
+
+    /// Downcasts to `Merlin` transcript.
+    pub fn to_merlin(self) -> Result<Merlin, VMError> {
+        match self {
+            Value::Merlin(m) => Ok(m),
+            _ => Err(VMError::TypeNotMerlin),
+        }
+    }
+
+    /// Downcasts to `Variable`.
+    pub fn to_variable(self) -> Result<Variable, VMError> {
+        match self {
+            Value::Variable(v) => Ok(v),
+            _ => Err(VMError::TypeNotVariable),
+        }
+    }
+
+    /// Downcasts to `Expression`.
+    pub fn to_expression(self) -> Result<Expression, VMError> {
+        match self {
+            Value::Expression(e) => Ok(e),
+            _ => Err(VMError::TypeNotExpression),
+        }
+    }
+
+    /// Downcasts to `Constraint`.
+    pub fn to_constraint(self) -> Result<Constraint, VMError> {
+        match self {
+            Value::Constraint(c) => Ok(c),
+            _ => Err(VMError::TypeNotConstraint),
+        }
+    }
+
+    /// Downcasts to `ClearToken`.
+    pub fn to_clear_token(self) -> Result<ClearToken, VMError> {
+        match self {
+            Value::ClearToken(t) => Ok(t),
+            _ => Err(VMError::TypeNotClearToken),
+        }
+    }
+}
+
 /// Possible values on the stack machine
 pub enum Value {
     Int253(Int253),

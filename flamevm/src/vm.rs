@@ -728,17 +728,7 @@ impl VM {
         self.current_call.stack.pop().ok_or(VMError::StackUnderflow)
     }
 
-    /// Pops the top value, asserting it is an `Int253`.
-    fn pop_int253(&mut self) -> Result<Int253, VMError> {
-        match self.pop_value()? {
-            Value::Int253(i) => Ok(i),
-            _ => Err(VMError::TypeNotInt253),
-        }
-    }
-
-    /// Converts a stack-popped `Int253` index into a `usize`, rejecting
-    /// negatives, values that don't fit `u64`, and values exceeding the
-    /// addressed stack depth.
+    /// Converts a stack-popped `Int253` index into a `usize`.
     fn int253_to_stack_index(&self, i: Int253) -> Result<usize, VMError> {
         let v = i.to_u64().ok_or(VMError::IndexOutOfRange)?;
         let idx = usize::try_from(v).map_err(|_| VMError::IndexOutOfRange)?;
@@ -748,17 +738,12 @@ impl VM {
         Ok(idx)
     }
 
-    // `pushint`/`pushstr`/`pushpoint` are now inline in
-    // `dispatch_common`: `Instruction::parse` decodes their inline
-    // bytes into typed payloads (Int253 / String / [u8; 32]) so the
-    // handlers reduce to a single `push_value` call.
-
     /// `0x1b` `pushtoken` — `flv → token`. Pops an `Int253` flavor from
     /// the stack and pushes a zero-qty `ClearToken { qty: 0, flv }`. This
     /// is the canonical "empty bearer of a flavor" used as a starting
     /// point for issuance / borrow flows.
     fn op_pushtoken(&mut self) -> Result<(), VMError> {
-        let flv = self.pop_int253()?;
+        let flv = self.pop_value()?.to_int253()?;
         self.push_value(Value::ClearToken(ClearToken::new(Int253::zero(), flv)));
         Ok(())
     }
@@ -778,7 +763,7 @@ impl VM {
     /// `0x1e` `dup` — pops `k`, then copies the now-`k`-th item from top
     /// onto the top.
     fn op_dup(&mut self) -> Result<(), VMError> {
-        let k = self.pop_int253()?;
+        let k = self.pop_value()?.to_int253()?;
         self.op_dup_k(self.int253_to_stack_index(k)?)
     }
 
@@ -798,7 +783,7 @@ impl VM {
     /// `0x1f` `roll` — pops `k`, then moves the `k`-th item from top to
     /// the top.
     fn op_roll(&mut self) -> Result<(), VMError> {
-        let k = self.pop_int253()?;
+        let k = self.pop_value()?.to_int253()?;
         self.op_roll_k(self.int253_to_stack_index(k)?)
     }
 
@@ -815,18 +800,10 @@ impl VM {
         Ok(())
     }
 
-    /// Pops the top value, asserting it is a `Merlin` transcript.
-    fn pop_merlin(&mut self) -> Result<Merlin, VMError> {
-        match self.pop_value()? {
-            Value::Merlin(m) => Ok(m),
-            _ => Err(VMError::TypeNotMerlin),
-        }
-    }
-
     /// `0x69` `merlin` — `label → merlin`. Pops a label string, creates
     /// a fresh transcript bound to it.
     fn op_merlin(&mut self) -> Result<(), VMError> {
-        let label = self.pop_string()?;
+        let label = self.pop_value()?.to_string()?;
         self.push_value(Value::Merlin(Merlin::new(label.as_bytes())));
         Ok(())
     }
@@ -835,9 +812,9 @@ impl VM {
     /// (top), `label`, and `merlin`; absorbs `(label, str)` into the
     /// transcript; pushes merlin back.
     fn op_merlin_write(&mut self) -> Result<(), VMError> {
-        let data = self.pop_string()?;
-        let label = self.pop_string()?;
-        let mut m = self.pop_merlin()?;
+        let data = self.pop_value()?.to_string()?;
+        let label = self.pop_value()?.to_string()?;
+        let mut m = self.pop_value()?.to_merlin()?;
         m.write_bytes(label.as_bytes(), data.as_bytes());
         self.push_value(Value::Merlin(m));
         Ok(())
@@ -848,8 +825,8 @@ impl VM {
     /// the merlin back, then the new String.
     fn op_merlin_read(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
-        let label = self.pop_string()?;
-        let mut m = self.pop_merlin()?;
+        let label = self.pop_value()?.to_string()?;
+        let mut m = self.pop_value()?.to_merlin()?;
         let out = m.read_bytes(label.as_bytes(), n);
         self.push_value(Value::Merlin(m));
         self.push_value(Value::String(String::from(out)));
@@ -859,7 +836,7 @@ impl VM {
     /// `0x6c` `sha256` — pops a String, pushes the 32-byte SHA-256 digest.
     fn op_sha256(&mut self) -> Result<(), VMError> {
         use sha2::{Digest, Sha256};
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         let digest = Sha256::digest(s.as_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
@@ -868,7 +845,7 @@ impl VM {
     /// `0x6d` `sha512` — pops a String, pushes the 64-byte SHA-512 digest.
     fn op_sha512(&mut self) -> Result<(), VMError> {
         use sha2::{Digest, Sha512};
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         let digest = Sha512::digest(s.as_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
@@ -878,7 +855,7 @@ impl VM {
     /// (FIPS-202; padding `0x06`).
     fn op_sha3(&mut self) -> Result<(), VMError> {
         use sha3::{Digest, Sha3_256};
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         let digest = Sha3_256::digest(s.as_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
@@ -889,7 +866,7 @@ impl VM {
     /// Ethereum compatibility.
     fn op_keccak256(&mut self) -> Result<(), VMError> {
         use sha3::{Digest, Keccak256};
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         let digest = Keccak256::digest(s.as_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
@@ -901,17 +878,9 @@ impl VM {
     /// serialize via `to_bytes` so prover and verifier emit the
     /// same canonical bytes.
     fn op_log(&mut self) -> Result<(), VMError> {
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         self.txlog.push(crate::tx::TxEntry::Data(s.to_bytes()));
         Ok(())
-    }
-
-    /// Pops the top value, asserting it is a `Dict`.
-    fn pop_dict(&mut self) -> Result<Dict, VMError> {
-        match self.pop_value()? {
-            Value::Dict(d) => Ok(d),
-            _ => Err(VMError::TypeNotDict),
-        }
     }
 
     /// `0x60` `dict` — `... val key val key n → dict`. Pops `n`, then `n`
@@ -920,7 +889,7 @@ impl VM {
         let n = self.pop_byte_count(usize::MAX)?;
         let mut dict = Dict::new();
         for _ in 0..n {
-            let key = self.pop_int253()?;
+            let key = self.pop_value()?.to_int253()?;
             let value = self.pop_value()?;
             if dict.insert_strict(key, value).is_err() {
                 return Err(VMError::DictKeyOccupied);
@@ -934,8 +903,8 @@ impl VM {
     /// occupied key.
     fn op_put(&mut self) -> Result<(), VMError> {
         let v = self.pop_value()?;
-        let k = self.pop_int253()?;
-        let mut dict = self.pop_dict()?;
+        let k = self.pop_value()?.to_int253()?;
+        let mut dict = self.pop_value()?.to_dict()?;
         if dict.insert_strict(k, v).is_err() {
             return Err(VMError::DictKeyOccupied);
         }
@@ -948,8 +917,8 @@ impl VM {
     /// Stack order matches `put`: `v` on top, `k` below.
     fn op_replace(&mut self) -> Result<(), VMError> {
         let v = self.pop_value()?;
-        let k = self.pop_int253()?;
-        let mut dict = self.pop_dict()?;
+        let k = self.pop_value()?.to_int253()?;
+        let mut dict = self.pop_value()?.to_dict()?;
         let prev = dict.insert(k, v);
         self.push_value(Value::Dict(dict));
         match prev {
@@ -967,8 +936,8 @@ impl VM {
     /// `0x63` `get` — `dict k → dict' k v`. Removes and returns the
     /// value at `k`. Fails if the key is missing.
     fn op_get(&mut self) -> Result<(), VMError> {
-        let k = self.pop_int253()?;
-        let mut dict = self.pop_dict()?;
+        let k = self.pop_value()?.to_int253()?;
+        let mut dict = self.pop_value()?.to_dict()?;
         let v = dict.remove(&k).ok_or(VMError::DictKeyNotFound)?;
         self.push_value(Value::Dict(dict));
         self.push_value(Value::Int253(k));
@@ -979,8 +948,8 @@ impl VM {
     /// `0x64` `getopt` — `dict k → dict' {v 1 | 0}`. Like `get`, but
     /// soft-fails (pushes `0`) when the key is missing.
     fn op_getopt(&mut self) -> Result<(), VMError> {
-        let k = self.pop_int253()?;
-        let mut dict = self.pop_dict()?;
+        let k = self.pop_value()?.to_int253()?;
+        let mut dict = self.pop_value()?.to_dict()?;
         let v = dict.remove(&k);
         self.push_value(Value::Dict(dict));
         match v {
@@ -999,8 +968,8 @@ impl VM {
     /// without consuming it. Soft-fails with `0` on missing key; hard
     /// errors if the value exists but isn't copyable.
     fn op_getdup(&mut self) -> Result<(), VMError> {
-        let k = self.pop_int253()?;
-        let dict = self.pop_dict()?;
+        let k = self.pop_value()?.to_int253()?;
+        let dict = self.pop_value()?.to_dict()?;
         let copied = match dict.get(&k) {
             Some(v) => Some(v.try_clone()?),
             None => None,
@@ -1021,7 +990,7 @@ impl VM {
     /// `0x66` `first` — `dict → dict {k 1 | 0}`. Pushes the smallest key
     /// alongside a flag, or `0` if the dict is empty.
     fn op_first(&mut self) -> Result<(), VMError> {
-        let dict = self.pop_dict()?;
+        let dict = self.pop_value()?.to_dict()?;
         let k = dict.first_key();
         self.push_value(Value::Dict(dict));
         match k {
@@ -1038,7 +1007,7 @@ impl VM {
 
     /// `0x67` `last` — `dict → dict {k 1 | 0}`. Mirror of `first`.
     fn op_last(&mut self) -> Result<(), VMError> {
-        let dict = self.pop_dict()?;
+        let dict = self.pop_value()?.to_dict()?;
         let k = dict.last_key();
         self.push_value(Value::Dict(dict));
         match k {
@@ -1056,8 +1025,8 @@ impl VM {
     /// `0x68` `next` — `dict k → dict {k' 1 | 0}`. Smallest key strictly
     /// greater than `k`, or `0` if no such key exists.
     fn op_next(&mut self) -> Result<(), VMError> {
-        let k = self.pop_int253()?;
-        let dict = self.pop_dict()?;
+        let k = self.pop_value()?.to_int253()?;
+        let dict = self.pop_value()?.to_dict()?;
         let next_k = dict.next_key_after(&k);
         self.push_value(Value::Dict(dict));
         match next_k {
@@ -1075,7 +1044,7 @@ impl VM {
     /// Helper: converts a stack-popped count into a `usize` ≤ `max`.
     /// Returns `IndexOutOfRange` on overflow or above `max`.
     fn pop_byte_count(&mut self, max: usize) -> Result<usize, VMError> {
-        let n_int = self.pop_int253()?;
+        let n_int = self.pop_value()?.to_int253()?;
         let n_u64 = n_int.to_u64().ok_or(VMError::IndexOutOfRange)?;
         let n = usize::try_from(n_u64).map_err(|_| VMError::IndexOutOfRange)?;
         if n > max {
@@ -1110,7 +1079,7 @@ impl VM {
         // `IndexOutOfRange` if n exceeds the cap, which is the
         // hard-fail path.
         let n = self.pop_byte_count(256)?;
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         let n_bytes = (n + 7) / 8;
         if s.len() < n_bytes {
             self.push_read_failure(s);
@@ -1152,7 +1121,7 @@ impl VM {
     /// the front of `s`. Equivalent to `readbits(s, 256)`. Soft-fails
     /// on insufficient bytes, magnitude ≥ ℓ, or negative zero.
     fn op_read_int(&mut self) -> Result<(), VMError> {
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         if s.len() < 32 {
             self.push_read_failure(s);
             return Ok(());
@@ -1181,7 +1150,7 @@ impl VM {
     /// `n` bytes of `s` as a new String.
     fn op_read_str(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         if s.len() < n {
             self.push_read_failure(s);
             return Ok(());
@@ -1197,7 +1166,7 @@ impl VM {
     /// 32 bytes of `s` as a `Point` (decompressability not validated
     /// here; later opcodes that consume the point may reject it).
     fn op_read_point(&mut self) -> Result<(), VMError> {
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         if s.len() < 32 {
             self.push_read_failure(s);
             return Ok(());
@@ -1226,8 +1195,8 @@ impl VM {
             return Err(VMError::BitCountOutOfRange);
         }
         let n_bytes = n / 8;
-        let x = self.pop_int253()?;
-        let s = self.pop_string()?;
+        let x = self.pop_value()?.to_int253()?;
+        let s = self.pop_value()?.to_string()?;
         // Raw 32-byte sign-magnitude form; low `n` bits = first `n_bytes`.
         let raw = x.to_bytes();
         let appended = s.append_bytes(&raw[..n_bytes]);
@@ -1240,8 +1209,8 @@ impl VM {
     /// bits 0..254 carry the magnitude). Equivalent to
     /// `writebits(s, x, 256)`.
     fn op_write_int(&mut self) -> Result<(), VMError> {
-        let x = self.pop_int253()?;
-        let s = self.pop_string()?;
+        let x = self.pop_value()?.to_int253()?;
+        let s = self.pop_value()?.to_string()?;
         let appended = s.append_bytes(&x.to_bytes());
         self.push_value(Value::String(appended));
         Ok(())
@@ -1249,8 +1218,8 @@ impl VM {
 
     /// `0x46` `append` — `s s' → s''`. Concatenates two strings.
     fn op_append(&mut self) -> Result<(), VMError> {
-        let s2 = self.pop_string()?;
-        let s1 = self.pop_string()?;
+        let s2 = self.pop_value()?.to_string()?;
+        let s1 = self.pop_value()?.to_string()?;
         self.push_value(Value::String(s1.append(&s2)));
         Ok(())
     }
@@ -1258,7 +1227,7 @@ impl VM {
     /// `0x47` `writezeros` — `s n → s'`. Appends `n` zero bytes.
     fn op_write_zeros(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         let appended = s.append_bytes(&vec![0u8; n]);
         self.push_value(Value::String(appended));
         Ok(())
@@ -1266,15 +1235,15 @@ impl VM {
 
     /// `0x48` `bitnot` — `s → s'`. Inverts every bit.
     fn op_bit_not(&mut self) -> Result<(), VMError> {
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         self.push_value(Value::String(s.bit_not()));
         Ok(())
     }
 
     /// `0x49` `bitor` — `a b → c`. Bytewise OR. Fails if sizes differ.
     fn op_bit_or(&mut self) -> Result<(), VMError> {
-        let b = self.pop_string()?;
-        let a = self.pop_string()?;
+        let b = self.pop_value()?.to_string()?;
+        let a = self.pop_value()?.to_string()?;
         let c = a.bit_or(&b).ok_or(VMError::BitwiseSizeMismatch)?;
         self.push_value(Value::String(c));
         Ok(())
@@ -1282,8 +1251,8 @@ impl VM {
 
     /// `0x4a` `bitand` — `a b → c`. Bytewise AND. Fails on size mismatch.
     fn op_bit_and(&mut self) -> Result<(), VMError> {
-        let b = self.pop_string()?;
-        let a = self.pop_string()?;
+        let b = self.pop_value()?.to_string()?;
+        let a = self.pop_value()?.to_string()?;
         let c = a.bit_and(&b).ok_or(VMError::BitwiseSizeMismatch)?;
         self.push_value(Value::String(c));
         Ok(())
@@ -1291,8 +1260,8 @@ impl VM {
 
     /// `0x4b` `bitxor` — `a b → c`. Bytewise XOR. Fails on size mismatch.
     fn op_bit_xor(&mut self) -> Result<(), VMError> {
-        let b = self.pop_string()?;
-        let a = self.pop_string()?;
+        let b = self.pop_value()?.to_string()?;
+        let a = self.pop_value()?.to_string()?;
         let c = a.bit_xor(&b).ok_or(VMError::BitwiseSizeMismatch)?;
         self.push_value(Value::String(c));
         Ok(())
@@ -1303,7 +1272,7 @@ impl VM {
     /// on the left).
     fn op_shift_left(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(256)?;
-        let a = self.pop_string()?;
+        let a = self.pop_value()?.to_string()?;
         let (shifted, removed) = a.shift_left(n);
         self.push_value(Value::String(shifted));
         self.push_value(Value::String(removed));
@@ -1314,7 +1283,7 @@ impl VM {
     /// bits are zero-padded on the right.
     fn op_shift_right(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(256)?;
-        let a = self.pop_string()?;
+        let a = self.pop_value()?.to_string()?;
         let (shifted, removed) = a.shift_right(n);
         self.push_value(Value::String(shifted));
         self.push_value(Value::String(removed));
@@ -1326,7 +1295,7 @@ impl VM {
     /// non-negative, `1` for negative). Top of stack ends up holding
     /// the sign bit.
     fn op_abs(&mut self) -> Result<(), VMError> {
-        let v = self.pop_int253()?;
+        let v = self.pop_value()?.to_int253()?;
         let sign_bit = if v.is_negative() { 1u64 } else { 0u64 };
         self.push_value(Value::Int253(v.abs()));
         self.push_value(Value::Int253(Int253::from(sign_bit)));
@@ -1457,8 +1426,8 @@ impl VM {
     /// `0x55` `divmod` — `x z → d r`. Truncated division: `sign(d) =
     /// sign(x) XOR sign(z)`, `sign(r) = sign(x)`. Errors on zero divisor.
     fn op_divmod(&mut self) -> Result<(), VMError> {
-        let z = self.pop_int253()?;
-        let x = self.pop_int253()?;
+        let z = self.pop_value()?.to_int253()?;
+        let x = self.pop_value()?.to_int253()?;
         let (d, r) = x.div_rem(z).ok_or(VMError::DivByZero)?;
         self.push_value(Value::Int253(d));
         self.push_value(Value::Int253(r));
@@ -1469,7 +1438,7 @@ impl VM {
     /// as a little-endian unsigned integer, reduces it modulo ℓ, and
     /// pushes the result as a non-negative `Int253`.
     fn op_mod252(&mut self) -> Result<(), VMError> {
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         let bytes = s.as_bytes();
         if bytes.len() > 64 {
             return Err(VMError::StringTooLongForModReduction);
@@ -1522,8 +1491,8 @@ impl VM {
             let a = Self::into_constraint_or_int253(self.pop_value()?)?;
             self.push_value(Value::Constraint(crate::Constraint::and(a, b)));
         } else {
-            let b = self.pop_int253()?;
-            let a = self.pop_int253()?;
+            let b = self.pop_value()?.to_int253()?;
+            let a = self.pop_value()?.to_int253()?;
             let r = if !a.is_zero() && !b.is_zero() { 1u64 } else { 0u64 };
             self.push_value(Value::Int253(Int253::from(r)));
         }
@@ -1543,8 +1512,8 @@ impl VM {
             let a = Self::into_constraint_or_int253(self.pop_value()?)?;
             self.push_value(Value::Constraint(crate::Constraint::or(a, b)));
         } else {
-            let b = self.pop_int253()?;
-            let a = self.pop_int253()?;
+            let b = self.pop_value()?.to_int253()?;
+            let a = self.pop_value()?.to_int253()?;
             let r = if !a.is_zero() || !b.is_zero() { 1u64 } else { 0u64 };
             self.push_value(Value::Int253(Int253::from(r)));
         }
@@ -1615,7 +1584,7 @@ impl VM {
     /// `None`. Both sides hash to the same bytecode for the proof
     /// transcript.
     fn op_run(&mut self) -> Result<(), VMError> {
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         let instrs = s.to_instructions()?;
         self.enter_run(instrs)
     }
@@ -1633,9 +1602,9 @@ impl VM {
     /// chosen script as a new Run (same semantics as `run`,
     /// including the witness-preserving path for `String::Script`).
     fn op_switch(&mut self) -> Result<(), VMError> {
-        let b = self.pop_string()?;
-        let a = self.pop_string()?;
-        let x = self.pop_int253()?;
+        let b = self.pop_value()?.to_string()?;
+        let a = self.pop_value()?.to_string()?;
+        let x = self.pop_value()?.to_int253()?;
         let chosen = if x.is_zero() { b } else { a };
         let instrs = chosen.to_instructions()?;
         self.enter_run(instrs)
@@ -1657,7 +1626,7 @@ impl VM {
     /// (end the current Run; if the stack is clean and the run-stack is
     /// empty, the call exits cleanly).
     fn op_return(&mut self) -> Result<(), VMError> {
-        let k_int = self.pop_int253()?;
+        let k_int = self.pop_value()?.to_int253()?;
         let k_u64 = k_int.to_u64().ok_or(VMError::BadReturnArity)?;
         let k = usize::try_from(k_u64).map_err(|_| VMError::BadReturnArity)?;
 
@@ -1723,18 +1692,10 @@ impl VM {
         Ok(())
     }
 
-    /// Pops the top value, asserting it is a `String`.
-    fn pop_string(&mut self) -> Result<String, VMError> {
-        match self.pop_value()? {
-            Value::String(s) => Ok(s),
-            _ => Err(VMError::TypeNotString),
-        }
-    }
-
     /// Pops a 32-byte String and returns it as a fixed array. Used by
     /// opcodes that consume canonical-hash payloads (`send`, `call`).
     fn pop_string_32(&mut self) -> Result<[u8; 32], VMError> {
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         if s.len() != 32 {
             return Err(VMError::MalformedAddress);
         }
@@ -1760,16 +1721,6 @@ impl VM {
 
     fn op_nop(&mut self) -> Result<(), VMError> {
         Ok(())
-    }
-
-    /// Pops a `ClearToken` from the stack. Errors `TypeNotClearToken`
-    /// for any other variant (including encrypted `Token` /
-    /// `WideToken` — those have separate cleartext-vs-CS code paths).
-    fn pop_clear_token(&mut self) -> Result<ClearToken, VMError> {
-        match self.pop_value()? {
-            Value::ClearToken(t) => Ok(t),
-            _ => Err(VMError::TypeNotClearToken),
-        }
     }
 
     /// Returns the current call's actor identity, or
@@ -1813,7 +1764,7 @@ impl VM {
     ///
     /// Cleartext branch only; encrypted `qty: Point` errors `TokenRequiresCS`.
     fn op_issue(&mut self) -> Result<(), VMError> {
-        let tag = self.pop_string()?;
+        let tag = self.pop_value()?.to_string()?;
         let qty = match self.pop_value()? {
             Value::Int253(i) => i,
             Value::Point(_) => return Err(VMError::TokenRequiresCS),
@@ -1882,8 +1833,8 @@ impl VM {
 
     /// _a b_ **merge** → _{c 1 | a b 0}_
     fn op_merge(&mut self) -> Result<(), VMError> {
-        let b = self.pop_clear_token()?;
-        let a = self.pop_clear_token()?;
+        let b = self.pop_value()?.to_clear_token()?;
+        let a = self.pop_value()?.to_clear_token()?;
         match a.merge_into(b) {
             Ok(c) => {
                 self.push_value(Value::ClearToken(c));
@@ -1900,8 +1851,8 @@ impl VM {
 
     /// _a q_ **split** → _a' b_
     fn op_split(&mut self) -> Result<(), VMError> {
-        let q = self.pop_int253()?;
-        let a = self.pop_clear_token()?;
+        let q = self.pop_value()?.to_int253()?;
+        let a = self.pop_value()?.to_clear_token()?;
         match a.split(q) {
             Some((remainder, new_token)) => {
                 self.push_value(Value::ClearToken(remainder));
@@ -1916,8 +1867,8 @@ impl VM {
     ///
     /// Pure helper: no CS, no txlog effect, no actor-context requirement.
     fn op_issueflv(&mut self) -> Result<(), VMError> {
-        let tag = self.pop_string()?;
-        let cid = self.pop_string()?;
+        let tag = self.pop_value()?.to_string()?;
+        let cid = self.pop_value()?.to_string()?;
         if cid.len() != 32 {
             return Err(VMError::IndexOutOfRange);
         }
@@ -1926,22 +1877,6 @@ impl VM {
         let flv = flavor_from_actor(&ActorID::Hash(bytes), &tag);
         self.push_value(Value::Int253(flv));
         Ok(())
-    }
-
-    /// Pops a `Point` from the stack.
-    fn pop_point(&mut self) -> Result<Point, VMError> {
-        match self.pop_value()? {
-            Value::Point(p) => Ok(p),
-            _ => Err(VMError::TypeNotPoint),
-        }
-    }
-
-    /// Pops a `Cell` from the stack.
-    fn pop_cell(&mut self) -> Result<Cell, VMError> {
-        match self.pop_value()? {
-            Value::Cell(c) => Ok(c),
-            _ => Err(VMError::TypeNotCell),
-        }
     }
 
     /// Pops `n` values from the stack and returns them in caller-pushed
@@ -2005,7 +1940,7 @@ impl VM {
         witness: Option<&crate::witness::InputWitnesses>,
     ) -> Result<(), VMError> {
         self.require_external()?;
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         let bytes = s.as_bytes();
         let mut reader: &[u8] = bytes;
         let mut cell = Cell::decode(&mut reader)?;
@@ -2054,7 +1989,7 @@ impl VM {
 
     /// _args… k pred_ **cell** → _cell_
     fn op_cell(&mut self) -> Result<(), VMError> {
-        let pred_point = self.pop_point()?;
+        let pred_point = self.pop_value()?.to_point()?;
         let k = self.pop_byte_count(usize::MAX)?;
         let payload = self.pop_n_portable(k)?;
         let anchor = self.last_anchor.take().ok_or(VMError::AnchorMissing)?;
@@ -2066,7 +2001,7 @@ impl VM {
 
     /// _args… k pred_ **output** → ø
     fn op_output(&mut self) -> Result<(), VMError> {
-        let pred_point = self.pop_point()?;
+        let pred_point = self.pop_value()?.to_point()?;
         let k = self.pop_byte_count(usize::MAX)?;
         let payload = self.pop_n_portable(k)?;
         let anchor = self.last_anchor.take().ok_or(VMError::AnchorMissing)?;
@@ -2084,11 +2019,11 @@ impl VM {
     fn op_open(&mut self) -> Result<(), VMError> {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
-        let program_str = self.pop_string()?;
-        let position_str = self.pop_string()?;
-        let neighbors_dict = self.pop_dict()?;
-        let internal_key_pt = self.pop_point()?;
-        let cell = self.pop_cell()?;
+        let program_str = self.pop_value()?.to_string()?;
+        let position_str = self.pop_value()?.to_string()?;
+        let neighbors_dict = self.pop_value()?.to_dict()?;
+        let internal_key_pt = self.pop_value()?.to_point()?;
+        let cell = self.pop_value()?.to_cell()?;
 
         let cp = Self::callproof_from_stack_pieces(
             internal_key_pt,
@@ -2150,9 +2085,9 @@ impl VM {
     /// ratcheted from `last_anchor` before the entry is appended.
     fn op_send(&mut self) -> Result<(), VMError> {
         let target = ActorID::Hash(self.pop_string_32()?);
-        let method = MethodKey::from(self.pop_int253()?);
-        let vbytes = self.pop_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
-        let gas = self.pop_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
+        let method = MethodKey::from(self.pop_value()?.to_int253()?);
+        let vbytes = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
+        let gas = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
         let refund_predicate = Predicate::Opaque(
             curve25519_dalek::ristretto::CompressedRistretto(self.pop_string_32()?),
         );
@@ -2217,9 +2152,9 @@ impl VM {
     ) -> Result<(), VMError> {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let callee = ActorID::Hash(self.pop_string_32()?);
-        let method = MethodKey::from(self.pop_int253()?);
-        let vbytes = self.pop_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
-        let gas = self.pop_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
+        let method = MethodKey::from(self.pop_value()?.to_int253()?);
+        let vbytes = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
+        let gas = self.pop_value()?.to_int253()?.to_u64().ok_or(VMError::InvalidBitrange)?;
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
 
@@ -2304,7 +2239,7 @@ impl VM {
         if !self.current_call.loaded {
             return Err(VMError::SaveWithoutLoad);
         }
-        let state = ActorState::from_wrapper_dict(self.pop_dict()?)?;
+        let state = ActorState::from_wrapper_dict(self.pop_value()?.to_dict()?)?;
         registry.save_state(&actor, state)?;
         registry.unmark_for_destruction(&actor);
         self.current_call.loaded = false;
@@ -2316,7 +2251,7 @@ impl VM {
     /// Defers a TxID-bound signature for the cell's predicate, pours
     /// the cell's payload onto the stack, pushes `k`.
     fn op_signtx(&mut self) -> Result<(), VMError> {
-        let cell = self.pop_cell()?;
+        let cell = self.pop_value()?.to_cell()?;
         let k = cell.payload.len();
         self.deferred_sigs.push(DeferredSig::TxBound {
             verification_key: cell.predicate.verification_key(),
@@ -2336,9 +2271,9 @@ impl VM {
     fn op_signrun(&mut self) -> Result<(), VMError> {
         let m = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(m)?;
-        let sig_str = self.pop_string()?;
-        let prog_str = self.pop_string()?;
-        let cell = self.pop_cell()?;
+        let sig_str = self.pop_value()?.to_string()?;
+        let prog_str = self.pop_value()?.to_string()?;
+        let cell = self.pop_value()?.to_cell()?;
         if sig_str.as_bytes().len() != 64 {
             return Err(VMError::BadSignatureBytes);
         }
@@ -2392,30 +2327,6 @@ impl VM {
         Ok(())
     }
 
-    /// Pops a `Variable` from the stack.
-    fn pop_variable(&mut self) -> Result<crate::Variable, VMError> {
-        match self.pop_value()? {
-            Value::Variable(v) => Ok(v),
-            _ => Err(VMError::TypeNotVariable),
-        }
-    }
-
-    /// Pops an `Expression` from the stack.
-    fn pop_expression(&mut self) -> Result<crate::Expression, VMError> {
-        match self.pop_value()? {
-            Value::Expression(e) => Ok(e),
-            _ => Err(VMError::TypeNotExpression),
-        }
-    }
-
-    /// Pops a `Constraint` from the stack.
-    fn pop_constraint(&mut self) -> Result<crate::Constraint, VMError> {
-        match self.pop_value()? {
-            Value::Constraint(c) => Ok(c),
-            _ => Err(VMError::TypeNotConstraint),
-        }
-    }
-
     /// `0x5c alloc` — allocates a low-level R1CS variable. The witness
     /// comes from `Instruction::Alloc(Option<Int253>)`: `Some(i)` on
     /// the prover side (cleartext value the CS uses when proving),
@@ -2449,7 +2360,7 @@ impl VM {
     fn op_expr<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         self.require_external()?;
         use curve25519_dalek::scalar::Scalar;
-        let var = self.pop_variable()?;
+        let var = self.pop_value()?.to_variable()?;
         let (_point, r1cs_var) = delegate.commit_variable(&var.commitment)?;
         let witness = var.commitment.assignment();
         let expr = crate::Expression::LinearCombination(
@@ -2460,37 +2371,17 @@ impl VM {
         Ok(())
     }
 
-    /// Legacy helper kept only for `op_range`'s Constraint
-    /// lift-from-Int253 case. The polymorphic `and` / `or` / `not`
-    /// handlers inline the equivalent logic via
-    /// `into_constraint_or_int253`.
-    fn pop_constraint_or_int253(&mut self) -> Result<crate::Constraint, VMError> {
-        match self.pop_value()? {
-            Value::Constraint(c) => Ok(c),
-            Value::Int253(i) => Ok(crate::Constraint::Cleartext(!i.is_zero())),
-            _ => Err(VMError::TypeNotConstraint),
-        }
-    }
-
-    /// `0x5e range` — `expr n → expr`. Pops the bit-count `n` (Int253,
-    /// must be in `[1, 64]`) and the `Expression`, adds an `n`-bit
-    /// range-proof gadget asserting `0 ≤ expr.value < 2^n`, and
-    /// pushes the Expression back unchanged so callers can continue
-    /// using it.
+    /// _expr n_ **range** → _expr_
     ///
-    /// For `Expression::Constant(int)`: range proof reduces to a
-    /// cleartext check (no CS work), erroring `InvalidBitrange` if
-    /// the constant doesn't fit. For `LinearCombination`: invokes
-    /// `spacesuit::range_proof` with the prover's witness (when
-    /// available) and a freshly-built `LinearCombination` over the
-    /// expression's terms.
+    /// Pops the bit-count and Expression, adds an `n`-bit non-negativity
+    /// range proof, pushes the Expression back.
     fn op_range<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         self.require_external()?;
         use bulletproofs::r1cs::LinearCombination as LC;
         use spacesuit::BitRange;
 
         // Pop n (bit-count) — must be a non-negative Int253 in [1, 64].
-        let n_int = self.pop_int253()?;
+        let n_int = self.pop_value()?.to_int253()?;
         let n_u64 = n_int.to_u64().ok_or(VMError::BitCountOutOfRange)?;
         let n_usize = usize::try_from(n_u64).map_err(|_| VMError::BitCountOutOfRange)?;
         if n_usize == 0 {
@@ -2498,7 +2389,7 @@ impl VM {
         }
         let bit_range = BitRange::new(n_usize).ok_or(VMError::BitCountOutOfRange)?;
 
-        let expr = self.pop_expression()?;
+        let expr = self.pop_value()?.to_expression()?;
 
         match &expr {
             crate::Expression::Constant(value) => {
@@ -2539,7 +2430,7 @@ impl VM {
     /// witness is extracted directly.
     fn op_scalar(&mut self) -> Result<(), VMError> {
         self.require_external()?;
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         let int = s.to_scalar()?;
         self.push_value(Value::Expression(crate::Expression::constant(int)));
         Ok(())
@@ -2553,7 +2444,7 @@ impl VM {
     /// resulting Variable to bind it into the CS.
     fn op_commit(&mut self) -> Result<(), VMError> {
         self.require_external()?;
-        let s = self.pop_string()?;
+        let s = self.pop_value()?.to_string()?;
         let commitment = s.to_commitment()?;
         let var = crate::Variable { commitment };
         self.push_value(Value::Variable(var));
@@ -2643,8 +2534,8 @@ impl VM {
         use bulletproofs::r1cs::ConstraintSystem;
         // Stack convention: flv on top, qty below — matches spec
         // `qty flv → widetoken` and the `borrow` opcode pattern.
-        let flv = self.pop_int253()?;
-        let qty = self.pop_int253()?;
+        let flv = self.pop_value()?.to_int253()?;
+        let qty = self.pop_value()?.to_int253()?;
         // Reject negative qty up front. A negative fee would be a
         // refund and Flame has no refund mechanism — the negative
         // half is the debt token returned to the caller, not the
@@ -2776,8 +2667,8 @@ impl VM {
         let mut output_tokens: Vec<crate::Token> = Vec::with_capacity(n);
         let mut cloak_outs: Vec<spacesuit::AllocatedValue> = Vec::with_capacity(n);
         for _ in 0..n {
-            let flv_str = self.pop_string()?;
-            let qty_str = self.pop_string()?;
+            let flv_str = self.pop_value()?.to_string()?;
+            let qty_str = self.pop_value()?.to_string()?;
             let flv_commit = flv_str.to_commitment()?;
             let qty_commit = qty_str.to_commitment()?;
             let token = crate::Token::new(qty_commit, flv_commit);
@@ -2822,10 +2713,10 @@ impl VM {
     fn op_decrypt(&mut self) -> Result<(), VMError> {
         self.require_external()?;
         use bulletproofs::PedersenGens;
-        let q_blind = self.pop_int253()?;
-        let q_value = self.pop_int253()?;
-        let f_blind = self.pop_int253()?;
-        let f_value = self.pop_int253()?;
+        let q_blind = self.pop_value()?.to_int253()?;
+        let q_value = self.pop_value()?.to_int253()?;
+        let f_blind = self.pop_value()?.to_int253()?;
+        let f_value = self.pop_value()?.to_int253()?;
         let token = match self.pop_value()? {
             Value::Token(t) => t,
             _ => return Err(VMError::TypeNotToken),

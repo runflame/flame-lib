@@ -732,7 +732,7 @@ fn input_then_output_anchor_chain() {
     // The consumed cell's handle is still on the stack. For a stand-alone
     // anchor-chain test we don't care about authorizing it — drop it
     // directly so we can exercise `op_output` against the seeded anchor.
-    let _consumed = vm.pop_cell().expect("pop cell handle");
+    let _consumed = vm.pop_value().expect("pop value").to_cell().expect("pop cell handle");
 
     // Step 2: build an output through the real op_output handler.
     // Stack pre-output: [payload(5), count(1), predicate(Point)].
