@@ -26,6 +26,7 @@ mod test_proof_pipeline;
 mod test_stack;
 mod test_string_ops;
 mod test_tokens;
+mod test_tx_introspection;
 mod test_txlog;
 mod test_actor;
 mod test_actor_state;

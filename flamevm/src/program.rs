@@ -330,6 +330,20 @@ impl Program {
     pub fn open(mut self) -> Self { self.instructions.push(Instruction::Open); self }
     pub fn signtx(mut self) -> Self { self.instructions.push(Instruction::Signtx); self }
     pub fn signcall(mut self) -> Self { self.instructions.push(Instruction::Signcall); self }
+
+    // ── Tx-level & frame introspection (0x9a..=0xa4) ───
+
+    pub fn timelock(mut self) -> Self { self.instructions.push(Instruction::Timelock); self }
+    pub fn version(mut self) -> Self { self.instructions.push(Instruction::Version); self }
+    pub fn actorid(mut self) -> Self { self.instructions.push(Instruction::Actorid); self }
+    pub fn anchor(mut self) -> Self { self.instructions.push(Instruction::Anchor); self }
+    pub fn gas(mut self) -> Self { self.instructions.push(Instruction::Gas); self }
+    pub fn bytes(mut self) -> Self { self.instructions.push(Instruction::Bytes); self }
+    pub fn callerid(mut self) -> Self { self.instructions.push(Instruction::Callerid); self }
+    pub fn method(mut self) -> Self { self.instructions.push(Instruction::Method); self }
+    pub fn gaslimit(mut self) -> Self { self.instructions.push(Instruction::Gaslimit); self }
+    pub fn memlimit(mut self) -> Self { self.instructions.push(Instruction::Memlimit); self }
+    pub fn newbytes(mut self) -> Self { self.instructions.push(Instruction::Newbytes); self }
 }
 
 // ── ProgramItem ─────────────────────────────────────────────────────

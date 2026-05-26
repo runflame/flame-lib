@@ -106,10 +106,17 @@ const OP_LOAD: u8 = 0x96;
 const OP_SAVE: u8 = 0x97;
 const OP_SIGNTX: u8 = 0x98;
 const OP_SIGNCALL: u8 = 0x99;
+const OP_TIMELOCK: u8 = 0x9a;
+const OP_VERSION: u8 = 0x9b;
 const OP_ACTORID: u8 = 0x9c;
 const OP_ANCHOR: u8 = 0x9d;
+const OP_GAS: u8 = 0x9e;
+const OP_BYTES: u8 = 0x9f;
 const OP_CALLERID: u8 = 0xa0;
 const OP_METHOD: u8 = 0xa1;
+const OP_GASLIMIT: u8 = 0xa2;
+const OP_MEMLIMIT: u8 = 0xa3;
+const OP_NEWBYTES: u8 = 0xa4;
 
 // ── Instruction enum ─────────────────────────────────────────────────
 
@@ -201,10 +208,17 @@ pub enum Instruction {
     Save,                  // dict save → ø
     Signtx,                // cell signtx → items… k
     Signcall,               // cell script sig gas bytes args… m signcall → results… k'
+    Timelock,              // ø timelock → n {0|1}
+    Version,               // ø version → n
     Actorid,               // ø actorid → s
     Anchor,                // ø anchor → s
+    Gas,                   // ø gas → n
+    Bytes,                 // ø bytes → n
     Callerid,              // ø callerid → s
     Method,                // ø method → int
+    Gaslimit,              // ø gaslimit → n
+    Memlimit,              // ø memlimit → n
+    Newbytes,              // ø newbytes → n
     Ext(u8),               // unknown opcode byte; produced by the parser for any unassigned tag
 }
 
@@ -321,10 +335,17 @@ impl Instruction {
             Instruction::Save => out.push(OP_SAVE),
             Instruction::Signtx => out.push(OP_SIGNTX),
             Instruction::Signcall => out.push(OP_SIGNCALL),
+            Instruction::Timelock => out.push(OP_TIMELOCK),
+            Instruction::Version => out.push(OP_VERSION),
             Instruction::Actorid => out.push(OP_ACTORID),
             Instruction::Anchor => out.push(OP_ANCHOR),
+            Instruction::Gas => out.push(OP_GAS),
+            Instruction::Bytes => out.push(OP_BYTES),
             Instruction::Callerid => out.push(OP_CALLERID),
             Instruction::Method => out.push(OP_METHOD),
+            Instruction::Gaslimit => out.push(OP_GASLIMIT),
+            Instruction::Memlimit => out.push(OP_MEMLIMIT),
+            Instruction::Newbytes => out.push(OP_NEWBYTES),
             Instruction::Ext(b) => out.push(*b),
         }
     }
@@ -456,10 +477,17 @@ impl Instruction {
             OP_SAVE => Ok(Instruction::Save),
             OP_SIGNTX => Ok(Instruction::Signtx),
             OP_SIGNCALL => Ok(Instruction::Signcall),
+            OP_TIMELOCK => Ok(Instruction::Timelock),
+            OP_VERSION => Ok(Instruction::Version),
             OP_ACTORID => Ok(Instruction::Actorid),
             OP_ANCHOR => Ok(Instruction::Anchor),
+            OP_GAS => Ok(Instruction::Gas),
+            OP_BYTES => Ok(Instruction::Bytes),
             OP_CALLERID => Ok(Instruction::Callerid),
             OP_METHOD => Ok(Instruction::Method),
+            OP_GASLIMIT => Ok(Instruction::Gaslimit),
+            OP_MEMLIMIT => Ok(Instruction::Memlimit),
+            OP_NEWBYTES => Ok(Instruction::Newbytes),
             _ => Ok(Instruction::Ext(byte)),
         }
     }
@@ -756,6 +784,13 @@ mod tests {
             Instruction::Cell,
             Instruction::Signtx,
             Instruction::Signcall,
+            Instruction::Timelock,
+            Instruction::Version,
+            Instruction::Gas,
+            Instruction::Bytes,
+            Instruction::Gaslimit,
+            Instruction::Memlimit,
+            Instruction::Newbytes,
         ];
         for c in cases {
             let mut buf = Vec::new();
@@ -774,10 +809,11 @@ mod tests {
 
     #[test]
     fn ext_opcode_for_unknown_bytes() {
-        // 0x4f / 0x9a remain unassigned (0x6f is `log`, 0x7a is
-        // `fee`). 0xff is a sentinel "definitely unassigned" byte
-        // for fuzzing future extensions.
-        let unused = [0x4f, 0x9a, 0xff];
+        // 0x4f remains unassigned (0x4e is keccak256, 0x50 is abs).
+        // 0xa5..=0xaa are reserved for the planned chain-info family.
+        // 0xff is a sentinel "definitely unassigned" byte for fuzzing
+        // future extensions.
+        let unused = [0x4f, 0xa5, 0xff];
         for b in unused {
             let mut r: &[u8] = &[b];
             let parsed = Instruction::parse(&mut r).expect("parses");

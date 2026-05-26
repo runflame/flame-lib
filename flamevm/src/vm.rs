@@ -22,6 +22,13 @@ use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
 pub use crate::actor::{ActorID, ActorRegistry, ActorState};
 pub use crate::send::Message;
 
+/// Bitcoin BIP-65 convention threshold for distinguishing
+/// `TxHeader::locktime` as a block height vs. a Unix timestamp:
+/// values `< 500_000_000` are block heights, `≥` are timestamps
+/// (~1985-11-05 epoch). Surfaced to scripts via the `timelock`
+/// opcode's `{0|1}` flag.
+pub const LOCKTIME_TIMESTAMP_THRESHOLD: u32 = 500_000_000;
+
 /// 32-byte anchor. Chained via `ratchet` to make outputs unique
 /// within a transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -686,10 +693,17 @@ impl VM {
             I::Signtx => self.op_signtx(),
             I::Signcall => self.op_signcall(),
 
+            I::Timelock => self.op_timelock(),
+            I::Version => self.op_version(),
             I::Actorid => self.op_actorid(),
             I::Anchor => self.op_anchor(),
+            I::Gas => self.op_gas(),
+            I::Bytes => self.op_bytes(registry),
             I::Callerid => self.op_callerid(),
             I::Method => self.op_method(),
+            I::Gaslimit => self.op_gaslimit(),
+            I::Memlimit => self.op_memlimit(),
+            I::Newbytes => self.op_newbytes(),
 
             I::Ext(b) => Err(VMError::UnknownOpcode(b)),
         }?;
@@ -2200,6 +2214,73 @@ impl VM {
     fn op_method(&mut self) -> Result<(), VMError> {
         let m = self.current_call.kind.method().ok_or(VMError::OpcodeRequiresActorContext)?;
         self.push_value(Value::Int253(m));
+        Ok(())
+    }
+
+    /// **timelock** → _n {0|1}_
+    ///
+    /// Pushes the transaction's `locktime` and a unit flag
+    /// (0 = block height, 1 = Unix timestamp). Bitcoin BIP-65
+    /// convention: `flag = 1` iff `locktime >= LOCKTIME_TIMESTAMP_THRESHOLD`
+    /// (i.e. ≥ Tue 2025-11-05 = 500_000_000 = ~1985-11-05 Unix epoch).
+    fn op_timelock(&mut self) -> Result<(), VMError> {
+        let lt = self.header.locktime as u64;
+        let flag: u64 = if lt >= LOCKTIME_TIMESTAMP_THRESHOLD as u64 { 1 } else { 0 };
+        self.push_value(Value::Int253(Int253::from(lt)));
+        self.push_value(Value::Int253(Int253::from(flag)));
+        Ok(())
+    }
+
+    /// **version** → _n_  Pushes the transaction version field.
+    fn op_version(&mut self) -> Result<(), VMError> {
+        self.push_value(Value::Int253(Int253::from(self.header.version as u64)));
+        Ok(())
+    }
+
+    /// **gas** → _n_  Pushes remaining gas for the current call.
+    fn op_gas(&mut self) -> Result<(), VMError> {
+        let remaining = self
+            .current_call
+            .gas_limit
+            .saturating_sub(self.current_call.gas_used);
+        self.push_value(Value::Int253(Int253::from(remaining)));
+        Ok(())
+    }
+
+    /// **gaslimit** → _n_  Pushes the call's total gas budget cap.
+    fn op_gaslimit(&mut self) -> Result<(), VMError> {
+        self.push_value(Value::Int253(Int253::from(self.current_call.gas_limit)));
+        Ok(())
+    }
+
+    /// **memlimit** → _n_  Pushes the call's transient-memory cap
+    /// (4 × persistent_vbytes for actor frames; caller-specified
+    /// `bytes` operand for cell-open frames; explicit limit for the
+    /// outermost frame).
+    fn op_memlimit(&mut self) -> Result<(), VMError> {
+        self.push_value(Value::Int253(Int253::from(self.current_call.mem_limit)));
+        Ok(())
+    }
+
+    /// **newbytes** → _n_  Pushes the vbyte allotment delivered with
+    /// the current call (the parent's `bytes` operand at the
+    /// `call`/`send`/`open`/`signcall` site). Zero for `ExternalRoot`.
+    fn op_newbytes(&mut self) -> Result<(), VMError> {
+        self.push_value(Value::Int253(Int253::from(self.current_call.newbytes)));
+        Ok(())
+    }
+
+    /// **bytes** → _n_  Pushes the current actor's remaining
+    /// persistent vbyte balance. Internal-only (requires a registry
+    /// and an actor identity).
+    fn op_bytes(
+        &mut self,
+        registry: Option<&mut dyn ActorRegistry>,
+    ) -> Result<(), VMError> {
+        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
+        let actor = self.require_actor()?;
+        let balance = registry.actor_vbytes(actor)?;
+        self.push_value(Value::Int253(Int253::from(balance)));
         Ok(())
     }
 

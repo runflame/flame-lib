@@ -434,17 +434,17 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 97 | [save](#save) | int. | dict → ø | Persist the actor's state dict (unlocks; required to survive). |
 | 98 | [signtx](#signtx) | | cell → items… k | Authorize the tx with the cell predicate's signature; pour payload. |
 | 99 | [signcall](#signcall) | | cell script sig gas bytes args… m → results… k' | Run a script signed by the cell predicate in an isolated frame. |
-| 9a | [timelock](#timelock) | | ø → n {0\|1} | Push tx locktime and a flag for height (`0`) vs. timestamp (`1`). *planned* |
-| 9b | [version](#version) | | ø → n | Push tx version. *planned* |
+| 9a | [timelock](#timelock) | | ø → n {0\|1} | Push tx locktime and a flag for height (`0`) vs. timestamp (`1`). |
+| 9b | [version](#version) | | ø → n | Push tx version. |
 | 9c | [actorid](#actorid) | | ø → s | Push the current actor's id (32-byte string). |
 | 9d | [anchor](#anchor) | | ø → s | Push the current frame's anchor (32-byte string). |
-| 9e | [gas](#gas) | | ø → n | Push remaining gas budget for the current call. *planned* |
-| 9f | [bytes](#bytes) | | ø → n | Push the actor's remaining persistent vbyte balance. *planned* |
+| 9e | [gas](#gas) | | ø → n | Push remaining gas budget for the current call. |
+| 9f | [bytes](#bytes) | int. | ø → n | Push the actor's remaining persistent vbyte balance. |
 | a0 | [callerid](#callerid) | | ø → s | Push the caller actor's id (zero string if invoked externally). |
 | a1 | [method](#method) | | ø → int | Push the method key the current call is dispatched under. |
-| a2 | [gaslimit](#gaslimit) | | ø → n | Push the call's total gas budget cap. *planned* |
-| a3 | [memlimit](#memlimit) | | ø → n | Push the transient-memory cap (`4 × persistent_vbytes`). *planned* |
-| a4 | [newbytes](#newbytes) | | ø → n | Push vbytes delivered with the current call. *planned* |
+| a2 | [gaslimit](#gaslimit) | | ø → n | Push the call's total gas budget cap. |
+| a3 | [memlimit](#memlimit) | | ø → n | Push the transient-memory cap (`4 × persistent_vbytes` for actor frames). |
+| a4 | [newbytes](#newbytes) | | ø → n | Push vbytes delivered with the current call (0 at outermost frame). |
 |    | **Chain info** | | | |
 | a5 | [height](#height) | int. | ø → n | Push the current block height. *planned* |
 | a6 | [blockhash](#blockhash) | int. | h → s | Push the block hash at height `h`. *planned* |
@@ -1101,13 +1101,13 @@ The deferred signatures are batch-verified at finalize alongside any `signtx` it
 
 ø → _n {0|1}_
 
-Pushes the transaction's timelock (locktime field) and a flag distinguishing block-height (`0`) from Unix timestamp (`1`).
+Pushes the transaction's `locktime` (as `Int253`) and a unit flag: `0` for block height, `1` for Unix timestamp. The split follows Bitcoin's BIP-65 convention — `flag = 1` iff `locktime ≥ 500_000_000` (`LOCKTIME_TIMESTAMP_THRESHOLD`). Values below the threshold are block heights; values at or above are Unix timestamps (the threshold corresponds to ~1985-11-05, before any practical timestamp range). Available in either context.
 
 ### version
 
 ø → _n_
 
-Pushes the transaction version.
+Pushes `TxHeader::version` as a non-negative `Int253`. Available in either context.
 
 ### actorid
 
@@ -1125,13 +1125,13 @@ Pushes the current frame's anchor as a 32-byte String. Available from `InternalR
 
 ø → _n_
 
-Pushes the remaining gas for the current call.
+Pushes the current call's remaining gas budget — i.e. `gaslimit − gas_used` (saturating). Available in either context.
 
 ### bytes
 
 ø → _n_
 
-Pushes the current actor's remaining persistent vbyte balance.
+Pushes the current actor's remaining persistent vbyte balance, read from the registry. Internal-only: hard-fails `RegistryUnavailable` from external context and `OpcodeRequiresActorContext` from any frame without an actor identity (`ExternalRoot` / `CellOpen`).
 
 ### callerid
 
@@ -1149,19 +1149,19 @@ Pushes the dispatched method key as `Int253`. Hard-fails from non-actor frames.
 
 ø → _n_
 
-Pushes the call's gas budget cap (not the remaining amount).
+Pushes the current call's total gas budget cap (the value set at frame creation, not the remaining amount). Available in either context.
 
 ### memlimit
 
 ø → _n_
 
-Pushes the call's transient-memory cap (`4 × persistent_vbytes` per [ADR 0002](../decisions/0002-arena-memory-cap.md)).
+Pushes the current call's transient-memory cap — `4 × persistent_vbytes` for actor frames per [ADR 0002](../decisions/0002-arena-memory-cap.md), or the caller-specified `bytes` operand for `CellOpen` frames, or the explicit limit passed at the outermost frame. Available in either context.
 
 ### newbytes
 
 ø → _n_
 
-Pushes the vbyte amount delivered with the current call (the send's `bytes` allotment).
+Pushes the vbyte allotment delivered with the current call — the parent's `bytes` operand at the `call` / `send` / `open` / `signcall` site that created this frame. Zero at `ExternalRoot` (no parent). Available in either context.
 
 ## Chain-info instructions  *(all planned, internal-only)*
 
