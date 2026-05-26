@@ -82,14 +82,6 @@ impl Point {
     }
 }
 
-// `MultiscalarMul` was a placeholder for a stack-visible batched
-// MSM handle. zkvm doesn't have an equivalent: their batched checks
-// live inside `musig::BatchVerifier` as a `Delegate`-owned
-// resource, never reaching the stack. FlameVM follows the same
-// pattern via `crate::vm::Delegate::batch_verifier`, so the type
-// isn't needed. Removed cleanly; the spec.md type table entry
-// should be retired alongside this deletion (architect ADR).
-
 /// A Merlin transcript wrapper. Linear (non-copyable, non-droppable).
 ///
 /// User-supplied labels are passed directly to the underlying
