@@ -2238,7 +2238,7 @@ impl VM {
         let target = ActorID::Hash(self.pop_string_32()?);
         let method = Int253::from(self.pop_value()?.to_int253()?);
         let (gas, vbytes) = self.pop_gas_bytes()?;
-        let refund_predicate = Predicate::Opaque(
+        let refund_predicate = Predicate::opaque(
             curve25519_dalek::ristretto::CompressedRistretto(self.pop_string_32()?),
         );
         let k = self.pop_byte_count(usize::MAX)?;

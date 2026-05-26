@@ -1,6 +1,8 @@
 //! Cells, predicates, and call-proofs.
 
 use bulletproofs::PedersenGens;
+use core::any::Any;
+use core::fmt;
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
@@ -20,25 +22,98 @@ pub type CellID = [u8; 32];
 
 // ── Predicate ────────────────────────────────────────────────────
 
-/// Unlock condition for a cell. All FlameVM predicates are
-/// Taproot-compressed: `P = X + H(X, M) · B` where `X` is the internal
-/// key and `M` is the merkle root over a tree of programs.
+/// Prover-side metadata attached to a [`Predicate`]. The witness
+/// helps construct call-proofs, signatures, and re-derive the
+/// predicate's key on the prover side; it never crosses the wire.
 ///
-/// The `Opaque` variant is what verifiers see — just the 32-byte
-/// compressed point `P`. Prover-side variants (initially just `Tree`)
-/// carry the witness data needed to construct `CallProof`s or sign for
-/// the predicate. Additional witness variants may be added later as the
-/// prover API matures.
-#[derive(Clone, Debug)]
-pub enum Predicate {
-    /// Verifier-visible compressed point. The only variant that crosses
-    /// the wire.
-    Opaque(CompressedRistretto),
+/// Today the only impl is [`PredicateTree`] — the Taproot merkle
+/// witness with internal key + program leaves. Other anticipated
+/// witnesses (per zkvm's lead, commit 4a9ec80 in the slingshot
+/// tree) include:
+///
+/// - **Raw private keys** for tests / build-and-sign flows.
+/// - **Keytree derivation indices** so wallets can re-derive a
+///   predicate's key from a seed + path.
+/// - **Multikey / MuSig layouts** for 2-of-2 payment channels and
+///   other multi-party signing protocols.
+///
+/// Each is added by `impl PredicateWitness for MyType` — no touch
+/// to `Predicate` itself or its verifier-side call sites.
+///
+/// `Any` lets prover-side code downcast via
+/// [`Predicate::witness_as`]. `Send + Sync` keeps `Predicate`
+/// usable across threads (the txlog's `Output(Cell)` carries it).
+/// `Debug` supports the manual `Debug` impl on `Predicate`.
+pub trait PredicateWitness: Any + Send + Sync + fmt::Debug {
+    /// Canonical 32-byte compressed Ristretto point this witness
+    /// resolves to. Must equal the `point` field of the
+    /// `Predicate` that holds this witness — checked at
+    /// construction time.
+    fn to_point(&self) -> CompressedRistretto;
 
-    /// Prover-witness: the internal key plus the merkle tree of unlock
-    /// programs. Carries enough information to construct `CallProof`s
-    /// and to sign for the predicate.
-    Tree(PredicateTree),
+    /// Clones the witness behind a fresh boxed trait object. Used
+    /// by `<Predicate as Clone>::clone`. Implementations are
+    /// almost always `Box::new(self.clone())`.
+    fn clone_witness(&self) -> Box<dyn PredicateWitness>;
+
+    /// Bridge to `Any` so callers can downcast. Implementations
+    /// return `self`.
+    fn as_any(&self) -> &dyn Any;
+}
+
+/// Unlock condition for a cell — a Taproot-compressed point
+/// `P = X + H(X, M) · B` where `X` is the internal key and `M` is
+/// the merkle root over the program tree.
+///
+/// The on-wire form is just `point` (32 bytes). `witness` is
+/// optional prover-side metadata; it never serializes.
+///
+/// **Construction:**
+///
+/// - `Predicate::opaque(point)` — verifier-side; the wire-decoded
+///   form, no witness attached.
+/// - `Predicate::tree(tree)` — prover-side; wraps a
+///   [`PredicateTree`] witness.
+/// - `Predicate::with_witness(w)` — prover-side; attaches any
+///   custom [`PredicateWitness`] (Multikey, keytree-derived key,
+///   raw test scalar, …).
+///
+/// **Wire form is invariant across construction styles.** Calling
+/// `.to_point()` on any of the above returns the same 32 bytes —
+/// the constructors enforce this by deriving `point` from the
+/// witness when one is provided.
+pub struct Predicate {
+    /// Canonical wire form. The only thing observable to
+    /// verifiers; equal to `witness.to_point()` when `witness` is
+    /// `Some` (enforced by the constructors).
+    pub(crate) point: CompressedRistretto,
+
+    /// Optional prover metadata. `None` is the verifier's view.
+    /// Skipped by any serialization that targets the wire format.
+    pub(crate) witness: Option<Box<dyn PredicateWitness>>,
+}
+
+impl Clone for Predicate {
+    /// Clones the point and asks the witness to clone itself behind
+    /// a fresh boxed trait object via
+    /// [`PredicateWitness::clone_witness`].
+    fn clone(&self) -> Self {
+        Predicate {
+            point: self.point,
+            witness: self.witness.as_ref().map(|w| w.clone_witness()),
+        }
+    }
+}
+
+impl fmt::Debug for Predicate {
+    /// Prints only the canonical point. The witness type is opaque
+    /// to the formatter (could be anything implementing
+    /// `PredicateWitness`); we don't try to render it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Predicate")
+            .field(&self.point)
+            .finish()
+    }
 }
 
 /// One leaf in a `PredicateTree`'s merkle commitment. Every program leaf
@@ -62,37 +137,96 @@ pub enum PredicateLeaf {
 /// the `blinding_key` seed passed to `new`, so the on-tree position of
 /// a program within its pair is uniformly random. The seed itself is
 /// not retained — once the leaves are built, the seed is no longer
-/// needed for `compute_point` or `callproof_for`.
+/// needed for [`point`](Self::point) or [`callproof_for`](Self::callproof_for).
+///
+/// `point` caches `X + H(X, M) · B` so subsequent reads are O(1).
+/// `flamevm` reads it via `Predicate::to_point()` from the per-cell
+/// txid hash, the txlog's `Send.refund_predicate` encoding, and the
+/// `signtx`/`signcall` verification-key lookup — a hot path that
+/// previously re-walked the merkle root and re-multiplied the
+/// basepoint table on every call.
 ///
 /// Fields are `pub(crate)` to enforce the construction invariants:
-/// non-empty `leaves` exactly `2 × programs.len()` in length, and an
-/// `internal_key` that decompresses to a valid Ristretto point.
+/// non-empty `leaves` exactly `2 × programs.len()` in length, an
+/// `internal_key` that decompresses to a valid Ristretto point,
+/// and `point` populated by `new` from the other two fields.
 #[derive(Clone, Debug)]
 pub struct PredicateTree {
     pub(crate) internal_key: CompressedRistretto,
     pub(crate) leaves: Vec<PredicateLeaf>,
+    /// Cached Taproot-tweaked point `P = X + H(X, M) · B`.
+    pub(crate) point: CompressedRistretto,
+}
+
+impl PredicateWitness for PredicateTree {
+    fn to_point(&self) -> CompressedRistretto {
+        self.point
+    }
+    fn clone_witness(&self) -> Box<dyn PredicateWitness> {
+        Box::new(self.clone())
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl Predicate {
-    /// Returns the verifier-visible compressed point. For `Tree`, this
-    /// computes `P = X + H(X, M) · B`.
+    /// Verifier-style construction: wraps a wire-decoded point. No
+    /// witness attached. The on-wire `point` is the only thing the
+    /// verifier ever sees; constructing via `opaque` is what
+    /// `op_input` and predicate decoding do.
+    pub fn opaque(point: CompressedRistretto) -> Self {
+        Predicate { point, witness: None }
+    }
+
+    /// Prover-style construction: attaches a typed witness. The
+    /// predicate's `point` is derived from the witness so the two
+    /// stay in lockstep.
+    pub fn with_witness<W: PredicateWitness>(witness: W) -> Self {
+        let point = witness.to_point();
+        Predicate { point, witness: Some(Box::new(witness)) }
+    }
+
+    /// Convenience: attach a [`PredicateTree`] witness. Equivalent
+    /// to `Predicate::with_witness(tree)`.
+    pub fn tree(tree: PredicateTree) -> Self {
+        Self::with_witness(tree)
+    }
+
+    /// Returns the verifier-visible compressed point. O(1): the
+    /// constructors cache it.
     pub fn to_point(&self) -> CompressedRistretto {
-        match self {
-            Predicate::Opaque(p) => *p,
-            Predicate::Tree(t) => t.compute_point(),
-        }
+        self.point
     }
 
     /// Strips any prover-side witness data, leaving only the opaque
     /// point. Used when sealing a cell into wire encoding.
     pub fn to_opaque(&self) -> Predicate {
-        Predicate::Opaque(self.to_point())
+        Predicate::opaque(self.point)
+    }
+
+    /// Borrows the witness as `&W` if one is attached and downcasts
+    /// to the requested type. Returns `None` if no witness is
+    /// attached or the witness is of a different type.
+    ///
+    /// Used by prover-side code that needs the concrete witness:
+    /// e.g. `predicate.witness_as::<PredicateTree>()` to construct
+    /// a `CallProof`.
+    pub fn witness_as<W: PredicateWitness>(&self) -> Option<&W> {
+        self.witness.as_ref()?.as_any().downcast_ref::<W>()
+    }
+
+    /// True iff a witness is attached. Cheap probe before a
+    /// downcast when the caller doesn't know which witness type to
+    /// expect.
+    pub fn has_witness(&self) -> bool {
+        self.witness.is_some()
     }
 
     /// The 32-byte verification key for `signtx` / `signcall`.
     /// Equal to the predicate's opaque point.
     pub fn verification_key(&self) -> CompressedRistretto {
-        self.to_point()
+        self.point
     }
 
     /// The secondary Pedersen generator `B_blinding`, compressed.
@@ -155,11 +289,19 @@ impl PredicateTree {
             return Err(VMError::EmptyPredicateTree);
         }
         let internal_key = internal_key.unwrap_or_else(Predicate::unspendable_key);
-        if internal_key.decompress().is_none() {
-            return Err(VMError::InvalidPoint);
-        }
+        let x_point = internal_key
+            .decompress()
+            .ok_or(VMError::InvalidPoint)?;
         let leaves = create_merkle_leaves(&programs, &blinding_key);
-        Ok(PredicateTree { internal_key, leaves })
+        // Precompute the Taproot-tweaked point once at construction.
+        // `Predicate::to_point()` returns this cached value in O(1);
+        // hot paths (per-cell `Cell::id`, txid hashing, sig vk lookup)
+        // would otherwise re-walk the merkle tree and re-multiply the
+        // basepoint table on every call.
+        let root = merkle_root_of_leaves(&leaves);
+        let h = taproot_tweak(&internal_key, &root);
+        let point = (x_point + RISTRETTO_BASEPOINT_TABLE * &h).compress();
+        Ok(PredicateTree { internal_key, leaves, point })
     }
 
     /// Convenience: builds a tree with the unspendable internal key
@@ -191,15 +333,15 @@ impl PredicateTree {
         })
     }
 
-    /// Computes the predicate's opaque point `P = X + H(X, M)·B`.
+    /// Returns the cached Taproot-tweaked point
+    /// `P = X + H(X, M) · B`. O(1) — `PredicateTree::new` computes
+    /// it once at construction and stores it in `self.point`.
+    ///
+    /// The historic name `compute_point` is kept for backwards
+    /// compatibility but no longer recomputes; new code should
+    /// prefer `tree.point` or `Predicate::to_point()`.
     pub fn compute_point(&self) -> CompressedRistretto {
-        let root = self.merkle_root();
-        let h = taproot_tweak(&self.internal_key, &root);
-        let x_point = self
-            .internal_key
-            .decompress()
-            .expect("PredicateTree::new validated the internal key");
-        (x_point + RISTRETTO_BASEPOINT_TABLE * &h).compress()
+        self.point
     }
 
     /// Computes the merkle root over the leaves. For a single leaf the
@@ -489,7 +631,7 @@ impl Cell {
 
         // Entry 0: predicate Point.
         let predicate = match read_value(r) {
-            Ok(Some(Value::Point(p))) => Predicate::Opaque(p.to_compressed()),
+            Ok(Some(Value::Point(p))) => Predicate::opaque(p.to_compressed()),
             _ => return Err(VMError::MalformedCellEncoding),
         };
 

@@ -262,7 +262,7 @@ fn load_followed_by_save_preserves_actor() {
         payload: Vec::new(),
         gas: 1_000_000,
         vbytes: 0,
-        refund_predicate: Predicate::Opaque(Predicate::unspendable_key()),
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     };
     VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("ok");
 

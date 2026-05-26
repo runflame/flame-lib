@@ -281,7 +281,7 @@ fn open_with_inner(inner: Program) -> Program {
     .expect("scripts_only tree");
     let cp = tree.callproof_for(0).expect("cp");
     let pred_point = tree.compute_point();
-    let cell = Cell::new(Predicate::Opaque(pred_point), Anchor([0xa1; 32]), vec![]);
+    let cell = Cell::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![]);
     let cell_bytes = encode_cell_to_bytes(&cell);
 
     let mut outer = Program::new()

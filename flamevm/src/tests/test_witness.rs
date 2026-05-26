@@ -17,7 +17,7 @@ use super::test_helpers::*;
 fn input_string_cell_preserves_open_commitments() {
     let token = make_open_token(100, 7, 11, 13);
     let cell = Cell::new(
-        Predicate::Opaque(CompressedRistretto([0xaa; 32])),
+        Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x42; 32]),
         vec![Value::Token(token)],
     );
@@ -48,7 +48,7 @@ fn input_string_cell_preserves_open_commitments() {
 fn input_string_opaque_yields_closed_commitments() {
     let token = make_open_token(100, 7, 11, 13);
     let cell = Cell::new(
-        Predicate::Opaque(CompressedRistretto([0xaa; 32])),
+        Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x42; 32]),
         vec![Value::Token(token)],
     );
@@ -82,12 +82,12 @@ fn input_string_cell_and_opaque_yield_same_cell_id() {
     let token1 = make_open_token(100, 7, 11, 13);
     let token2 = make_open_token(100, 7, 11, 13);
     let cell1 = Cell::new(
-        Predicate::Opaque(CompressedRistretto([0xaa; 32])),
+        Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x42; 32]),
         vec![Value::Token(token1)],
     );
     let cell2 = Cell::new(
-        Predicate::Opaque(CompressedRistretto([0xaa; 32])),
+        Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x42; 32]),
         vec![Value::Token(token2)],
     );
@@ -118,7 +118,7 @@ fn input_string_cell_and_opaque_yield_same_cell_id() {
 fn input_mixed_payload_decodes_on_both_paths() {
     let token = make_open_token(50, 9, 17, 19);
     let cell = Cell::new(
-        Predicate::Opaque(CompressedRistretto([0xaa; 32])),
+        Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x42; 32]),
         vec![
             Value::Int253(Int253::from(1u64)),
@@ -151,7 +151,7 @@ fn input_mixed_payload_decodes_on_both_paths() {
 fn string_cell_clone_degrades_to_opaque() {
     let token = make_open_token(7, 11, 13, 17);
     let cell = Cell::new(
-        Predicate::Opaque(CompressedRistretto([0xaa; 32])),
+        Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x55; 32]),
         vec![Value::Token(token)],
     );

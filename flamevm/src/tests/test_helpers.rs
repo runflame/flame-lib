@@ -115,7 +115,7 @@ pub(crate) fn dummy_message(gas: u64) -> Message {
         // Test fixture: NUMS-unspendable predicate as the refund
         // sink. No real bounce path exercised by the tests that
         // call `dummy_message`; this just satisfies the field.
-        refund_predicate: Predicate::Opaque(Predicate::unspendable_key()),
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     }
 }
 
@@ -193,7 +193,7 @@ pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
     let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
     let child_kind = CallKind::CellOpen {
         anchor: Anchor([0u8; 32]),
-        predicate: Predicate::Opaque(CompressedRistretto([0u8; 32])),
+        predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
     };
     let child = CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), child_kind, 500, 0, 0);
@@ -346,7 +346,7 @@ pub(crate) fn encode_cell_to_bytes(cell: &Cell) -> Vec<u8> {
 /// two-item portable payload. Used by both the round-trip and the
 /// `input` opcode tests.
 pub(crate) fn fixture_cell() -> Cell {
-    let predicate = Predicate::Opaque(CompressedRistretto([0xaa; 32]));
+    let predicate = Predicate::opaque(CompressedRistretto([0xaa; 32]));
     let anchor = Anchor([0x42; 32]);
     let payload = vec![
         Value::Int253(Int253::from(7u64)),
@@ -481,7 +481,7 @@ pub(crate) fn make_signtx_script_with_cell(
     vk: CompressedRistretto,
 ) -> (Vec<u8>, crate::cell::CellID) {
     let cell = Cell::new(
-        Predicate::Opaque(vk),
+        Predicate::opaque(vk),
         Anchor([0x42; 32]),
         vec![Value::Int253(Int253::from(0u64))], // single Int253 payload
     );
@@ -769,7 +769,7 @@ pub(crate) fn build_input_cell(inp: &NMInputSpec) -> (Cell, CallProof) {
     let cp = tree.callproof_for(0).expect("callproof for leaf 0");
     let pred_point = tree.compute_point();
     let cell = Cell::new(
-        Predicate::Opaque(pred_point),
+        Predicate::opaque(pred_point),
         Anchor(inp.anchor),
         vec![Value::Token(token)],
     );

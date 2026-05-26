@@ -112,7 +112,7 @@ impl Address {
         match (tag, count) {
             (Self::TAG_PREDICATE, 2) => {
                 let p = match read_value(r) {
-                    Ok(Some(Value::Point(p))) => Predicate::Opaque(p.to_compressed()),
+                    Ok(Some(Value::Point(p))) => Predicate::opaque(p.to_compressed()),
                     _ => return Err(VMError::MalformedAddress),
                 };
                 Ok(Address::Predicate(p))
@@ -197,7 +197,7 @@ mod tests {
     use curve25519_dalek::ristretto::CompressedRistretto;
 
     fn fake_predicate() -> Predicate {
-        Predicate::Opaque(CompressedRistretto([0x7e; 32]))
+        Predicate::opaque(CompressedRistretto([0x7e; 32]))
     }
 
     #[test]

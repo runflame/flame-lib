@@ -265,7 +265,7 @@ fn phase20_two_txbound_verifies_with_multisig() {
     let (vk2, sk2) = signing_keypair(22);
 
     let cell1 = Cell::new(
-        Predicate::Opaque(vk1),
+        Predicate::opaque(vk1),
         Anchor([0xa1; 32]),
         vec![Value::Int253(Int253::from(0u64))],
     );
@@ -273,7 +273,7 @@ fn phase20_two_txbound_verifies_with_multisig() {
     let cell1_bytes = encode_cell_to_bytes(&cell1);
 
     let cell2 = Cell::new(
-        Predicate::Opaque(vk2),
+        Predicate::opaque(vk2),
         Anchor([0xa2; 32]),
         vec![Value::Int253(Int253::from(0u64))],
     );

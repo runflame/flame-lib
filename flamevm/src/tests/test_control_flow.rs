@@ -321,7 +321,7 @@ fn return_transfers_values_to_parent() {
         CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
     let child_kind = CallKind::CellOpen {
         anchor: Anchor([0u8; 32]),
-        predicate: Predicate::Opaque(CompressedRistretto([0u8; 32])),
+        predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
     };
     let child_frame = CallFrame::new(

@@ -237,7 +237,7 @@ impl String {
                 }
                 let mut bytes = [0u8; 32];
                 bytes.copy_from_slice(&data);
-                Ok(crate::cell::Predicate::Opaque(
+                Ok(crate::cell::Predicate::opaque(
                     curve25519_dalek::ristretto::CompressedRistretto(bytes),
                 ))
             }

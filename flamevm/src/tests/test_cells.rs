@@ -249,7 +249,7 @@ fn open_preserves_alloc_witnesses_via_script_string() {
     // Construct the input cell with an empty payload — the witness
     // we care about lives in the unlock script, not the payload.
     let cell = Cell::new(
-        Predicate::Opaque(pred_point),
+        Predicate::opaque(pred_point),
         Anchor([0xa1; 32]),
         vec![],
     );
@@ -599,7 +599,7 @@ fn cell_id_changes_when_payload_value_changes() {
     // type-shape but different values must have different ids.
     // Per architect response 9.3: payload bytes are bound via the
     // canonical encoding API.
-    let pred = Predicate::Opaque(CompressedRistretto([0xaa; 32]));
+    let pred = Predicate::opaque(CompressedRistretto([0xaa; 32]));
     let a = Anchor([0x42; 32]);
     let c1 = Cell::new(
         pred.clone(),
@@ -997,7 +997,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
 
     let (tree1, cp1) = build_predicate_with_program(&prog, 11);
     let cell1 = Cell::new(
-        Predicate::Opaque(tree1.compute_point()),
+        Predicate::opaque(tree1.compute_point()),
         Anchor([0xa1; 32]),
         vec![Value::Int253(Int253::from(11u64))],
     );
@@ -1006,7 +1006,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
 
     let (tree2, cp2) = build_predicate_with_program(&prog, 22);
     let cell2 = Cell::new(
-        Predicate::Opaque(tree2.compute_point()),
+        Predicate::opaque(tree2.compute_point()),
         Anchor([0xa2; 32]),
         vec![Value::Int253(Int253::from(22u64))],
     );
@@ -1192,7 +1192,7 @@ fn op_open_cs_blocked_when_external_context_false() {
     // alloc is 0x5c — external-only CS op. push:0 + alloc + return.
     let child_kind = CallKind::CellOpen {
         anchor: Anchor([0u8; 32]),
-        predicate: Predicate::Opaque(CompressedRistretto([0u8; 32])),
+        predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: false,
     };
     let child = CallFrame::new(

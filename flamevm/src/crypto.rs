@@ -76,7 +76,7 @@ impl Point {
     pub fn to_predicate(self) -> Result<crate::cell::Predicate, VMError> {
         match self {
             Point::Predicate(p) => Ok(*p),
-            Point::Opaque(c) => Ok(crate::cell::Predicate::Opaque(c)),
+            Point::Opaque(c) => Ok(crate::cell::Predicate::opaque(c)),
             Point::Commitment(_) => Err(VMError::TypeNotPoint),
         }
     }

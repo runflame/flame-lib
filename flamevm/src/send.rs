@@ -112,7 +112,7 @@ mod tests {
     use curve25519_dalek::ristretto::CompressedRistretto;
 
     fn dummy_predicate() -> Predicate {
-        Predicate::Opaque(CompressedRistretto([0u8; 32]))
+        Predicate::opaque(CompressedRistretto([0u8; 32]))
     }
 
     #[test]
