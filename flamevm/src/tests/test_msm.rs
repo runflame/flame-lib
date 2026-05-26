@@ -16,12 +16,13 @@ use super::test_helpers::*;
 /// `point + point` → `MultiscalarMul` with two unit-scalar terms.
 #[test]
 fn op_add_point_point_lifts_to_msm() {
-    let mut script = vec![0x1a];                  // pushpoint
-    script.extend_from_slice(&[0x55; 32]);
-    script.push(0x1a);                            // pushpoint
-    script.extend_from_slice(&[0x66; 32]);
-    script.push(0x53);                            // add
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_with_script(
+        Program::new()
+            .push_point([0x55; 32])
+            .push_point([0x66; 32])
+            .add()
+            .to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[0] {
         Value::MultiscalarMul(m) => assert_eq!(m.len(), 2),
@@ -32,11 +33,9 @@ fn op_add_point_point_lifts_to_msm() {
 /// `int * point` → MSM with one term `(int_as_scalar, point)`.
 #[test]
 fn op_mul_int_point_lifts_to_msm() {
-    let mut script = vec![0x03];                  // push:3
-    script.push(0x1a);                            // pushpoint
-    script.extend_from_slice(&[0x55; 32]);
-    script.push(0x54);                            // mul
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_with_script(
+        Program::new().push_int(3u64).push_point([0x55; 32]).mul().to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[0] {
         Value::MultiscalarMul(m) => assert_eq!(m.len(), 1),
@@ -47,11 +46,9 @@ fn op_mul_int_point_lifts_to_msm() {
 /// `point * int` matches `int * point` (commutative dispatch).
 #[test]
 fn op_mul_point_int_lifts_to_msm() {
-    let mut script = vec![0x1a];                  // pushpoint
-    script.extend_from_slice(&[0x55; 32]);
-    script.push(0x03);                            // push:3
-    script.push(0x54);                            // mul
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_with_script(
+        Program::new().push_point([0x55; 32]).push_int(3u64).mul().to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     assert!(matches!(vm.current_call.stack[0], Value::MultiscalarMul(_)));
 }
@@ -59,10 +56,9 @@ fn op_mul_point_int_lifts_to_msm() {
 /// `neg point` → MSM with one term `(-1, point)`.
 #[test]
 fn op_neg_point_lifts_to_msm() {
-    let mut script = vec![0x1a];                  // pushpoint
-    script.extend_from_slice(&[0x55; 32]);
-    script.push(0x52);                            // neg
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_with_script(
+        Program::new().push_point([0x55; 32]).neg().to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[0] {
         Value::MultiscalarMul(m) => assert_eq!(m.len(), 1),
@@ -73,30 +69,12 @@ fn op_neg_point_lifts_to_msm() {
 /// `msm + msm` concatenates term vectors.
 #[test]
 fn op_add_msm_msm_concatenates() {
-    // Build two MSMs of size 2 each (via point+point), then add them.
-    let mut script = vec![];
-    for byte in [0x11u8, 0x22, 0x33, 0x44] {
-        script.push(0x1a);
-        script.extend_from_slice(&[byte; 32]);
-    }
-    script.push(0x53);                            // add → MSM of size 2
-    // Move the first MSM out of the way (it's now at depth 2 → 1
-    // since add consumed two of the four pushes).
-    script.push(0x53);                            // add — but wait, we
-    // After the first add we have [point2, point1, MSM(point3,point4)] — let me redo.
-    // Simpler: build two pairs, add each, then add the MSMs.
-    let mut script = vec![];
-    for byte in [0x11u8, 0x22] { // first pair
-        script.push(0x1a);
-        script.extend_from_slice(&[byte; 32]);
-    }
-    script.push(0x53);                            // add → MSM_A (size 2)
-    for byte in [0x33u8, 0x44] { // second pair
-        script.push(0x1a);
-        script.extend_from_slice(&[byte; 32]);
-    }
-    script.push(0x53);                            // add → MSM_B (size 2)
-    script.push(0x53);                            // MSM_A + MSM_B → MSM (size 4)
+    // Build two MSMs (each of size 2 via point+point), then add them.
+    let script = Program::new()
+        .push_point([0x11; 32]).push_point([0x22; 32]).add()   // MSM_A
+        .push_point([0x33; 32]).push_point([0x44; 32]).add()   // MSM_B
+        .add()                                                  // MSM_A + MSM_B
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[0] {
@@ -108,14 +86,10 @@ fn op_add_msm_msm_concatenates() {
 /// `msm * int` scales all coefficients (`len` unchanged).
 #[test]
 fn op_mul_msm_int_scales() {
-    let mut script = vec![];
-    for byte in [0x11u8, 0x22] {
-        script.push(0x1a);
-        script.extend_from_slice(&[byte; 32]);
-    }
-    script.push(0x53);                            // add → MSM size 2
-    script.push(0x07);                            // push:7
-    script.push(0x54);                            // mul → scaled MSM
+    let script = Program::new()
+        .push_point([0x11; 32]).push_point([0x22; 32]).add()   // MSM size 2
+        .push_int(7u64).mul()                                   // scaled MSM
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[0] {
@@ -127,16 +101,10 @@ fn op_mul_msm_int_scales() {
 /// `point + msm` and `msm + point` both append (commutative).
 #[test]
 fn op_add_msm_point_appends_either_order() {
-    // msm + point
-    let mut script = vec![];
-    for byte in [0x11u8, 0x22] {
-        script.push(0x1a);
-        script.extend_from_slice(&[byte; 32]);
-    }
-    script.push(0x53);                            // add → MSM size 2
-    script.push(0x1a);
-    script.extend_from_slice(&[0x33; 32]);
-    script.push(0x53);                            // MSM + point → MSM size 3
+    let script = Program::new()
+        .push_point([0x11; 32]).push_point([0x22; 32]).add()   // MSM size 2
+        .push_point([0x33; 32]).add()                           // MSM + point
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     assert!(matches!(&vm.current_call.stack[0],
@@ -149,12 +117,11 @@ fn op_add_msm_point_appends_either_order() {
 /// Sigma-protocol semantics → hard fail.
 #[test]
 fn op_mul_point_point_rejected() {
-    let mut script = vec![0x1a];
-    script.extend_from_slice(&[0x55; 32]);
-    script.push(0x1a);
-    script.extend_from_slice(&[0x66; 32]);
-    script.push(0x54);                            // mul
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_with_script(
+        Program::new()
+            .push_point([0x55; 32]).push_point([0x66; 32]).mul()
+            .to_bytecode(),
+    );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::TypeNotInt253
@@ -164,18 +131,11 @@ fn op_mul_point_point_rejected() {
 /// `msm * msm` is also quadratic in group elements → hard fail.
 #[test]
 fn op_mul_msm_msm_rejected() {
-    let mut script = vec![];
-    for byte in [0x11u8, 0x22] {
-        script.push(0x1a);
-        script.extend_from_slice(&[byte; 32]);
-    }
-    script.push(0x53);
-    for byte in [0x33u8, 0x44] {
-        script.push(0x1a);
-        script.extend_from_slice(&[byte; 32]);
-    }
-    script.push(0x53);
-    script.push(0x54);                            // mul (MSM*MSM) — rejected
+    let script = Program::new()
+        .push_point([0x11; 32]).push_point([0x22; 32]).add()
+        .push_point([0x33; 32]).push_point([0x44; 32]).add()
+        .mul()
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
@@ -188,11 +148,9 @@ fn op_mul_msm_msm_rejected() {
 /// MSM is non-copyable: `dup` rejects.
 #[test]
 fn msm_dup_rejects() {
-    let mut script = vec![0x1a];
-    script.extend_from_slice(&[0x55; 32]);
-    script.push(0x52);                            // neg → MSM
-    script.push(0x20);                            // dup:0
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_with_script(
+        Program::new().push_point([0x55; 32]).neg().dup_k(0).to_bytecode(),
+    );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::TypeNotCopyable
@@ -202,11 +160,9 @@ fn msm_dup_rejects() {
 /// MSM is non-droppable: `drop` rejects.
 #[test]
 fn msm_drop_rejects() {
-    let mut script = vec![0x1a];
-    script.extend_from_slice(&[0x55; 32]);
-    script.push(0x52);                            // neg → MSM
-    script.push(0x1c);                            // drop
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_with_script(
+        Program::new().push_point([0x55; 32]).neg().drop_().to_bytecode(),
+    );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::TypeNotDroppable
@@ -216,13 +172,12 @@ fn msm_drop_rejects() {
 /// MSM is non-portable: cannot be sealed into a cell payload.
 #[test]
 fn msm_in_cell_payload_rejected() {
-    let mut script = vec![0x1a];
-    script.extend_from_slice(&[0x55; 32]);
-    script.push(0x52);                            // neg → MSM
-    script.push(0x01);                            // k=1
-    script.push(0x1a);
-    script.extend_from_slice(&[0xaa; 32]);        // predicate point
-    script.push(0x91);                            // cell
+    let script = Program::new()
+        .push_point([0x55; 32]).neg()                  // → MSM
+        .push_int(1u64)                                // count = 1
+        .push_point([0xaa; 32])                        // predicate
+        .cell()
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
@@ -234,11 +189,9 @@ fn msm_in_cell_payload_rejected() {
 /// `type` opcode pushes 0xc3 for MSM.
 #[test]
 fn msm_typecode_is_c3() {
-    let mut script = vec![0x1a];
-    script.extend_from_slice(&[0x55; 32]);
-    script.push(0x52);                            // neg → MSM
-    script.push(0x7f);                            // type
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_with_script(
+        Program::new().push_point([0x55; 32]).neg().type_().to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     // Stack: [MSM, typecode_int]. Top is the typecode.
     let top = &vm.current_call.stack[1];
@@ -367,11 +320,9 @@ fn verify_msm_invalid_point_rejected_at_batch() {
 /// `verify` on an MSM in internal context errors `ExternalOnly`.
 #[test]
 fn verify_msm_in_internal_context_rejected() {
-    let mut script = vec![0x1a];
-    script.extend_from_slice(&[0x55; 32]);
-    script.push(0x52);                            // neg → MSM
-    script.push(0x79);                            // verify
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_with_script(
+        Program::new().push_point([0x55; 32]).neg().verify().to_bytecode(),
+    );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::ExternalOnly
