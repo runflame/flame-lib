@@ -194,8 +194,10 @@ fn prove_then_verify_with_commit_expr_eq() {
 #[test]
 fn op_decrypt_succeeds_on_matching_witness() {
     // Build a Token from cleartext (q, f); decrypt with the
-    // correct (q, f, q', f') quartet succeeds and pushes
-    // ClearToken(q, f).
+    // correct (q, f, q', f') quartet pushes ClearToken(q, f).
+    // The two Pedersen-opening checks are deferred into the
+    // batch verifier; consume the batch at the end to confirm
+    // it accepts.
     let q = Int253::from(100u64);
     let f = Int253::from(7u64);
     let q_blind = Int253::from(11u64);
@@ -227,12 +229,24 @@ fn op_decrypt_succeeds_on_matching_witness() {
         }
         _ => panic!("expected ClearToken"),
     }
+
+    // Drain the batch and confirm both deferred openings verify.
+    let batch = core::mem::replace(
+        &mut delegate.batch,
+        musig::BatchVerifier::new(rand::thread_rng()),
+    );
+    batch.verify().expect("batch verifies on correct witness");
 }
 
 #[test]
 fn op_decrypt_rejects_wrong_witness() {
-    // Mismatched blinding → commitment opens to a different point
-    // → CleartextConstraintFalse.
+    // Mismatched blinding → the Pedersen-opening MSM doesn't sum to
+    // identity. Under the deferred batch verification design, the
+    // `decrypt` opcode itself succeeds (it just appends two
+    // statements to the batch verifier); the rejection surfaces when
+    // the batch is drained — same lane as Schnorr / MuSig / MSM
+    // verification failures, mapped to
+    // `BatchSignatureVerificationFailed` by `Verifier::verify`.
     let q = Int253::from(100u64);
     let f = Int253::from(7u64);
     let qty_commit = crate::Commitment::blinded_with_factor(
@@ -251,8 +265,22 @@ fn op_decrypt_rejects_wrong_witness() {
     vm.push_value(Value::Int253(q));
     vm.push_value(Value::Int253(Int253::from(11u64)));
     let mut delegate = StubDelegate::new();
-    let err = vm.step_external(&mut delegate).unwrap_err();
-    assert!(matches!(err, VMError::CleartextConstraintFalse));
+    vm.step_external(&mut delegate)
+        .expect("op_decrypt defers the check, so the step itself succeeds");
+
+    // ClearToken got pushed (deferred design — the prover's claim is
+    // taken at face value until the batch runs).
+    assert!(matches!(vm.current_call.stack[0], Value::ClearToken(_)));
+
+    // Drain the batch — wrong blinding means the deferred MSM doesn't
+    // sum to identity. The verifier rejects.
+    let batch = core::mem::replace(
+        &mut delegate.batch,
+        musig::BatchVerifier::new(rand::thread_rng()),
+    );
+    batch
+        .verify()
+        .expect_err("batch must reject mismatched blinding");
 }
 
 #[test]

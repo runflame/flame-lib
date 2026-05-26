@@ -808,7 +808,7 @@ impl VM {
             I::Range => self.op_range(delegate),
             I::Scalar => self.op_scalar(),
             I::Commit => self.op_commit(),
-            I::Decrypt => self.op_decrypt(),
+            I::Decrypt => self.op_decrypt(delegate),
             I::Mix => self.op_mix(delegate),
             I::Fee => self.op_fee(delegate),
             I::Verify => self.op_verify(delegate),
@@ -2824,14 +2824,25 @@ impl VM {
     /// `0x77 decrypt` — `token f f' q q' → cleartoken`. Reveals a
     /// cleartext quantity / flavor pair for an encrypted Token by
     /// supplying their cleartext values (`f`, `q`) and Pedersen
-    /// blinding factors (`f'`, `q'`). Verifies that
-    /// `token.qty.to_point() == q*B + q'*B_blinding` and analogously
-    /// for the flavor, then pushes a `ClearToken(q, f)`.
+    /// blinding factors (`f'`, `q'`).
+    ///
+    /// Each Pedersen-opening — `token.qty == q*B + q'*B_blinding` and
+    /// `token.flv == f*B + f'*B_blinding` — is rewritten as the MSM
+    /// assertion `q*B + q'*B_blinding − token.qty == 0` (and likewise
+    /// for `flv`) and appended to the delegate's `BatchVerifier` as
+    /// two independent statements. The actual multi-scalar
+    /// multiplication runs once per tx at finalize, alongside the
+    /// Schnorr / MuSig / MSM batch — same lane and rollback story as
+    /// `op_verify` for `MultiscalarMul`. So a wrong `(q, q', f, f')`
+    /// surfaces as `BatchSignatureVerificationFailed` at finalize,
+    /// not synchronously here.
     ///
     /// All four scalar operands (`f`, `f'`, `q`, `q'`) are popped as
-    /// `Int253`. The Token is popped last (deepest on stack). Errors
-    /// `CleartextConstraintFalse` if either commitment doesn't open.
-    fn op_decrypt(&mut self) -> Result<(), VMError> {
+    /// `Int253`. The Token is popped last (deepest on stack). The
+    /// `ClearToken(q, f)` push happens unconditionally — the
+    /// soundness of the `q, f` declaration is the deferred batch
+    /// check above.
+    fn op_decrypt<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         self.require_external()?;
         use bulletproofs::PedersenGens;
         let q_blind = self.pop_value()?.to_int253()?;
@@ -2843,17 +2854,28 @@ impl VM {
             _ => return Err(VMError::TypeNotToken),
         };
         let gens = PedersenGens::default();
-        let expected_qty_point = gens
-            .commit(q_value.to_scalar_mod_order(), q_blind.to_scalar_mod_order())
-            .compress();
-        let expected_flv_point = gens
-            .commit(f_value.to_scalar_mod_order(), f_blind.to_scalar_mod_order())
-            .compress();
-        if expected_qty_point != token.qty.to_point()
-            || expected_flv_point != token.flv.to_point()
-        {
-            return Err(VMError::CleartextConstraintFalse);
-        }
+        // Append two independent statements:
+        //   q*B + q'*B_blinding + (-1)*token.qty.to_point() == identity
+        //   f*B + f'*B_blinding + (-1)*token.flv.to_point() == identity
+        // Each gets its own random factor from the batch verifier, so
+        // they can't cancel each other or other batched statements.
+        // `B` is the Ristretto basepoint (PedersenGens default), so the
+        // value scalar rides on the BatchVerifier's basepoint lane.
+        let neg_one = -Scalar::ONE;
+        let qty_point = token.qty.to_point().decompress();
+        let flv_point = token.flv.to_point().decompress();
+        musig::BatchVerification::append(
+            delegate.batch_verifier(),
+            q_value.to_scalar_mod_order(),
+            [q_blind.to_scalar_mod_order(), neg_one],
+            [Some(gens.B_blinding), qty_point],
+        );
+        musig::BatchVerification::append(
+            delegate.batch_verifier(),
+            f_value.to_scalar_mod_order(),
+            [f_blind.to_scalar_mod_order(), neg_one],
+            [Some(gens.B_blinding), flv_point],
+        );
         self.push_value(Value::ClearToken(ClearToken::new(q_value, f_value)));
         Ok(())
     }
