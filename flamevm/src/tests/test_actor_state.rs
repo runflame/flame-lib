@@ -50,12 +50,12 @@ fn vm_for(actor: ActorID, script: Vec<u8>) -> VM {
 #[test]
 fn load_pushes_wrapper_dict_and_marks_actor() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, vec![0x1d], 1_000, 0);
+    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
 
     // Script: just `load`. Step once and inspect; don't run to
     // end (end-of-frame is checked clean-stack, which a bare
     // `load` would violate).
-    let script = vec![0x96];
+    let script = Program::new().load().to_bytecode();
     let mut vm = vm_for(id.clone(), script);
     vm.step_internal_with_registry(&mut reg).expect("load step");
 
@@ -75,10 +75,10 @@ fn load_pushes_wrapper_dict_and_marks_actor() {
 #[test]
 fn load_then_save_round_trips_and_clears_mark() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, vec![0x1d], 1_000, 0);
+    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
 
     // Script: `load; save`.
-    let script = vec![0x96, 0x97];
+    let script = Program::new().load().save().to_bytecode();
     let mut vm = vm_for(id.clone(), script);
     while vm.step_internal_with_registry(&mut reg).expect("step") {}
 
@@ -98,7 +98,7 @@ fn load_in_external_root_errors_actor_context() {
     let mut vm = VM::new(
         dummy_header(),
         CallFrame::new(
-            Program::parse(&[0x96]).unwrap().into_instructions(),
+            Program::new().load().into_instructions(),
             kind,
             1000,
             0,
@@ -112,8 +112,8 @@ fn load_in_external_root_errors_actor_context() {
 #[test]
 fn load_without_registry_errors_registry_unavailable() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, vec![0x1d], 1_000, 0);
-    let mut vm = vm_for(id, vec![0x96]);
+    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
+    let mut vm = vm_for(id, Program::new().load().to_bytecode());
     // step_internal (no registry) hits the RegistryUnavailable
     // guard inside op_load.
     let err = vm.step_internal().expect_err("must error");
@@ -123,10 +123,10 @@ fn load_without_registry_errors_registry_unavailable() {
 #[test]
 fn second_load_on_same_frame_errors_already_marked() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, vec![0x1d], 1_000, 0);
+    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
 
     // Script: `load; load`.
-    let script = vec![0x96, 0x96];
+    let script = Program::new().load().load().to_bytecode();
     let mut vm = vm_for(id, script);
     // First step: `load` succeeds.
     assert!(vm.step_internal_with_registry(&mut reg).expect("first"));
@@ -138,11 +138,11 @@ fn second_load_on_same_frame_errors_already_marked() {
 #[test]
 fn load_against_marked_actor_from_outside_frame_errors() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, vec![0x1d], 1_000, 0);
+    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
     // Pre-mark the actor (as if a sibling frame loaded it).
     reg.mark_for_destruction(&id);
 
-    let mut vm = vm_for(id, vec![0x96]);
+    let mut vm = vm_for(id, Program::new().load().to_bytecode());
     let err = vm.step_internal_with_registry(&mut reg).expect_err("must error");
     assert!(matches!(err, VMError::LoadAlreadyMarked));
 }
@@ -150,7 +150,7 @@ fn load_against_marked_actor_from_outside_frame_errors() {
 #[test]
 fn load_against_frozen_actor_errors() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, vec![0x1d], 1_000, 0);
+    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
     // Force-freeze the actor.
     {
         let a = reg.actor_mut(&id).expect("present");
@@ -158,7 +158,7 @@ fn load_against_frozen_actor_errors() {
         a.frozen_since = Some(10);
     }
 
-    let mut vm = vm_for(id, vec![0x96]);
+    let mut vm = vm_for(id, Program::new().load().to_bytecode());
     let err = vm.step_internal_with_registry(&mut reg).expect_err("must error");
     assert!(matches!(err, VMError::ActorFrozen));
 }
@@ -166,11 +166,11 @@ fn load_against_frozen_actor_errors() {
 #[test]
 fn save_without_load_errors() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, vec![0x1d], 1_000, 0);
+    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
 
-    // Script: pushint8 0, dict, save. Save runs without a prior
+    // Script: push:0, dict, save. Save runs without a prior
     // load → SaveWithoutLoad error.
-    let script = vec![0x10, 0, 0x60, 0x97];
+    let script = Program::new().push_int(0u64).dict().save().to_bytecode();
     let mut vm = vm_for(id, script);
     // 2 instructions before save: pushint8(0), dict.
     for i in 0..2 {
@@ -191,11 +191,11 @@ fn save_with_malformed_dict_errors_malformed_actor_state() {
     // directly), we set the frame's `loaded` flag by hand and
     // hit save with an empty Dict pre-pushed.
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, vec![0x1d], 1_000, 0);
+    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
     reg.mark_for_destruction(&id); // simulate prior load
 
-    // Script: pushint8(0); dict; save. Pre-save = 2 instructions.
-    let script = vec![0x10, 0, 0x60, 0x97];
+    // Script: push:0; dict; save. Pre-save = 2 instructions.
+    let script = Program::new().push_int(0u64).dict().save().to_bytecode();
     let mut vm = vm_for(id, script);
     vm.current_call.loaded = true; // simulate prior op_load on this frame
     for i in 0..2 {
@@ -221,7 +221,7 @@ fn load_without_save_then_commit_tx_destroys_actor_and_queues_vbytes() {
     // Step a single `load`. We don't run to end-of-frame (that'd
     // hit StackNotClean) — we're testing the registry mutation,
     // not the script's clean exit.
-    let mut vm = vm_for(id.clone(), vec![0x96]);
+    let mut vm = vm_for(id.clone(), Program::new().load().to_bytecode());
     vm.step_internal_with_registry(&mut reg).expect("load ok");
     assert!(reg.is_marked_for_destruction(&id));
 
@@ -246,7 +246,12 @@ fn load_followed_by_save_preserves_actor() {
     // BlockContext + ActorRegistry come in via test_helpers' wildcard.
     let mut reg = MemRegistry::new();
     // recv = `load; save` — full pair. No self-destruct.
-    let id = deploy_with_recv(&mut reg, vec![0x96, 0x97], 10_000, 0);
+    let id = deploy_with_recv(
+        &mut reg,
+        Program::new().load().save().to_bytecode(),
+        10_000,
+        0,
+    );
 
     let block = BlockContext { height: 100 };
     let msg = Message {
