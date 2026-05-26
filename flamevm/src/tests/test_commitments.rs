@@ -116,7 +116,7 @@ fn string_opaque_downcast_to_instructions_parses_bytes() {
 fn op_scalar_pushes_constant_expression() {
     // Pre-load a 32-byte String on the stack, dispatch `scalar`,
     // confirm the result is Expression::Constant.
-    let mut vm = vm_external_with_script(vec![0x5a]); // scalar opcode
+    let mut vm = vm_external_with_script(Program::new().scalar().to_bytecode());
     let s = String::scalar(Int253::from(99u64));
     vm.push_value(Value::String(s));
     let mut delegate = StubDelegate::new();
@@ -135,7 +135,7 @@ fn op_commit_pushes_variable() {
     // Pre-load a witness-bearing String::Commitment, dispatch
     // `commit`, confirm the result is a Variable with the open
     // commitment preserved.
-    let mut vm = vm_external_with_script(vec![0x5b]); // commit opcode
+    let mut vm = vm_external_with_script(Program::new().commit().to_bytecode());
     let c = crate::Commitment::unblinded(Int253::from(42u64));
     vm.push_value(Value::String(String::commitment(c.clone())));
     let mut delegate = StubDelegate::new();
@@ -210,7 +210,7 @@ fn op_decrypt_succeeds_on_matching_witness() {
     );
     let token = crate::Token::new(qty_commit, flv_commit);
 
-    let mut vm = vm_external_with_script(vec![0x77]); // decrypt
+    let mut vm = vm_external_with_script(Program::new().decrypt().to_bytecode());
     vm.push_value(Value::Token(token));
     vm.push_value(Value::Int253(f));
     vm.push_value(Value::Int253(f_blind));
@@ -257,21 +257,21 @@ fn op_decrypt_rejects_wrong_witness() {
 
 #[test]
 fn scalar_in_internal_context_errors_external_only() {
-    let mut vm = vm_with_script(vec![0x5a]);
+    let mut vm = vm_with_script(Program::new().scalar().to_bytecode());
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::ExternalOnly));
 }
 
 #[test]
 fn commit_in_internal_context_errors_external_only() {
-    let mut vm = vm_with_script(vec![0x5b]);
+    let mut vm = vm_with_script(Program::new().commit().to_bytecode());
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::ExternalOnly));
 }
 
 #[test]
 fn decrypt_in_internal_context_errors_external_only() {
-    let mut vm = vm_with_script(vec![0x77]);
+    let mut vm = vm_with_script(Program::new().decrypt().to_bytecode());
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::ExternalOnly));
 }
