@@ -23,6 +23,36 @@ pub trait BatchVerification {
         J: IntoIterator<Item = Option<RistrettoPoint>>;
 }
 
+/// Opaque snapshot of a [`BatchVerifier`]'s state. Issued by
+/// [`BatchCheckpoint::snapshot`] and consumed by
+/// [`BatchCheckpoint::restore`]. Used by higher layers (e.g. a VM
+/// with call-frame rollback) to discard a sub-batch's contributions
+/// on failure: snapshot before entering the failable scope, restore
+/// on failure. On success the snapshot is dropped — accumulated
+/// terms stay.
+///
+/// The snapshot only captures monotonic state; the RNG inside the
+/// verifier is not rewound. Any random scalars sampled between
+/// snapshot and restore are simply lost, which is harmless — the
+/// remaining batch terms still carry the random factors that were
+/// sampled for them.
+#[derive(Clone)]
+pub struct BatchSnapshot {
+    basepoint_scalar: Scalar,
+    dyn_len: usize,
+}
+
+/// Checkpoint / rollback for batch accumulators. Separate from
+/// [`BatchVerification`] so single-shot verifiers (which have no
+/// meaningful "state") aren't required to support it.
+pub trait BatchCheckpoint {
+    /// Captures the current accumulator state for later [`Self::restore`].
+    fn snapshot(&self) -> BatchSnapshot;
+    /// Restores the accumulator to the state captured by `snap`.
+    /// Any terms appended since the snapshot are dropped.
+    fn restore(&mut self, snap: &BatchSnapshot);
+}
+
 /// Single signature verifier that implements batching interface.
 pub struct SingleVerifier {
     result: Result<(), StarsigError>,
@@ -103,16 +133,23 @@ impl<R: RngCore + CryptoRng> BatchVerifier<R> {
         }
     }
 
-    /// Drains the accumulator into its three component vectors:
-    /// `(basepoint_scalar, dyn_weights, dyn_points)`. Useful for
-    /// folding a sub-batch into a parent batch via
-    /// [`BatchVerification::append`] — the parent's `append`
-    /// multiplies the whole sub-statement by a fresh random scalar,
-    /// preserving the Schwartz–Zippel soundness bound.
-    pub fn into_parts(
-        self,
-    ) -> (Scalar, Vec<Scalar>, Vec<Option<RistrettoPoint>>) {
-        (self.basepoint_scalar, self.dyn_weights, self.dyn_points)
+}
+
+impl<R: RngCore + CryptoRng> BatchCheckpoint for BatchVerifier<R> {
+    fn snapshot(&self) -> BatchSnapshot {
+        // `dyn_weights` and `dyn_points` grow together (extend in
+        // lockstep inside `append`); one length is enough.
+        debug_assert_eq!(self.dyn_weights.len(), self.dyn_points.len());
+        BatchSnapshot {
+            basepoint_scalar: self.basepoint_scalar,
+            dyn_len: self.dyn_weights.len(),
+        }
+    }
+
+    fn restore(&mut self, snap: &BatchSnapshot) {
+        self.basepoint_scalar = snap.basepoint_scalar;
+        self.dyn_weights.truncate(snap.dyn_len);
+        self.dyn_points.truncate(snap.dyn_len);
     }
 }
 
