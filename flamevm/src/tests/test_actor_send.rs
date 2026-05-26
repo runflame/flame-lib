@@ -1,4 +1,4 @@
-//! Tests for op_send, anchor ratchet, payload_hash, refund predicate.
+//! Tests for op_send, anchor split, payload, refund predicate.
 
 #![allow(unused_imports)]
 
@@ -15,8 +15,6 @@ use crate::{ActorID, ActorRegistry, Int253};
 ///   method
 ///   addr
 ///   send
-///
-/// For 0 args: push k, refund, gas, bytes, method, addr, send.
 fn send_script(
     target: &ActorID,
     refund_bytes: [u8; 32],
@@ -24,38 +22,15 @@ fn send_script(
     gas: u64,
     vbytes: u64,
 ) -> Vec<u8> {
-    let mut s = Vec::new();
-    // k = 0
-    s.push(0x00);
-    // refund: pushstr 32 bytes
-    s.push(0x19); // pushstr
-    s.push(0x00); // sub-varint tag U8
-    s.push(32);   // length
-    s.extend_from_slice(&refund_bytes);
-    // gas
-    s.extend(push_int_bytes(gas));
-    // bytes
-    s.extend(push_int_bytes(vbytes));
-    // method
-    s.extend(push_int_bytes(method));
-    // addr (32-byte hash)
-    s.push(0x19);
-    s.push(0x00);
-    s.push(32);
-    s.extend_from_slice(&target.to_hash());
-    // send
-    s.push(0x94);
-    s
-}
-
-fn push_int_bytes(n: u64) -> Vec<u8> {
-    if n < 16 {
-        vec![n as u8]
-    } else {
-        let mut v = vec![0x14];
-        v.extend_from_slice(&n.to_le_bytes());
-        v
-    }
+    Program::new()
+        .push_int(0u64)                                // k = 0 args
+        .push_str(String::from(refund_bytes.to_vec())) // refund (32-byte)
+        .push_int(gas)
+        .push_int(vbytes)
+        .push_int(method)
+        .push_str(String::from(target.to_hash().to_vec())) // addr (32-byte)
+        .send()
+        .to_bytecode()
 }
 
 /// Builds an InternalRoot VM running `script`.
@@ -184,21 +159,17 @@ fn send_payload_in_txlog_differs_across_args() {
     let refund = [0u8; 32];
 
     // Helper that builds a script with 1 portable arg (an Int253).
-    let one_arg_send = |arg: u8| {
-        let mut s = Vec::new();
-        // arg
-        s.push(arg as u8); // push:k (small)
-        // k = 1
-        s.push(0x01);
-        // refund
-        s.push(0x19); s.push(0x00); s.push(32); s.extend_from_slice(&refund);
-        // gas = 1, bytes = 0, method = 0
-        s.push(0x01); s.push(0x00); s.push(0x00);
-        // addr
-        s.push(0x19); s.push(0x00); s.push(32);
-        s.extend_from_slice(&target.to_hash());
-        s.push(0x94); // send
-        s
+    let one_arg_send = |arg: u64| {
+        Program::new()
+            .push_int(arg)                                     // payload[0]
+            .push_int(1u64)                                    // k = 1
+            .push_str(String::from(refund.to_vec()))           // refund
+            .push_int(1u64)                                    // gas
+            .push_int(0u64)                                    // bytes
+            .push_int(0u64)                                    // method
+            .push_str(String::from(target.to_hash().to_vec())) // addr
+            .send()
+            .to_bytecode()
     };
 
     let script_a = one_arg_send(7);
@@ -245,7 +216,7 @@ fn external_txid_includes_send_entry() {
     let txid_with = crate::tx::TxID::from_log(&vm1.txlog);
 
     // Run a no-op tx (nop instead of send).
-    let mut vm2 = vm_internal(ActorID::Hash([0x33; 32]), vec![0x1d]);
+    let mut vm2 = vm_internal(ActorID::Hash([0x33; 32]), Program::new().nop().to_bytecode());
     while vm2.step_internal().expect("step") {}
     let txid_without = crate::tx::TxID::from_log(&vm2.txlog);
 
@@ -254,15 +225,21 @@ fn external_txid_includes_send_entry() {
 
 #[test]
 fn send_with_non_32_byte_addr_errors() {
-    let mut s = Vec::new();
-    // k = 0, refund (valid), gas = 1, bytes = 0, method = 0
-    s.push(0x00);
-    s.push(0x19); s.push(0x00); s.push(32); s.extend_from_slice(&[0u8; 32]);
-    s.push(0x01); s.push(0x00); s.push(0x00);
-    // BAD addr: only 16 bytes
-    s.push(0x19); s.push(0x00); s.push(16); s.extend_from_slice(&[0u8; 16]);
-    s.push(0x94);
-    let mut vm = vm_internal(ActorID::Hash([0u8; 32]), s);
+    // Stack-shape OK for everything except the addr String, which is
+    // 16 bytes instead of 32. `op_send` errors `MalformedAddress`.
+    // Built via the public builder; the bad String comes from a
+    // shorter byte slice. (No need for raw bytes — only the value
+    // length matters.)
+    let script = Program::new()
+        .push_int(0u64)                              // k = 0
+        .push_str(String::from(vec![0u8; 32]))       // refund (valid 32 bytes)
+        .push_int(1u64)                              // gas
+        .push_int(0u64)                              // bytes
+        .push_int(0u64)                              // method
+        .push_str(String::from(vec![0u8; 16]))       // BAD addr: 16 bytes
+        .send()
+        .to_bytecode();
+    let mut vm = vm_internal(ActorID::Hash([0u8; 32]), script);
     let err = loop {
         match vm.step_internal() {
             Ok(true) => continue,
@@ -275,16 +252,16 @@ fn send_with_non_32_byte_addr_errors() {
 
 #[test]
 fn send_with_non_32_byte_refund_errors() {
-    let mut s = Vec::new();
-    // k = 0
-    s.push(0x00);
-    // BAD refund: 16 bytes
-    s.push(0x19); s.push(0x00); s.push(16); s.extend_from_slice(&[0u8; 16]);
-    // gas, bytes, method, addr
-    s.push(0x01); s.push(0x00); s.push(0x00);
-    s.push(0x19); s.push(0x00); s.push(32); s.extend_from_slice(&[0u8; 32]);
-    s.push(0x94);
-    let mut vm = vm_internal(ActorID::Hash([0u8; 32]), s);
+    let script = Program::new()
+        .push_int(0u64)                              // k = 0
+        .push_str(String::from(vec![0u8; 16]))       // BAD refund: 16 bytes
+        .push_int(1u64)                              // gas
+        .push_int(0u64)                              // bytes
+        .push_int(0u64)                              // method
+        .push_str(String::from(vec![0u8; 32]))       // addr (valid)
+        .send()
+        .to_bytecode();
+    let mut vm = vm_internal(ActorID::Hash([0u8; 32]), script);
     let err = loop {
         match vm.step_internal() {
             Ok(true) => continue,
