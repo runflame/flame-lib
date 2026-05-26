@@ -43,49 +43,32 @@ fn vm_for_actor(actor: ActorID, script: Vec<u8>) -> VM {
     )
 }
 
-/// Helper: builds the bytecode that prepares the call stack and
-/// invokes 0x95 (call). Spec stack (bottom→top, since op_call pops
-/// from the top):
-///   args…   k   gas   bytes   method   addr   call
-/// With 0 args the push order becomes k, gas, bytes, method, addr.
+/// Helper: builds bytecode that prepares the call stack and invokes
+/// `op_call` with `k=0` args. Built via the public `Program` builder.
+/// Spec stack (bottom→top, popped top-first by `op_call`):
+///   k   gas   bytes   method   addr   call
 fn call_script(target: &ActorID, method: u64, gas: u64) -> Vec<u8> {
-    let mut s = Vec::new();
-    // k (0 args) — deepest
-    s.push(0x00);
-    // gas
-    s.extend(push_int_bytes(gas));
-    // bytes (0)
-    s.push(0x00);
-    // method
-    s.extend(push_int_bytes(method));
-    // addr: 32-byte String — pushstr + sub-varint length + hash bytes.
-    s.push(0x19); // pushstr
-    s.push(0x00); // sub-varint tag U8
-    s.push(32);   // length
-    s.extend_from_slice(&target.to_hash());
-    // call
-    s.push(0x95);
-    s
+    Program::new()
+        .push_int(0u64)                                // k = 0 args
+        .push_int(gas)                                 // gas
+        .push_int(0u64)                                // bytes
+        .push_int(method)                              // method
+        .push_str(String::from(target.to_hash().to_vec())) // addr (32-byte)
+        .call()
+        .to_bytecode()
 }
 
-/// Push a small unsigned int via the narrowest encoding the
-/// existing encoder uses. For values < 16, uses push:k (0x0k).
-/// For others, falls back to pushint64 (0x14 + 8 bytes LE).
-fn push_int_bytes(n: u64) -> Vec<u8> {
-    if n < 16 {
-        vec![n as u8]
-    } else {
-        let mut v = vec![0x14];
-        v.extend_from_slice(&n.to_le_bytes());
-        v
-    }
+/// `nop`-only recv — short fixture used when the test only cares
+/// about call-frame mechanics, not the callee body.
+fn nop_recv() -> Vec<u8> {
+    Program::new().nop().to_bytecode()
 }
 
 #[test]
 fn call_a_to_b_creates_new_frame_with_callee_identity() {
     let mut reg = MemRegistry::new();
     // B: just `nop` so it does nothing then frame exits clean.
-    let b = deploy_recv(&mut reg, vec![0x1d], 1_000);
+    let b = deploy_recv(&mut reg, nop_recv(), 1_000);
 
     // A: call B; expect 0 results.
     let a_script = call_script(&b, 0, 10_000);
@@ -117,7 +100,7 @@ fn call_does_not_emit_txlog_entry_by_itself() {
     // what the state machine reads. Here B's recv is a nop, so the
     // txlog after the call is just the Header.
     let mut reg = MemRegistry::new();
-    let b = deploy_recv(&mut reg, vec![0x1d], 1_000);
+    let b = deploy_recv(&mut reg, nop_recv(), 1_000);
     let a_script = call_script(&b, 0, 10_000);
     let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
 
@@ -142,7 +125,7 @@ fn direct_self_call_rejected_as_reentrancy() {
     let mut state = ActorState::new();
     state.public.insert(
         RECV_METHOD,
-        Value::String(String::from(b"\x1d".to_vec())),
+        Value::String(String::from(nop_recv())),
     );
     let id = ActorID::Hash([0xa1; 32]);
     reg.deploy(id.clone(), state, 10_000, 0).expect("deploy");
@@ -190,21 +173,24 @@ fn indirect_cycle_rejected_as_reentrancy() {
     let mut a_state = ActorState::new();
     a_state.public.insert(
         RECV_METHOD,
-        Value::String(String::from(b"\x1d".to_vec())),
+        Value::String(String::from(nop_recv())),
     );
     reg.deploy(a_id.clone(), a_state, 100_000, 0).expect("deploy A");
 
     let mut b_state = ActorState::new();
     b_state.public.insert(
         RECV_METHOD,
-        Value::String(String::from(b"\x1d".to_vec())),
+        Value::String(String::from(nop_recv())),
     );
     reg.deploy(b_id.clone(), b_state, 100_000, 0).expect("deploy B");
 
     // B's recv: call A (re-entry — fails with marker 0), drop the
     // marker, return cleanly.
-    let mut b_recv = call_script(&a_id, 0, 1_000);
-    b_recv.push(0x1c); // drop failure marker
+    let b_recv = {
+        let mut p = Program::parse(&call_script(&a_id, 0, 1_000)).expect("parse");
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.to_bytecode()
+    };
     let mut new_b_state = ActorState::new();
     new_b_state.public.insert(
         RECV_METHOD,
@@ -214,8 +200,12 @@ fn indirect_cycle_rejected_as_reentrancy() {
 
     // A's recv: call B (B returns 0 results successfully), drop the
     // [count, success] markers.
-    let mut a_script = call_script(&b_id, 0, 50_000);
-    a_script.extend(vec![0x1c, 0x1c]);
+    let a_script = {
+        let mut p = Program::parse(&call_script(&b_id, 0, 50_000)).expect("parse");
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.to_bytecode()
+    };
     let mut vm = vm_for_actor(a_id, a_script);
 
     // Tx must complete without fatal error.
@@ -233,16 +223,25 @@ fn sibling_calls_to_same_actor_allowed_after_return() {
     // not re-entrancy because B isn't on the live call stack at
     // the time of the second call.
     let mut reg = MemRegistry::new();
-    // B: return 0 results — `push:0 return`.
-    let b = deploy_recv(&mut reg, vec![0x00, 0x7e], 1_000);
+    // B: `push:0; return` — returns 0 results.
+    let b_recv = Program::new().push_int(0u64).return_().to_bytecode();
+    let b = deploy_recv(&mut reg, b_recv, 1_000);
 
     // A: call B; drop returned `[count=0, success=1]`; call B again;
     // drop those two markers — leaves an empty stack for the implicit
     // root finish_call.
-    let mut a_script = call_script(&b, 0, 5_000);
-    a_script.extend(vec![0x1c, 0x1c]);                 // drop, drop
-    a_script.extend(call_script(&b, 0, 5_000));
-    a_script.extend(vec![0x1c, 0x1c]);                 // drop, drop
+    let a_script = {
+        let mut p = Program::parse(&call_script(&b, 0, 5_000)).expect("parse");
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(crate::ops::Instruction::Drop);
+        let second = Program::parse(&call_script(&b, 0, 5_000)).expect("parse");
+        for i in second.into_instructions() {
+            p.push_instr(i);
+        }
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.to_bytecode()
+    };
     let a = deploy_recv(&mut reg, a_script.clone(), 100_000);
 
     let mut vm = vm_for_actor(a, a_script);
@@ -253,7 +252,7 @@ fn sibling_calls_to_same_actor_allowed_after_return() {
 #[test]
 fn call_without_registry_errors() {
     let mut reg = MemRegistry::new();
-    let b = deploy_recv(&mut reg, vec![0x1d], 1_000);
+    let b = deploy_recv(&mut reg, nop_recv(), 1_000);
     let a_script = call_script(&b, 0, 10_000);
     let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
     let mut vm = vm_for_actor(a, a_script);
@@ -276,9 +275,9 @@ fn save_emits_actorsave_with_post_state_root() {
     // A thin state machine consuming the TxLog can apply these in
     // order to mutate the registry without re-running the script.
     let mut reg = MemRegistry::new();
-    // Recv: load (0x96) then save (0x97). Round-trip with no changes
-    // still emits the ActorSave entry.
-    let recv = vec![0x96, 0x97];
+    // Recv: `load; save` — round-trip with no state change still
+    // emits the ActorSave entry.
+    let recv = Program::new().load().save().to_bytecode();
     let id = ActorID::Hash([0xab; 32]);
     let mut state = ActorState::new();
     state.public.insert(RECV_METHOD, Value::String(crate::String::from(recv.clone())));
