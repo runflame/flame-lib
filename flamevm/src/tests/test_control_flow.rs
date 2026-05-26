@@ -7,14 +7,14 @@ use super::test_helpers::*;
 #[test]
 fn verify_truthy_pops() {
     // push:1, verify — succeeds, stack empties.
-    let mut vm = vm_with_script(vec![0x01, 0x79]);
+    let mut vm = vm_with_script(Program::new().push_int(1u64).verify().to_bytecode());
     run_to_end(&mut vm).unwrap();
     assert!(vm.current_call.stack.is_empty());
 }
 
 #[test]
 fn verify_zero_fails() {
-    let mut vm = vm_with_script(vec![0x00, 0x79]);
+    let mut vm = vm_with_script(Program::new().push_int(0u64).verify().to_bytecode());
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::VerifyFailed
@@ -24,9 +24,7 @@ fn verify_zero_fails() {
 #[test]
 fn verify_requires_int() {
     // pushpoint, verify — top is Point not Int253.
-    let mut script = vec![0x1a];
-    script.extend_from_slice(&[0u8; 32]);
-    script.push(0x79);
+    let script = Program::new().push_point([0u8; 32]).verify().to_bytecode();
     let mut vm = vm_with_script(script);
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
@@ -63,7 +61,7 @@ fn run_resumes_outer_after_subprogram_finishes() {
 #[test]
 fn run_requires_string() {
     // push:5, run — top is Int253 not String.
-    let mut vm = vm_with_script(vec![0x05, 0x7b]);
+    let mut vm = vm_with_script(Program::new().push_int(5u64).run().to_bytecode());
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::TypeNotString
@@ -172,7 +170,7 @@ fn switch_preserves_alloc_witnesses_via_script_string() {
 fn loop_resets_run_cursor_to_start() {
     // nop, loop — after `loop` the Run cursor is back at the start,
     // so the next step parses `nop` again (not end-of-script).
-    let mut vm = vm_with_script(vec![0x1d, 0x7c]);
+    let mut vm = vm_with_script(Program::new().nop().loop_().to_bytecode());
     vm.step_internal().unwrap(); // nop
     vm.step_internal().unwrap(); // loop
     // Cursor should be at the start: the next instruction is `nop` again.
@@ -242,7 +240,7 @@ fn switch_picks_b_when_x_zero() {
 fn return_zero_at_root_errors() {
     // push:0, return — root frame has no caller, so `return` errors
     // even with k=0. Scripts that want a clean early exit use `break:0`.
-    let mut vm = vm_with_script(vec![0x00, 0x7e]);
+    let mut vm = vm_with_script(Program::new().push_int(0u64).return_().to_bytecode());
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
         VMError::ReturnAtRoot
@@ -252,7 +250,9 @@ fn return_zero_at_root_errors() {
 #[test]
 fn return_nonzero_at_root_errors() {
     // push:7, push:1, return — k=1 at root: nowhere for 7 to go.
-    let mut vm = vm_with_script(vec![0x07, 0x01, 0x7e]);
+    let mut vm = vm_with_script(
+        Program::new().push_int(7u64).push_int(1u64).return_().to_bytecode(),
+    );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
         VMError::ReturnAtRoot
@@ -262,14 +262,16 @@ fn return_nonzero_at_root_errors() {
 #[test]
 fn break_zero_at_root_with_clean_stack_exits_cleanly() {
     // break:0 at root — preferred way to short-circuit cleanly.
-    let mut vm = vm_with_script(vec![0x80]);
+    let mut vm = vm_with_script(Program::new().break_k(0).to_bytecode());
     run_until_tx_done(&mut vm).unwrap();
 }
 
 #[test]
 fn break_zero_at_root_with_leftover_stack_errors() {
     // push:5, break:0 — break works, but finish_call catches the leftover.
-    let mut vm = vm_with_script(vec![0x05, 0x80]);
+    let mut vm = vm_with_script(
+        Program::new().push_int(5u64).break_k(0).to_bytecode(),
+    );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
         VMError::StackNotClean
@@ -281,7 +283,11 @@ fn return_with_dirty_leftover_errors() {
     // Inside a child frame: push:9, push:7, push:1, return — k=1, two
     // items below count → StackNotClean. Error is caught and translated
     // to a `0` failure marker on the parent.
-    let mut vm = vm_with_nested_child_script(vec![0x09, 0x07, 0x01, 0x7e]);
+    let mut vm = vm_with_nested_child_script(
+        Program::new()
+            .push_int(9u64).push_int(7u64).push_int(1u64).return_()
+            .to_bytecode(),
+    );
     while !vm.call_stack.is_empty() {
         vm.step_internal().expect("step ok — error swallowed into marker");
     }
@@ -294,7 +300,9 @@ fn return_too_few_items_errors() {
     // Inside a child frame: push:5, return — k=5 popped, zero items
     // remain → BadReturnArity. The `step` wrapper catches the error,
     // unwinds the child, and pushes `0` (failure marker) onto the parent.
-    let mut vm = vm_with_nested_child_script(vec![0x05, 0x7e]);
+    let mut vm = vm_with_nested_child_script(
+        Program::new().push_int(5u64).return_().to_bytecode(),
+    );
     while !vm.call_stack.is_empty() {
         vm.step_internal().expect("step ok — error swallowed into marker");
     }
@@ -308,7 +316,7 @@ fn return_transfers_values_to_parent() {
     // Set up a nested call manually (the `call` opcode is not yet
     // wired — see `op_call` plan).
     // Child script: push:7, push:1, return (k=1).
-    let child_script = vec![0x07, 0x01, 0x7e];
+    let child_script = Program::new().push_int(7u64).push_int(1u64).return_().to_bytecode();
     let parent_frame =
         CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
     let child_kind = CallKind::CellOpen {
@@ -372,7 +380,7 @@ fn break_one_ends_subprog_and_outer() {
 fn break_out_of_call_errors() {
     // Top-level break:1 — but run_stack is empty, so this tries to
     // break past the call boundary.
-    let mut vm = vm_with_script(vec![0x81]);
+    let mut vm = vm_with_script(Program::new().break_k(1).to_bytecode());
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
         VMError::BreakOutOfCall
@@ -383,14 +391,16 @@ fn break_out_of_call_errors() {
 fn break_zero_at_root_ends_cleanly() {
     // break:0 at root: ends current run (which IS the root run),
     // run_stack empty → finish_call with empty stack → clean exit.
-    let mut vm = vm_with_script(vec![0x80]);
+    let mut vm = vm_with_script(Program::new().break_k(0).to_bytecode());
     run_until_tx_done(&mut vm).unwrap();
 }
 
 #[test]
 fn type_pushes_int253_code() {
     // push:5, type, drop, drop — top is type code (0 for Int253), then 5.
-    let mut vm = vm_with_script(vec![0x05, 0x7f]);
+    let mut vm = vm_with_script(
+        Program::new().push_int(5u64).type_().to_bytecode(),
+    );
     vm.step_internal().unwrap(); // push:5
     vm.step_internal().unwrap(); // type
     assert_eq!(vm.current_call.stack.len(), 2);
@@ -409,7 +419,7 @@ fn type_pushes_string_code() {
 
 #[test]
 fn type_underflow_errors() {
-    let mut vm = vm_with_script(vec![0x7f]);
+    let mut vm = vm_with_script(Program::new().type_().to_bytecode());
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::StackUnderflow
