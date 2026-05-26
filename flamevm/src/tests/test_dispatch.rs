@@ -15,7 +15,9 @@ fn internal_empty_script_finishes() {
 
 #[test]
 fn internal_nop_script_finishes() {
-    let mut reg = StubRegistry { script: vec![0x1d, 0x1d, 0x1d] };
+    let mut reg = StubRegistry {
+        script: Program::new().nop().nop().nop().to_bytecode(),
+    };
     let block = BlockContext { height: 0 };
     let result =
         VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block).unwrap();
@@ -24,6 +26,7 @@ fn internal_nop_script_finishes() {
 
 #[test]
 fn internal_unknown_opcode_errors() {
+    // Plant an explicit invalid opcode (0xff) — raw bytes by design.
     let mut reg = StubRegistry { script: vec![0x1d, 0xff] };
     let block = BlockContext { height: 0 };
     let err =
@@ -85,7 +88,9 @@ fn dispatch_falls_through_to_int_path_when_no_constraint_on_top() {
     // Pure Int253 path for `and` — must NOT route to Constraint
     // overload when both operands are Int253. push:1 push:1 and
     // → push:1.
-    let mut vm = vm_with_script(vec![0x01, 0x01, 0x58]); // push:1, push:1, and
+    let mut vm = vm_with_script(
+        Program::new().push_int(1u64).push_int(1u64).and().to_bytecode(),
+    );
     run_to_end(&mut vm).expect("int and ok");
     assert_eq!(vm.current_call.stack.len(), 1);
     assert_int(&vm.current_call.stack[0], Int253::from(1u64));
