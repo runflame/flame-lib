@@ -254,11 +254,9 @@ fn constraint_and_with_false_branch_rejected() {
 #[test]
 fn range_in_internal_context_errors_external_only() {
     // Internal context dispatches `range` to ExternalOnly.
-    let mut vm = vm_with_script(vec![
-        0x10, 0x01, // pushint8(1)
-        0x10, 0x40, // pushint8(64)
-        0x5e, // range
-    ]);
+    let mut vm = vm_with_script(
+        Program::new().push_int(1u64).push_int(64u64).range().to_bytecode(),
+    );
     // Push an Expression manually so dispatch_internal hits range.
     // Actually we can't construct an Expression in internal context
     // (alloc is ExternalOnly too). The simpler test: just step until
