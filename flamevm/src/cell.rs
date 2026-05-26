@@ -433,12 +433,6 @@ impl Cell {
         h
     }
 
-    /// Derives the cell's contribution to the anchor chain. Equivalent
-    /// to `Anchor(self.id()).ratchet()`.
-    pub fn to_anchor(&self) -> Anchor {
-        Anchor(self.id()).ratchet()
-    }
-
     /// Writes the canonical wire form: a list-style `Dict` with three
     /// entries — predicate (`Point`), anchor (32-byte `String`), payload
     /// (nested list-style `Dict` of portable values).

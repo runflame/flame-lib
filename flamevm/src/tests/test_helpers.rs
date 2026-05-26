@@ -900,11 +900,16 @@ pub(crate) fn assert_nm_txlog(
     // The cell_id is hash(predicate, anchor, payload), so
     // asserting all three pins down the cell_id without
     // recomputing it.
-    let mut expected_anchor = build_input_cell(
-        inputs.last().expect("at least one input"),
-    )
-    .0
-    .to_anchor();
+    //
+    // Anchor chain (split design): after the last input's `input` op,
+    // last_anchor = Anchor(last_input.id()). Each output consumes via
+    // split — left half goes to the output's anchor field, right half
+    // becomes the next iteration's parent.
+    let mut expected_anchor = Anchor(
+        build_input_cell(inputs.last().expect("at least one input"))
+            .0
+            .id(),
+    );
     for (j, out) in outputs.iter().enumerate() {
         let expected_pred = output_predicate_point(out.predicate_tag);
         let (q_open, f_open) = open_commitments_for_output(out);
@@ -917,11 +922,16 @@ pub(crate) fn assert_nm_txlog(
                     "output[{}] predicate mismatch (idx {})",
                     j, idx
                 );
+                // Split the running parent anchor; the left half is
+                // what this output's `anchor` field commits to, the
+                // right half becomes the next iteration's parent.
+                let (split_left, split_right) = expected_anchor.split();
                 assert_eq!(
-                    c.anchor.0, expected_anchor.0,
+                    c.anchor.0, split_left.0,
                     "output[{}] anchor mismatch (idx {})",
                     j, idx
                 );
+                expected_anchor = split_right;
                 assert_eq!(
                     c.payload.len(),
                     1,
@@ -947,8 +957,6 @@ pub(crate) fn assert_nm_txlog(
                         "output[{}] payload[0] must be Token", j
                     ),
                 }
-                // Advance the chain for the next iteration.
-                expected_anchor = c.to_anchor();
             }
             _ => panic!("txlog[{}] must be Output", idx),
         }

@@ -134,9 +134,12 @@ fn call_emits_txentry_call_with_pre_state_root_and_anchor() {
         _ => unreachable!(),
     };
     assert_eq!(callee, b);
-    // Anchor ratcheted from the zero seed (no inputs were taken
-    // before this call).
-    assert_eq!(anchor, Anchor([0u8; 32]).ratchet());
+    // callee_anchor is the LEFT half of split(InternalRoot.anchor).
+    // The frame was constructed with the zero-seed in test fixture;
+    // production InternalRoot frames receive a unique anchor via
+    // Message.anchor from the originating tx's op_send.
+    let (expected_callee_anchor, _residual) = Anchor([0u8; 32]).split();
+    assert_eq!(anchor, expected_callee_anchor);
     // Pre-state root non-zero — it's a Merlin challenge over the
     // (non-empty) state of B.
     assert_ne!(root, [0u8; 32]);

@@ -12,7 +12,7 @@ fn signtx_pours_payload_and_records_txbound_sig() {
     script.push(0x91); // cell
     script.push(0x98); // signtx
     let mut vm = vm_with_script(script);
-    vm.last_anchor = Some(Anchor([0x42; 32]));
+    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
     // Stack now has [5, 7, count=2].
     assert_eq!(vm.current_call.stack.len(), 3);
@@ -44,7 +44,7 @@ fn signcall_records_explicit_sig_and_runs_program() {
     script.push(0x00); // m=0 args
     script.push(0x99); // signcall
     let mut vm = vm_with_script(script);
-    vm.last_anchor = Some(Anchor([0x42; 32]));
+    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
     assert!(vm.current_call.stack.is_empty());
     assert_eq!(vm.deferred_sigs.len(), 1);
@@ -80,7 +80,7 @@ fn signcall_message_binds_only_to_program_not_to_cell() {
         script.push(0x00);
         script.push(0x99);
         let mut vm = vm_with_script(script);
-        vm.last_anchor = Some(Anchor([0x42; 32]));
+        vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
         run_to_end(&mut vm).unwrap();
         vm.deferred_sigs.into_iter().next().unwrap()
     }
@@ -109,7 +109,7 @@ fn signcall_rejects_wrong_signature_length() {
     script.push(0x00);
     script.push(0x99);
     let mut vm = vm_with_script(script);
-    vm.last_anchor = Some(Anchor([0x42; 32]));
+    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::BadSignatureBytes
@@ -498,7 +498,7 @@ fn signcall_actorid_errors_no_actor_context() {
     script.push(0x00);
     script.push(0x99); // signcall
     let mut vm = vm_with_script(script);
-    vm.last_anchor = Some(Anchor([0x42; 32]));
+    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::OpcodeRequiresActorContext

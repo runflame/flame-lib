@@ -109,10 +109,14 @@ fn anchor_in_internal_root_pushes_frame_anchor() {
 }
 
 #[test]
-fn anchor_in_external_root_errors_actor_context() {
+fn anchor_in_external_root_errors_anchor_missing() {
+    // `op_anchor` reads the frame's dynamic last_anchor; from a
+    // fresh ExternalRoot with no prior `input`, the slot is `None`
+    // and the opcode hard-fails `AnchorMissing` (same rule as the
+    // consume sites).
     let mut vm = vm_external(vec![0x9d]);
     let err = vm.step_internal().expect_err("must error");
-    assert!(matches!(err, VMError::OpcodeRequiresActorContext));
+    assert!(matches!(err, VMError::AnchorMissing));
 }
 
 #[test]

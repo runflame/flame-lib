@@ -114,9 +114,11 @@ fn send_queues_message_and_emits_txentry() {
     assert_eq!(gas, 10_000);
     assert_eq!(vbytes, 500);
     assert_eq!(refund.to_point().as_bytes(), &refund_bytes);
-    // Anchor is the ratchet of the zero seed (no prior anchor in
-    // this frame).
-    assert_eq!(anchor, Anchor([0u8; 32]).ratchet());
+    // Anchor is the LEFT half of split(InternalRoot.anchor). The
+    // frame was constructed with the zero seed; production
+    // InternalRoot anchors come from a prior tx's send.
+    let (expected_send_anchor, _) = Anchor([0u8; 32]).split();
+    assert_eq!(anchor, expected_send_anchor);
 
     // Message queued into vm.sends.
     assert_eq!(vm.sends.len(), 1);
@@ -133,7 +135,7 @@ fn send_queues_message_and_emits_txentry() {
 }
 
 #[test]
-fn two_sends_get_distinct_ratcheted_anchors() {
+fn two_sends_get_distinct_split_anchors() {
     let target = ActorID::Hash([0xcc; 32]);
     let refund = [0u8; 32];
     let mut script = send_script(&target, refund, 0, 1, 0);
@@ -141,11 +143,18 @@ fn two_sends_get_distinct_ratcheted_anchors() {
     let mut vm = vm_internal(ActorID::Hash([0x11; 32]), script);
     while vm.step_internal().expect("step ok") {}
 
+    // Anchor flow:
+    //   parent_0 = InternalRoot.anchor (zero in this test fixture)
+    //   send₁: split(parent_0) → (a₀ = sends[0].anchor, parent_1)
+    //   send₂: split(parent_1) → (a₁ = sends[1].anchor, parent_2)
     assert_eq!(vm.sends.len(), 2);
     let a0 = vm.sends[0].anchor;
     let a1 = vm.sends[1].anchor;
     assert_ne!(a0, a1, "anchors must differ");
-    assert_eq!(a1, a0.ratchet(), "second anchor is first.ratchet()");
+    let (expected_a0, parent_1) = Anchor([0u8; 32]).split();
+    let (expected_a1, _) = parent_1.split();
+    assert_eq!(a0, expected_a0);
+    assert_eq!(a1, expected_a1);
 }
 
 #[test]
@@ -163,6 +172,10 @@ fn send_from_external_root_has_no_caller() {
             0,
         ),
     );
+    // External root has no inherent anchor — production scripts call
+    // `input` first. Seed the frame directly so this test can focus
+    // on the caller-id semantics.
+    vm.current_call.last_anchor = Some(Anchor([0xaa; 32]));
     while vm.step_internal().expect("step ok") {}
     assert_eq!(vm.sends.len(), 1);
     assert_eq!(vm.sends[0].caller, None, "no caller from ExternalRoot");

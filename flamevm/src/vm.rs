@@ -35,13 +35,24 @@ pub const LOCKTIME_TIMESTAMP_THRESHOLD: u32 = 500_000_000;
 pub struct Anchor(pub [u8; 32]);
 
 impl Anchor {
-    /// Ratchets the anchor into a new anchor.
-    pub fn ratchet(&self) -> Anchor {
-        let mut t = Transcript::new(b"flamevm.anchor.ratchet.v1");
-        t.append_message(b"prev", &self.0);
-        let mut next = [0u8; 32];
-        t.challenge_bytes(b"next", &mut next);
-        Anchor(next)
+    /// Deterministically splits this anchor into two distinct
+    /// children. Used by every consume site that needs a unique
+    /// entity-anchor: the `left` half is embedded in the new entity
+    /// (cell / message / callee frame), the `right` half replaces
+    /// the consumer's current anchor.
+    ///
+    /// Uniqueness inherits from the parent: if `self` came from a
+    /// spend-once source (an input cell's id) and from a chain of
+    /// prior splits over that source, both children are unique
+    /// within the network.
+    pub fn split(&self) -> (Anchor, Anchor) {
+        let mut t = Transcript::new(b"flamevm.anchor.split.v1");
+        t.append_message(b"parent", &self.0);
+        let mut left = [0u8; 32];
+        let mut right = [0u8; 32];
+        t.challenge_bytes(b"left", &mut left);
+        t.challenge_bytes(b"right", &mut right);
+        (Anchor(left), Anchor(right))
     }
 }
 
@@ -295,10 +306,22 @@ pub struct CallFrame {
     /// Per-frame load/save pairing flag. Set by `op_load`, cleared by
     /// `op_save`. Unmatched load self-destructs the actor at tx commit.
     pub(crate) loaded: bool,
+
+    /// Current dynamic anchor for this frame. `None` until seeded by
+    /// `op_input` (for ExternalRoot) or by the frame's CallKind anchor
+    /// at construction (for InternalRoot / ActorCall / CellOpen).
+    /// Consumed-and-replaced via `Anchor::split` by every op that
+    /// produces a new unique-anchored entity (cell / output / send /
+    /// call / open / signcall). See spec §Anchor.
+    pub(crate) last_anchor: Option<Anchor>,
 }
 
 impl CallFrame {
     /// Builds a fresh CallFrame whose Run walks `instructions`.
+    /// `last_anchor` is seeded from the kind's anchor field when
+    /// available (InternalRoot / ActorCall / CellOpen all carry an
+    /// anchor produced by the parent's split); ExternalRoot starts
+    /// uninitialized — `op_input` is the only way to seed it.
     pub fn new(
         instructions: Vec<crate::ops::Instruction>,
         kind: CallKind,
@@ -306,6 +329,7 @@ impl CallFrame {
         mem_limit: u64,
         newbytes: u64,
     ) -> Self {
+        let last_anchor = kind.anchor();
         Self {
             stack: Vec::new(),
             current_run: Run::new(instructions),
@@ -317,6 +341,7 @@ impl CallFrame {
             mem_used: 0,
             newbytes,
             loaded: false,
+            last_anchor,
         }
     }
 }
@@ -384,7 +409,6 @@ impl core::fmt::Debug for TxResult {
 pub(crate) struct VM {
     #[allow(dead_code)]
     header: TxHeader,
-    pub(crate) last_anchor: Option<Anchor>,
 
     gas_used: u64,
     vbytes_used: u64,
@@ -497,7 +521,6 @@ impl VM {
         txlog.push(crate::tx::TxEntry::Header(header));
         Self {
             header,
-            last_anchor: None,
             gas_used: 0,
             vbytes_used: 0,
             current_call: initial_call,
@@ -507,6 +530,19 @@ impl VM {
             deferred_sigs: Vec::new(),
             sends: Vec::new(),
         }
+    }
+
+    /// Splits the current frame's anchor: returns the `left` half
+    /// (to embed in a fresh unique-anchored entity — cell, message,
+    /// callee frame), and writes the `right` half back into the
+    /// frame's `last_anchor`. Hard-fails `AnchorMissing` if no
+    /// anchor has been claimed yet (no prior `op_input` in this
+    /// frame).
+    fn consume_anchor(&mut self) -> Result<Anchor, VMError> {
+        let parent = self.current_call.last_anchor.ok_or(VMError::AnchorMissing)?;
+        let (left, right) = parent.split();
+        self.current_call.last_anchor = Some(right);
+        Ok(left)
     }
 
     /// Drains the VM into a `TxResult`, computing TxID from the txlog.
@@ -1831,8 +1867,12 @@ impl VM {
     fn op_input(&mut self) -> Result<(), VMError> {
         self.require_external()?;
         let cell = self.pop_value()?.to_string()?.to_cell()?;
+        // Seed the frame's anchor from the input cell's id — the cell
+        // is a spend-once source on the wire, so its id is unique. Any
+        // prior `last_anchor` (e.g. unused residue from a previous
+        // input + outputs sequence) is replaced. See spec §Anchor.
+        self.current_call.last_anchor = Some(Anchor(cell.id()));
         self.txlog.push(crate::tx::TxEntry::Input(cell.id()));
-        self.last_anchor = Some(cell.to_anchor());
         self.push_value(Value::Cell(cell));
         Ok(())
     }
@@ -1842,9 +1882,8 @@ impl VM {
         let pred = self.pop_value()?.to_point()?.to_predicate()?;
         let k = self.pop_byte_count(usize::MAX)?;
         let payload = self.pop_n_portable(k)?;
-        let anchor = self.last_anchor.take().ok_or(VMError::AnchorMissing)?;
+        let anchor = self.consume_anchor()?;
         let cell = Cell::new(pred, anchor, payload);
-        self.last_anchor = Some(cell.to_anchor());
         self.push_value(Value::Cell(cell));
         Ok(())
     }
@@ -1854,9 +1893,8 @@ impl VM {
         let pred = self.pop_value()?.to_point()?.to_predicate()?;
         let k = self.pop_byte_count(usize::MAX)?;
         let payload = self.pop_n_portable(k)?;
-        let anchor = self.last_anchor.take().ok_or(VMError::AnchorMissing)?;
+        let anchor = self.consume_anchor()?;
         let cell = Cell::new(pred, anchor, payload);
-        self.last_anchor = Some(cell.to_anchor());
         self.txlog.push(crate::tx::TxEntry::Output(cell));
         Ok(())
     }
@@ -1920,6 +1958,13 @@ impl VM {
     /// pour `cell.payload` then `args` onto the new stack, swap the
     /// parent out. Memory cap equals `bytes` (no actor → no
     /// `4 × vbytes` rule).
+    ///
+    /// Anchoring: the new frame's `last_anchor` is seeded from
+    /// `cell.id()` directly (the cell is a unique on-chain entity;
+    /// its id is the natural spend-once source for any new entities
+    /// the unlocked script creates). The parent's anchor is NOT
+    /// consumed — opening a cell is an unlock, not a unique-id-
+    /// producing act.
     fn enter_cell_open_frame(
         &mut self,
         cell: Cell,
@@ -1929,7 +1974,7 @@ impl VM {
         args: Vec<Value>,
     ) {
         let external_context = self.is_external();
-        let anchor = cell.to_anchor();
+        let anchor = Anchor(cell.id());
         let mut frame = CallFrame::new(
             instrs,
             CallKind::CellOpen {
@@ -2022,8 +2067,7 @@ impl VM {
             }
         }
 
-        let anchor = self.last_anchor.unwrap_or(Anchor([0u8; 32])).ratchet();
-        self.last_anchor = Some(anchor);
+        let anchor = self.consume_anchor()?;
 
         let payload_hash = {
             let mut t = merlin::Transcript::new(b"flamevm.send.payload");
@@ -2088,8 +2132,7 @@ impl VM {
         let script = registry.resolve_method(&callee, method)?;
         let pre_state_root = state_root(&registry.load_state(&callee)?)?;
 
-        let callee_anchor = self.last_anchor.unwrap_or(Anchor([0u8; 32])).ratchet();
-        self.last_anchor = Some(callee_anchor);
+        let callee_anchor = self.consume_anchor()?;
         self.txlog.push(crate::tx::TxEntry::Call {
             callee: callee.clone(),
             method,
@@ -2193,8 +2236,12 @@ impl VM {
     }
 
     /// **anchor** → _string_
+    ///
+    /// Pushes the frame's *current* anchor (the one the next
+    /// consume site would use). Hard-fails `AnchorMissing` if no
+    /// anchor has been claimed yet — same rule as consumers.
     fn op_anchor(&mut self) -> Result<(), VMError> {
-        let a = self.current_call.kind.anchor().ok_or(VMError::OpcodeRequiresActorContext)?;
+        let a = self.current_call.last_anchor.ok_or(VMError::AnchorMissing)?;
         self.push_value(Value::String(String::from(a.0.to_vec())));
         Ok(())
     }

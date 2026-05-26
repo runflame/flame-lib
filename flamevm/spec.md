@@ -327,6 +327,37 @@ Withdrawn vbytes are recycled into the total pool. Recycling is subject to 100-b
 **Transient memory.** In addition to persistent storage, an actor may use transient memory during a call (scratch space released when the call ends). The cap is fixed at 4× the actor's current persistent vbyte size; the `memlimit` opcode returns this cap. Allocations that would push live memory past the cap fail the call.
 
 
+# Anchors
+
+Every new cell, message, and call frame is **anchored** by a unique 32-byte value embedded in its wire form, so two cells with the same predicate + payload but different anchors hash to different ids. Uniqueness is the core safety property — without it, cell ids collide across txs and authors can be tricked into operating on the wrong entity.
+
+**Uniqueness source.** Anchors are unique only when they descend from a *spend-once source* — a UTXO consumed via [`input`](#input). Cell ids are themselves anchored (their `Cell::id` is `H(predicate, anchor, payload)`), so each input cell's id is unique relative to every prior tx's outputs. Any anchor derived deterministically from such a source remains unique.
+
+**Per-frame slot.** Every `CallFrame` carries a single `last_anchor: Option<Anchor>`. It is:
+- `None` at `ExternalRoot` until [`input`](#input) seeds it.
+- `Some(anchor)` at `InternalRoot`, `ActorCall`, and `CellOpen` frames — seeded from the frame's `CallKind` anchor field at construction time. These anchors are themselves split-children of a prior frame's anchor (for actor calls / sends across the tx) or of a wire-supplied cell id (for cell-opens and message deliveries).
+
+**Splitting.** Each opcode that produces a new unique-anchored entity *consumes* the frame's `last_anchor` and replaces it with a fresh derived value. The split is a single Merlin transcript:
+
+```
+t = Transcript::new(b"flamevm.anchor.split.v1");
+t.append_message(b"parent", &last_anchor.0);
+left  = t.challenge_bytes(b"left",  32);
+right = t.challenge_bytes(b"right", 32);
+```
+
+The `left` half is embedded in the new entity (cell anchor / send anchor / callee anchor); the `right` half replaces `last_anchor`. Authors never see `left` and `right` separately — the VM picks them automatically at the consume site.
+
+**Sites that consume + split**: [`cell`](#cell), [`output`](#output), [`send`](#send), [`call`](#call). Each hard-fails `AnchorMissing` if no prior input claim has seeded the frame's anchor.
+
+**Sites that produce / seed without consuming**: [`input`](#input) seeds `last_anchor = Anchor(cell.id())` directly (the spent UTXO's id is already unique on the wire — no split needed). Replacing any prior value is intentional: it lets a partial transaction depend only on its own input claim, not on what other parts of the tx contributed before it.
+
+**Sites that don't touch the parent's anchor**: [`open`](#open) and [`signcall`](#signcall) — unlocking a cell is not a unique-id-producing act. The opened frame's `last_anchor` is seeded from the cell's id directly, so its own internal entity chain inherits uniqueness from the cell being opened, independent of the parent's anchor state.
+
+**Locality.** Because each frame has its own `last_anchor` and frame boundaries don't bleed mutations, a script author can predict every anchor value their script consumes purely from local state: the input cells they claim plus the ops they invoke. Other parties' inputs / outputs in the same tx (interleaved or not) cannot affect their chain. This is the "localized anchor" property — the same predictability zkvm's design depends on for multi-party composition, but enforced structurally per-frame rather than by ordering convention.
+
+**Comparison with zkvm.** zkvm uses a single VM-level `Option<Anchor>`, ratchets only at `input`, and lets `output`/`contract` advance to the new contract's id directly (no extra hash step). The future tx that spends an output must ratchet on its own (an obligation enforced only by the next `input`). FlameVM's split-at-source removes that obligation: every consume site produces two cryptographically independent children at once, so neither the cell's wire-stored anchor nor the parent's residual anchor can be reused without the matching half of the original split.
+
 # Instruction set
 
 Each instruction is a one-byte **opcode** optionally followed by **immediate data** encoded inline in the bytecode. Stack effects are written in left-to-right bottom-to-top order: in `a b → c`, `b` is the top of the stack on entry, `c` is the top on exit.
@@ -977,7 +1008,7 @@ When the cascade ends the entire call (e.g. `break:0` at the outermost Run of a 
 
 _s_ → _cell_
 
-Materializes a `cell` handle from the String on top of the stack. Seeds the VM's `last_anchor` from the cell's identity (via `Cell::to_anchor()`, which ratchets internally) and emits `TxEntry::Input(cell_id)`.
+Materializes a `cell` handle from the String on top of the stack. Seeds the frame's `last_anchor` to `Anchor(cell.id())` (the input cell's id is a spend-once unique source — see §Anchors), unconditionally replacing any prior value. Emits `TxEntry::Input(cell_id)`.
 
 **Witness path (prover).** The prover pushes `String::Cell(c)` whose Token payloads still carry `Commitment::Open` quantities and flavors. `to_cell()` extracts the cell directly — open commitments survive into downstream `mix`/`commit` without any separate witness queue. Same pattern as zkvm's `String::Output` / `to_output`.
 
@@ -993,9 +1024,9 @@ Hard-fails on non-String top, malformed bytes (`MalformedCellEncoding`, includin
 
 _items… k pred_ → _cell_
 
-Pops `pred: Point`, then `k` portable items. Wraps them into a linear `cell` handle whose anchor is the VM's current `last_anchor`. Advances `last_anchor` to `cell.to_anchor()` for the next allocator.
+Pops `pred: Point`, then `k` portable items. Consumes the frame's `last_anchor` via a split (see §Anchors): the `left` half goes into the new cell's `anchor` field, the `right` half replaces `last_anchor`. Wraps everything into a linear `cell` handle.
 
-Hard-fails `AnchorMissing` if `last_anchor` is unset, `NonPortableInOutput` if any item isn't portable.
+Hard-fails `AnchorMissing` if no anchor has been claimed yet, `NonPortableInOutput` if any item isn't portable.
 
 ### output
 
@@ -1015,7 +1046,7 @@ Verifies the Taproot call-proof against the cell's predicate:
 4. Pops `position` (String, bit-packed path), `neighbors` (list-Dict of 32-byte Strings, leaf-to-root), `internal_key` (Point).
 5. Pops `cell`.
 6. Constructs a `CallProof` and verifies `predicate.verify_callproof` — checks the Merkle root and the tweaked-key relation `P = X + h(X, M)·B`.
-7. On success, creates a new isolated `CallKind::CellOpen { anchor: cell.to_anchor(), predicate: cell.predicate }` frame with the popped `gas` / `bytes` allotments, pours the cell's payload then the `args` onto the new frame's stack, and enters the unlocked `script`.
+7. On success, creates a new isolated `CallKind::CellOpen { anchor: Anchor(cell.id()), predicate: cell.predicate, external_context }` frame with the popped `gas` / `bytes` allotments, pours the cell's payload then the `args` onto the new frame's stack, and enters the unlocked `script`. The parent's `last_anchor` is **not** consumed — opening a cell is an unlock, not a unique-id-producing act.
 
 The new frame has **no actor identity** by default — `op_load`/`op_save`/`op_call`/`op_send` all error from inside. The frame inherits CS access from the caller's context (external root → CS available; internal → not). Results return via `return k'`; leftover gas refunds to the parent.
 
@@ -1037,7 +1068,7 @@ Asynchronous message-send. Pops operands top-first:
 6. `k` (`Int253`) — args count.
 7. `args…` — k portable values, delivery payload.
 
-Ratchets the VM's `last_anchor` and uses it as the message anchor (the SendID — known at broadcast time). Emits `TxEntry::Send { anchor, target, method, refund_predicate, gas, vbytes, payload_hash }` and appends a `Message` to the VM's outbound send queue. The originator's actor id (if any) becomes the message's `caller`.
+Splits the frame's `last_anchor` (see §Anchors): the `left` half becomes the message's `anchor` (= SendID, known at broadcast time), the `right` half replaces `last_anchor`. Hard-fails `AnchorMissing` if no anchor has been claimed yet. Emits `TxEntry::Send { anchor, target, method, refund_predicate, gas, vbytes, payload_hash }` and appends a `Message` to the VM's outbound send queue. The originator's actor id (if any) becomes the message's `caller`.
 
 Available in both contexts. Hard-fails `MalformedAddress` on wrong-size addr or refund, `NonPortableInSend` on non-portable args, `InvalidBitrange` on negative/overflowing allotments.
 
@@ -1049,7 +1080,7 @@ _args… k gas bytes method addr_ → _results… k'_
 
 Synchronous actor-to-actor call. Same operand shape as [`send`](#send) minus `refund`.
 
-Verifies the **re-entrancy guard** — the target actor must not already appear on the current call stack ([ADR 0003](../decisions/0003-forbid-reentrancy.md); errors `ReentrancyDetected`). Resolves the callee's method bytes via the registry, snapshots the callee's pre-state hash, ratchets `last_anchor` to the callee anchor, and emits `TxEntry::Call { callee, method, pre_state_root, callee_anchor }`.
+Verifies the **re-entrancy guard** — the target actor must not already appear on the current call stack ([ADR 0003](../decisions/0003-forbid-reentrancy.md); errors `ReentrancyDetected`). Resolves the callee's method bytes via the registry, snapshots the callee's pre-state hash, and splits the parent's `last_anchor` to derive the `callee_anchor` (left half) while keeping the right half as the parent's new `last_anchor`. Emits `TxEntry::Call { callee, method, pre_state_root, callee_anchor }`. Hard-fails `AnchorMissing` if the parent has no claimed anchor.
 
 Creates an isolated `CallKind::ActorCall { actor, method, caller, anchor }` frame with the popped `gas` / `bytes` allotments. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
 
@@ -1119,7 +1150,7 @@ Pushes the current frame's actor id as a 32-byte String. Hard-fails `OpcodeRequi
 
 ø → _s_
 
-Pushes the current frame's anchor as a 32-byte String. Available from `InternalRoot`, `ActorCall`, and `CellOpen` frames. Hard-fails from `ExternalRoot`.
+Pushes the frame's *current* `last_anchor` as a 32-byte String — the value the next consume site would split. Hard-fails `AnchorMissing` if no anchor has been claimed yet (same rule as `cell` / `output` / `send` / `call`). Available in either context.
 
 ### gas
 
