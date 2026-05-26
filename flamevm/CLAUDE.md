@@ -50,6 +50,17 @@ You implement FlameVM — the stack machine, value types, encoding, opcodes, and
 - Keep solutions simple and direct. No over-engineering.
 - One focused coding pass; avoid write-delete-rewrite cycles.
 - If unsure: surface as a question, do not guess semantics.
+- **Tests use the public `Program` builder API.** New tests should
+  construct scripts via `Program::new()…to_bytecode()`, not by
+  hand-writing opcode bytes. Raw `vec![0xNN, …]` is reserved for:
+  (a) wire-encoding tests in `test_stack.rs` (`pushint*`/`pushstr`/
+  `pushpoint` variants, parse-error fixtures); (b) planted invalid
+  opcodes (`0xff`) for dispatch tests; (c) byte fixtures that are
+  *not scripts* — strings being pushed onto the stack as Value data,
+  arbitrary bytes used as `ActorID::Constructor` payloads, expected
+  bytecode in builder-output equality assertions. Anywhere else,
+  prefer the builder — gaps in its surface are bugs to fix on the
+  builder side, not to work around with raw bytes.
 
 ## Interfaces to coordinate
 
