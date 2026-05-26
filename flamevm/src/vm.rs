@@ -83,8 +83,12 @@ pub struct BlockContext {
 /// R1CS constraint system and finalizes proofs and signatures.
 pub trait Delegate {
     type CS: r1cs::RandomizableConstraintSystem;
-    /// Per-side batched scalar-point check accumulator.
-    type BatchVerifier: musig::BatchVerification;
+    /// Per-side batched scalar-point check accumulator. The
+    /// [`musig::BatchCheckpoint`] bound lets the VM snapshot the
+    /// accumulator on call entry and restore it on call failure —
+    /// so a failed nested call's MSM contributions can't pollute
+    /// the caller's proof.
+    type BatchVerifier: musig::BatchVerification + musig::BatchCheckpoint;
 
     /// Returns the delegate's underlying constraint system.
     fn cs(&mut self) -> &mut Self::CS;
@@ -276,19 +280,6 @@ fn state_root(state: &ActorState) -> Result<[u8; 32], VMError> {
     Ok(h)
 }
 
-/// Folds a sub-batch into a target batch via one
-/// [`BatchVerification::append`] call. The target's `append`
-/// multiplies the *whole* sub-statement (`basepoint_scalar` and every
-/// dyn-term) by a fresh RNG-sampled random scalar — preserving the
-/// Schwartz–Zippel bound that prevents independent failures from
-/// cancelling each other (probability `< #terms / 2²⁵²`).
-fn merge_batch_into<B: musig::BatchVerification>(
-    sub: musig::BatchVerifier<rand::rngs::ThreadRng>,
-    target: &mut B,
-) {
-    let (basepoint, dyn_weights, dyn_points) = sub.into_parts();
-    target.append(basepoint, dyn_weights, dyn_points);
-}
 
 /// An isolated execution scope. Holds its own stack, run, gas budget, and
 /// transient-memory cap. Created by `call`, `open`, or the outermost frame
@@ -336,18 +327,13 @@ pub struct CallFrame {
     pub(crate) snap_deferred_sigs_len: usize,
     pub(crate) snap_total_fee: crate::fees::CheckedFee,
 
-    /// Per-frame MSM / signature batch accumulator. Any opcode that
-    /// appends to the batch during execution (today: `op_verify` on
-    /// an MSM) routes through `self.current_call.pending_batch`
-    /// instead of the delegate's global batch. On clean return the
-    /// child's contents are folded into the parent's via
-    /// `BatchVerification::append` — which multiplies the whole
-    /// sub-statement by a fresh random scalar (Schwartz–Zippel). On
-    /// failure the frame (and its batch) is dropped, so a failed
-    /// call's batch contributions vanish without polluting the
-    /// caller's proof. At tx end the root frame's batch is folded
-    /// into the delegate's global batch and verified there.
-    pub(crate) pending_batch: musig::BatchVerifier<rand::rngs::ThreadRng>,
+    /// Snapshot of the delegate's MSM/signature batch state taken
+    /// when this frame's child was pushed. Restored on child
+    /// failure so the polluting MSM appended by the failed callee
+    /// is dropped from the global batch — keeping the caller's
+    /// proof verifiable. `None` when no call is in flight (or in
+    /// internal context where the delegate has no real batch).
+    pub(crate) snap_batch: Option<musig::BatchSnapshot>,
 }
 
 impl CallFrame {
@@ -374,7 +360,7 @@ impl CallFrame {
             snap_txlog_len: 0,
             snap_deferred_sigs_len: 0,
             snap_total_fee: crate::fees::CheckedFee::zero(),
-            pending_batch: musig::BatchVerifier::new(rand::thread_rng()),
+            snap_batch: None,
         }
     }
 }
@@ -485,15 +471,6 @@ impl VM {
             ),
         );
         while vm.step_external(&mut delegate)? {}
-        // Fold the root frame's MSM batch into the delegate's global
-        // batch before finalize. Up to this point all MSM verifies
-        // landed in per-frame accumulators; this is the single point
-        // where they cross into the delegate.
-        let root_batch = core::mem::replace(
-            &mut vm.current_call.pending_batch,
-            musig::BatchVerifier::new(rand::thread_rng()),
-        );
-        merge_batch_into(root_batch, delegate.batch_verifier());
         let sigs = mem::take(&mut vm.deferred_sigs);
         delegate.finalize(sigs.clone())?;
         vm.deferred_sigs = sigs;
@@ -522,15 +499,6 @@ impl VM {
             ),
         );
         while vm.step_external(delegate)? {}
-        // Fold root frame's batch into the delegate's. Mirrors
-        // `execute_external` — callers (`Prover::prove`,
-        // `Verifier::verify`) own the delegate and call its `verify`
-        // after we return.
-        let root_batch = core::mem::replace(
-            &mut vm.current_call.pending_batch,
-            musig::BatchVerifier::new(rand::thread_rng()),
-        );
-        merge_batch_into(root_batch, delegate.batch_verifier());
         Ok(vm.into_result(bytecode, None))
     }
 
@@ -693,8 +661,26 @@ impl VM {
         delegate: &mut D,
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<bool, VMError> {
+        // Depth before the step. If the step pushes a frame
+        // (`call`/`open`/`signcall` succeeded in entering), depth
+        // grows by 1 and we snapshot the delegate's batch on the
+        // *parent* frame — so a future failure can restore the
+        // pre-call batch state. Snapshots only happen in external
+        // context (`InternalDelegate::batch_verifier` panics, so we
+        // can't query it in internal mode — see `is_external`).
+        let depth_before = self.call_stack.len();
         match self.step_inner(delegate, registry) {
-            Ok(cont) => Ok(cont),
+            Ok(cont) => {
+                let depth_after = self.call_stack.len();
+                if depth_after > depth_before && self.is_external() {
+                    use musig::BatchCheckpoint;
+                    let snap = delegate.batch_verifier().snapshot();
+                    if let Some(parent) = self.call_stack.last_mut() {
+                        parent.snap_batch = Some(snap);
+                    }
+                }
+                Ok(cont)
+            }
             Err(e) => {
                 // Outermost frame errors propagate (kill the tx).
                 if self.call_stack.is_empty() {
@@ -703,7 +689,7 @@ impl VM {
                 // Nested call errored — discard the failed frame,
                 // restore the parent's anchor + roll back side
                 // effects, push failure marker `0` onto parent.
-                self.fail_current_call();
+                self.fail_current_call(delegate);
                 Ok(true)
             }
         }
@@ -864,11 +850,6 @@ impl VM {
             .current_call
             .gas_limit
             .saturating_sub(self.current_call.gas_used);
-        // Take ownership of the child's pending batch before swap.
-        let child_batch = core::mem::replace(
-            &mut self.current_call.pending_batch,
-            musig::BatchVerifier::new(rand::thread_rng()),
-        );
 
         if let Some(parent) = self.call_stack.pop() {
             self.current_call = parent;
@@ -881,34 +862,30 @@ impl VM {
             if let Some(post) = self.current_call.post_call_anchor.take() {
                 self.last_anchor = Some(post);
             }
-            // Merge child's MSM batch into parent's via one random-
-            // factor append (Schwartz–Zippel; same primitive
-            // `BatchVerification::append` uses for each statement).
-            merge_batch_into(child_batch, &mut self.current_call.pending_batch);
+            // Clean exit: child's MSM contributions stay in the
+            // delegate's batch. Drop the entry-time snapshot.
+            self.current_call.snap_batch = None;
             // Success marker with k=0: stack += [count=0, success=1].
             self.current_call.stack.push(Value::Int253(Int253::from(0u64)));
             self.current_call.stack.push(Value::Int253(Int253::ONE));
             return Ok(true);
         }
-        // Outermost call returned: entire tx complete. The root
-        // frame's pending_batch survives in `self.current_call`;
-        // `into_result` later drains it into the delegate's batch.
-        // Put it back since we took it above.
-        self.current_call.pending_batch = child_batch;
+        // Outermost call returned: entire tx complete.
         Ok(false)
     }
 
     /// Discards the current frame on failure: pops it without
     /// preserving its effects, rolls back side-effects from the
-    /// parent's snapshot (txlog tail, deferred-sigs tail, total_fee),
-    /// applies the parent's `post_call_anchor`, and pushes `0` onto
-    /// the parent's stack as the failure marker. Caller's effects
-    /// up to the failed call are preserved; the parent script
-    /// continues at the instruction after the call.
+    /// parent's snapshot (txlog tail, deferred-sigs tail, total_fee,
+    /// delegate batch state), applies the parent's
+    /// `post_call_anchor`, and pushes `0` onto the parent's stack
+    /// as the failure marker. Caller's effects up to the failed
+    /// call are preserved; the parent script continues at the
+    /// instruction after the call.
     ///
     /// Note: actor-state rollback is NOT yet implemented — that
     /// requires per-actor snapshots in the registry (next iteration).
-    fn fail_current_call(&mut self) {
+    fn fail_current_call<D: Delegate>(&mut self, delegate: &mut D) {
         // Cannot fail the outermost frame — caller of this helper
         // must ensure call_stack is non-empty.
         let parent = self
@@ -921,6 +898,14 @@ impl VM {
         self.txlog.truncate(self.current_call.snap_txlog_len);
         self.deferred_sigs.truncate(self.current_call.snap_deferred_sigs_len);
         self.total_fee = self.current_call.snap_total_fee;
+        // Restore the delegate's MSM/sig batch to its pre-call state
+        // so any non-identity statements the failed callee appended
+        // are discarded. Only in external context — internal-mode
+        // delegates have no real batch (snapshot was never taken).
+        if let Some(snap) = self.current_call.snap_batch.take() {
+            use musig::BatchCheckpoint;
+            delegate.batch_verifier().restore(&snap);
+        }
         // Apply parent's post-call anchor (caller's right half of
         // the entry split — independent of whatever the callee did
         // with its left half).
@@ -1674,7 +1659,6 @@ impl VM {
             }
             Value::MultiscalarMul(m) => {
                 self.require_external()?;
-                let _ = delegate; // batch routed through per-frame accumulator
                 let terms = m.into_terms();
                 let scalars: Vec<curve25519_dalek::scalar::Scalar> =
                     terms.iter().map(|(s, _)| *s).collect();
@@ -1682,13 +1666,15 @@ impl VM {
                     terms.iter().map(|(_, p)| p.decompress()).collect();
                 // basepoint_scalar = 0: no contribution from the
                 // basepoint; the entire MSM must sum to identity.
-                // Append to the *per-frame* batch so a failed
-                // call/open/signcall can discard its MSM verifications
-                // (frame drop → batch drop). The append multiplies the
-                // whole statement by a fresh random scalar (RNG-based,
-                // Schwartz–Zippel safe).
+                // The BatchVerifier multiplies the whole statement
+                // by a fresh random scalar (RNG-based, owned by the
+                // delegate) so unrelated batched statements can't
+                // cancel each other. Per-frame rollback is achieved
+                // not by batching per-frame, but by snapshotting the
+                // delegate's batch on call entry (see `step`) and
+                // restoring on call failure (see `fail_current_call`).
                 musig::BatchVerification::append(
-                    &mut self.current_call.pending_batch,
+                    delegate.batch_verifier(),
                     curve25519_dalek::scalar::Scalar::zero(),
                     scalars,
                     points,
@@ -1755,11 +1741,6 @@ impl VM {
             .current_call
             .gas_limit
             .saturating_sub(self.current_call.gas_used);
-        // Take ownership of the child's pending batch before swap.
-        let child_batch = core::mem::replace(
-            &mut self.current_call.pending_batch,
-            musig::BatchVerifier::new(rand::thread_rng()),
-        );
 
         let parent = self.call_stack.pop().expect("checked non-empty above");
         self.current_call = parent;
@@ -1771,11 +1752,10 @@ impl VM {
         if let Some(post) = self.current_call.post_call_anchor.take() {
             self.last_anchor = Some(post);
         }
-        // Merge the child's batch into the parent's via one append.
-        // `append` multiplies the whole sub-statement by a fresh
-        // random scalar — Schwartz–Zippel keeps independent failures
-        // from cancelling across the merge boundary.
-        merge_batch_into(child_batch, &mut self.current_call.pending_batch);
+        // Clean exit: the child's MSM contributions already live in
+        // the delegate's batch and are kept. Discard the entry-time
+        // snapshot since it would only be used on the failure path.
+        self.current_call.snap_batch = None;
         // Pour return values, then count, then success marker (1).
         self.current_call.stack.extend(return_values);
         self.current_call.stack.push(Value::Int253(Int253::from(k as u64)));

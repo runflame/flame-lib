@@ -684,53 +684,57 @@ Tests: 555 green (one new positive test; reused existing infra).
 
 ---
 
-## Phase 44 — Per-frame MSM/sig batch with merge-on-success, drop-on-failure (landed)
+## Phase 44 — Batch rollback under call failure (landed)
 
 Implements the per-frame batch isolation flagged in Phase 43.6. Net
 effect: a failed `call` / `open` / `signcall` cannot pollute the
-caller's batch with stale MSM contributions, so the caller's proof
-verifies regardless of what the failed callee did.
+caller's MSM/sig batch with stale contributions, so the caller's
+proof verifies regardless of what the failed callee did. Achieved
+via snapshot/restore on the delegate's existing global batch —
+symmetric with the existing rollback of `TxLog`, `deferred_sigs`,
+`total_fee`. Avoids introducing any new `thread_rng()` calls inside
+the VM lib (the RNG already lives in the delegate, where the caller
+supplies it).
 
-1. **`starsig::BatchVerifier::into_parts`** — new public method that
-   drains the accumulator into `(basepoint_scalar, dyn_weights,
-   dyn_points)`. Lets flamevm fold a sub-batch into a target batch
-   via one `BatchVerification::append` call (which already multiplies
-   the whole sub-statement by a fresh random scalar). Single change
-   in the starsig crate; no behavior change to existing call sites.
-2. **`CallFrame::pending_batch: BatchVerifier<ThreadRng>`** — every
-   frame owns its own accumulator. Cheap to create (ThreadRng is a
-   thread-local handle).
-3. **`op_verify` for MSM** — routes `BatchVerification::append`
-   through `self.current_call.pending_batch` instead of
-   `delegate.batch_verifier()`. RNG-based random factor preserved
-   (the `append` method handles it).
-4. **`op_return` + `finish_call`** — on clean exit, the child's
-   pending batch is folded into the parent's via the new
-   `merge_batch_into` helper: `(basepoint, ws, ps) =
-   child.into_parts(); parent.append(basepoint, ws, ps);`. One
-   random factor per merge.
-5. **`fail_current_call`** — no extra code needed. Dropping the
-   frame drops the accumulator. Failed call's MSM contributions
-   simply cease to exist.
-6. **Tx-end drain** — at the end of `VM::run` and
-   `VM::execute_external`, the root frame's accumulator is folded
-   into `delegate.batch_verifier()` via the same merge primitive.
-   This is the single point where MSM contributions cross from the
-   VM into the delegate's global batch.
-7. **Spec + design** synced. `flamevm/spec.md` §MultiscalarMul now
-   describes the implemented design (not a "may" implementation
-   note). `design.md` §"Crypto-batch composition under call failure"
-   is unchanged — the prose already matched the implementation.
+1. **`starsig::BatchSnapshot`** + **`BatchCheckpoint` trait** — new
+   public types/methods in starsig. `BatchVerifier<R>` impls
+   `BatchCheckpoint`: `snapshot()` captures `(basepoint_scalar,
+   dyn_len)`; `restore(&snap)` truncates the dyn-arrays and resets
+   the basepoint scalar. The RNG isn't rewound; that's harmless
+   because the remaining terms still carry the random factors that
+   were sampled for them.
+2. **`Delegate::BatchVerifier` bound widened** to require
+   `musig::BatchCheckpoint` alongside `BatchVerification`.
+3. **`CallFrame::snap_batch: Option<BatchSnapshot>`** — populated
+   on the parent frame when a child is pushed; consumed on child
+   failure.
+4. **`step` wraps frame-push detection**: depth grew + external
+   context → snapshot via `delegate.batch_verifier().snapshot()` and
+   store on the new parent (`call_stack.last_mut()`).
+5. **`fail_current_call(delegate)`** — restores the batch via
+   `delegate.batch_verifier().restore(&snap)` before applying the
+   anchor/marker. Internal context: `snap_batch` is `None`, so the
+   restore call is skipped.
+6. **`op_return` + `finish_call`** — discard `snap_batch` on clean
+   exit (any MSM the callee appended stays in the global batch).
+7. **`op_verify` for MSM** — appends to `delegate.batch_verifier()`
+   directly (no per-frame batches, no merging). The delegate's
+   `append` still multiplies each statement by an RNG-sampled
+   random scalar — RNG ownership unchanged.
+8. **Spec + design** synced. `flamevm/spec.md` §MultiscalarMul and
+   `design.md` §"Batch rollback under call failure" describe the
+   snapshot/restore design.
 
 Tests: 2 new in `test_msm.rs`:
-- `failed_call_msm_does_not_pollute_parent_batch` — the canary:
-  child appends a non-identity 1·G MSM to its batch, fails via
-  `verify(0)`, parent's proof verifies cleanly. Would fail without
-  per-frame batching.
-- `clean_call_msm_propagates_to_parent_batch` — the inverse:
-  child appends 1·G, returns cleanly; merged into parent; verifier
-  rejects with `BatchSignatureVerificationFailed`. Confirms the
-  merge isn't accidentally swallowing successful MSMs.
+- `failed_call_msm_does_not_pollute_parent_batch` — child appends
+  a non-identity 1·G MSM to the batch, fails via `verify(0)`. The
+  failure path restores the batch to its pre-call state; the
+  caller's proof verifies cleanly.
+- `clean_call_msm_propagates_to_parent_batch` — child appends 1·G,
+  returns cleanly. Snapshot discarded; 1·G stays in the global
+  batch; verifier rejects with
+  `BatchSignatureVerificationFailed`. Confirms the design isn't
+  accidentally swallowing successful MSMs.
 
 Test count: 557 green (was 555).
 
