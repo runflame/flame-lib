@@ -124,7 +124,9 @@ fn pushpoint_roundtrip() {
 #[test]
 fn pushtoken_zero_qty_with_flavor() {
     // push:7, pushtoken — flavor comes from the stack now.
-    let mut vm = vm_with_script(vec![0x07, 0x1b]);
+    let mut vm = vm_with_script(
+        Program::new().push_int(7u64).pushtoken().to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[0] {
         Value::ClearToken(t) => {
@@ -138,9 +140,12 @@ fn pushtoken_zero_qty_with_flavor() {
 #[test]
 fn pushtoken_requires_int_flavor() {
     // pushstr "x", pushtoken — top is String, not Int253.
-    let mut script = pushstr_bytes(b"x");
-    script.push(0x1b);
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_with_script(
+        Program::new()
+            .push_str(String::from(b"x".to_vec()))
+            .pushtoken()
+            .to_bytecode(),
+    );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::TypeNotInt253
@@ -149,12 +154,12 @@ fn pushtoken_requires_int_flavor() {
 
 #[test]
 fn pushtoken_full_flavor_via_pushint_full() {
-    // pushint full <bytes>, pushtoken — exercises a non-small flavor.
+    // push a non-small flavor (encoder picks the right pushint variant),
+    // then pushtoken.
     let flv = Int253::from(0x1234567890abcdefu64);
-    let mut script = vec![0x18];
-    script.extend_from_slice(&flv.to_bytes());
-    script.push(0x1b);
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_with_script(
+        Program::new().push_int(flv).pushtoken().to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[0] {
         Value::ClearToken(t) => {
@@ -167,14 +172,16 @@ fn pushtoken_full_flavor_via_pushint_full() {
 
 #[test]
 fn drop_droppable_int() {
-    let mut vm = vm_with_script(vec![0x05, 0x1c]); // push:5, drop
+    let mut vm = vm_with_script(
+        Program::new().push_int(5u64).drop_().to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     assert!(vm.current_call.stack.is_empty());
 }
 
 #[test]
 fn drop_underflow_errors() {
-    let mut vm = vm_with_script(vec![0x1c]);
+    let mut vm = vm_with_script(Program::new().drop_().to_bytecode());
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::StackUnderflow
@@ -183,7 +190,9 @@ fn drop_underflow_errors() {
 
 #[test]
 fn dup_immediate_zero_copies_top() {
-    let mut vm = vm_with_script(vec![0x07, 0x20]); // push:7, dup:0
+    let mut vm = vm_with_script(
+        Program::new().push_int(7u64).dup_k(0).to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
     assert_int(&vm.current_call.stack[0], Int253::from(7u64));
@@ -193,7 +202,11 @@ fn dup_immediate_zero_copies_top() {
 #[test]
 fn dup_immediate_k_picks_kth_from_top() {
     // push:1, push:2, push:3, dup:2 → 1 2 3 1
-    let mut vm = vm_with_script(vec![0x01, 0x02, 0x03, 0x22]);
+    let mut vm = vm_with_script(
+        Program::new()
+            .push_int(1u64).push_int(2u64).push_int(3u64).dup_k(2)
+            .to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 4);
     assert_int(&vm.current_call.stack[3], Int253::from(1u64));
@@ -202,7 +215,11 @@ fn dup_immediate_k_picks_kth_from_top() {
 #[test]
 fn dup_dynamic_pops_index() {
     // push:9, push:8, push:0, dup → 9 8 (k=0) → 9 8 8
-    let mut vm = vm_with_script(vec![0x09, 0x08, 0x00, 0x1e]);
+    let mut vm = vm_with_script(
+        Program::new()
+            .push_int(9u64).push_int(8u64).push_int(0u64).dup()
+            .to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 3);
     assert_int(&vm.current_call.stack[2], Int253::from(8u64));
@@ -211,7 +228,9 @@ fn dup_dynamic_pops_index() {
 #[test]
 fn dup_out_of_range_errors() {
     // push:5, dup:5 (only 1 item on stack)
-    let mut vm = vm_with_script(vec![0x05, 0x25]);
+    let mut vm = vm_with_script(
+        Program::new().push_int(5u64).dup_k(5).to_bytecode(),
+    );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::IndexOutOfRange
@@ -221,7 +240,9 @@ fn dup_out_of_range_errors() {
 #[test]
 fn dup_noncopyable_errors() {
     // push:1, pushtoken (linear), dup:0
-    let mut vm = vm_with_script(vec![0x01, 0x1b, 0x20]);
+    let mut vm = vm_with_script(
+        Program::new().push_int(1u64).pushtoken().dup_k(0).to_bytecode(),
+    );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::TypeNotCopyable
@@ -231,7 +252,11 @@ fn dup_noncopyable_errors() {
 #[test]
 fn roll_immediate_moves_kth_to_top() {
     // push:1, push:2, push:3, roll:2 → 2 3 1
-    let mut vm = vm_with_script(vec![0x01, 0x02, 0x03, 0x32]);
+    let mut vm = vm_with_script(
+        Program::new()
+            .push_int(1u64).push_int(2u64).push_int(3u64).roll_k(2)
+            .to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     let stack = &vm.current_call.stack;
     assert_int(&stack[0], Int253::from(2u64));
@@ -241,7 +266,9 @@ fn roll_immediate_moves_kth_to_top() {
 
 #[test]
 fn roll_zero_is_noop() {
-    let mut vm = vm_with_script(vec![0x07, 0x30]);
+    let mut vm = vm_with_script(
+        Program::new().push_int(7u64).roll_k(0).to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
     assert_int(&vm.current_call.stack[0], Int253::from(7u64));
@@ -250,7 +277,11 @@ fn roll_zero_is_noop() {
 #[test]
 fn roll_dynamic_pops_index() {
     // push:1, push:2, push:1, roll  → roll k=1 → stack {1,2} -> {2,1}
-    let mut vm = vm_with_script(vec![0x01, 0x02, 0x01, 0x1f]);
+    let mut vm = vm_with_script(
+        Program::new()
+            .push_int(1u64).push_int(2u64).push_int(1u64).roll()
+            .to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     let stack = &vm.current_call.stack;
     assert_int(&stack[0], Int253::from(2u64));
@@ -259,7 +290,9 @@ fn roll_dynamic_pops_index() {
 
 #[test]
 fn roll_out_of_range_errors() {
-    let mut vm = vm_with_script(vec![0x05, 0x35]);
+    let mut vm = vm_with_script(
+        Program::new().push_int(5u64).roll_k(5).to_bytecode(),
+    );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::IndexOutOfRange
@@ -269,13 +302,14 @@ fn roll_out_of_range_errors() {
 #[test]
 fn dup_of_copyable_dict_succeeds() {
     // {5: 50}, dup:0 — should copy the dict.
-    let mut vm = vm_with_script(vec![
-        0x10, 50, 0x05, 0x01, 0x60, // dict
-        0x20,                       // dup:0
-    ]);
+    let mut vm = vm_with_script(
+        Program::new()
+            .push_int(50u64).push_int(5u64).push_int(1u64).dict()
+            .dup_k(0)
+            .to_bytecode(),
+    );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
-    // Both stack entries should be dicts of length 1.
     for v in &vm.current_call.stack {
         match v {
             Value::Dict(d) => assert_eq!(d.len(), 1),
@@ -287,7 +321,13 @@ fn dup_of_copyable_dict_succeeds() {
 #[test]
 fn dup_of_noncopyable_dict_errors() {
     // push:7, pushtoken, push:5, push:1, dict, dup:0
-    let mut vm = vm_with_script(vec![0x07, 0x1b, 0x05, 0x01, 0x60, 0x20]);
+    let mut vm = vm_with_script(
+        Program::new()
+            .push_int(7u64).pushtoken()
+            .push_int(5u64).push_int(1u64).dict()
+            .dup_k(0)
+            .to_bytecode(),
+    );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::TypeNotCopyable
