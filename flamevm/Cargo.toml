@@ -8,7 +8,7 @@ description = "Flame virtual machine"
 
 [dependencies]
 curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility", "rand_core"] }
-merlin = { version = "3" }
+merlin = { version = "3", features = ["dynamic-labels"] }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"

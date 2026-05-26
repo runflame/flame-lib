@@ -85,43 +85,30 @@ impl Point {
 /// A Merlin transcript wrapper. Linear (non-copyable, non-droppable).
 ///
 /// User-supplied labels are passed directly to the underlying
-/// `Transcript` API.
-///
-/// **Dynamic-labels workaround.** Merlin v3 (crates.io) restricts
-/// labels to `&'static [u8]`. flamevm's `merlin` / `merlinwrite` /
-/// `merlinread` opcodes accept user-supplied `&[u8]` labels — to
-/// bridge the gap we `Box::leak` each label so it satisfies the
-/// `'static` bound. This leaks the label's bytes per VM call;
-/// bounded by gas per tx but accumulates over a node's lifetime.
-/// See workspace `Cargo.toml` — replace with a runflame/merlin v3
-/// fork once published.
+/// `Transcript` API. This relies on the `dynamic-labels` feature of
+/// the runflame fork of merlin (see workspace `[patch.crates-io]`),
+/// which relaxes the upstream `&'static [u8]` constraint to `&[u8]`.
 pub struct Merlin {
     transcript: Transcript,
-}
-
-/// Promotes a `&[u8]` label to `&'static [u8]` by leaking a fresh
-/// boxed copy. Bytes are never freed; see TODO in `Cargo.toml`.
-fn leak_label(label: &[u8]) -> &'static [u8] {
-    Box::leak(label.to_vec().into_boxed_slice())
 }
 
 impl Merlin {
     /// Creates a fresh transcript bound to `label`.
     pub fn new(label: &[u8]) -> Self {
-        Merlin { transcript: Transcript::new(leak_label(label)) }
+        Merlin { transcript: Transcript::new(label) }
     }
 
     /// Appends `data` to the transcript under `label`. Used by the
     /// `merlinwrite` opcode.
     pub fn write_bytes(&mut self, label: &[u8], data: &[u8]) {
-        self.transcript.append_message(leak_label(label), data);
+        self.transcript.append_message(label, data);
     }
 
     /// Squeezes `n` bytes of challenge from the transcript, tagged by
     /// `label`. Used by the `merlinread` opcode.
     pub fn read_bytes(&mut self, label: &[u8], n: usize) -> Vec<u8> {
         let mut out = vec![0u8; n];
-        self.transcript.challenge_bytes(leak_label(label), &mut out);
+        self.transcript.challenge_bytes(label, &mut out);
         out
     }
 }
