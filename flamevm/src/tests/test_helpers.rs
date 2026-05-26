@@ -553,13 +553,13 @@ pub(crate) fn make_signtx_script_with_cell(
         vec![Value::Int253(Int253::from(0u64))], // single Int253 payload
     );
     let cell_id = cell.id();
-    let bytes = encode_cell_to_bytes(&cell);
-    let mut script = Vec::new();
-    push_string_bytes(&mut script, &bytes);
-    script.push(0x90); // input
-    script.push(0x98); // signtx — pushes 1 Int253 (payload) + count 1
-    script.push(0x1c); // drop count
-    script.push(0x1c); // drop payload Int253
+    let script = Program::new()
+        .push_str(String::from(encode_cell_to_bytes(&cell)))
+        .input()
+        .signtx()    // pushes 1 Int253 (payload) + count 1
+        .drop_()     // drop count
+        .drop_()     // drop payload Int253
+        .to_bytecode();
     (script, cell_id)
 }
 

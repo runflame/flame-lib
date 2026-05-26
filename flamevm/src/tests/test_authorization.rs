@@ -7,10 +7,14 @@ use super::test_helpers::*;
 #[test]
 fn signtx_pours_payload_and_records_txbound_sig() {
     // Build cell with payload [5, 7], then signtx.
-    let mut script = vec![0x05, 0x07, 0x02];
-    push_point_bytes(&mut script, &[0xaa; 32]);
-    script.push(0x91); // cell
-    script.push(0x98); // signtx
+    let script = Program::new()
+        .push_int(5u64)
+        .push_int(7u64)
+        .push_int(2u64)                       // payload count
+        .push_point([0xaa; 32])
+        .cell()
+        .signtx()
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
@@ -32,17 +36,21 @@ fn signtx_pours_payload_and_records_txbound_sig() {
 fn signcall_records_explicit_sig_and_runs_program() {
     // Inner script `drop, push:0, return` drains the payload and
     // exits the isolated CellOpen frame (ADR 0013).
-    let prog = vec![0x1c, 0x00, 0x7e];
+    let prog = Program::new().drop_().push_int(0u64).return_().to_bytecode();
     let sig_bytes = [0u8; 64];
 
-    let mut script = vec![0x05, 0x01];
-    push_point_bytes(&mut script, &[0xaa; 32]);
-    script.push(0x91); // cell
-    push_string_bytes(&mut script, &prog);
-    push_string_bytes(&mut script, &sig_bytes);
-    push_open_gas_bytes(&mut script);
-    script.push(0x00); // m=0 args
-    script.push(0x99); // signcall
+    let script = Program::new()
+        .push_int(5u64)                                  // payload [5]
+        .push_int(1u64)                                  // payload count
+        .push_point([0xaa; 32])
+        .cell()
+        .push_str(String::from(prog))                    // inner script
+        .push_str(String::from(sig_bytes.to_vec()))      // 64-byte sig
+        .push_int(1024u64)                               // gas
+        .push_int(1024u64)                               // bytes
+        .push_int(0u64)                                  // m = 0 args
+        .signcall()
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
@@ -72,16 +80,20 @@ fn signcall_message_binds_only_to_program_not_to_cell() {
     // identical deferred-sig messages — confirms architect's
     // intent that signcall binds only to the program.
     fn run_signcall(predicate_byte: u8) -> DeferredSig {
-        let prog = vec![0x1c, 0x00, 0x7e];
+        let prog = Program::new().drop_().push_int(0u64).return_().to_bytecode();
         let sig = [0u8; 64];
-        let mut script = vec![0x05, 0x01];
-        push_point_bytes(&mut script, &[predicate_byte; 32]);
-        script.push(0x91);
-        push_string_bytes(&mut script, &prog);
-        push_string_bytes(&mut script, &sig);
-        push_open_gas_bytes(&mut script);
-        script.push(0x00);
-        script.push(0x99);
+        let script = Program::new()
+            .push_int(5u64)
+            .push_int(1u64)
+            .push_point([predicate_byte; 32])
+            .cell()
+            .push_str(String::from(prog))
+            .push_str(String::from(sig.to_vec()))
+            .push_int(1024u64)
+            .push_int(1024u64)
+            .push_int(0u64)
+            .signcall()
+            .to_bytecode();
         let mut vm = vm_with_script(script);
         vm.last_anchor = Some(Anchor([0x42; 32]));
         run_to_end(&mut vm).unwrap();
@@ -103,14 +115,19 @@ fn signcall_message_binds_only_to_program_not_to_cell() {
 fn signcall_rejects_wrong_signature_length() {
     // payload(5), count(1), predicate, cell, prog, bad-sig, gas/bytes,
     // m=0, signcall. signcall pops bad sig and errors before frame.
-    let mut script = vec![0x05, 0x01];
-    push_point_bytes(&mut script, &[0xaa; 32]);
-    script.push(0x91); // cell
-    push_string_bytes(&mut script, &[0x1c, 0x00, 0x7e]); // prog
-    push_string_bytes(&mut script, &[0u8; 63]); // sig of wrong length
-    push_open_gas_bytes(&mut script);
-    script.push(0x00);
-    script.push(0x99);
+    let prog = Program::new().drop_().push_int(0u64).return_().to_bytecode();
+    let script = Program::new()
+        .push_int(5u64)
+        .push_int(1u64)
+        .push_point([0xaa; 32])
+        .cell()
+        .push_str(String::from(prog))
+        .push_str(String::from(vec![0u8; 63]))           // bad: 63-byte sig
+        .push_int(1024u64)
+        .push_int(1024u64)
+        .push_int(0u64)
+        .signcall()
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
@@ -265,19 +282,17 @@ fn phase20_two_txbound_verifies_with_multisig() {
 
     // Script: input cell1, signtx (drop payload+count), input cell2,
     // signtx (drop payload+count).
-    let mut script = Vec::new();
-    push_string_bytes(&mut script, &cell1_bytes);
-    script.push(0x90);
-    script.push(0x98);
-    script.push(0x1c);
-    script.push(0x1c);
-    push_string_bytes(&mut script, &cell2_bytes);
-    script.push(0x90);
-    script.push(0x98);
-    script.push(0x1c);
-    script.push(0x1c);
-
-    let program = crate::Program::parse(&script).expect("decode");
+    let program = Program::new()
+        .push_str(String::from(cell1_bytes))
+        .input()
+        .signtx()
+        .drop_()
+        .drop_()
+        .push_str(String::from(cell2_bytes))
+        .input()
+        .signtx()
+        .drop_()
+        .drop_();
     let prover_result =
         Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove ok");
@@ -491,16 +506,20 @@ fn phase20_signature_over_wrong_txid_rejected() {
 /// failure marker on the parent's stack.
 #[test]
 fn signcall_actorid_errors_no_actor_context() {
-    let prog = vec![0x9c]; // actorid
+    let prog = Program::new().actorid().to_bytecode();
     let sig_bytes = [0u8; 64];
-    let mut script = vec![0x05, 0x01];
-    push_point_bytes(&mut script, &[0xaa; 32]);
-    script.push(0x91); // cell
-    push_string_bytes(&mut script, &prog);
-    push_string_bytes(&mut script, &sig_bytes);
-    push_open_gas_bytes(&mut script);
-    script.push(0x00);
-    script.push(0x99); // signcall
+    let script = Program::new()
+        .push_int(5u64)
+        .push_int(1u64)
+        .push_point([0xaa; 32])
+        .cell()
+        .push_str(String::from(prog))
+        .push_str(String::from(sig_bytes.to_vec()))
+        .push_int(1024u64)
+        .push_int(1024u64)
+        .push_int(0u64)
+        .signcall()
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
