@@ -306,6 +306,21 @@ pub struct CallFrame {
     /// Per-frame load/save pairing flag. Set by `op_load`, cleared by
     /// `op_save`. Unmatched load self-destructs the actor at tx commit.
     pub(crate) loaded: bool,
+
+    /// Anchor that should replace `VM.last_anchor` when control
+    /// returns to this frame from a child call. Populated at call
+    /// entry as the `right` half of the parent's anchor split (the
+    /// `left` half becomes the child frame's starting anchor).
+    /// `None` when no call is in flight from this frame.
+    pub(crate) post_call_anchor: Option<Anchor>,
+
+    /// Snapshots taken at child-call entry, used to roll back side
+    /// effects if the call fails. All `Vec` cursors and the fee
+    /// accumulator are restored on failure; on success they're
+    /// discarded.
+    pub(crate) snap_txlog_len: usize,
+    pub(crate) snap_deferred_sigs_len: usize,
+    pub(crate) snap_total_fee: crate::fees::CheckedFee,
 }
 
 impl CallFrame {
@@ -328,6 +343,10 @@ impl CallFrame {
             mem_used: 0,
             newbytes,
             loaded: false,
+            post_call_anchor: None,
+            snap_txlog_len: 0,
+            snap_deferred_sigs_len: 0,
+            snap_total_fee: crate::fees::CheckedFee::zero(),
         }
     }
 }
@@ -368,11 +387,6 @@ pub struct TxResult {
     /// build the aggregate multi-signature; verifier sees them
     /// after the fact for the same audit shape).
     pub deferred_sigs: Vec<DeferredSig>,
-
-    /// Outbound message sends recorded by `op_send`. Drained by
-    /// the consensus layer after external-tx commit to instantiate
-    /// each one as an internal transaction.
-    pub sends: Vec<Message>,
 }
 
 /// Manual Debug — the linear `Cell` in `txlog` blocks `#[derive]`.
@@ -387,7 +401,6 @@ impl core::fmt::Debug for TxResult {
             .field("bytecode.len", &self.bytecode.len())
             .field("proof_present", &self.proof.is_some())
             .field("deferred_sigs.len", &self.deferred_sigs.len())
-            .field("sends.len", &self.sends.len())
             .finish()
     }
 }
@@ -419,9 +432,6 @@ pub(crate) struct VM {
 
     /// Signature checks deferred to `Delegate::finalize`.
     deferred_sigs: Vec<DeferredSig>,
-
-    /// Outbound messages queued by `op_send`.
-    sends: Vec<Message>,
 }
 
 impl VM {
@@ -528,21 +538,36 @@ impl VM {
             txlog,
             total_fee: crate::fees::CheckedFee::zero(),
             deferred_sigs: Vec::new(),
-            sends: Vec::new(),
         }
     }
 
-    /// Splits `last_anchor` (per-tx): returns the `left` half (to
-    /// embed in a fresh unique-anchored entity — cell, message), and
-    /// writes the `right` half back. Hard-fails `AnchorMissing` if
-    /// no anchor has been claimed yet (no prior `op_input` in this
-    /// tx, or no Message-delivered anchor for an internal tx).
-    /// `call` / `open` / `signcall` don't go through this path —
-    /// intra-tx calls don't mint cross-tx entities.
+    /// Splits `last_anchor`: returns the `left` half (to embed in
+    /// a fresh unique-anchored entity — cell, message), and writes
+    /// the `right` half back. Hard-fails `AnchorMissing` if no
+    /// anchor has been claimed yet.
     fn consume_anchor(&mut self) -> Result<Anchor, VMError> {
         let parent = self.last_anchor.ok_or(VMError::AnchorMissing)?;
         let (left, right) = parent.split();
         self.last_anchor = Some(right);
+        Ok(left)
+    }
+
+    /// Splits the current anchor for a call entry: returns the
+    /// `left` half (becomes the callee's starting `last_anchor`) and
+    /// stores the `right` half in the parent frame's
+    /// `post_call_anchor` slot — so when control returns to the
+    /// parent (success *or* failure), the parent's anchor chain
+    /// resumes deterministically from `right`. Also stashes the
+    /// snapshots needed to roll back side effects on failure.
+    /// `Anchor` flows uninitialized → `AnchorMissing`.
+    fn split_anchor_for_call(&mut self) -> Result<Anchor, VMError> {
+        let parent_anchor = self.last_anchor.ok_or(VMError::AnchorMissing)?;
+        let (left, right) = parent_anchor.split();
+        self.current_call.post_call_anchor = Some(right);
+        // Snapshot effect counters for failure rollback.
+        self.current_call.snap_txlog_len = self.txlog.len();
+        self.current_call.snap_deferred_sigs_len = self.deferred_sigs.len();
+        self.current_call.snap_total_fee = self.total_fee;
         Ok(left)
     }
 
@@ -554,7 +579,6 @@ impl VM {
     ) -> TxResult {
         let txlog = mem::take(&mut self.txlog);
         let deferred_sigs = mem::take(&mut self.deferred_sigs);
-        let sends = mem::take(&mut self.sends);
         let txid = crate::tx::TxID::from_log(&txlog);
         TxResult {
             txid,
@@ -565,7 +589,6 @@ impl VM {
             bytecode,
             proof,
             deferred_sigs,
-            sends,
         }
     }
 
@@ -614,8 +637,35 @@ impl VM {
     }
 
     /// Executes one instruction. Returns `Ok(true)` to continue,
-    /// `Ok(false)` to stop.
+    /// `Ok(false)` to stop. Errors that occur inside a nested
+    /// call frame are caught — the frame is unwound via
+    /// `fail_current_call` and a `0` failure marker is pushed
+    /// onto the parent's stack. Errors at the outermost frame
+    /// propagate to the caller (kill the tx).
     fn step<D: Delegate>(
+        &mut self,
+        delegate: &mut D,
+        registry: Option<&mut dyn ActorRegistry>,
+    ) -> Result<bool, VMError> {
+        match self.step_inner(delegate, registry) {
+            Ok(cont) => Ok(cont),
+            Err(e) => {
+                // Outermost frame errors propagate (kill the tx).
+                if self.call_stack.is_empty() {
+                    return Err(e);
+                }
+                // Nested call errored — discard the failed frame,
+                // restore the parent's anchor + roll back side
+                // effects, push failure marker `0` onto parent.
+                self.fail_current_call();
+                Ok(true)
+            }
+        }
+    }
+
+    /// Single-step body, separated from `step` so the error path
+    /// can be uniformly caught.
+    fn step_inner<D: Delegate>(
         &mut self,
         delegate: &mut D,
         registry: Option<&mut dyn ActorRegistry>,
@@ -758,7 +808,8 @@ impl VM {
 
     /// Pops the current frame back to its caller on clean exit. Stack
     /// must be empty (use `return k` to send values across the boundary).
-    /// Leftover gas is refunded to the parent.
+    /// Leftover gas is refunded to the parent. Implicit clean exits
+    /// push `{0, 1}` onto the parent's stack (success with k=0).
     fn finish_call(&mut self) -> Result<bool, VMError> {
         if !self.current_call.stack.is_empty() {
             return Err(VMError::StackNotClean);
@@ -774,10 +825,51 @@ impl VM {
                 .current_call
                 .gas_limit
                 .saturating_add(leftover_gas);
+            // Apply parent's post-call anchor — the `right` half of
+            // the split taken at call entry.
+            if let Some(post) = self.current_call.post_call_anchor.take() {
+                self.last_anchor = Some(post);
+            }
+            // Success marker with k=0: stack += [count=0, success=1].
+            self.current_call.stack.push(Value::Int253(Int253::from(0u64)));
+            self.current_call.stack.push(Value::Int253(Int253::ONE));
             return Ok(true);
         }
         // Outermost call returned: entire tx complete.
         Ok(false)
+    }
+
+    /// Discards the current frame on failure: pops it without
+    /// preserving its effects, rolls back side-effects from the
+    /// parent's snapshot (txlog tail, deferred-sigs tail, total_fee),
+    /// applies the parent's `post_call_anchor`, and pushes `0` onto
+    /// the parent's stack as the failure marker. Caller's effects
+    /// up to the failed call are preserved; the parent script
+    /// continues at the instruction after the call.
+    ///
+    /// Note: actor-state rollback is NOT yet implemented — that
+    /// requires per-actor snapshots in the registry (next iteration).
+    fn fail_current_call(&mut self) {
+        // Cannot fail the outermost frame — caller of this helper
+        // must ensure call_stack is non-empty.
+        let parent = self
+            .call_stack
+            .pop()
+            .expect("fail_current_call: outermost frame errors must propagate");
+        self.current_call = parent;
+        // Roll back side effects via the snapshots taken at call
+        // entry.
+        self.txlog.truncate(self.current_call.snap_txlog_len);
+        self.deferred_sigs.truncate(self.current_call.snap_deferred_sigs_len);
+        self.total_fee = self.current_call.snap_total_fee;
+        // Apply parent's post-call anchor (caller's right half of
+        // the entry split — independent of whatever the callee did
+        // with its left half).
+        if let Some(post) = self.current_call.post_call_anchor.take() {
+            self.last_anchor = Some(post);
+        }
+        // Push failure marker.
+        self.current_call.stack.push(Value::Int253(Int253::from(0u64)));
     }
 
     /// Pushes a value onto the current call's stack.
@@ -1573,8 +1665,10 @@ impl VM {
 
     /// _x(k-1) … x(0) k_ **return** → ø
     ///
-    /// Pops the frame, refunds leftover gas, pushes the `k` items onto
-    /// the caller's stack. Errors `ReturnAtRoot` at the outermost frame.
+    /// Pops the frame, refunds leftover gas, pushes the `k` items
+    /// then `k` then `1` (success marker) onto the caller's stack.
+    /// Stack on parent after the call: `… values… k 1` (top = 1).
+    /// Errors `ReturnAtRoot` at the outermost frame.
     fn op_return(&mut self) -> Result<(), VMError> {
         let k_int = self.pop_value()?.to_int253()?;
         let k_u64 = k_int.to_u64().ok_or(VMError::BadReturnArity)?;
@@ -1606,7 +1700,14 @@ impl VM {
             .current_call
             .gas_limit
             .saturating_add(leftover_gas);
+        // Apply parent's post-call anchor (set at call entry).
+        if let Some(post) = self.current_call.post_call_anchor.take() {
+            self.last_anchor = Some(post);
+        }
+        // Pour return values, then count, then success marker (1).
         self.current_call.stack.extend(return_values);
+        self.current_call.stack.push(Value::Int253(Int253::from(k as u64)));
+        self.current_call.stack.push(Value::Int253(Int253::ONE));
         Ok(())
     }
 
@@ -1922,7 +2023,9 @@ impl VM {
         )?;
         let _ = cell.predicate.verify_callproof(&cp)?;
         let instrs = prog.to_instructions()?;
-        self.enter_cell_open_frame(cell, instrs, gas, bytes, args);
+        // Split parent's anchor for the callee + stash post-call.
+        let child_anchor = self.split_anchor_for_call()?;
+        self.enter_cell_open_frame(cell, instrs, gas, bytes, args, child_anchor);
         Ok(())
     }
 
@@ -1950,20 +2053,17 @@ impl VM {
         });
 
         let instrs = prog_str.to_instructions()?;
-        self.enter_cell_open_frame(cell, instrs, gas, bytes, args);
+        let child_anchor = self.split_anchor_for_call()?;
+        self.enter_cell_open_frame(cell, instrs, gas, bytes, args, child_anchor);
         Ok(())
     }
 
-    /// Shared tail of `op_open` / `op_signcall` (ADR 0013): build a
-    /// new `CellOpen` frame snapshotting the caller's CS context,
-    /// pour `cell.payload` then `args` onto the new stack, swap the
-    /// parent out. Memory cap equals `bytes` (no actor → no
-    /// `4 × vbytes` rule).
-    ///
-    /// Anchoring: open is intra-tx; the per-tx `last_anchor` flows
-    /// through the unlocked script unchanged. `CallKind::CellOpen`
-    /// stores the opened cell's id as metadata (used by debug/log
-    /// surfaces, not by `op_anchor`).
+    /// Shared tail of `op_open` / `op_signcall`: build a new
+    /// `CellOpen` frame snapshotting the caller's CS context, pour
+    /// `cell.payload` then `args` onto the new stack, swap the
+    /// parent out, and switch the active anchor to `child_anchor`
+    /// (the `left` half of the parent's call-entry split). Memory
+    /// cap equals `bytes` (no actor → no `4 × vbytes` rule).
     fn enter_cell_open_frame(
         &mut self,
         cell: Cell,
@@ -1971,13 +2071,13 @@ impl VM {
         gas: u64,
         bytes: u64,
         args: Vec<Value>,
+        child_anchor: Anchor,
     ) {
         let external_context = self.is_external();
-        let anchor = Anchor(cell.id());
         let mut frame = CallFrame::new(
             instrs,
             CallKind::CellOpen {
-                anchor,
+                anchor: child_anchor,
                 predicate: cell.predicate.clone(),
                 external_context,
             },
@@ -1993,6 +2093,7 @@ impl VM {
         }
         let parent = core::mem::replace(&mut self.current_call, frame);
         self.call_stack.push(parent);
+        self.last_anchor = Some(child_anchor);
     }
 
     /// Pops `bytes` then `gas` (in that order — `gas` is deeper) as
@@ -2067,41 +2168,19 @@ impl VM {
         }
 
         let anchor = self.consume_anchor()?;
-
-        let payload_hash = {
-            let mut t = merlin::Transcript::new(b"flamevm.send.payload");
-            t.append_message(b"len", &(args.len() as u64).to_le_bytes());
-            let mut buf = Vec::new();
-            for v in &args {
-                buf.clear();
-                crate::encoding::write_value(&mut buf, v)
-                    .map_err(|_| VMError::NonPortableInSend)?;
-                t.append_message(b"item", &buf);
-            }
-            let mut h = [0u8; 32];
-            t.challenge_bytes(b"payload_hash", &mut h);
-            h
-        };
-
+        let caller = self.current_call.kind.actor().cloned();
+        // Single source of truth: the full message lives in the
+        // TxLog. The block builder scans `TxEntry::Send` entries to
+        // construct internal-tx deliveries — no separate queue.
         self.txlog.push(crate::tx::TxEntry::Send {
             anchor,
-            target: target.clone(),
-            method,
-            refund_predicate: refund_predicate.clone(),
-            gas,
-            vbytes,
-            payload_hash,
-        });
-        let caller = self.current_call.kind.actor().cloned();
-        self.sends.push(Message {
             target,
-            method,
             caller,
-            anchor,
-            payload: args,
+            method,
+            refund_predicate,
             gas,
             vbytes,
-            refund_predicate,
+            payload: args,
         });
         Ok(())
     }
@@ -2122,21 +2201,42 @@ impl VM {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
 
-        if iter_actor_ids_on_stack(&self.current_call, &self.call_stack)
-            .any(|id| id == &callee)
-        {
-            return Err(VMError::ReentrancyDetected);
-        }
+        // Pre-frame setup. Any failure here ("cannot enter callee")
+        // converts to a `0` failure marker on the caller's stack —
+        // the call simply "did not happen" from the caller's POV.
+        let pre_frame: Result<(Vec<u8>, [u8; 32], u64, ActorID), VMError> = (|| {
+            if iter_actor_ids_on_stack(&self.current_call, &self.call_stack)
+                .any(|id| id == &callee)
+            {
+                return Err(VMError::ReentrancyDetected);
+            }
+            let script = registry.resolve_method(&callee, method)?;
+            let pre_state_root = state_root(&registry.load_state(&callee)?)?;
+            let mem_limit = registry.actor_vbytes(&callee)?.saturating_mul(4);
+            let caller = self
+                .current_call
+                .kind
+                .actor()
+                .cloned()
+                .unwrap_or(ActorID::Hash([0u8; 32]));
+            Ok((script, pre_state_root, mem_limit, caller))
+        })();
+        let (script, pre_state_root, mem_limit, caller) = match pre_frame {
+            Ok(v) => v,
+            Err(_) => {
+                // Pre-frame failure (reentrancy, missing actor, etc.):
+                // push marker `0`, no frame created, no rollback needed.
+                self.push_value(Value::Int253(Int253::from(0u64)));
+                return Ok(());
+            }
+        };
 
-        let script = registry.resolve_method(&callee, method)?;
-        let pre_state_root = state_root(&registry.load_state(&callee)?)?;
-
-        // Calls are intra-tx — they don't mint cross-tx entities, so
-        // the anchor is not consumed. Record a snapshot of the
-        // current anchor (or zero if uninitialized) as a TxEntry
-        // marker; Internal TxID binds via (callee, method,
-        // pre_state_root) primarily.
-        let callee_anchor = self.last_anchor.unwrap_or(Anchor([0u8; 32]));
+        // Split the parent's anchor: `left` (callee_anchor) seeds
+        // the callee's `last_anchor`; `right` is stashed on the
+        // parent frame's `post_call_anchor` for restoration on
+        // return (success or failure). Also snapshots side-effect
+        // cursors so we can roll back if the child errors out.
+        let callee_anchor = self.split_anchor_for_call()?;
         self.txlog.push(crate::tx::TxEntry::Call {
             callee: callee.clone(),
             method,
@@ -2144,13 +2244,6 @@ impl VM {
             callee_anchor,
         });
 
-        let mem_limit = registry.actor_vbytes(&callee)?.saturating_mul(4);
-        let caller = self
-            .current_call
-            .kind
-            .actor()
-            .cloned()
-            .unwrap_or(ActorID::Hash([0u8; 32]));
         let program = crate::program::Program::parse(&script)?;
         let mut frame = CallFrame::new(
             program.into_instructions(),
@@ -2170,6 +2263,8 @@ impl VM {
 
         let parent = core::mem::replace(&mut self.current_call, frame);
         self.call_stack.push(parent);
+        // Switch the active anchor to the callee's half.
+        self.last_anchor = Some(callee_anchor);
         Ok(())
     }
 

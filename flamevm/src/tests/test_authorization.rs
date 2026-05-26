@@ -46,7 +46,10 @@ fn signcall_records_explicit_sig_and_runs_program() {
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
-    assert!(vm.current_call.stack.is_empty());
+    // Parent stack: [count=0, success=1] from the child's clean return.
+    assert_eq!(vm.current_call.stack.len(), 2);
+    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
     assert_eq!(vm.deferred_sigs.len(), 1);
     match &vm.deferred_sigs[0] {
         DeferredSig::Explicit {
@@ -484,7 +487,8 @@ fn phase20_signature_over_wrong_txid_rejected() {
 
 /// `op_signcall` creates an isolated CallFrame with no actor identity,
 /// same as `op_open` (ADR 0013). Inside the signed leaf, `op_actorid`
-/// must error `OpcodeRequiresActorContext`.
+/// errors `OpcodeRequiresActorContext` — caught by step as a `0`
+/// failure marker on the parent's stack.
 #[test]
 fn signcall_actorid_errors_no_actor_context() {
     let prog = vec![0x9c]; // actorid
@@ -499,8 +503,8 @@ fn signcall_actorid_errors_no_actor_context() {
     script.push(0x99); // signcall
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
-    assert!(matches!(
-        run_to_end(&mut vm).unwrap_err(),
-        VMError::OpcodeRequiresActorContext
-    ));
+    run_to_end(&mut vm).unwrap();
+    // Child errored → unwind + marker `0` on parent.
+    assert_eq!(vm.current_call.stack.len(), 1);
+    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
 }

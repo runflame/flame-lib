@@ -494,7 +494,9 @@ fn confidential_1_to_1_with_fee() {
         .push_int(1024u64) // gas
         .push_int(1024u64) // bytes
         .push_int(0u64)    // k args
-        .open();
+        .open()
+        .verify()          // assert success marker
+        .drop_();          // discard count
     // Fee opcode: pushes WideToken(-3, 0).
     program = program.push_int(3u64).push_int(0u64).fee();
     // Output commitment Strings (witness-bearing prover-side).
@@ -707,7 +709,9 @@ fn confidential_with_fee_undersupply_rejected() {
         .push_int(1024u64)
         .push_int(1024u64)
         .push_int(0u64)
-        .open();
+        .open()
+        .verify()
+        .drop_();
     program = program.push_int(3u64).push_int(0u64).fee();
     program = program
         .push_str(crate::String::commitment(q_out))

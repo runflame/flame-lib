@@ -279,31 +279,28 @@ fn break_zero_at_root_with_leftover_stack_errors() {
 #[test]
 fn return_with_dirty_leftover_errors() {
     // Inside a child frame: push:9, push:7, push:1, return — k=1, two
-    // items below count → StackNotClean.
+    // items below count → StackNotClean. Error is caught and translated
+    // to a `0` failure marker on the parent.
     let mut vm = vm_with_nested_child_script(vec![0x09, 0x07, 0x01, 0x7e]);
-    let err = loop {
-        match vm.step_internal() {
-            Ok(true) => continue,
-            Ok(false) => panic!("expected error"),
-            Err(e) => break e,
-        }
-    };
-    assert!(matches!(err, VMError::StackNotClean));
+    while !vm.call_stack.is_empty() {
+        vm.step_internal().expect("step ok — error swallowed into marker");
+    }
+    assert_eq!(vm.current_call.stack.len(), 1);
+    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
 }
 
 #[test]
 fn return_too_few_items_errors() {
     // Inside a child frame: push:5, return — k=5 popped, zero items
-    // remain → BadReturnArity.
+    // remain → BadReturnArity. The `step` wrapper catches the error,
+    // unwinds the child, and pushes `0` (failure marker) onto the parent.
     let mut vm = vm_with_nested_child_script(vec![0x05, 0x7e]);
-    let err = loop {
-        match vm.step_internal() {
-            Ok(true) => continue,
-            Ok(false) => panic!("expected error"),
-            Err(e) => break e,
-        }
-    };
-    assert!(matches!(err, VMError::BadReturnArity));
+    while !vm.call_stack.is_empty() {
+        vm.step_internal().expect("step ok — error swallowed into marker");
+    }
+    // Parent stack: just the failure marker.
+    assert_eq!(vm.current_call.stack.len(), 1);
+    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
 }
 
 #[test]
@@ -334,9 +331,11 @@ fn return_transfers_values_to_parent() {
         vm.step_internal().unwrap();
     }
 
-    // Parent received the 7.
-    assert_eq!(vm.current_call.stack.len(), 1);
+    // Parent received the 7 then the count (1) then the success marker (1).
+    assert_eq!(vm.current_call.stack.len(), 3);
     assert_int(&vm.current_call.stack[0], Int253::from(7u64));
+    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
 }
 
 #[test]

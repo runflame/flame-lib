@@ -134,14 +134,12 @@ fn call_emits_txentry_call_with_pre_state_root_and_anchor() {
         _ => unreachable!(),
     };
     assert_eq!(callee, b);
-    // callee_anchor is a snapshot of the tx's current last_anchor at
-    // call time — not consumed, just recorded (calls are intra-tx).
-    // Frame fixture seeds InternalRoot with the zero anchor, and no
-    // cell/output/send has split it before the call, so the snapshot
-    // is exactly the zero anchor.
-    assert_eq!(anchor, Anchor([0u8; 32]));
-    // Pre-state root non-zero — it's a Merlin challenge over the
-    // (non-empty) state of B.
+    // callee_anchor is the LEFT half of split(InternalRoot.anchor).
+    // The fixture seeds with the zero anchor; production frames get
+    // a Message-delivered (split-derived) value.
+    let (expected_callee_anchor, _post) = Anchor([0u8; 32]).split();
+    assert_eq!(anchor, expected_callee_anchor);
+    // Pre-state root non-zero — Merlin challenge over actor state.
     assert_ne!(root, [0u8; 32]);
 }
 
@@ -156,27 +154,43 @@ fn direct_self_call_rejected_as_reentrancy() {
     let id = ActorID::Hash([0xa1; 32]);
     reg.deploy(id.clone(), state, 10_000, 0).expect("deploy");
 
-    // Now run a self-call from a fresh VM in id's actor context.
+    // Self-call from id's actor context: pre-frame reentrancy check
+    // rejects with marker `0` on the caller's stack. The call simply
+    // "did not happen" — no Call entry, no anchor split.
     let script = call_script(&id, 0, 10_000);
     let mut vm = vm_for_actor(id.clone(), script);
 
-    // Step to and including the `call` — expect ReentrancyDetected.
-    let err = loop {
-        match vm.step_internal_with_registry(&mut reg) {
-            Ok(true) => continue,
-            Ok(false) => panic!("ran to end without reentrancy detection"),
-            Err(e) => break e,
+    // Step through the call op. Marker `0` is left on top of the
+    // stack; subsequent steps may fail later (StackNotClean at root
+    // finish) but the call-time error is the marker.
+    while vm.step_internal_with_registry(&mut reg).is_ok() {
+        if !vm.current_call.stack.is_empty()
+            && matches!(vm.current_call.stack.last(), Some(Value::Int253(_)))
+        {
+            // After call: stack should be exactly [0].
+            assert_eq!(vm.current_call.stack.len(), 1);
+            match &vm.current_call.stack[0] {
+                Value::Int253(i) => assert_eq!(*i, Int253::from(0u64), "marker"),
+                _ => panic!("expected Int253 marker"),
+            }
+            // No TxEntry::Call emitted for the rejected self-call.
+            let calls = vm.txlog.iter()
+                .filter(|e| matches!(e, crate::tx::TxEntry::Call { .. }))
+                .count();
+            assert_eq!(calls, 0, "rejected reentry must not log a Call entry");
+            return;
         }
-    };
-    assert!(matches!(err, VMError::ReentrancyDetected), "got {:?}", err);
+    }
+    panic!("call did not push a marker");
 }
 
 #[test]
 fn indirect_cycle_rejected_as_reentrancy() {
     let mut reg = MemRegistry::new();
     // Build A and B. A → B; B re-calls A. The re-entrancy detection
-    // fires inside B's call attempt. Two-phase setup: deploy A and
-    // B with no-op recvs first, then overwrite B's recv to call A.
+    // fires inside B's call attempt and converts to a `0` failure
+    // marker on B's stack (instead of a fatal error) per the new
+    // call-return contract. B drops it and returns cleanly to A.
     let a_id = ActorID::Hash([0xaa; 32]);
     let b_id = ActorID::Hash([0xbb; 32]);
 
@@ -194,8 +208,10 @@ fn indirect_cycle_rejected_as_reentrancy() {
     );
     reg.deploy(b_id.clone(), b_state, 100_000, 0).expect("deploy B");
 
-    // Now overwrite B's recv to call A (re-entry into the chain root).
-    let b_recv = call_script(&a_id, 0, 1_000);
+    // B's recv: call A (re-entry — fails with marker 0), drop the
+    // marker, return cleanly.
+    let mut b_recv = call_script(&a_id, 0, 1_000);
+    b_recv.push(0x1c); // drop failure marker
     let mut new_b_state = ActorState::new();
     new_b_state.public.insert(
         RECV_METHOD,
@@ -203,18 +219,22 @@ fn indirect_cycle_rejected_as_reentrancy() {
     );
     reg.save_state(&b_id, new_b_state).expect("update B");
 
-    // A's recv: call B.
-    let a_script = call_script(&b_id, 0, 50_000);
+    // A's recv: call B (B returns 0 results successfully), drop the
+    // [count, success] markers.
+    let mut a_script = call_script(&b_id, 0, 50_000);
+    a_script.extend(vec![0x1c, 0x1c]);
     let mut vm = vm_for_actor(a_id, a_script);
 
-    let err = loop {
-        match vm.step_internal_with_registry(&mut reg) {
-            Ok(true) => continue,
-            Ok(false) => panic!("ran to end without reentrancy detection"),
-            Err(e) => break e,
-        }
-    };
-    assert!(matches!(err, VMError::ReentrancyDetected), "got {:?}", err);
+    // Tx must complete without fatal error.
+    while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
+
+    // Reentrancy is silently rejected before a Call entry is logged:
+    // exactly one Call entry (A → B); B → A leaves no trace beyond
+    // the failure marker B observed.
+    let call_count = vm.txlog.iter()
+        .filter(|e| matches!(e, crate::tx::TxEntry::Call { .. }))
+        .count();
+    assert_eq!(call_count, 1, "only A→B should be logged; reentrant B→A is rejected pre-log");
 }
 
 #[test]
@@ -226,9 +246,13 @@ fn sibling_calls_to_same_actor_allowed_after_return() {
     // B: return 0 results — `push:0 return`.
     let b = deploy_recv(&mut reg, vec![0x00, 0x7e], 1_000);
 
-    // A: call B; call B again.
+    // A: call B; drop returned `[count=0, success=1]`; call B again;
+    // drop those two markers — leaves an empty stack for the implicit
+    // root finish_call.
     let mut a_script = call_script(&b, 0, 5_000);
+    a_script.extend(vec![0x1c, 0x1c]);                 // drop, drop
     a_script.extend(call_script(&b, 0, 5_000));
+    a_script.extend(vec![0x1c, 0x1c]);                 // drop, drop
     let a = deploy_recv(&mut reg, a_script.clone(), 100_000);
 
     let mut vm = vm_for_actor(a, a_script);
@@ -256,19 +280,27 @@ fn call_without_registry_errors() {
 }
 
 #[test]
-fn call_to_unknown_actor_errors() {
+fn call_to_unknown_actor_rejected_with_marker() {
     let mut reg = MemRegistry::new();
-    // Caller exists; target does not.
+    // Caller exists; target does not — pre-frame registry lookup
+    // fails → marker `0` on caller's stack, no Call entry.
     let ghost = ActorID::Hash([0xab; 32]);
     let a_script = call_script(&ghost, 0, 10_000);
     let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
     let mut vm = vm_for_actor(a, a_script);
-    let err = loop {
-        match vm.step_internal_with_registry(&mut reg) {
-            Ok(true) => continue,
-            Ok(false) => panic!("ran out before reaching call"),
-            Err(e) => break e,
+    while vm.step_internal_with_registry(&mut reg).is_ok() {
+        if !vm.current_call.stack.is_empty() {
+            assert_eq!(vm.current_call.stack.len(), 1);
+            match &vm.current_call.stack[0] {
+                Value::Int253(i) => assert_eq!(*i, Int253::from(0u64)),
+                _ => panic!("expected Int253 marker"),
+            }
+            let calls = vm.txlog.iter()
+                .filter(|e| matches!(e, crate::tx::TxEntry::Call { .. }))
+                .count();
+            assert_eq!(calls, 0);
+            return;
         }
-    };
-    assert!(matches!(err, VMError::ActorNotFound), "got {:?}", err);
+    }
+    panic!("call did not push a marker");
 }

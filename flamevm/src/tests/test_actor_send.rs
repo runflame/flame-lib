@@ -86,52 +86,38 @@ fn send_queues_message_and_emits_txentry() {
     let mut vm = vm_internal(ActorID::Hash([0xaa; 32]), script);
     while vm.step_internal().expect("step ok") {}
 
-    // Send entry recorded in txlog (after Header).
-    let send_entry = vm.txlog.iter().find_map(|e| match e {
-        crate::tx::TxEntry::Send {
+    // Send entry recorded in txlog (after Header). The full message
+    // (including payload + caller) lives in the entry — no separate
+    // sends queue.
+    let send_count = vm.txlog.iter().filter(|e| matches!(e, crate::tx::TxEntry::Send { .. })).count();
+    assert_eq!(send_count, 1);
+    match vm.txlog.iter().find(|e| matches!(e, crate::tx::TxEntry::Send { .. })) {
+        Some(crate::tx::TxEntry::Send {
+            anchor,
             target: t,
+            caller,
             method,
+            refund_predicate,
             gas,
             vbytes,
-            refund_predicate,
-            anchor,
-            payload_hash,
-        } => Some((
-            t.clone(),
-            *method,
-            *gas,
-            *vbytes,
-            refund_predicate.clone(),
-            *anchor,
-            *payload_hash,
-        )),
-        _ => None,
-    });
-    let (t, method, gas, vbytes, refund, anchor, _hash) =
-        send_entry.expect("Send entry present");
-    assert_eq!(t, target);
-    assert_eq!(method, Int253::from(3u64));
-    assert_eq!(gas, 10_000);
-    assert_eq!(vbytes, 500);
-    assert_eq!(refund.to_point().as_bytes(), &refund_bytes);
-    // Anchor is the LEFT half of split(InternalRoot.anchor). The
-    // frame was constructed with the zero seed; production
-    // InternalRoot anchors come from a prior tx's send.
-    let (expected_send_anchor, _) = Anchor([0u8; 32]).split();
-    assert_eq!(anchor, expected_send_anchor);
-
-    // Message queued into vm.sends.
-    assert_eq!(vm.sends.len(), 1);
-    let msg = &vm.sends[0];
-    assert_eq!(msg.target, target);
-    assert_eq!(msg.method, Int253::from(3u64));
-    assert_eq!(msg.gas, 10_000);
-    assert_eq!(msg.vbytes, 500);
-    assert_eq!(msg.anchor, anchor);
-    // Caller = the executing actor (InternalRoot's actor field).
-    assert_eq!(msg.caller, Some(ActorID::Hash([0xaa; 32])));
-    // SendID == anchor.
-    assert_eq!(msg.id().as_bytes(), &anchor.0);
+            payload,
+        }) => {
+            assert_eq!(*t, target);
+            assert_eq!(*method, Int253::from(3u64));
+            assert_eq!(*gas, 10_000);
+            assert_eq!(*vbytes, 500);
+            assert_eq!(refund_predicate.to_point().as_bytes(), &refund_bytes);
+            // Anchor is the LEFT half of split(InternalRoot.anchor)
+            // (the zero seed in this test fixture).
+            let (expected_send_anchor, _) = Anchor([0u8; 32]).split();
+            assert_eq!(*anchor, expected_send_anchor);
+            // Caller = the executing actor (InternalRoot's `actor`).
+            assert_eq!(*caller, Some(ActorID::Hash([0xaa; 32])));
+            // No payload args in this test.
+            assert!(payload.is_empty());
+        }
+        _ => panic!("expected Send entry"),
+    }
 }
 
 #[test]
@@ -143,18 +129,24 @@ fn two_sends_get_distinct_split_anchors() {
     let mut vm = vm_internal(ActorID::Hash([0x11; 32]), script);
     while vm.step_internal().expect("step ok") {}
 
-    // Anchor flow:
+    // Anchor flow (sends recorded inside TxLog):
     //   parent_0 = InternalRoot.anchor (zero in this test fixture)
-    //   send₁: split(parent_0) → (a₀ = sends[0].anchor, parent_1)
-    //   send₂: split(parent_1) → (a₁ = sends[1].anchor, parent_2)
-    assert_eq!(vm.sends.len(), 2);
-    let a0 = vm.sends[0].anchor;
-    let a1 = vm.sends[1].anchor;
-    assert_ne!(a0, a1, "anchors must differ");
+    //   send₁: split(parent_0) → (a₀ = entry[1].anchor, parent_1)
+    //   send₂: split(parent_1) → (a₁ = entry[2].anchor, parent_2)
+    let send_anchors: Vec<Anchor> = vm
+        .txlog
+        .iter()
+        .filter_map(|e| match e {
+            crate::tx::TxEntry::Send { anchor, .. } => Some(*anchor),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(send_anchors.len(), 2);
+    assert_ne!(send_anchors[0], send_anchors[1], "anchors must differ");
     let (expected_a0, parent_1) = Anchor([0u8; 32]).split();
     let (expected_a1, _) = parent_1.split();
-    assert_eq!(a0, expected_a0);
-    assert_eq!(a1, expected_a1);
+    assert_eq!(send_anchors[0], expected_a0);
+    assert_eq!(send_anchors[1], expected_a1);
 }
 
 #[test]
@@ -177,13 +169,17 @@ fn send_from_external_root_has_no_caller() {
     // on the caller-id semantics.
     vm.last_anchor = Some(Anchor([0xaa; 32]));
     while vm.step_internal().expect("step ok") {}
-    assert_eq!(vm.sends.len(), 1);
-    assert_eq!(vm.sends[0].caller, None, "no caller from ExternalRoot");
+    let caller = vm.txlog.iter().find_map(|e| match e {
+        crate::tx::TxEntry::Send { caller, .. } => Some(caller.clone()),
+        _ => None,
+    });
+    assert_eq!(caller, Some(None), "no caller from ExternalRoot");
 }
 
 #[test]
-fn send_payload_hash_binds_to_args() {
-    // Two sends with different payloads → different payload_hash.
+fn send_payload_in_txlog_differs_across_args() {
+    // Two sends with different payloads → different TxEntry::Send
+    // payloads (and consequently different TxIDs).
     let target = ActorID::Hash([0xee; 32]);
     let refund = [0u8; 32];
 
@@ -212,19 +208,26 @@ fn send_payload_hash_binds_to_args() {
     while vm_a.step_internal().expect("a") {}
     while vm_b.step_internal().expect("b") {}
 
-    let hash = |vm: &VM| {
+    let payload_of = |vm: &VM| -> Vec<Int253> {
         vm.txlog
             .iter()
             .find_map(|e| match e {
-                crate::tx::TxEntry::Send { payload_hash, .. } => Some(*payload_hash),
+                crate::tx::TxEntry::Send { payload, .. } => Some(payload
+                    .iter()
+                    .map(|v| match v {
+                        Value::Int253(i) => *i,
+                        _ => panic!("non-Int payload in test"),
+                    })
+                    .collect()),
                 _ => None,
             })
             .expect("Send present")
     };
+    assert_ne!(payload_of(&vm_a), payload_of(&vm_b));
     assert_ne!(
-        hash(&vm_a),
-        hash(&vm_b),
-        "different payloads → different hashes"
+        crate::tx::TxID::from_log(&vm_a.txlog),
+        crate::tx::TxID::from_log(&vm_b.txlog),
+        "different payloads → different TxIDs"
     );
 }
 

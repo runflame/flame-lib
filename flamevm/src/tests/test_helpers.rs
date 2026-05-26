@@ -700,11 +700,16 @@ pub(crate) fn build_confidential_nm_program(
         // callproof pieces.
         program = push_callproof_to_program(program, &cp);
         // gas/bytes operands (generous), then push:0 args, open.
+        // After open, the parent stack has [Token, k=1, success=1]:
+        // verify pops the success marker (hard-fail if 0), drop
+        // discards the count, leaving just the Token for mix.
         program = program
             .push_int(1024u64)
             .push_int(1024u64)
             .push_int(0u64)
-            .open();
+            .open()
+            .verify()
+            .drop_();
     }
 
     //                    commit String (witness-bearing). ──
@@ -901,15 +906,16 @@ pub(crate) fn assert_nm_txlog(
     // asserting all three pins down the cell_id without
     // recomputing it.
     //
-    // Anchor chain (split design): after the last input's `input` op,
-    // last_anchor = Anchor(last_input.id()). Each output consumes via
-    // split — left half goes to the output's anchor field, right half
-    // becomes the next iteration's parent.
-    let mut expected_anchor = Anchor(
-        build_input_cell(inputs.last().expect("at least one input"))
-            .0
-            .id(),
-    );
+    // Anchor chain (split-at-every-call design): after each input's
+    // `open`, the parent's anchor is split — the right half stays in
+    // the parent. So after the last input's `input` then `open`, the
+    // running anchor is `Anchor(last_input.id()).split().1`. Each
+    // output then splits it again: left → output.anchor, right →
+    // next iteration's parent.
+    let last_input_id = build_input_cell(
+        inputs.last().expect("at least one input")
+    ).0.id();
+    let (_, mut expected_anchor) = Anchor(last_input_id).split();
     for (j, out) in outputs.iter().enumerate() {
         let expected_pred = output_predicate_point(out.predicate_tag);
         let (q_open, f_open) = open_commitments_for_output(out);
@@ -971,7 +977,7 @@ pub(crate) fn assert_nm_txlog(
         "confidential N→M matrix tests must not emit deferred sigs"
     );
     assert!(
-        result.sends.is_empty(),
+        !result.txlog.iter().any(|e| matches!(e, crate::tx::TxEntry::Send { .. })),
         "confidential N→M matrix tests must not emit sends"
     );
 }

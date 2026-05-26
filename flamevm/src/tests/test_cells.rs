@@ -131,7 +131,8 @@ fn output_opcode_emits_to_txlog_without_pushing() {
 fn open_with_valid_callproof_runs_program() {
     // Cell payload: 5. Inner program: drop, push:0, return — drains
     // the payload inside the isolated CellOpen frame and returns 0
-    // items to parent (ADR 0013).
+    // items to parent (ADR 0013). On clean return parent's stack
+    // gets [count=0, success=1].
     let inner_program = vec![0x1c, 0x00, 0x7e];
     let (tree, cp) = build_predicate_with_program(&inner_program, 7);
     let pred_point = tree.compute_point();
@@ -146,7 +147,10 @@ fn open_with_valid_callproof_runs_program() {
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
-    assert!(vm.current_call.stack.is_empty());
+    // Parent stack: [count=0, success=1].
+    assert_eq!(vm.current_call.stack.len(), 2);
+    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
 }
 
 #[test]
@@ -250,7 +254,9 @@ fn open_preserves_alloc_witnesses_via_script_string() {
         .push_int(1024u64) // gas
         .push_int(1024u64) // bytes
         .push_int(0u64)    // k args
-        .open();
+        .open()
+        .verify()  // pops success marker (1); errors if 0
+        .drop_();  // pops count
 
     // Prover round-trip.
     let pc_gens = bulletproofs::PedersenGens::default();
@@ -301,7 +307,10 @@ fn open_passes_args_after_payload() {
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
-    assert!(vm.current_call.stack.is_empty());
+    // Parent stack: [count=0, success=1].
+    assert_eq!(vm.current_call.stack.len(), 2);
+    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
 }
 
 #[test]
@@ -358,7 +367,10 @@ fn scripts_only_predicate_opens_via_program_path() {
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
-    assert!(vm.current_call.stack.is_empty());
+    // Parent stack: [count=0, success=1].
+    assert_eq!(vm.current_call.stack.len(), 2);
+    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
 }
 
 #[test]
@@ -394,11 +406,15 @@ fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
         run_to_end(&mut vm).unwrap_or_else(|e| {
             panic!("program index {} did not open cleanly: {:?}", i, e)
         });
-        assert!(
-            vm.current_call.stack.is_empty(),
-            "program index {} left stack non-empty",
+        // Parent stack: [count=0, success=1].
+        assert_eq!(
+            vm.current_call.stack.len(),
+            2,
+            "program index {} expected [count, marker] on stack",
             i
         );
+        assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+        assert_int(&vm.current_call.stack[1], Int253::from(1u64));
     }
 }
 
@@ -977,6 +993,9 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     push_open_gas_bytes(&mut script);
     script.push(0x00); // k = 0 args
     script.push(0x93); // open
+    // open leaves [count=0, success=1]; verify+drop cleans up cleanly.
+    script.push(0x79); // verify (pops 1, errors if 0)
+    script.push(0x1c); // drop count
 
     // Consume cell 2
     push_string_bytes(&mut script, &cell2_bytes);
@@ -985,6 +1004,8 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     push_open_gas_bytes(&mut script);
     script.push(0x00); // k = 0 args
     script.push(0x93); // open
+    script.push(0x79); // verify
+    script.push(0x1c); // drop
 
     // Emit output 1
     script.push(0x09); // push:9
@@ -1039,23 +1060,25 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     }
     assert_eq!(out2.predicate.to_point().as_bytes(), &out2_pred_bytes);
 
-    // Anchor chain (split design):
+    // Anchor chain (split-at-each-call design):
     //   - input₁: last_anchor = Anchor(cell1.id())
-    //   - open₁ does NOT consume the parent's last_anchor (open is
-    //     an unlock, not a unique-id-producing act — the child
-    //     frame's anchor chain starts independently from cell.id()).
+    //   - open₁: split(Anchor(cell1.id())) → (left to child, right to
+    //     parent's post_call_anchor). After child returns:
+    //     last_anchor = right.
     //   - input₂: replaces last_anchor = Anchor(cell2.id())
-    //   - open₂: same as above (no parent consume)
-    //   - output₁: split(Anchor(cell2.id())) → (left₁=out1.anchor, right₁)
-    //   - output₂: split(right₁) → (left₂=out2.anchor, right₂)
-    //   - final last_anchor = right₂
-    let (out1_expected, right1) = Anchor(cell2_id).split();
-    let (out2_expected, right2) = right1.split();
+    //   - open₂: split(Anchor(cell2.id())) → (left to child, right to
+    //     parent's post_call_anchor). After return:
+    //     last_anchor = r2 = Anchor(cell2.id()).split().1.
+    //   - output₁: split(r2) → (out1.anchor = left, last_anchor = right).
+    //   - output₂: split that → (out2.anchor = left, last_anchor = right).
+    let (_, r2) = Anchor(cell2_id).split();
+    let (out1_expected, after_out1) = r2.split();
+    let (out2_expected, after_out2) = after_out1.split();
     assert_eq!(out1.anchor.0, out1_expected.0);
     assert_eq!(out2.anchor.0, out2_expected.0);
     assert_ne!(out1.anchor.0, out2.anchor.0);
     let final_anchor = vm.last_anchor.expect("anchor set after output 2");
-    assert_eq!(final_anchor.0, right2.0);
+    assert_eq!(final_anchor.0, after_out2.0);
 
     // No `signtx` / `signcall` were used → no deferred sigs.
     assert!(
@@ -1067,7 +1090,9 @@ fn external_tx_two_inputs_two_outputs_via_open() {
 // ── ADR 0013 isolation invariants ──────────────────────────────────
 
 /// `op_open` creates an isolated CallFrame with no actor identity;
-/// `op_actorid` inside the leaf must error `OpcodeRequiresActorContext`.
+/// `op_actorid` inside the leaf errors `OpcodeRequiresActorContext`,
+/// which the step wrapper catches as a `0` failure marker on the
+/// parent's stack (the call simply "failed").
 #[test]
 fn op_open_actorid_errors_no_actor_context() {
     let inner = vec![0x9c]; // actorid (would also need return, but errors first)
@@ -1082,15 +1107,14 @@ fn op_open_actorid_errors_no_actor_context() {
     script.push(0x93);                  // open
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
-    assert!(matches!(
-        run_to_end(&mut vm).unwrap_err(),
-        VMError::OpcodeRequiresActorContext
-    ));
+    run_to_end(&mut vm).unwrap();
+    // Child errored → unwind + marker `0` on parent.
+    assert_eq!(vm.current_call.stack.len(), 1);
+    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
 }
 
-/// `op_open` leaf returning the wrong arity must error `BadReturnArity`.
-/// Cell has no payload; leaf pushes 1 then `return` reads k=1 and finds
-/// the stack empty after popping k.
+/// `op_open` leaf returning the wrong arity errors `BadReturnArity`;
+/// caught by step as a `0` failure marker on the parent.
 #[test]
 fn op_open_return_arity_mismatch_errors() {
     // push:1, return — pops k=1 from stack, then stack.len()(0) < 1.
@@ -1106,10 +1130,9 @@ fn op_open_return_arity_mismatch_errors() {
     script.push(0x93);
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
-    assert!(matches!(
-        run_to_end(&mut vm).unwrap_err(),
-        VMError::BadReturnArity
-    ));
+    run_to_end(&mut vm).unwrap();
+    assert_eq!(vm.current_call.stack.len(), 1);
+    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
 }
 
 /// CS context propagates: a CellOpen frame with `external_context:
@@ -1137,7 +1160,11 @@ fn op_open_cs_blocked_when_external_context_false() {
     let mut vm = VM::new(dummy_header(), parent);
     let parent_saved = std::mem::replace(&mut vm.current_call, child);
     vm.call_stack.push(parent_saved);
-    let err = vm.step_internal().unwrap_err();
-    assert!(matches!(err, VMError::ExternalOnly));
+    // alloc errors ExternalOnly inside the child; step catches and
+    // unwinds, leaving a `0` failure marker on the parent's stack.
+    vm.step_internal().expect("step ok — error swallowed into marker");
+    assert!(vm.call_stack.is_empty());
+    assert_eq!(vm.current_call.stack.len(), 1);
+    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
 }
 
