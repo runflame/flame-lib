@@ -53,7 +53,7 @@ fn actorid_in_internal_root_pushes_hash_string() {
         Int253::from(0u64),
         None,
         Anchor([0u8; 32]),
-        vec![0x9c],
+        Program::new().actorid().to_bytecode(),
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
@@ -64,7 +64,7 @@ fn actorid_in_internal_root_pushes_hash_string() {
 
 #[test]
 fn actorid_in_external_root_errors_actor_context() {
-    let mut vm = vm_external(vec![0x9c]);
+    let mut vm = vm_external(Program::new().actorid().to_bytecode());
     let err = vm.step_internal().expect_err("must error");
     assert!(matches!(err, VMError::OpcodeRequiresActorContext));
 }
@@ -81,7 +81,7 @@ fn actorid_in_constructor_form_uses_canonical_hash_seed() {
         Int253::from(0u64),
         None,
         Anchor([0u8; 32]),
-        vec![0x9c],
+        Program::new().actorid().to_bytecode(),
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
@@ -99,7 +99,7 @@ fn anchor_in_internal_root_pushes_frame_anchor() {
         Int253::from(0u64),
         None,
         anc,
-        vec![0x9d],
+        Program::new().anchor().to_bytecode(),
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
@@ -114,7 +114,7 @@ fn anchor_in_external_root_errors_anchor_missing() {
     // fresh ExternalRoot with no prior `input`, the slot is `None`
     // and the opcode hard-fails `AnchorMissing` (same rule as the
     // consume sites).
-    let mut vm = vm_external(vec![0x9d]);
+    let mut vm = vm_external(Program::new().anchor().to_bytecode());
     let err = vm.step_internal().expect_err("must error");
     assert!(matches!(err, VMError::AnchorMissing));
 }
@@ -127,7 +127,7 @@ fn callerid_with_some_caller_pushes_hash_string() {
         Int253::from(0u64),
         Some(caller),
         Anchor([0u8; 32]),
-        vec![0xa0],
+        Program::new().callerid().to_bytecode(),
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
@@ -144,7 +144,7 @@ fn callerid_with_none_caller_pushes_zero_string() {
         Int253::from(0u64),
         None,
         Anchor([0u8; 32]),
-        vec![0xa0],
+        Program::new().callerid().to_bytecode(),
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
@@ -155,7 +155,7 @@ fn callerid_with_none_caller_pushes_zero_string() {
 
 #[test]
 fn callerid_in_external_root_errors_actor_context() {
-    let mut vm = vm_external(vec![0xa0]);
+    let mut vm = vm_external(Program::new().callerid().to_bytecode());
     let err = vm.step_internal().expect_err("must error");
     assert!(matches!(err, VMError::OpcodeRequiresActorContext));
 }
@@ -167,7 +167,7 @@ fn method_pushes_int253_key() {
         Int253::from(42u64),
         None,
         Anchor([0u8; 32]),
-        vec![0xa1],
+        Program::new().method().to_bytecode(),
     );
     vm.step_internal().expect("step ok");
     assert_int(
@@ -178,7 +178,7 @@ fn method_pushes_int253_key() {
 
 #[test]
 fn method_in_external_root_errors_actor_context() {
-    let mut vm = vm_external(vec![0xa1]);
+    let mut vm = vm_external(Program::new().method().to_bytecode());
     let err = vm.step_internal().expect_err("must error");
     assert!(matches!(err, VMError::OpcodeRequiresActorContext));
 }
