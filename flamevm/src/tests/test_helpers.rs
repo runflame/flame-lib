@@ -210,21 +210,6 @@ pub(crate) fn assert_str(v: &Value, expected: &[u8]) {
     }
 }
 
-/// Helper: pushes integer `n` (`0 ≤ n ≤ 65535`) onto the script
-/// using the shortest available immediate.
-pub(crate) fn push_small_uint(script: &mut Vec<u8>, n: u32) {
-    if n <= 15 {
-        script.push(n as u8);
-    } else if n <= 255 {
-        script.push(0x10);
-        script.push(n as u8);
-    } else {
-        assert!(n <= 65_535);
-        script.push(0x12);
-        script.extend_from_slice(&(n as u16).to_le_bytes());
-    }
-}
-
 /// Helper: encodes `value` (non-negative `Int253`) as a low-`n_bits`
 /// LSB-first byte sequence (writebits-compatible).
 pub(crate) fn writebits_bytes(value: &Int253, n_bits: usize) -> Vec<u8> {
@@ -298,58 +283,6 @@ pub(crate) fn build_multi_leaf_predicate(
     .unwrap();
     let cp = tree.callproof_for(program_index).unwrap();
     (tree, cp)
-}
-
-/// Helper: appends script bytes that push a CallProof's four pieces
-/// onto the stack in the order `open` expects: internal_key (Point),
-/// neighbors (Dict), position (String), program (String).
-///
-/// Builds the neighbors Dict via the `dict` opcode: for n entries,
-/// pushes `(val_0, key_0, val_1, key_1, … , n)` then `dict`. Keys
-/// are the indices `0..n-1`, so the resulting Dict is canonical
-/// list-style.
-pub(crate) fn push_callproof_pieces(script: &mut Vec<u8>, cp: &CallProof) {
-    push_point_bytes(script, cp.internal_key.as_bytes());
-    for (i, h) in cp.neighbors.iter().enumerate() {
-        push_string_bytes(script, h); // val
-        push_small_uint(script, i as u32); // key
-    }
-    push_small_uint(script, cp.neighbors.len() as u32);
-    script.push(0x60); // dict
-    push_string_bytes(script, &cp.position);
-    push_string_bytes(script, &cp.program);
-}
-
-/// Helper: appends `gas` and `bytes` operands (both generous defaults
-/// for tests) for `op_open` / `op_signcall`. Encoded as two `pushint16`
-/// ops — six bytes total.
-pub(crate) fn push_open_gas_bytes(script: &mut Vec<u8>) {
-    script.push(0x12); // pushint16_pos (gas = 1024)
-    script.extend_from_slice(&1024u16.to_le_bytes());
-    script.push(0x12); // pushint16_pos (bytes = 1024)
-    script.extend_from_slice(&1024u16.to_le_bytes());
-}
-
-/// Helper: builds a script that pushes a `String` value of the given bytes.
-/// Uses the sub-varint length-prefix the `pushstr` opcode expects.
-pub(crate) fn push_string_bytes(script: &mut Vec<u8>, bytes: &[u8]) {
-    script.push(0x19); // pushstr
-    if bytes.len() <= 255 {
-        script.push(0x00); // sub-varint tag 0
-        script.push(bytes.len() as u8);
-    } else {
-        // tag 1: 2 LE bytes; value = 256 + w. We support up to 65791.
-        script.push(0x01);
-        let w = (bytes.len() - 256) as u16;
-        script.extend_from_slice(&w.to_le_bytes());
-    }
-    script.extend_from_slice(bytes);
-}
-
-/// Helper: builds a script that pushes a Point value (1a + 32 bytes).
-pub(crate) fn push_point_bytes(script: &mut Vec<u8>, bytes: &[u8; 32]) {
-    script.push(0x1a);
-    script.extend_from_slice(bytes);
 }
 
 pub use crate::token::flavor_from_actor as test_flavor_from_actor;
