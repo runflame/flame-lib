@@ -331,6 +331,13 @@ impl Program {
     pub fn signtx(mut self) -> Self { self.instructions.push(Instruction::Signtx); self }
     pub fn signcall(mut self) -> Self { self.instructions.push(Instruction::Signcall); self }
 
+    // ── Actor invocation + state (0x94..=0x97) ─────────
+
+    pub fn send(mut self) -> Self { self.instructions.push(Instruction::Send); self }
+    pub fn call(mut self) -> Self { self.instructions.push(Instruction::Call); self }
+    pub fn load(mut self) -> Self { self.instructions.push(Instruction::Load); self }
+    pub fn save(mut self) -> Self { self.instructions.push(Instruction::Save); self }
+
     // ── Tx-level & frame introspection (0x9a..=0xa4) ───
 
     pub fn timelock(mut self) -> Self { self.instructions.push(Instruction::Timelock); self }
