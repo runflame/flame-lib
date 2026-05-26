@@ -125,7 +125,7 @@ async fn create_new_blockchain(
             current_timestamp_ms(),
             vec![ClearValue {
                 qty: 1000,
-                flv: Scalar::zero(),
+                flv: Scalar::ZERO,
             }],
         );
         Ok(state)

@@ -57,7 +57,7 @@ impl Value {
             Value::Expression(e) => Ok(Value::Expression(-e)),
             Value::Point(p) => Ok(Value::MultiscalarMul(
                 crate::msm::MultiscalarMul::term(
-                    -curve25519_dalek::scalar::Scalar::one(),
+                    -curve25519_dalek::scalar::Scalar::ONE,
                     p.to_compressed(),
                 ),
             )),

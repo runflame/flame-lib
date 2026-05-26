@@ -199,13 +199,13 @@ impl SecretConstraint {
 
                 let (xy_assg, xw_assg, y_assg) = match x_assg {
                     Some(x) => {
-                        let is_zero = x.ct_eq(&Scalar::zero());
+                        let is_zero = x.ct_eq(&Scalar::ZERO);
                         let y = Scalar::conditional_select(
-                            &Scalar::zero(),
-                            &Scalar::one(),
+                            &Scalar::ZERO,
+                            &Scalar::ONE,
                             is_zero.into(),
                         );
-                        let w = Scalar::conditional_select(&x, &Scalar::one(), is_zero.into());
+                        let w = Scalar::conditional_select(&x, &Scalar::ONE, is_zero.into());
                         let w = w.invert();
                         (Some((x, y)), Some((x, w)), Some(y))
                     }
@@ -222,7 +222,7 @@ impl SecretConstraint {
                 // (3) `x*y == 0` which implies that y == 0 if x != 0.
                 cs.constrain(o1.into());
                 // (4) `x*w == 1 - y` which implies that y == 1 if x == 0.
-                cs.constrain(o2 - Scalar::one() + r1);
+                cs.constrain(o2 - Scalar::ONE + r1);
 
                 // Note: w (r2) is left unconstrained — it is a free variable.
 
@@ -253,7 +253,7 @@ impl Commitment {
     /// Creates an open commitment with a zero blinding factor.
     pub fn unblinded<T: Into<Int253>>(x: T) -> Self {
         Commitment::Open(Box::new(CommitmentWitness {
-            blinding: Scalar::zero(),
+            blinding: Scalar::ZERO,
             value: x.into(),
         }))
     }
@@ -342,7 +342,7 @@ impl Expression {
                     (Some(l), Some(r)) => Some(l * r),
                     (_, _) => None,
                 };
-                Expression::LinearCombination(vec![(output_var, Scalar::one())], output_assignment)
+                Expression::LinearCombination(vec![(output_var, Scalar::ONE)], output_assignment)
             }
         }
     }

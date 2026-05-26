@@ -42,7 +42,7 @@ impl Value {
     pub fn zero() -> Value {
         Value {
             q: 0u64.into(),
-            f: Scalar::zero(),
+            f: Scalar::ZERO,
         }
     }
 

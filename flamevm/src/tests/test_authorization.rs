@@ -148,7 +148,7 @@ fn signcall_explicit_sig_batch_verifies_correctly() {
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
     use curve25519_dalek::scalar::Scalar;
     let sk = Scalar::from(42u64);
-    let vk_point = (&sk * &RISTRETTO_BASEPOINT_TABLE).compress();
+    let vk_point = (RISTRETTO_BASEPOINT_TABLE * &sk).compress();
     // Build the message exactly as `op_signcall`'s
     // `signcall_message(program)` helper does.
     let inner_prog = vec![0x1c]; // drop
@@ -177,7 +177,7 @@ fn signcall_tampered_sig_batch_rejects() {
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
     use curve25519_dalek::scalar::Scalar;
     let sk = Scalar::from(42u64);
-    let vk_point = (&sk * &RISTRETTO_BASEPOINT_TABLE).compress();
+    let vk_point = (RISTRETTO_BASEPOINT_TABLE * &sk).compress();
     let inner_prog = vec![0x1c];
     let mut prog_t = merlin::Transcript::new(b"flamevm.signcall.v1");
     prog_t.append_message(b"program", &inner_prog);
@@ -196,7 +196,7 @@ fn signcall_tampered_sig_batch_rejects() {
             // If from_bytes rejects (non-canonical scalar), build by hand.
             Ok::<_, ()>(musig::Signature {
                 R: sig.R,
-                s: sig.s + Scalar::one(),
+                s: sig.s + Scalar::ONE,
             })
         })
         .unwrap();

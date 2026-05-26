@@ -18,7 +18,7 @@ impl Signature {
         sbuf[..].copy_from_slice(&sig[32..]);
         Ok(Signature {
             R: CompressedRistretto(Rbuf),
-            s: Scalar::from_canonical_bytes(sbuf).ok_or(StarsigError::InvalidSignature)?,
+            s: Option::from(Scalar::from_canonical_bytes(sbuf)).ok_or(StarsigError::InvalidSignature)?,
         })
     }
 

@@ -82,8 +82,8 @@ impl Int253 {
         let negative = bytes[31] & 0x80 != 0;
         let mut scalar_bytes = bytes;
         scalar_bytes[31] &= 0x7f;
-        // Verify canonical encoding.
-        Scalar::from_canonical_bytes(scalar_bytes)?;
+        // Verify canonical encoding. dalek v4: returns CtOption, convert via Option::from.
+        Option::<Scalar>::from(Scalar::from_canonical_bytes(scalar_bytes))?;
         if negative && scalar_bytes == [0u8; 32] {
             return None; // reject negative zero
         }
@@ -94,7 +94,7 @@ impl Int253 {
     /// Negative zero is normalized to positive zero.
     pub fn from_parts(sign: bool, scalar: Scalar) -> Int253 {
         let mut bytes = scalar.to_bytes();
-        if sign && scalar != Scalar::zero() {
+        if sign && scalar != Scalar::ZERO {
             bytes[31] |= 0x80;
         }
         Int253 { bytes }
@@ -428,7 +428,7 @@ mod tests {
     fn from_i64_zero() {
         let i = Int253::from(0i64);
         assert!(!i.is_negative());
-        assert_eq!(i.to_scalar_mod_order(), Scalar::zero());
+        assert_eq!(i.to_scalar_mod_order(), Scalar::ZERO);
     }
 
     #[test]
@@ -491,7 +491,7 @@ mod tests {
 
         // abs(0) is 0.
         let i = Int253::from(0u64).abs();
-        assert_eq!(i.to_scalar_mod_order(), Scalar::zero());
+        assert_eq!(i.to_scalar_mod_order(), Scalar::ZERO);
     }
 
     #[test]
@@ -514,9 +514,9 @@ mod tests {
         assert_eq!(i.to_scalar_mod_order(), Scalar::from(50u64));
 
         // Negative zero normalizes to positive zero.
-        let i = Int253::from_parts(true, Scalar::zero());
+        let i = Int253::from_parts(true, Scalar::ZERO);
         assert!(!i.is_negative());
-        assert_eq!(i.to_scalar_mod_order(), Scalar::zero());
+        assert_eq!(i.to_scalar_mod_order(), Scalar::ZERO);
     }
 
     #[test]
@@ -679,7 +679,7 @@ mod tests {
 
     fn l_minus_one() -> Int253 {
         // -1 mod ℓ = ℓ - 1 as a Scalar; wrap that into a non-negative Int253.
-        Int253::from(-Scalar::one())
+        Int253::from(-Scalar::ONE)
     }
 
     #[test]
@@ -722,7 +722,7 @@ mod tests {
         // magnitude is (ℓ-1)^2 mod ℓ = 1.
         let got = -l_minus_one() * l_minus_one();
         assert!(got.is_negative());
-        assert_eq!(got.abs_scalar(), Scalar::one());
+        assert_eq!(got.abs_scalar(), Scalar::ONE);
     }
 
     #[test]
@@ -822,7 +822,7 @@ mod tests {
         //   |r| < |d|
         //   sign(q) == sign(n) ^ sign(d)   (when q != 0)
         //   sign(r) == sign(n)              (when r != 0)
-        let big = Int253::from(-Scalar::one()); // magnitude ℓ-1, positive
+        let big = Int253::from(-Scalar::ONE); // magnitude ℓ-1, positive
         let huge = Int253::from(Scalar::from(u64::MAX) * Scalar::from(u64::MAX));
         for &n in &[big, -big, huge, -huge] {
             for &d in &[

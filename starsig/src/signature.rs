@@ -82,7 +82,7 @@ impl Signature {
         // `0 == (-s * G) + (1 * R) + (c * pubkey)`
         batch.append(
             -self.s,
-            iter::once(Scalar::one()).chain(iter::once(c)),
+            iter::once(Scalar::ONE).chain(iter::once(c)),
             iter::once(self.R.decompress()).chain(iter::once(pubkey.into_point().decompress())),
         );
     }

@@ -185,9 +185,9 @@ fn decode_peer_addr(buf: &mut BytesMut) -> Result<PeerAddr, io::Error> {
     let addr = read_socket_addr(buf)?;
     check_length(buf, 32, "peer id")?;
     let key = buf.split_to(32);
-    let id = PeerID(PublicKey::from(CompressedRistretto::from_slice(
-        key.as_ref(),
-    )));
+    let cr = CompressedRistretto::from_slice(key.as_ref())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad peer key"))?;
+    let id = PeerID(PublicKey::from(cr));
     Ok(PeerAddr { id, addr })
 }
 

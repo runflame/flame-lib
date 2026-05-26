@@ -253,7 +253,7 @@ pub(crate) fn build_predicate_with_program(
     internal_secret: u64,
 ) -> (PredicateTree, CallProof) {
     let secret = Scalar::from(internal_secret);
-    let x_point = &secret * &RISTRETTO_BASEPOINT_TABLE;
+    let x_point = RISTRETTO_BASEPOINT_TABLE * &secret;
     let internal_key = x_point.compress();
     let tree = PredicateTree::new(
         Some(internal_key),
@@ -273,7 +273,7 @@ pub(crate) fn build_multi_leaf_predicate(
     internal_secret: u64,
 ) -> (PredicateTree, CallProof) {
     let secret = Scalar::from(internal_secret);
-    let x_point = &secret * &RISTRETTO_BASEPOINT_TABLE;
+    let x_point = RISTRETTO_BASEPOINT_TABLE * &secret;
     let internal_key = x_point.compress();
     let tree = PredicateTree::new(
         Some(internal_key),
@@ -470,7 +470,7 @@ pub(crate) fn run_external_steps<'g>(
 pub(crate) fn signing_keypair(secret: u64) -> (CompressedRistretto, Scalar) {
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
     let sk = Scalar::from(secret);
-    let vk = (&sk * &RISTRETTO_BASEPOINT_TABLE).compress();
+    let vk = (RISTRETTO_BASEPOINT_TABLE * &sk).compress();
     (vk, sk)
 }
 

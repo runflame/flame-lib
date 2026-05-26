@@ -62,7 +62,7 @@ impl XpubDerivation for Xpub {
             Address::new(
                 label,
                 ctrl_key.into_point(),
-                &enc_key * &RISTRETTO_BASEPOINT_TABLE,
+                RISTRETTO_BASEPOINT_TABLE * &enc_key,
             ),
             enc_key,
         )

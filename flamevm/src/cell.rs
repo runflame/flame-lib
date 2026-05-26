@@ -123,7 +123,7 @@ impl Predicate {
             .internal_key
             .decompress()
             .ok_or(VMError::CallProofMismatch)?;
-        let p_prime = x_point + &h * &RISTRETTO_BASEPOINT_TABLE;
+        let p_prime = x_point + RISTRETTO_BASEPOINT_TABLE * &h;
         // 3. Compare to the predicate's opaque point.
         if p_prime.compress() != self.to_point() {
             return Err(VMError::CallProofMismatch);
@@ -199,7 +199,7 @@ impl PredicateTree {
             .internal_key
             .decompress()
             .expect("PredicateTree::new validated the internal key");
-        (x_point + &h * &RISTRETTO_BASEPOINT_TABLE).compress()
+        (x_point + RISTRETTO_BASEPOINT_TABLE * &h).compress()
     }
 
     /// Computes the merkle root over the leaves. For a single leaf the

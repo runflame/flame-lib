@@ -35,7 +35,7 @@ impl From<u64> for SignedInteger {
 impl Into<Scalar> for SignedInteger {
     fn into(self) -> Scalar {
         if self.0 < 0 {
-            Scalar::zero() - Scalar::from((-self.0) as u64)
+            Scalar::ZERO - Scalar::from((-self.0) as u64)
         } else {
             Scalar::from(self.0 as u64)
         }

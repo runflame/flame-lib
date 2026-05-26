@@ -119,7 +119,7 @@ impl Xprv {
 
         let mut scalar_bytes = [0u8; 32];
         scalar_bytes.copy_from_slice(&bytes[..32]);
-        let scalar = match Scalar::from_canonical_bytes(scalar_bytes) {
+        let scalar = match Option::<Scalar>::from(Scalar::from_canonical_bytes(scalar_bytes)) {
             Some(x) => x,
             None => return None,
         };
@@ -140,7 +140,7 @@ impl Xpub {
     /// Returns a leaf `VerificationKey` derived using a PRF customized with a user-provided closure.
     pub fn derive_key(&self, customize: impl FnOnce(&mut Transcript)) -> VerificationKey {
         let f = self.derive_leaf_helper(self.prepare_prf(), customize);
-        (self.pubkey_decompressed + (&f * &constants::RISTRETTO_BASEPOINT_TABLE)).into()
+        (self.pubkey_decompressed + (constants::RISTRETTO_BASEPOINT_TABLE * &f)).into()
     }
 
     /// Serializes this Xpub to a sequence of bytes.
@@ -158,14 +158,11 @@ impl Xpub {
             return None;
         }
 
-        let compressed_pubkey = CompressedRistretto::from_slice(&bytes[..32]);
+        let compressed_pubkey = CompressedRistretto::from_slice(&bytes[..32]).ok()?;
         let mut dk = [0u8; 32];
         dk.copy_from_slice(&bytes[32..]);
 
-        let point = match compressed_pubkey.decompress() {
-            Some(p) => p,
-            None => return None,
-        };
+        let point = compressed_pubkey.decompress()?;
 
         Some(Xpub {
             pubkey: compressed_pubkey.into(),
@@ -196,7 +193,7 @@ impl Xpub {
         let mut child_dk = [0u8; 32];
         prf.challenge_bytes(b"dk", &mut child_dk);
 
-        let child_point = self.pubkey_decompressed + (&f * &constants::RISTRETTO_BASEPOINT_TABLE);
+        let child_point = self.pubkey_decompressed + (constants::RISTRETTO_BASEPOINT_TABLE * &f);
 
         let xpub = Xpub {
             pubkey: child_point.compress().into(),

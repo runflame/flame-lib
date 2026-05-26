@@ -7,10 +7,10 @@ edition = "2018"
 [dependencies]
 thiserror = "1"
 byteorder = "1"
-merlin = "2"
-rand = "0.7"
+merlin = "3"
+rand = "0.8"
 subtle = "2"
-curve25519-dalek = { version = "3", features = ["serde"] }
+curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility", "rand_core"] }
 serde = { version = "1.0", features=["derive"] }
 bech32 = "0.7"
 
@@ -27,5 +27,5 @@ path = "../zkvm"
 path = "../blockchain"
 
 [dev-dependencies]
-rand_chacha = "0.2"
+rand_chacha = "0.3"
 hex = "^0.3"

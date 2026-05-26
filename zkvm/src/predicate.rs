@@ -203,7 +203,7 @@ impl Predicate {
         // P == X + h1(X, M)*B -> 0 == -P + X + h1(X, M)*B
         batch.append(
             h,
-            iter::once(-Scalar::one()).chain(iter::once(Scalar::one())),
+            iter::once(-Scalar::ONE).chain(iter::once(Scalar::ONE)),
             iter::once(self.to_point().decompress())
                 .chain(iter::once(key.into_point().decompress())),
         )

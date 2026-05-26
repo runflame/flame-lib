@@ -176,7 +176,7 @@ impl PeerID {
         hex::decode(id)
             .map(|b| {
                 if b.len() == 32 {
-                    Some(CompressedRistretto::from_slice(&b))
+                    CompressedRistretto::from_slice(&b).ok()
                 } else {
                     None
                 }

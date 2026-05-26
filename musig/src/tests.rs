@@ -40,7 +40,8 @@ fn make_multikey() {
     let expected_pubkey = CompressedRistretto::from_slice(&[
         224, 55, 123, 145, 179, 165, 49, 222, 32, 55, 98, 22, 171, 85, 86, 8, 136, 50, 15, 199,
         239, 6, 119, 17, 228, 9, 231, 89, 28, 228, 113, 87,
-    ]);
+    ])
+    .expect("valid 32-byte slice");
 
     assert_eq!(expected_pubkey, multikey.aggregated_key().into_point());
 }

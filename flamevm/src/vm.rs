@@ -1675,7 +1675,7 @@ impl VM {
                 // restoring on call failure (see `fail_current_call`).
                 musig::BatchVerification::append(
                     delegate.batch_verifier(),
-                    curve25519_dalek::scalar::Scalar::zero(),
+                    curve25519_dalek::scalar::Scalar::ZERO,
                     scalars,
                     points,
                 );
@@ -2504,7 +2504,7 @@ impl VM {
             .allocate(witness_scalar)
             .map_err(VMError::R1CSError)?;
         let expr = crate::Expression::LinearCombination(
-            vec![(r1cs_var, curve25519_dalek::scalar::Scalar::one())],
+            vec![(r1cs_var, curve25519_dalek::scalar::Scalar::ONE)],
             witness,
         );
         self.push_value(Value::Expression(expr));
@@ -2521,7 +2521,7 @@ impl VM {
         let (_point, r1cs_var) = delegate.commit_variable(&var.commitment)?;
         let witness = var.commitment.assignment();
         let expr = crate::Expression::LinearCombination(
-            vec![(r1cs_var, Scalar::one())],
+            vec![(r1cs_var, Scalar::ONE)],
             witness,
         );
         self.push_value(Value::Expression(expr));

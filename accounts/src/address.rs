@@ -113,10 +113,10 @@ impl Address {
         if buf.len() != 64 {
             return None;
         }
-        let enckey = CompressedRistretto::from_slice(&buf[32..64]).decompress()?;
+        let enckey = CompressedRistretto::from_slice(&buf[32..64]).ok()?.decompress()?;
         Some(Address {
             label: AddressLabel { inner: label },
-            control_key: CompressedRistretto::from_slice(&buf[0..32]),
+            control_key: CompressedRistretto::from_slice(&buf[0..32]).ok()?,
             encryption_key: enckey.compress(),
             encryption_key_decompressed: enckey,
         })
@@ -132,7 +132,7 @@ impl Address {
         mut rng: R,
     ) -> (Receiver, Vec<u8>) {
         let nonce_scalar = Scalar::random(&mut rng);
-        let nonce_point = (&nonce_scalar * &RISTRETTO_BASEPOINT_TABLE).compress();
+        let nonce_point = (RISTRETTO_BASEPOINT_TABLE * &nonce_scalar).compress();
         let dh = (nonce_scalar * self.encryption_key_decompressed).compress();
 
         let (flv_blinding, qty_blinding, mut flv_pad, mut qty_pad) = self.derive_keys_from_dh(&dh);
@@ -187,7 +187,7 @@ impl Address {
             return None;
         }
         let ct = candidate_data;
-        let nonce_point = CompressedRistretto::from_slice(&ct[0..32]).decompress()?;
+        let nonce_point = CompressedRistretto::from_slice(&ct[0..32]).ok()?.decompress()?;
 
         let dh = (decryption_key * nonce_point).compress();
 
@@ -196,7 +196,7 @@ impl Address {
         xor_slice(&mut flv_pad[..], &ct[32..64]);
         xor_slice(&mut qty_pad[..], &ct[64..72]);
 
-        let flv = Scalar::from_canonical_bytes(flv_pad)?;
+        let flv = Option::<Scalar>::from(Scalar::from_canonical_bytes(flv_pad))?;
         let qty = u64::from_le_bytes(qty_pad);
 
         // need to verify:
@@ -212,7 +212,7 @@ impl Address {
         let gens = PedersenGens::default();
 
         let p = RistrettoPoint::optional_multiscalar_mul(
-            iter::once(-Scalar::one())
+            iter::once(-Scalar::ONE)
                 .chain(iter::once(-challenge))
                 .chain(iter::once(flv + challenge * Scalar::from(qty)))
                 .chain(iter::once(flv_blinding + challenge * qty_blinding)),
@@ -346,7 +346,7 @@ mod tests {
         );
 
         let value = ClearValue {
-            flv: Scalar::zero(),
+            flv: Scalar::ZERO,
             qty: 1000,
         };
 

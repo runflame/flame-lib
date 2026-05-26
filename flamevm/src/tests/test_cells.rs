@@ -349,7 +349,7 @@ fn open_passes_args_after_payload() {
 fn predicate_tree_new_validates_inputs() {
     // Empty programs → EmptyPredicateTree.
     let secret = Scalar::from(1u64);
-    let ik = (&secret * &RISTRETTO_BASEPOINT_TABLE).compress();
+    let ik = (RISTRETTO_BASEPOINT_TABLE * &secret).compress();
     assert!(matches!(
         PredicateTree::new(Some(ik), Vec::new(), TEST_BLINDING_KEY).unwrap_err(),
         VMError::EmptyPredicateTree
@@ -504,7 +504,7 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
 #[test]
 fn callproof_for_out_of_range_index_errors() {
     let secret = Scalar::from(1u64);
-    let ik = (&secret * &RISTRETTO_BASEPOINT_TABLE).compress();
+    let ik = (RISTRETTO_BASEPOINT_TABLE * &secret).compress();
     let tree = PredicateTree::new(
         Some(ik),
         vec![vec![0x1d], vec![0x1c]],

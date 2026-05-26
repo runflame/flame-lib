@@ -115,7 +115,7 @@ impl Multisignature for Signature {
         let n = context.len();
         batch.append(
             -self.s,
-            iter::once(Scalar::one())
+            iter::once(Scalar::ONE)
                 .chain((0..n).map(|i| context.challenge(i, &mut transcript.clone()))),
             iter::once(self.R.decompress())
                 .chain((0..n).map(|i| context.key(i).into_point().decompress())),

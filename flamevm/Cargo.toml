@@ -7,9 +7,9 @@ license = "Apache-2.0"
 description = "Flame virtual machine"
 
 [dependencies]
-curve25519-dalek = { version = "3", features = ["serde"] }
-merlin = { version = "2", features = ["dynamic-labels"] }
-rand = "0.7"
+curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility", "rand_core"] }
+merlin = { version = "3" }
+rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 sha3 = "0.10"
@@ -24,7 +24,7 @@ features = ["merlin"]
 path = "../merkle"
 
 [dependencies.bulletproofs]
-git = "https://github.com/dalek-cryptography/bulletproofs"
+git = "https://github.com/runflame/bulletproofs"
 branch = "develop"
 features = ["yoloproofs"]
 
@@ -36,4 +36,4 @@ path = "../musig"
 
 [features]
 default = []
-nightly = ["curve25519-dalek/nightly", "curve25519-dalek/alloc", "bulletproofs/nightly"]
+nightly = ["curve25519-dalek/alloc", "bulletproofs/nightly"]

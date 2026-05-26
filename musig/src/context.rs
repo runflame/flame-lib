@@ -98,7 +98,7 @@ impl Multikey {
     pub fn aggregated_signing_key(privkeys: &[SigningKey]) -> SigningKey {
         match privkeys.len() {
             0 => {
-                return Scalar::zero();
+                return Scalar::ZERO;
             }
             1 => {
                 // Special case: single key is passed as-is
@@ -119,7 +119,7 @@ impl Multikey {
         }
 
         // aggregated_key = sum_i ( a_i * X_i )
-        let mut aggregated_key = Scalar::zero();
+        let mut aggregated_key = Scalar::ZERO;
         for (i, x) in privkeys.iter().enumerate() {
             let a = Multikey::compute_factor(&prf, i);
             aggregated_key = aggregated_key + a * x;
@@ -145,7 +145,7 @@ impl MusigContext for Multikey {
         // The list of pubkeys, <L>, has already been committed to self.transcript.
         let a_i = match &self.prf {
             Some(t) => Multikey::compute_factor(&t, i),
-            None => Scalar::one(),
+            None => Scalar::ONE,
         };
 
         c * a_i

@@ -21,7 +21,7 @@ pub struct FeeRate {
 
 /// Flavor of the asset used to pay the fees.
 pub fn fee_flavor() -> Scalar {
-    Scalar::zero()
+    Scalar::ZERO
 }
 
 impl FeeRate {

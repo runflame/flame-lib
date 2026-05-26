@@ -51,7 +51,7 @@ pub struct MultiscalarMul {
 impl MultiscalarMul {
     /// Constructs an MSM with a single term `(1, point)`.
     pub fn from_point(p: &Point) -> Self {
-        Self { terms: vec![(Scalar::one(), p.to_compressed())] }
+        Self { terms: vec![(Scalar::ONE, p.to_compressed())] }
     }
 
     /// Constructs an MSM with a single term `(scalar, point)`.
@@ -80,7 +80,7 @@ impl MultiscalarMul {
 
     /// Appends a Point with coefficient 1.
     pub fn push_point(self, p: &Point) -> Self {
-        self.push_term(Scalar::one(), p.to_compressed())
+        self.push_term(Scalar::ONE, p.to_compressed())
     }
 
     /// Negates all scalar coefficients.

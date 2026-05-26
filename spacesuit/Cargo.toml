@@ -6,20 +6,20 @@ edition = "2018"
 
 [dependencies]
 thiserror = "1"
-merlin = "2"
-rand = "0.7"
+merlin = "3"
+rand = "0.8"
 subtle = "2"
-curve25519-dalek = { version = "3", features = ["serde"] }
+curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility", "rand_core"] }
 serde = { version = "1.0", features=["derive"] }
 
 [dependencies.bulletproofs]
-git = "https://github.com/dalek-cryptography/bulletproofs"
+git = "https://github.com/runflame/bulletproofs"
 branch = "develop"
 features = ["yoloproofs"]
 
 [features]
 default = []
-nightly = ["curve25519-dalek/nightly", "curve25519-dalek/alloc", "subtle/nightly", "bulletproofs/nightly"]
+nightly = ["curve25519-dalek/alloc", "subtle/nightly", "bulletproofs/nightly"]
 
 [dev-dependencies]
 criterion = "0.2"

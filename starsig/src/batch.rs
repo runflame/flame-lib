@@ -113,7 +113,7 @@ impl<R: RngCore + CryptoRng> BatchVerifier<R> {
     pub fn with_capacity(rng: R, capacity: usize) -> Self {
         Self {
             rng,
-            basepoint_scalar: Scalar::zero(),
+            basepoint_scalar: Scalar::ZERO,
             dyn_weights: Vec::with_capacity(capacity * 2),
             dyn_points: Vec::with_capacity(capacity * 2),
         }

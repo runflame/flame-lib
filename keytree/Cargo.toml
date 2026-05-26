@@ -5,18 +5,18 @@ authors = ["Tess Rinearson <tess.rinearson@gmail.com>", "Oleg Andreev <oleganza@
 edition = "2018"
 
 [dependencies]
-curve25519-dalek = { version = "3", features = ["serde"] }
+curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility", "rand_core"] }
 serde = { version = "1.0", features=["derive"] }
-merlin = "2"
-rand = "0.7"
+merlin = "3"
+rand = "0.8"
 
 [dependencies.starsig]
 path = "../starsig"
 
 [dev-dependencies]
-rand_chacha = "0.2"
+rand_chacha = "0.3"
 hex = "^0.3"
 
 [features]
 default = []
-nightly = ["curve25519-dalek/nightly", "curve25519-dalek/alloc"]
+nightly = ["curve25519-dalek/alloc"]

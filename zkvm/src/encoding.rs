@@ -25,7 +25,7 @@ pub trait ReaderExt: Reader {
     /// Reads a Ristretto255 scalar (32 bytes).
     fn read_scalar(&mut self) -> Result<Scalar, ReadError> {
         let buf = self.read_u8x32()?;
-        Scalar::from_canonical_bytes(buf).ok_or(ReadError::InvalidFormat)
+        Option::<Scalar>::from(Scalar::from_canonical_bytes(buf)).ok_or(ReadError::InvalidFormat)
     }
 }
 

@@ -118,7 +118,7 @@ fn build_and_verify(program: Program) -> Result<(TxID, TxLog), VMError> {
         let sig = if utx.signing_instructions.len() == 0 {
             Signature {
                 R: CompressedRistretto::identity(),
-                s: Scalar::zero(),
+                s: Scalar::ZERO,
             }
         } else {
             // find all the secret scalars for the pubkeys used in the VM
@@ -510,7 +510,7 @@ fn taproot_program_path() {
     build_and_verify(prog).unwrap();
 
     let wrong_prog = Program::build(|p| {
-        p.push(secret_scalar + Scalar::one())
+        p.push(secret_scalar + Scalar::ONE)
             .push(prev_output.clone())
             .input()
             .push(String::Opaque(call_proof.to_bytes().clone()))
@@ -586,7 +586,7 @@ fn eval_test() {
         p.verify();
 
         // to make program finish we need to spend a dummy input
-        p.input_helper(0, Scalar::zero(), pred.clone());
+        p.input_helper(0, Scalar::ZERO, pred.clone());
         p.output_helper(pred);
     });
 

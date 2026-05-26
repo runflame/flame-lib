@@ -11,7 +11,7 @@ fn token_cleartext_constructor_packs_unblinded_commitments() {
     assert_eq!(t.flv.assignment(), Some(Int253::from(7u64)));
     // Witness uses zero blinding.
     let (_, b) = t.qty.witness().expect("open commitment");
-    assert_eq!(b, Scalar::zero());
+    assert_eq!(b, Scalar::ZERO);
 }
 
 #[test]

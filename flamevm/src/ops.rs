@@ -580,7 +580,7 @@ fn parse_pushint_n(
     let mag = u128::from_le_bytes(buf);
     let mut scalar_bytes = [0u8; 32];
     scalar_bytes[..16].copy_from_slice(&mag.to_le_bytes());
-    let scalar = Scalar::from_canonical_bytes(scalar_bytes)
+    let scalar = Option::<Scalar>::from(Scalar::from_canonical_bytes(scalar_bytes))
         .ok_or(VMError::InvalidInt253Encoding)?;
     Ok(Instruction::PushInt(Int253::from_parts(negative, scalar)))
 }

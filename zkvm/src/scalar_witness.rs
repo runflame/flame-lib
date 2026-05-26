@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(
             -ScalarWitness::from(Scalar::from(0xffu64))
                 + ScalarWitness::from(Scalar::from(0xffu64)),
-            ScalarWitness::from(Scalar::zero())
+            ScalarWitness::from(Scalar::ZERO)
         );
     }
 

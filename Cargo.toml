@@ -19,9 +19,13 @@ members = [
 # `demo` crate is built separately with nightly as required by Rocket
 exclude = ["demo"]
 
-# Use the runflame fork of merlin to lift the `&'static [u8]` label
-# restriction. The `dynamic-labels` feature (enabled by flamevm) widens
-# the transcript API to accept `&[u8]`, letting the VM pass user-supplied
-# labels through without internal prefixing.
-[patch.crates-io]
-merlin = { git = "https://github.com/runflame/merlin.git" }
+# TODO(merlin-v3-dynamic-labels): runflame/bulletproofs at branch
+# `develop` uses `merlin = "3"` from crates.io, which restricts
+# transcript labels to `&'static [u8]`. flamevm's `merlin` /
+# `merlinwrite` / `merlinread` opcodes pass user-supplied `&[u8]`
+# labels — currently bridged via `Box::leak` in `flamevm/src/
+# crypto.rs` (leaks bytes per VM call, bounded by gas per tx but
+# accumulates over a node's lifetime). Once a runflame/merlin v3
+# fork with the `dynamic-labels` feature is published, restore the
+# `[patch.crates-io] merlin = { git = … }` line below and drop the
+# `Box::leak` workaround.
