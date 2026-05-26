@@ -746,6 +746,20 @@ Mirror of [`and`](#and) for disjunction.
 
 ## Constraint system instructions  *(external-only)*
 
+**Rollback on call failure.** Every CS-touching opcode (`scalar`,
+`commit`, `alloc`, `expr`, `range`, `eq` via `verify`, `mix`,
+`decrypt`, `fee`) appends to the delegate's R1CS. On `call` /
+`open` / `signcall` entry the VM checkpoints the R1CS via
+`bulletproofs::r1cs::CheckpointableConstraintSystem::checkpoint`;
+on call failure the child's CS contributions (witness vectors,
+constraint vectors, deferred constraints, transcript state) are
+rolled back to the parent's snapshot via `rollback`. Both Prover
+and Verifier hit the same checkpoint/rollback sites because they
+walk the same script — the transcript stays in lockstep across
+the failure boundary. On clean return the snapshot is dropped and
+the child's CS contributions remain in the final proof. See
+`design.md` §"CS rollback under call failure".
+
 ### scalar
 
 _s_ → _expr_

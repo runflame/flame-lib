@@ -82,7 +82,13 @@ pub struct BlockContext {
 /// External-context user-task abstraction: prover or verifier. Owns the
 /// R1CS constraint system and finalizes proofs and signatures.
 pub trait Delegate {
-    type CS: r1cs::RandomizableConstraintSystem;
+    /// The R1CS constraint system. The
+    /// [`r1cs::CheckpointableConstraintSystem`] bound lets the VM
+    /// snapshot the CS on call entry and roll back the witness +
+    /// constraint vectors + transcript on call failure — so a
+    /// failed nested call's CS effects can't pollute the caller's
+    /// proof.
+    type CS: r1cs::RandomizableConstraintSystem + r1cs::CheckpointableConstraintSystem;
     /// Per-side batched scalar-point check accumulator. The
     /// [`musig::BatchCheckpoint`] bound lets the VM snapshot the
     /// accumulator on call entry and restore it on call failure —
@@ -334,6 +340,15 @@ pub struct CallFrame {
     /// proof verifiable. `None` when no call is in flight (or in
     /// internal context where the delegate has no real batch).
     pub(crate) snap_batch: Option<musig::BatchSnapshot>,
+
+    /// Snapshot of the delegate's R1CS constraint system taken
+    /// when this frame's child was pushed. Restored on child
+    /// failure via `bulletproofs::r1cs::CheckpointableConstraintSystem::
+    /// rollback` — truncates the witness/constraint vectors and
+    /// rewinds the Fiat–Shamir transcript so any allocations and
+    /// constraints the failed callee made are dropped. `None` in
+    /// internal context (no real CS).
+    pub(crate) snap_cs: Option<r1cs::Checkpoint>,
 }
 
 impl CallFrame {
@@ -361,6 +376,7 @@ impl CallFrame {
             snap_deferred_sigs_len: 0,
             snap_total_fee: crate::fees::CheckedFee::zero(),
             snap_batch: None,
+            snap_cs: None,
         }
     }
 }
@@ -674,9 +690,12 @@ impl VM {
                 let depth_after = self.call_stack.len();
                 if depth_after > depth_before && self.is_external() {
                     use musig::BatchCheckpoint;
-                    let snap = delegate.batch_verifier().snapshot();
+                    use r1cs::CheckpointableConstraintSystem;
+                    let batch_snap = delegate.batch_verifier().snapshot();
+                    let cs_snap = delegate.cs().checkpoint();
                     if let Some(parent) = self.call_stack.last_mut() {
-                        parent.snap_batch = Some(snap);
+                        parent.snap_batch = Some(batch_snap);
+                        parent.snap_cs = Some(cs_snap);
                     }
                 }
                 Ok(cont)
@@ -863,8 +882,11 @@ impl VM {
                 self.last_anchor = Some(post);
             }
             // Clean exit: child's MSM contributions stay in the
-            // delegate's batch. Drop the entry-time snapshot.
+            // delegate's batch, and the CS contributions stay in the
+            // R1CS. Drop both entry-time snapshots — they would only
+            // be used on the failure path.
             self.current_call.snap_batch = None;
+            self.current_call.snap_cs = None;
             // Success marker with k=0: stack += [count=0, success=1].
             self.current_call.stack.push(Value::Int253(Int253::from(0u64)));
             self.current_call.stack.push(Value::Int253(Int253::ONE));
@@ -877,11 +899,11 @@ impl VM {
     /// Discards the current frame on failure: pops it without
     /// preserving its effects, rolls back side-effects from the
     /// parent's snapshot (txlog tail, deferred-sigs tail, total_fee,
-    /// delegate batch state), applies the parent's
-    /// `post_call_anchor`, and pushes `0` onto the parent's stack
-    /// as the failure marker. Caller's effects up to the failed
-    /// call are preserved; the parent script continues at the
-    /// instruction after the call.
+    /// delegate batch state, R1CS constraint system), applies the
+    /// parent's `post_call_anchor`, and pushes `0` onto the parent's
+    /// stack as the failure marker. Caller's effects up to the
+    /// failed call are preserved; the parent script continues at
+    /// the instruction after the call.
     ///
     /// Note: actor-state rollback is NOT yet implemented — that
     /// requires per-actor snapshots in the registry (next iteration).
@@ -905,6 +927,13 @@ impl VM {
         if let Some(snap) = self.current_call.snap_batch.take() {
             use musig::BatchCheckpoint;
             delegate.batch_verifier().restore(&snap);
+        }
+        // Restore the delegate's R1CS state too — drops the
+        // witness/constraint vectors and rewinds the Fiat–Shamir
+        // transcript so the proof binds only to the parent's CS.
+        if let Some(snap) = self.current_call.snap_cs.take() {
+            use r1cs::CheckpointableConstraintSystem;
+            delegate.cs().rollback(snap);
         }
         // Apply parent's post-call anchor (caller's right half of
         // the entry split — independent of whatever the callee did
@@ -1752,10 +1781,12 @@ impl VM {
         if let Some(post) = self.current_call.post_call_anchor.take() {
             self.last_anchor = Some(post);
         }
-        // Clean exit: the child's MSM contributions already live in
-        // the delegate's batch and are kept. Discard the entry-time
-        // snapshot since it would only be used on the failure path.
+        // Clean exit: the child's contributions to the delegate's
+        // batch and R1CS already live there and are kept. Discard
+        // both entry-time snapshots — they would only be used on
+        // the failure path.
         self.current_call.snap_batch = None;
+        self.current_call.snap_cs = None;
         // Pour return values, then count, then success marker (1).
         self.current_call.stack.extend(return_values);
         self.current_call.stack.push(Value::Int253(Int253::from(k as u64)));

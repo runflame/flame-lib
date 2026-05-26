@@ -266,3 +266,136 @@ fn range_in_internal_context_errors_external_only() {
     assert!(matches!(err, VMError::ExternalOnly));
 }
 
+// ── CS rollback on call failure ─────────────────────────────────
+
+/// Wraps `inner` in an `open` of a single-leaf cell that consumes
+/// itself (`input` then `open`) so the script runs under a real
+/// `last_anchor`. The outer program returns the inner's failure
+/// or success marker on the stack for the caller's continuation.
+fn open_with_inner(inner: Program) -> Program {
+    let inner_bytes = inner.to_bytecode();
+    let tree = PredicateTree::scripts_only(
+        vec![inner_bytes.clone()],
+        TEST_BLINDING_KEY,
+    )
+    .expect("scripts_only tree");
+    let cp = tree.callproof_for(0).expect("cp");
+    let pred_point = tree.compute_point();
+    let cell = Cell::new(Predicate::Opaque(pred_point), Anchor([0xa1; 32]), vec![]);
+    let cell_bytes = encode_cell_to_bytes(&cell);
+
+    let mut outer = Program::new()
+        .push_str(String::from(cell_bytes))
+        .input()
+        .push_point(*cp.internal_key.as_bytes());
+    for (i, h) in cp.neighbors.iter().enumerate() {
+        outer = outer
+            .push_str(String::from(h.to_vec()))
+            .push_int(i as u64);
+    }
+    outer
+        .push_int(cp.neighbors.len() as u64)
+        .dict()
+        .push_str(String::from(cp.position.clone()))
+        .push_script(inner)
+        .push_int(1024u64)
+        .push_int(1024u64)
+        .push_int(0u64)
+        .open()
+}
+
+/// A failed `open` whose child allocated an *unsatisfiable* R1CS
+/// constraint must not pollute the caller's CS. With CS rollback,
+/// the child's allocations and constraints are dropped from the
+/// Prover/Verifier's R1CS at failure time — so the caller's proof
+/// over its own (satisfiable) constraints verifies cleanly.
+///
+/// Without CS rollback, the verifier sees `7 + 3 == 99` in the
+/// constraint set and rejects with `InvalidR1CSProof`.
+#[test]
+fn failed_call_unsat_cs_does_not_pollute_parent_proof() {
+    let pc_gens = PedersenGens::default();
+    // Child: introduces an UNSATISFIABLE constraint (7 + 3 == 99),
+    // then deliberately fails via `verify(0)` so the whole frame
+    // is rolled back into a `0` marker on the parent.
+    let inner = Program::new()
+        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Int253::from(3u64)))
+        .add()
+        .alloc(Some(Int253::from(99u64)))
+        .eq()
+        .verify()                                  // unsat constraint into CS
+        .push_int(0u64)
+        .verify()                                  // VerifyFailed → unwind
+        .push_int(0u64)
+        .return_();
+    let outer = open_with_inner(inner)
+        .drop_()                                   // discard `0` failure marker
+        // Parent's own constraint: 7 + 3 == 10 — satisfiable.
+        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Int253::from(3u64)))
+        .add()
+        .alloc(Some(Int253::from(10u64)))
+        .eq()
+        .verify();
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+        .expect("prove ok");
+    let TxResult { bytecode, proof, .. } = result;
+    let proof = proof.expect("proof set");
+
+    // Verifier must accept: the child's `7+3==99` was rolled back
+    // out of the CS; only the parent's satisfiable `7+3==10`
+    // remains.
+    let pc_gens_v = PedersenGens::default();
+    Verifier::verify(
+        &pc_gens_v,
+        bytecode,
+        &proof,
+        dummy_header(),
+        1_000_000,
+        0,
+        None,
+    )
+    .expect("verify must accept — failed call's CS contributions rolled back");
+}
+
+/// Inverse: when the cell-open succeeds cleanly, its allocations
+/// and constraints stay in the CS. If the child's constraint is
+/// unsatisfiable, the verifier rejects — confirming the rollback
+/// only fires on the failure path.
+#[test]
+fn clean_call_cs_alloc_propagates_to_parent_proof() {
+    let pc_gens = PedersenGens::default();
+    // Child: adds an UNSATISFIABLE constraint and returns cleanly.
+    let inner = Program::new()
+        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Int253::from(3u64)))
+        .add()
+        .alloc(Some(Int253::from(99u64)))
+        .eq()
+        .verify()
+        .push_int(0u64)
+        .return_();
+    let outer = open_with_inner(inner)
+        .verify()                                  // pop success marker (1)
+        .drop_();                                  // drop count
+
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+        .expect("prover always builds something");
+    let TxResult { bytecode, proof, .. } = result;
+    let proof = proof.expect("proof set");
+
+    let pc_gens_v = PedersenGens::default();
+    let err = Verifier::verify(
+        &pc_gens_v,
+        bytecode,
+        &proof,
+        dummy_header(),
+        1_000_000,
+        0,
+        None,
+    )
+    .expect_err("verify must reject — child's unsat constraint inherited cleanly");
+    assert!(matches!(err, VMError::InvalidR1CSProof));
+}
+
