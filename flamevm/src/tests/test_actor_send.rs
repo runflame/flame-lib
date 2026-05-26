@@ -175,7 +175,7 @@ fn send_from_external_root_has_no_caller() {
     // External root has no inherent anchor — production scripts call
     // `input` first. Seed the frame directly so this test can focus
     // on the caller-id semantics.
-    vm.current_call.last_anchor = Some(Anchor([0xaa; 32]));
+    vm.last_anchor = Some(Anchor([0xaa; 32]));
     while vm.step_internal().expect("step ok") {}
     assert_eq!(vm.sends.len(), 1);
     assert_eq!(vm.sends[0].caller, None, "no caller from ExternalRoot");

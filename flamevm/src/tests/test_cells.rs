@@ -43,7 +43,7 @@ fn cell_opcode_builds_a_cell_and_ratchets_anchor() {
     script.push(0x91);
     let mut vm = vm_with_script(script);
     let seed = Anchor([0x42; 32]);
-    vm.current_call.last_anchor = Some(seed);
+    vm.last_anchor = Some(seed);
     run_to_end(&mut vm).unwrap();
     // The cell took the LEFT half of split(seed) as its anchor;
     // last_anchor is now the RIGHT half.
@@ -52,7 +52,7 @@ fn cell_opcode_builds_a_cell_and_ratchets_anchor() {
     match &vm.current_call.stack[0] {
         Value::Cell(c) => {
             assert_eq!(c.anchor.0, expected_left.0);
-            assert_eq!(vm.current_call.last_anchor.unwrap().0, expected_right.0);
+            assert_eq!(vm.last_anchor.unwrap().0, expected_right.0);
         }
         other => panic!("expected Cell, got {}", value_kind(other)),
     }
@@ -72,7 +72,7 @@ fn cell_opcode_rejects_non_portable_payload() {
     push_point_bytes(&mut script, &[0xaa; 32]);
     script.push(0x91); // cell
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::NonPortableInOutput
@@ -87,7 +87,7 @@ fn cell_is_noncopyable_and_nondroppable() {
     script.push(0x91);
     script.push(0x20); // dup:0
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::TypeNotCopyable
@@ -99,7 +99,7 @@ fn cell_is_noncopyable_and_nondroppable() {
     script.push(0x91);
     script.push(0x1c); // drop
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::TypeNotDroppable
@@ -112,7 +112,7 @@ fn output_opcode_emits_to_txlog_without_pushing() {
     push_point_bytes(&mut script, &[0xaa; 32]);
     script.push(0x92); // output
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
     // Stack is empty.
     assert!(vm.current_call.stack.is_empty());
@@ -144,7 +144,7 @@ fn open_with_valid_callproof_runs_program() {
     script.push(0x00); // k=0 args
     script.push(0x93); // open
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
     assert!(vm.current_call.stack.is_empty());
 }
@@ -171,7 +171,7 @@ fn open_with_wrong_program_hard_fails() {
     script.push(0x00);
     script.push(0x93);
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::CallProofMismatch
@@ -299,7 +299,7 @@ fn open_passes_args_after_payload() {
     script.push(0x02);                  // k=2
     script.push(0x93);                  // open
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
     assert!(vm.current_call.stack.is_empty());
 }
@@ -356,7 +356,7 @@ fn scripts_only_predicate_opens_via_program_path() {
     script.push(0x00); // 0 args
     script.push(0x93); // open
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
     assert!(vm.current_call.stack.is_empty());
 }
@@ -390,7 +390,7 @@ fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
         script.push(0x00); // k=0 args
         script.push(0x93); // open
         let mut vm = vm_with_script(script);
-        vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+        vm.last_anchor = Some(Anchor([0x42; 32]));
         run_to_end(&mut vm).unwrap_or_else(|e| {
             panic!("program index {} did not open cleanly: {:?}", i, e)
         });
@@ -430,7 +430,7 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
     script.push(0x00);
     script.push(0x93);
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::CallProofMismatch
@@ -475,7 +475,7 @@ fn output_rejects_cell_as_payload_item() {
     push_point_bytes(&mut script, &[0xbb; 32]);
     script.push(0x92); // output
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::NonPortableInOutput
@@ -492,7 +492,7 @@ fn cell_opcode_rejects_cell_as_payload_item() {
     push_point_bytes(&mut script, &[0xbb; 32]);
     script.push(0x91); // cell (attempted outer)
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::NonPortableInOutput
@@ -518,7 +518,7 @@ fn output_rejects_dict_containing_a_cell() {
     push_point_bytes(&mut script, &[0xbb; 32]);
     script.push(0x92); // output
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::NonPortableInOutput
@@ -660,7 +660,7 @@ fn input_pushes_cell_seeds_anchor_and_emits_txlog() {
 
     // last_anchor seeded to the input cell's id (split design — no
     // extra ratchet; cell.id() is the unique spend-once source).
-    assert_eq!(vm.current_call.last_anchor.expect("anchor seeded").0, expected_id);
+    assert_eq!(vm.last_anchor.expect("anchor seeded").0, expected_id);
 
     // Txlog has Header + one Input entry committing the cell id.
     assert_eq!(vm.txlog.len(), 2);
@@ -734,7 +734,7 @@ fn input_then_output_anchor_chain() {
     vm.op_input().expect("input ok");
     // Stack: [Cell]. last_anchor: Some(cell.id()).
     assert_eq!(
-        vm.current_call.last_anchor.expect("anchor").0,
+        vm.last_anchor.expect("anchor").0,
         expected_anchor_after_input.0
     );
 
@@ -763,7 +763,7 @@ fn input_then_output_anchor_chain() {
     }
     // last_anchor advanced again past the output cell.
     assert_ne!(
-        vm.current_call.last_anchor.expect("anchor").0,
+        vm.last_anchor.expect("anchor").0,
         expected_anchor_after_input.0
     );
 }
@@ -910,8 +910,8 @@ fn external_tx_one_input_one_output_via_signtx() {
     // 4e. last_anchor is the RIGHT half of the split that emitted
     //     the output — distinct from the output's stored anchor
     //     (which is the LEFT half).
-    assert!(vm.current_call.last_anchor.is_some());
-    assert_ne!(vm.current_call.last_anchor.unwrap().0, output_cell_anchor.0);
+    assert!(vm.last_anchor.is_some());
+    assert_ne!(vm.last_anchor.unwrap().0, output_cell_anchor.0);
 }
 
 #[test]
@@ -1054,7 +1054,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     assert_eq!(out1.anchor.0, out1_expected.0);
     assert_eq!(out2.anchor.0, out2_expected.0);
     assert_ne!(out1.anchor.0, out2.anchor.0);
-    let final_anchor = vm.current_call.last_anchor.expect("anchor set after output 2");
+    let final_anchor = vm.last_anchor.expect("anchor set after output 2");
     assert_eq!(final_anchor.0, right2.0);
 
     // No `signtx` / `signcall` were used → no deferred sigs.
@@ -1081,7 +1081,7 @@ fn op_open_actorid_errors_no_actor_context() {
     script.push(0x00);                  // k=0 args
     script.push(0x93);                  // open
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::OpcodeRequiresActorContext
@@ -1105,7 +1105,7 @@ fn op_open_return_arity_mismatch_errors() {
     script.push(0x00); // k=0 args
     script.push(0x93);
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::BadReturnArity

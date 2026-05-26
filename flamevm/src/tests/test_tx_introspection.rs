@@ -119,7 +119,7 @@ fn newbytes_value_observable_inside_cell_open_frame() {
     script.push(0x00); // k=0 args
     script.push(0x93); // open
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     // `run_to_end` exits as soon as the current frame's Run is
     // finished. After `return` swaps back to the parent and the
     // parent's Run has no more instructions, the loop exits without

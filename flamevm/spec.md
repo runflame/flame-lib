@@ -329,15 +329,17 @@ Withdrawn vbytes are recycled into the total pool. Recycling is subject to 100-b
 
 # Anchors
 
-Every new cell, message, and call frame is **anchored** by a unique 32-byte value embedded in its wire form, so two cells with the same predicate + payload but different anchors hash to different ids. Uniqueness is the core safety property — without it, cell ids collide across txs and authors can be tricked into operating on the wrong entity.
+Every new cell and message is **anchored** by a unique 32-byte value embedded in its wire form, so two cells with the same predicate + payload but different anchors hash to different ids. Uniqueness is the core safety property — without it, cell ids collide across txs and authors can be tricked into operating on the wrong entity.
 
-**Uniqueness source.** Anchors are unique only when they descend from a *spend-once source* — a UTXO consumed via [`input`](#input). Cell ids are themselves anchored (their `Cell::id` is `H(predicate, anchor, payload)`), so each input cell's id is unique relative to every prior tx's outputs. Any anchor derived deterministically from such a source remains unique.
+**Uniqueness source.** Anchors are unique only when they descend from a *spend-once source*: a UTXO consumed via [`input`](#input), or the `anchor` of a Message that triggered an internal tx (which is itself a split-child of an external tx's `op_send`). Cell ids are themselves anchored (`Cell::id = H(predicate, anchor, payload)`), so each input cell's id is unique on the network. Any anchor derived deterministically from such a source remains unique.
 
-**Per-frame slot.** Every `CallFrame` carries a single `last_anchor: Option<Anchor>`. It is:
-- `None` at `ExternalRoot` until [`input`](#input) seeds it.
-- `Some(anchor)` at `InternalRoot`, `ActorCall`, and `CellOpen` frames — seeded from the frame's `CallKind` anchor field at construction time. These anchors are themselves split-children of a prior frame's anchor (for actor calls / sends across the tx) or of a wire-supplied cell id (for cell-opens and message deliveries).
+**Per-tx slot.** The VM carries a single `last_anchor: Option<Anchor>` for the entire transaction. It is:
+- `None` at the start of an external tx — [`input`](#input) is the only way to seed it.
+- `Some(M)` at the start of an internal tx, where `M` is the delivering Message's anchor (a split-child from the originating external tx's `op_send`).
 
-**Splitting.** Each opcode that produces a new unique-anchored entity *consumes* the frame's `last_anchor` and replaces it with a fresh derived value. The split is a single Merlin transcript:
+Calls don't introduce new anchor slots. `op_call`, `op_open`, and `op_signcall` are all intra-transaction — they don't mint cross-tx entities, so they don't need their own anchor. The tx's single `last_anchor` flows through every frame; whatever a callee splits is what the caller sees on return.
+
+**Splitting.** Each opcode that produces a new unique-anchored *cross-tx* entity (cell-on-wire, message-to-actor) consumes `last_anchor` and replaces it with a fresh derived value. The split is a single Merlin transcript:
 
 ```
 t = Transcript::new(b"flamevm.anchor.split.v1");
@@ -346,17 +348,17 @@ left  = t.challenge_bytes(b"left",  32);
 right = t.challenge_bytes(b"right", 32);
 ```
 
-The `left` half is embedded in the new entity (cell anchor / send anchor / callee anchor); the `right` half replaces `last_anchor`. Authors never see `left` and `right` separately — the VM picks them automatically at the consume site.
+The `left` half is embedded in the new entity (cell anchor / SendID); the `right` half replaces `last_anchor`. Authors never see `left` and `right` separately — the VM picks them automatically at the consume site.
 
-**Sites that consume + split**: [`cell`](#cell), [`output`](#output), [`send`](#send), [`call`](#call). Each hard-fails `AnchorMissing` if no prior input claim has seeded the frame's anchor.
+**Sites that consume + split**: [`cell`](#cell), [`output`](#output), [`send`](#send). Each hard-fails `AnchorMissing` if no prior input claim has seeded the tx's anchor.
 
-**Sites that produce / seed without consuming**: [`input`](#input) seeds `last_anchor = Anchor(cell.id())` directly (the spent UTXO's id is already unique on the wire — no split needed). Replacing any prior value is intentional: it lets a partial transaction depend only on its own input claim, not on what other parts of the tx contributed before it.
+**Site that seeds without consuming**: [`input`](#input) sets `last_anchor = Anchor(cell.id())` directly (the spent UTXO's id is already unique on the wire — no split needed). Replacing any prior value is intentional: it lets a partial transaction depend only on its own input claim, not on what other parts of the tx contributed before it.
 
-**Sites that don't touch the parent's anchor**: [`open`](#open) and [`signcall`](#signcall) — unlocking a cell is not a unique-id-producing act. The opened frame's `last_anchor` is seeded from the cell's id directly, so its own internal entity chain inherits uniqueness from the cell being opened, independent of the parent's anchor state.
+**Sites that don't touch the anchor at all**: [`call`](#call), [`open`](#open), [`signcall`](#signcall). All three create new call frames but stay intra-tx — they don't produce on-chain entities themselves; only the leaf opcodes (`cell` / `output` / `send`) inside the called/opened script do, and those consume the same per-tx `last_anchor`. `op_call` does record a snapshot of `last_anchor` into `TxEntry::Call.callee_anchor` for Internal-TxID binding purposes, but the slot itself is unchanged.
 
-**Locality.** Because each frame has its own `last_anchor` and frame boundaries don't bleed mutations, a script author can predict every anchor value their script consumes purely from local state: the input cells they claim plus the ops they invoke. Other parties' inputs / outputs in the same tx (interleaved or not) cannot affect their chain. This is the "localized anchor" property — the same predictability zkvm's design depends on for multi-party composition, but enforced structurally per-frame rather than by ordering convention.
+**Locality across parties.** Each `op_input` *replaces* the anchor unconditionally rather than mixing into a chain. So a multi-party tx where party A claims input A_in and produces outputs, then party B claims input B_in and produces outputs, has each party's output anchors rooted only in their own input id. B's claim wipes A's residue; that's fine because B's outputs derive from B_in's split-children, not from anything A did. A party signing their portion can predict their own output anchors locally from their own input cell ids.
 
-**Comparison with zkvm.** zkvm uses a single VM-level `Option<Anchor>`, ratchets only at `input`, and lets `output`/`contract` advance to the new contract's id directly (no extra hash step). The future tx that spends an output must ratchet on its own (an obligation enforced only by the next `input`). FlameVM's split-at-source removes that obligation: every consume site produces two cryptographically independent children at once, so neither the cell's wire-stored anchor nor the parent's residual anchor can be reused without the matching half of the original split.
+**Comparison with zkvm.** zkvm uses a single VM-level `Option<Anchor>`, ratchets only at `input`, and lets `output`/`contract` advance to the new contract's id directly (no extra hash step). The future tx that spends an output must ratchet on its own (an obligation enforced only by the next `input`). FlameVM's split-at-source removes that obligation: every consume site produces two cryptographically independent children at once, so neither the cell's wire-stored anchor nor the residual anchor can be reused without the matching half of the original split.
 
 # Instruction set
 
@@ -1046,7 +1048,7 @@ Verifies the Taproot call-proof against the cell's predicate:
 4. Pops `position` (String, bit-packed path), `neighbors` (list-Dict of 32-byte Strings, leaf-to-root), `internal_key` (Point).
 5. Pops `cell`.
 6. Constructs a `CallProof` and verifies `predicate.verify_callproof` — checks the Merkle root and the tweaked-key relation `P = X + h(X, M)·B`.
-7. On success, creates a new isolated `CallKind::CellOpen { anchor: Anchor(cell.id()), predicate: cell.predicate, external_context }` frame with the popped `gas` / `bytes` allotments, pours the cell's payload then the `args` onto the new frame's stack, and enters the unlocked `script`. The parent's `last_anchor` is **not** consumed — opening a cell is an unlock, not a unique-id-producing act.
+7. On success, creates a new isolated `CallKind::CellOpen { anchor: Anchor(cell.id()), predicate: cell.predicate, external_context }` frame with the popped `gas` / `bytes` allotments, pours the cell's payload then the `args` onto the new frame's stack, and enters the unlocked `script`. The tx's `last_anchor` is **not** touched — `op_open` is intra-tx and doesn't mint anything cross-tx. The `CellOpen.anchor` field is metadata (a reference to the opened cell's id), not a separate anchor slot.
 
 The new frame has **no actor identity** by default — `op_load`/`op_save`/`op_call`/`op_send` all error from inside. The frame inherits CS access from the caller's context (external root → CS available; internal → not). Results return via `return k'`; leftover gas refunds to the parent.
 
@@ -1080,7 +1082,7 @@ _args… k gas bytes method addr_ → _results… k'_
 
 Synchronous actor-to-actor call. Same operand shape as [`send`](#send) minus `refund`.
 
-Verifies the **re-entrancy guard** — the target actor must not already appear on the current call stack ([ADR 0003](../decisions/0003-forbid-reentrancy.md); errors `ReentrancyDetected`). Resolves the callee's method bytes via the registry, snapshots the callee's pre-state hash, and splits the parent's `last_anchor` to derive the `callee_anchor` (left half) while keeping the right half as the parent's new `last_anchor`. Emits `TxEntry::Call { callee, method, pre_state_root, callee_anchor }`. Hard-fails `AnchorMissing` if the parent has no claimed anchor.
+Verifies the **re-entrancy guard** — the target actor must not already appear on the current call stack ([ADR 0003](../decisions/0003-forbid-reentrancy.md); errors `ReentrancyDetected`). Resolves the callee's method bytes via the registry, snapshots the callee's pre-state hash. Records a snapshot of the tx's current `last_anchor` (or the zero anchor if uninitialized) into `TxEntry::Call.callee_anchor` for Internal-TxID binding — the slot itself is **not** consumed (calls are intra-tx and don't mint cross-tx entities). Emits `TxEntry::Call { callee, method, pre_state_root, callee_anchor }`.
 
 Creates an isolated `CallKind::ActorCall { actor, method, caller, anchor }` frame with the popped `gas` / `bytes` allotments. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
 

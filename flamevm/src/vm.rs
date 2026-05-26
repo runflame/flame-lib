@@ -306,22 +306,10 @@ pub struct CallFrame {
     /// Per-frame load/save pairing flag. Set by `op_load`, cleared by
     /// `op_save`. Unmatched load self-destructs the actor at tx commit.
     pub(crate) loaded: bool,
-
-    /// Current dynamic anchor for this frame. `None` until seeded by
-    /// `op_input` (for ExternalRoot) or by the frame's CallKind anchor
-    /// at construction (for InternalRoot / ActorCall / CellOpen).
-    /// Consumed-and-replaced via `Anchor::split` by every op that
-    /// produces a new unique-anchored entity (cell / output / send /
-    /// call / open / signcall). See spec §Anchor.
-    pub(crate) last_anchor: Option<Anchor>,
 }
 
 impl CallFrame {
     /// Builds a fresh CallFrame whose Run walks `instructions`.
-    /// `last_anchor` is seeded from the kind's anchor field when
-    /// available (InternalRoot / ActorCall / CellOpen all carry an
-    /// anchor produced by the parent's split); ExternalRoot starts
-    /// uninitialized — `op_input` is the only way to seed it.
     pub fn new(
         instructions: Vec<crate::ops::Instruction>,
         kind: CallKind,
@@ -329,7 +317,6 @@ impl CallFrame {
         mem_limit: u64,
         newbytes: u64,
     ) -> Self {
-        let last_anchor = kind.anchor();
         Self {
             stack: Vec::new(),
             current_run: Run::new(instructions),
@@ -341,7 +328,6 @@ impl CallFrame {
             mem_used: 0,
             newbytes,
             loaded: false,
-            last_anchor,
         }
     }
 }
@@ -409,6 +395,15 @@ impl core::fmt::Debug for TxResult {
 pub(crate) struct VM {
     #[allow(dead_code)]
     header: TxHeader,
+
+    /// Per-tx current anchor. `None` for fresh ExternalRoot txs (the
+    /// first `op_input` seeds it); `Some(M)` at the start of an
+    /// internal tx (where `M` is the delivering Message's anchor —
+    /// itself a split-child from the originating tx's `op_send`).
+    /// Consumed-and-replaced via split by `cell` / `output` / `send`;
+    /// `call` / `open` / `signcall` don't touch it (intra-tx calls
+    /// don't mint new cross-tx entities).
+    pub(crate) last_anchor: Option<Anchor>,
 
     gas_used: u64,
     vbytes_used: u64,
@@ -519,8 +514,13 @@ impl VM {
         // Header is the first txlog entry so TxID binds to version + locktime.
         let mut txlog = Vec::new();
         txlog.push(crate::tx::TxEntry::Header(header));
+        // Seed last_anchor from the root frame's kind: ExternalRoot →
+        // None (op_input must seed); InternalRoot → Some(Message.anchor)
+        // (already unique from prior tx's op_send split).
+        let last_anchor = initial_call.kind.anchor();
         Self {
             header,
+            last_anchor,
             gas_used: 0,
             vbytes_used: 0,
             current_call: initial_call,
@@ -532,16 +532,17 @@ impl VM {
         }
     }
 
-    /// Splits the current frame's anchor: returns the `left` half
-    /// (to embed in a fresh unique-anchored entity — cell, message,
-    /// callee frame), and writes the `right` half back into the
-    /// frame's `last_anchor`. Hard-fails `AnchorMissing` if no
-    /// anchor has been claimed yet (no prior `op_input` in this
-    /// frame).
+    /// Splits `last_anchor` (per-tx): returns the `left` half (to
+    /// embed in a fresh unique-anchored entity — cell, message), and
+    /// writes the `right` half back. Hard-fails `AnchorMissing` if
+    /// no anchor has been claimed yet (no prior `op_input` in this
+    /// tx, or no Message-delivered anchor for an internal tx).
+    /// `call` / `open` / `signcall` don't go through this path —
+    /// intra-tx calls don't mint cross-tx entities.
     fn consume_anchor(&mut self) -> Result<Anchor, VMError> {
-        let parent = self.current_call.last_anchor.ok_or(VMError::AnchorMissing)?;
+        let parent = self.last_anchor.ok_or(VMError::AnchorMissing)?;
         let (left, right) = parent.split();
-        self.current_call.last_anchor = Some(right);
+        self.last_anchor = Some(right);
         Ok(left)
     }
 
@@ -1867,11 +1868,11 @@ impl VM {
     fn op_input(&mut self) -> Result<(), VMError> {
         self.require_external()?;
         let cell = self.pop_value()?.to_string()?.to_cell()?;
-        // Seed the frame's anchor from the input cell's id — the cell
+        // Seed the per-tx anchor from the input cell's id — the cell
         // is a spend-once source on the wire, so its id is unique. Any
         // prior `last_anchor` (e.g. unused residue from a previous
-        // input + outputs sequence) is replaced. See spec §Anchor.
-        self.current_call.last_anchor = Some(Anchor(cell.id()));
+        // input + outputs sequence) is replaced. See spec §Anchors.
+        self.last_anchor = Some(Anchor(cell.id()));
         self.txlog.push(crate::tx::TxEntry::Input(cell.id()));
         self.push_value(Value::Cell(cell));
         Ok(())
@@ -1959,12 +1960,10 @@ impl VM {
     /// parent out. Memory cap equals `bytes` (no actor → no
     /// `4 × vbytes` rule).
     ///
-    /// Anchoring: the new frame's `last_anchor` is seeded from
-    /// `cell.id()` directly (the cell is a unique on-chain entity;
-    /// its id is the natural spend-once source for any new entities
-    /// the unlocked script creates). The parent's anchor is NOT
-    /// consumed — opening a cell is an unlock, not a unique-id-
-    /// producing act.
+    /// Anchoring: open is intra-tx; the per-tx `last_anchor` flows
+    /// through the unlocked script unchanged. `CallKind::CellOpen`
+    /// stores the opened cell's id as metadata (used by debug/log
+    /// surfaces, not by `op_anchor`).
     fn enter_cell_open_frame(
         &mut self,
         cell: Cell,
@@ -2132,7 +2131,12 @@ impl VM {
         let script = registry.resolve_method(&callee, method)?;
         let pre_state_root = state_root(&registry.load_state(&callee)?)?;
 
-        let callee_anchor = self.consume_anchor()?;
+        // Calls are intra-tx — they don't mint cross-tx entities, so
+        // the anchor is not consumed. Record a snapshot of the
+        // current anchor (or zero if uninitialized) as a TxEntry
+        // marker; Internal TxID binds via (callee, method,
+        // pre_state_root) primarily.
+        let callee_anchor = self.last_anchor.unwrap_or(Anchor([0u8; 32]));
         self.txlog.push(crate::tx::TxEntry::Call {
             callee: callee.clone(),
             method,
@@ -2237,11 +2241,12 @@ impl VM {
 
     /// **anchor** → _string_
     ///
-    /// Pushes the frame's *current* anchor (the one the next
-    /// consume site would use). Hard-fails `AnchorMissing` if no
-    /// anchor has been claimed yet — same rule as consumers.
+    /// Pushes the tx's *current* anchor (the value the next consume
+    /// site would split). Hard-fails `AnchorMissing` if no anchor
+    /// has been claimed yet — same rule as `cell` / `output` /
+    /// `send`. Available in either context.
     fn op_anchor(&mut self) -> Result<(), VMError> {
-        let a = self.current_call.last_anchor.ok_or(VMError::AnchorMissing)?;
+        let a = self.last_anchor.ok_or(VMError::AnchorMissing)?;
         self.push_value(Value::String(String::from(a.0.to_vec())));
         Ok(())
     }

@@ -224,7 +224,7 @@ fn msm_in_cell_payload_rejected() {
     script.extend_from_slice(&[0xaa; 32]);        // predicate point
     script.push(0x91);                            // cell
     let mut vm = vm_with_script(script);
-    vm.current_call.last_anchor = Some(Anchor([0x42; 32]));
+    vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::NonPortableInOutput
