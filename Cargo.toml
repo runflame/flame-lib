@@ -25,7 +25,17 @@ exclude = ["demo"]
 # `merlinwrite` / `merlinread` opcodes pass user-supplied `&[u8]`
 # labels — currently bridged via `Box::leak` in `flamevm/src/
 # crypto.rs` (leaks bytes per VM call, bounded by gas per tx but
-# accumulates over a node's lifetime). Once a runflame/merlin v3
-# fork with the `dynamic-labels` feature is published, restore the
-# `[patch.crates-io] merlin = { git = … }` line below and drop the
-# `Box::leak` workaround.
+# accumulates over a node's lifetime).
+#
+# The fork at https://github.com/runflame/merlin carries the
+# `dynamic-labels` feature but is still pinned at merlin v2.0.0 —
+# cargo's `[patch.crates-io]` mechanism rejects it because every
+# consumer here requests `merlin = "3"`. To switch to the fork:
+#   1. Bump `Cargo.toml` in runflame/merlin to `version = "3.0.0"`
+#      (the dynamic-labels source still applies cleanly).
+#   2. Push the bump.
+#   3. Restore the patch line below and remove `leak_label` in
+#      `flamevm/src/crypto.rs`.
+#
+# [patch.crates-io]
+# merlin = { git = "https://github.com/runflame/merlin" }
