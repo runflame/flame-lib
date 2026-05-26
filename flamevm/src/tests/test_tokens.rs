@@ -121,7 +121,7 @@ fn cleartoken_negated_flips_qty_sign() {
 fn amount_on_cleartoken_pushes_qty_and_flv() {
     // Pre-load a ClearToken on the stack, run `amount`, verify the
     // shape `cleartoken(qty,flv) → cleartoken qty flv`.
-    let mut vm = vm_with_script(vec![0x70]); // amount
+    let mut vm = vm_with_script(Program::new().amount().to_bytecode());
     vm.push_value(Value::ClearToken(ClearToken::new(
         Int253::from(11u64),
         Int253::from(22u64),
@@ -144,7 +144,7 @@ fn amount_on_cleartoken_pushes_qty_and_flv() {
 
 #[test]
 fn amount_on_token_pushes_points() {
-    let mut vm = vm_with_script(vec![0x70]);
+    let mut vm = vm_with_script(Program::new().amount().to_bytecode());
     vm.push_value(Value::Token(make_cleartext_token(33, 44)));
     vm.step_internal().expect("step ok");
     assert_eq!(vm.current_call.stack.len(), 3);
@@ -164,7 +164,7 @@ fn amount_on_token_pushes_points() {
 
 #[test]
 fn amount_on_non_token_errors_typenottoken() {
-    let mut vm = vm_with_script(vec![0x70]);
+    let mut vm = vm_with_script(Program::new().amount().to_bytecode());
     vm.push_value(Value::Int253(Int253::from(5u64)));
     let err = vm.step_internal().unwrap_err();
     assert!(matches!(err, VMError::TypeNotToken));
@@ -174,15 +174,15 @@ fn amount_on_non_token_errors_typenottoken() {
 
 #[test]
 fn issue_clear_path_emits_txlog_and_returns_cleartoken() {
-    // Script: pushint8(7), pushstr "gold", issue.
+    // Script: push:7, pushstr "gold", issue.
     // Run under InternalRoot with a known actor identity so
     // `op_issue` can resolve a flavor.
     let actor = ActorID::Hash([0x55; 32]);
-    let mut script = vec![0x10, 7];
-    push_string_bytes(&mut script, b"gold");
-    script.push(0x71); // issue
-    // `vm_internal_with_actor` takes ownership; clone so we can
-    // recompute the expected flavor against the same id below.
+    let script = Program::new()
+        .push_int(7u64)
+        .push_str(String::from(b"gold".to_vec()))
+        .issue()
+        .to_bytecode();
     let mut vm = vm_internal_with_actor(script, actor.clone());
     run_to_end(&mut vm).expect("issue ok");
 
@@ -216,10 +216,11 @@ fn issue_clear_path_emits_txlog_and_returns_cleartoken() {
 fn issue_with_point_qty_errors_tokenrequirescs() {
     // Pushpoint then pushstr then issue → encrypted branch (deferred).
     let actor = ActorID::Hash([0x55; 32]);
-    let mut script = vec![0x1a]; // pushpoint
-    script.extend_from_slice(&[0u8; 32]);
-    push_string_bytes(&mut script, b"gold");
-    script.push(0x71);
+    let script = Program::new()
+        .push_point([0u8; 32])
+        .push_str(String::from(b"gold".to_vec()))
+        .issue()
+        .to_bytecode();
     let mut vm = vm_internal_with_actor(script, actor);
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::TokenRequiresCS));
@@ -228,9 +229,11 @@ fn issue_with_point_qty_errors_tokenrequirescs() {
 #[test]
 fn issue_at_external_root_errors_actor_context() {
     // ExternalRoot has no actor identity.
-    let mut script = vec![0x10, 7];
-    push_string_bytes(&mut script, b"gold");
-    script.push(0x71);
+    let script = Program::new()
+        .push_int(7u64)
+        .push_str(String::from(b"gold".to_vec()))
+        .issue()
+        .to_bytecode();
     let mut vm = VM::new(
         dummy_header(),
         CallFrame::new(
@@ -246,7 +249,7 @@ fn issue_at_external_root_errors_actor_context() {
 #[test]
 fn retire_cleartoken_emits_txlog() {
     // Pre-load a ClearToken, run `retire`.
-    let mut vm = vm_with_script(vec![0x72]);
+    let mut vm = vm_with_script(Program::new().retire().to_bytecode());
     vm.push_value(Value::ClearToken(ClearToken::new(
         Int253::from(11u64),
         Int253::from(22u64),
@@ -272,7 +275,7 @@ fn retire_token_emits_txlog_with_commitment_points() {
     let token = make_cleartext_token(11, 22);
     let q_pt = token.qty.to_point();
     let f_pt = token.flv.to_point();
-    let mut vm = vm_with_script(vec![0x72]);
+    let mut vm = vm_with_script(Program::new().retire().to_bytecode());
     vm.push_value(Value::Token(token));
     vm.step_internal().expect("retire ok");
     // Header at index 0, Retire at index 1.
@@ -288,7 +291,7 @@ fn retire_token_emits_txlog_with_commitment_points() {
 
 #[test]
 fn retire_non_token_errors_typenottoken() {
-    let mut vm = vm_with_script(vec![0x72]);
+    let mut vm = vm_with_script(Program::new().retire().to_bytecode());
     vm.push_value(Value::Int253(Int253::from(5u64)));
     let err = vm.step_internal().unwrap_err();
     assert!(matches!(err, VMError::TypeNotToken));
@@ -297,7 +300,9 @@ fn retire_non_token_errors_typenottoken() {
 #[test]
 fn borrow_clear_path_returns_neg_pos_pair() {
     // Stack: [qty=5, flv=7] then `borrow` → [neg5, pos5].
-    let mut vm = vm_with_script(vec![0x10, 5, 0x10, 7, 0x73]);
+    let mut vm = vm_with_script(
+        Program::new().push_int(5u64).push_int(7u64).borrow().to_bytecode(),
+    );
     run_to_end(&mut vm).expect("borrow ok");
     assert_eq!(vm.current_call.stack.len(), 2);
     // Bottom: negative qty.
@@ -320,12 +325,10 @@ fn borrow_clear_path_returns_neg_pos_pair() {
 
 #[test]
 fn borrow_with_point_errors_tokenrequirescs() {
-    // pushpoint, pushint8(7), borrow → Point qty → CS required.
-    let mut script = vec![0x1a];
-    script.extend_from_slice(&[0u8; 32]);
-    script.extend_from_slice(&[0x10, 7]);
-    script.push(0x73);
-    let mut vm = vm_with_script(script);
+    // pushpoint, push:7, borrow → Point qty → CS required.
+    let mut vm = vm_with_script(
+        Program::new().push_point([0u8; 32]).push_int(7u64).borrow().to_bytecode(),
+    );
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::TokenRequiresCS));
 }
@@ -333,7 +336,7 @@ fn borrow_with_point_errors_tokenrequirescs() {
 #[test]
 fn merge_same_flavor_combines_qtys() {
     // Push two cleartokens with same flavor, merge → (merged, 1).
-    let mut vm = vm_with_script(vec![0x74]);
+    let mut vm = vm_with_script(Program::new().merge().to_bytecode());
     vm.push_value(Value::ClearToken(ClearToken::new(
         Int253::from(3u64),
         Int253::from(7u64),
@@ -354,7 +357,7 @@ fn merge_same_flavor_combines_qtys() {
 
 #[test]
 fn merge_flavor_mismatch_soft_fails() {
-    let mut vm = vm_with_script(vec![0x74]);
+    let mut vm = vm_with_script(Program::new().merge().to_bytecode());
     vm.push_value(Value::ClearToken(ClearToken::new(
         Int253::from(3u64),
         Int253::from(7u64),
@@ -371,8 +374,8 @@ fn merge_flavor_mismatch_soft_fails() {
 
 #[test]
 fn split_within_qty_returns_two_cleartokens() {
-    // ClearToken(10, 7), pushint8(3), split.
-    let mut vm = vm_with_script(vec![0x10, 3, 0x75]);
+    // ClearToken(10, 7), push:3, split.
+    let mut vm = vm_with_script(Program::new().push_int(3u64).split().to_bytecode());
     vm.push_value(Value::ClearToken(ClearToken::new(
         Int253::from(10u64),
         Int253::from(7u64),
@@ -396,7 +399,7 @@ fn split_within_qty_returns_two_cleartokens() {
 
 #[test]
 fn split_above_qty_hard_fails() {
-    let mut vm = vm_with_script(vec![0x10, 9, 0x75]);
+    let mut vm = vm_with_script(Program::new().push_int(9u64).split().to_bytecode());
     vm.push_value(Value::ClearToken(ClearToken::new(
         Int253::from(2u64),
         Int253::from(7u64),
@@ -409,10 +412,11 @@ fn split_above_qty_hard_fails() {
 fn issueflv_pushes_correct_flavor() {
     // pushstr <32-byte cid>, pushstr "gold", issueflv.
     let actor_bytes = [0xab; 32];
-    let mut script = Vec::new();
-    push_string_bytes(&mut script, &actor_bytes);
-    push_string_bytes(&mut script, b"gold");
-    script.push(0x78); // issueflv
+    let script = Program::new()
+        .push_str(String::from(actor_bytes.to_vec()))
+        .push_str(String::from(b"gold".to_vec()))
+        .issue_flv()
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).expect("issueflv ok");
     let expected = test_flavor_from_actor(
@@ -425,10 +429,11 @@ fn issueflv_pushes_correct_flavor() {
 
 #[test]
 fn issueflv_rejects_non_32_byte_cid() {
-    let mut script = Vec::new();
-    push_string_bytes(&mut script, &[0xab; 16]); // 16-byte cid
-    push_string_bytes(&mut script, b"gold");
-    script.push(0x78);
+    let script = Program::new()
+        .push_str(String::from(vec![0xab; 16]))     // bad 16-byte cid
+        .push_str(String::from(b"gold".to_vec()))
+        .issue_flv()
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::IndexOutOfRange));
