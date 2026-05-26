@@ -563,11 +563,10 @@ fn phase21_txlog_ordering_in_txresult() {
     // Use execute_external (the simple delegate path) — same
     // TxResult shape, easier setup. Build a script that pushes a
     // string and logs it twice.
-    let mut script = Vec::new();
-    push_string_bytes(&mut script, b"a");
-    script.push(0x6f); // log
-    push_string_bytes(&mut script, b"b");
-    script.push(0x6f); // log
+    let script = Program::new()
+        .push_str(String::from(b"a".to_vec())).log()
+        .push_str(String::from(b"b".to_vec())).log()
+        .to_bytecode();
     let delegate = StubDelegate::new();
     let result = VM::execute_external(
         dummy_header(),
