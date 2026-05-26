@@ -328,3 +328,134 @@ fn verify_msm_in_internal_context_rejected() {
         VMError::ExternalOnly
     ));
 }
+
+// ── Per-frame batch isolation ────────────────────────────────────
+
+/// Builds an outer program that consumes a cell (to seed the anchor)
+/// then opens it via the script-leaf path, with `inner` as the leaf
+/// program. Returns a Program ready for `Prover::prove`.
+fn open_with_inner(inner: crate::program::Program) -> crate::program::Program {
+    let inner_bytes = inner.to_bytecode();
+    let tree = crate::cell::PredicateTree::scripts_only(
+        vec![inner_bytes.clone()],
+        TEST_BLINDING_KEY,
+    ).expect("scripts_only tree");
+    let cp = tree.callproof_for(0).expect("cp");
+    let pred_point = tree.compute_point();
+    let cell = Cell::new(Predicate::Opaque(pred_point), Anchor([0xa1; 32]), vec![]);
+    let cell_bytes = encode_cell_to_bytes(&cell);
+
+    let mut outer = Program::new()
+        .push_str(String::from(cell_bytes))
+        .input()
+        .push_point(*cp.internal_key.as_bytes());
+    for (i, h) in cp.neighbors.iter().enumerate() {
+        outer = outer
+            .push_str(String::from(h.to_vec()))
+            .push_int(i as u64);
+    }
+    outer
+        .push_int(cp.neighbors.len() as u64)
+        .dict()
+        .push_str(String::from(cp.position.clone()))
+        .push_script(inner)
+        .push_int(1024u64)
+        .push_int(1024u64)
+        .push_int(0u64)
+        .open()
+}
+
+/// A failed nested call that appended a *non-identity* MSM to its
+/// pending batch must not pollute the parent's batch. After the
+/// parent finishes cleanly (with no MSM of its own), the verifier
+/// batch should sum to the identity — i.e. the proof verifies.
+///
+/// Without per-frame batching this would fail with
+/// `BatchSignatureVerificationFailed` because the bogus 1·G ≠ 0
+/// statement from the failed callee would survive in the global batch.
+#[test]
+fn failed_call_msm_does_not_pollute_parent_batch() {
+    use bulletproofs::PedersenGens;
+    let pc_gens = PedersenGens::default();
+    let g_bytes = *curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED.as_bytes();
+
+    // Inner cell-open script: append a NON-identity MSM (1·G) to the
+    // child frame's batch, then deliberately fail via `verify(0)` so
+    // the whole frame is rolled back into a `0` marker on the parent.
+    let inner = Program::new()
+        .push_int(1u64)
+        .push_point(g_bytes)
+        .mul()
+        .verify()                              // appends 1·G to pending_batch
+        .push_int(0u64)
+        .verify()                              // VerifyFailed → frame unwinds
+        .push_int(0u64)
+        .return_();
+    let outer = open_with_inner(inner)
+        .drop_()                               // drop the `0` failure marker
+        // Trivially-true constraint to give the proof something to check.
+        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Int253::from(7u64)))
+        .eq()
+        .verify();
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+        .expect("prove ok");
+    let TxResult { bytecode, proof, .. } = result;
+    let proof = proof.expect("proof set");
+
+    // Verifier-side must accept: the parent's batch contains only the
+    // (identity) contribution from its own clean execution; the
+    // child's polluting 1·G never reaches the global batch.
+    let pc_gens_v = PedersenGens::default();
+    Verifier::verify(
+        &pc_gens_v,
+        bytecode,
+        &proof,
+        dummy_header(),
+        1_000_000,
+        0,
+        None,
+    )
+    .expect("verify must accept — failed call's MSM was discarded");
+}
+
+/// Inverse: when the cell-open succeeds cleanly, its non-identity MSM
+/// IS merged into the parent's batch and the verifier rejects.
+/// Confirms the per-frame design isn't accidentally swallowing every
+/// MSM, only those from failed frames.
+#[test]
+fn clean_call_msm_propagates_to_parent_batch() {
+    use bulletproofs::PedersenGens;
+    let pc_gens = PedersenGens::default();
+    let g_bytes = *curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED.as_bytes();
+
+    // Inner: append 1·G to batch, then return cleanly.
+    let inner = Program::new()
+        .push_int(1u64)
+        .push_point(g_bytes)
+        .mul()
+        .verify()
+        .push_int(0u64)
+        .return_();
+    let outer = open_with_inner(inner)
+        .verify()                              // pop success marker
+        .drop_();                              // drop count
+
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+        .expect("prove ok (prover always builds something)");
+    let TxResult { bytecode, proof, .. } = result;
+    let proof = proof.expect("proof set");
+
+    let pc_gens_v = PedersenGens::default();
+    let err = Verifier::verify(
+        &pc_gens_v,
+        bytecode,
+        &proof,
+        dummy_header(),
+        1_000_000,
+        0,
+        None,
+    )
+    .expect_err("verify must reject — clean call merged the 1·G MSM into the parent batch");
+    assert!(matches!(err, VMError::BatchSignatureVerificationFailed));
+}

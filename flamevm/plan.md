@@ -56,7 +56,7 @@ what's left to build.
 **34 of 42 complete (81 %).** ◐ = partially done (Phase 35: the 5
 resource-introspection opcodes shipped; mem-cap allocator pending.
 Phase 38: spec.md restructured to zkvm-spec layout; ADR backfill
-pending). Total test count: 555 passing; build clean; remaining
+pending). Total test count: 557 passing; build clean; remaining
 compiler warnings target Phase 34 (gas charging) and Phase 35
 (mem-cap allocator).
 
@@ -677,10 +677,62 @@ Implemented per `decisions/0014-txlog-records-effects-not-control-flow.md`:
    decision.
 6. **Companion notes** in `design.md` + `spec.md` §MultiscalarMul on
    per-frame batch composition under call failure (RNG-based merge,
-   same Schwartz–Zippel pattern as `BatchVerification::append`). Not
-   yet implemented — design note for a future phase.
+   same Schwartz–Zippel pattern as `BatchVerification::append`).
+   Implemented in Phase 44.
 
 Tests: 555 green (one new positive test; reused existing infra).
+
+---
+
+## Phase 44 — Per-frame MSM/sig batch with merge-on-success, drop-on-failure (landed)
+
+Implements the per-frame batch isolation flagged in Phase 43.6. Net
+effect: a failed `call` / `open` / `signcall` cannot pollute the
+caller's batch with stale MSM contributions, so the caller's proof
+verifies regardless of what the failed callee did.
+
+1. **`starsig::BatchVerifier::into_parts`** — new public method that
+   drains the accumulator into `(basepoint_scalar, dyn_weights,
+   dyn_points)`. Lets flamevm fold a sub-batch into a target batch
+   via one `BatchVerification::append` call (which already multiplies
+   the whole sub-statement by a fresh random scalar). Single change
+   in the starsig crate; no behavior change to existing call sites.
+2. **`CallFrame::pending_batch: BatchVerifier<ThreadRng>`** — every
+   frame owns its own accumulator. Cheap to create (ThreadRng is a
+   thread-local handle).
+3. **`op_verify` for MSM** — routes `BatchVerification::append`
+   through `self.current_call.pending_batch` instead of
+   `delegate.batch_verifier()`. RNG-based random factor preserved
+   (the `append` method handles it).
+4. **`op_return` + `finish_call`** — on clean exit, the child's
+   pending batch is folded into the parent's via the new
+   `merge_batch_into` helper: `(basepoint, ws, ps) =
+   child.into_parts(); parent.append(basepoint, ws, ps);`. One
+   random factor per merge.
+5. **`fail_current_call`** — no extra code needed. Dropping the
+   frame drops the accumulator. Failed call's MSM contributions
+   simply cease to exist.
+6. **Tx-end drain** — at the end of `VM::run` and
+   `VM::execute_external`, the root frame's accumulator is folded
+   into `delegate.batch_verifier()` via the same merge primitive.
+   This is the single point where MSM contributions cross from the
+   VM into the delegate's global batch.
+7. **Spec + design** synced. `flamevm/spec.md` §MultiscalarMul now
+   describes the implemented design (not a "may" implementation
+   note). `design.md` §"Crypto-batch composition under call failure"
+   is unchanged — the prose already matched the implementation.
+
+Tests: 2 new in `test_msm.rs`:
+- `failed_call_msm_does_not_pollute_parent_batch` — the canary:
+  child appends a non-identity 1·G MSM to its batch, fails via
+  `verify(0)`, parent's proof verifies cleanly. Would fail without
+  per-frame batching.
+- `clean_call_msm_propagates_to_parent_batch` — the inverse:
+  child appends 1·G, returns cleanly; merged into parent; verifier
+  rejects with `BatchSignatureVerificationFailed`. Confirms the
+  merge isn't accidentally swallowing successful MSMs.
+
+Test count: 557 green (was 555).
 
 ---
 
