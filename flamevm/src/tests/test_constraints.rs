@@ -399,3 +399,132 @@ fn clean_call_cs_alloc_propagates_to_parent_proof() {
     assert!(matches!(err, VMError::InvalidR1CSProof));
 }
 
+/// **Full-coverage rollback canary.** A failed `open` whose child
+/// touched *every* rollback-tracked lane must leave the caller
+/// observably untouched. The child does:
+///
+///   1. `output` — emits `TxEntry::Output` (lane: TxLog truncate).
+///   2. `send`   — emits `TxEntry::Send`   (lane: TxLog truncate).
+///   3. `cell` + `signtx` — records a `DeferredSig::TxBound`
+///       (lane: deferred_sigs truncate).
+///   4. MSM `verify` with a non-identity statement (lane: batch
+///      rollback via `BatchCheckpoint::restore`).
+///   5. R1CS `alloc / eq / verify` with an unsatisfiable equality
+///      (lane: CS rollback via `r1cs::CheckpointableConstraintSystem::
+///      rollback`).
+///   6. `verify(0)` — forces the frame to unwind into a `0` marker.
+///
+/// After the failure rolls back, the outer script does its own
+/// satisfiable proof. Prover→Verifier must accept; the TxLog must
+/// contain only `Header + Input` (the `Input` is `open_with_inner`'s
+/// own anchor-seeding step, *before* the failed `open`); no
+/// `TxBound` deferred sig must survive (so we pass `None` as the
+/// envelope signature).
+#[test]
+fn failed_call_rolls_back_every_state_lane() {
+    use curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED;
+    let pc_gens = PedersenGens::default();
+    let g_bytes = *RISTRETTO_BASEPOINT_COMPRESSED.as_bytes();
+
+    let inner = Program::new()
+        // ── lane 1: TxLog (Output) ──────────────────────────────
+        .push_int(42u64)
+        .push_int(1u64)
+        .push_point([0xbb; 32])
+        .output()
+        // ── lane 2: TxLog (Send) ────────────────────────────────
+        .push_int(0u64)                                    // k=0 args
+        .push_str(String::from(vec![0u8; 32]))             // refund (32 B)
+        .push_int(1u64)                                    // gas
+        .push_int(0u64)                                    // bytes
+        .push_int(0u64)                                    // method
+        .push_str(String::from(vec![0xcc; 32]))            // addr (32 B)
+        .send()
+        // ── lane 3: deferred_sigs (signtx records TxBound) ──────
+        .push_int(0u64)                                    // payload count = 0
+        .push_point([0xdd; 32])                            // predicate
+        .cell()                                            // → Cell on stack
+        .signtx()                                          // pours payload + count; records TxBound
+        .drop_()                                           // drop count = 0
+        // ── lane 4: MSM/sig batch (non-identity 1·G) ────────────
+        .push_int(1u64)
+        .push_point(g_bytes)
+        .mul()
+        .verify()                                          // appends 1·G to batch
+        // ── lane 5: R1CS (unsatisfiable 7+3==99) ────────────────
+        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Int253::from(3u64)))
+        .add()
+        .alloc(Some(Int253::from(99u64)))
+        .eq()
+        .verify()
+        // ── deliberately fail ───────────────────────────────────
+        .push_int(0u64)
+        .verify()                                          // VerifyFailed → frame unwinds
+        .push_int(0u64)
+        .return_();                                        // unreachable
+
+    let outer = open_with_inner(inner)
+        .drop_()                                           // discard `0` failure marker
+        // Parent's own satisfiable constraint: 7 + 3 == 10.
+        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Int253::from(3u64)))
+        .add()
+        .alloc(Some(Int253::from(10u64)))
+        .eq()
+        .verify();
+
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+        .expect("prove ok");
+    let txid_p = result.txid;
+
+    // ── TxLog assertion: rollback truncated all child entries ──
+    // After the failure, the only entries left are Header (always)
+    // and Input (emitted by `open_with_inner`'s anchor-seeding
+    // `input` call BEFORE the failing open). The child's Output +
+    // Send would have made this length 4.
+    assert_eq!(
+        result.txlog.len(),
+        2,
+        "txlog must be only [Header, Input] after rollback (got len={}, entries={:?})",
+        result.txlog.len(),
+        result.txlog,
+    );
+    assert!(matches!(result.txlog[0], crate::tx::TxEntry::Header(_)));
+    assert!(matches!(result.txlog[1], crate::tx::TxEntry::Input(_)));
+
+    // ── deferred_sigs assertion: signtx's TxBound was rolled back ──
+    assert!(
+        result.deferred_sigs.is_empty(),
+        "deferred_sigs must be empty after rollback (got {} entries)",
+        result.deferred_sigs.len(),
+    );
+
+    // ── end-to-end roundtrip: verifier must accept ──
+    // If ANY lane wasn't rolled back:
+    //   - txlog: TxID changes (both sides see the entries, so this
+    //     wouldn't fail via TxID mismatch — but the test above
+    //     catches the leak directly).
+    //   - deferred_sigs: verifier wants a TxBound signature for the
+    //     leftover signtx → `MissingTxBoundSignature` since we pass
+    //     `None`.
+    //   - batch: 1·G != identity → `BatchSignatureVerificationFailed`.
+    //   - CS: 7+3==99 unsatisfiable → `InvalidR1CSProof`.
+    let TxResult { bytecode, proof, .. } = result;
+    let proof = proof.expect("proof set");
+    let verifier_result = Verifier::verify(
+        &pc_gens,
+        bytecode,
+        &proof,
+        dummy_header(),
+        1_000_000,
+        0,
+        None, // no txbound sig — if a TxBound leaked, verify rejects with MissingTxBoundSignature
+    )
+    .expect("verify must accept — every rollback lane fired");
+
+    // TxID must match between prover and verifier (both ran the
+    // same script through the same rollback sites).
+    assert_eq!(verifier_result.txid, txid_p);
+}
+
