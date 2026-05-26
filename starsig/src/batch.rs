@@ -102,6 +102,18 @@ impl<R: RngCore + CryptoRng> BatchVerifier<R> {
             Err(StarsigError::InvalidBatch)
         }
     }
+
+    /// Drains the accumulator into its three component vectors:
+    /// `(basepoint_scalar, dyn_weights, dyn_points)`. Useful for
+    /// folding a sub-batch into a parent batch via
+    /// [`BatchVerification::append`] — the parent's `append`
+    /// multiplies the whole sub-statement by a fresh random scalar,
+    /// preserving the Schwartz–Zippel soundness bound.
+    pub fn into_parts(
+        self,
+    ) -> (Scalar, Vec<Scalar>, Vec<Option<RistrettoPoint>>) {
+        (self.basepoint_scalar, self.dyn_weights, self.dyn_points)
+    }
 }
 
 impl<R: RngCore + CryptoRng> BatchVerification for BatchVerifier<R> {
