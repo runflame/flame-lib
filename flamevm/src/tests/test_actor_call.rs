@@ -1,4 +1,4 @@
-//! Tests for op_call, re-entrancy guard, and TxEntry::Call.
+//! Tests for op_call, re-entrancy guard, and call-frame semantics.
 
 #![allow(unused_imports)]
 
@@ -111,7 +111,11 @@ fn call_a_to_b_creates_new_frame_with_callee_identity() {
 }
 
 #[test]
-fn call_emits_txentry_call_with_pre_state_root_and_anchor() {
+fn call_does_not_emit_txlog_entry_by_itself() {
+    // Calls are intra-tx control flow and emit no txlog entry on their
+    // own. The callee's effects (Output / Send / ActorSave / etc.) are
+    // what the state machine reads. Here B's recv is a nop, so the
+    // txlog after the call is just the Header.
     let mut reg = MemRegistry::new();
     let b = deploy_recv(&mut reg, vec![0x1d], 1_000);
     let a_script = call_script(&b, 0, 10_000);
@@ -122,25 +126,14 @@ fn call_emits_txentry_call_with_pre_state_root_and_anchor() {
         vm.step_internal_with_registry(&mut reg).expect("step ok");
     }
 
-    // txlog: Header at [0], Call at [1].
-    let call_entry = vm.txlog.iter().find(|e| matches!(e, crate::tx::TxEntry::Call { .. }));
-    let (callee, _method, root, anchor) = match call_entry.expect("Call entry present") {
-        crate::tx::TxEntry::Call {
-            callee,
-            method,
-            pre_state_root,
-            callee_anchor,
-        } => (callee.clone(), *method, *pre_state_root, *callee_anchor),
-        _ => unreachable!(),
-    };
-    assert_eq!(callee, b);
-    // callee_anchor is the LEFT half of split(InternalRoot.anchor).
-    // The fixture seeds with the zero anchor; production frames get
-    // a Message-delivered (split-derived) value.
+    // The callee's anchor IS what `last_anchor` becomes — split-left of
+    // the InternalRoot's zero anchor. Verifies the per-call anchor
+    // split without needing a txlog entry to mirror it.
     let (expected_callee_anchor, _post) = Anchor([0u8; 32]).split();
-    assert_eq!(anchor, expected_callee_anchor);
-    // Pre-state root non-zero — Merlin challenge over actor state.
-    assert_ne!(root, [0u8; 32]);
+    assert_eq!(vm.last_anchor.unwrap(), expected_callee_anchor);
+
+    // Header at [0], nothing else — no Call entry exists in the txlog.
+    assert_eq!(vm.txlog.len(), 1, "calls produce no txlog entries");
 }
 
 #[test]
@@ -173,11 +166,11 @@ fn direct_self_call_rejected_as_reentrancy() {
                 Value::Int253(i) => assert_eq!(*i, Int253::from(0u64), "marker"),
                 _ => panic!("expected Int253 marker"),
             }
-            // No TxEntry::Call emitted for the rejected self-call.
-            let calls = vm.txlog.iter()
-                .filter(|e| matches!(e, crate::tx::TxEntry::Call { .. }))
-                .count();
-            assert_eq!(calls, 0, "rejected reentry must not log a Call entry");
+            // Rejected reentry produces no side effects — txlog is
+            // just the Header. (Calls themselves emit no txlog entry;
+            // this assertion catches any accidental ActorSave / Send
+            // from a half-entered frame.)
+            assert_eq!(vm.txlog.len(), 1, "rejected reentry must not emit side effects");
             return;
         }
     }
@@ -228,13 +221,10 @@ fn indirect_cycle_rejected_as_reentrancy() {
     // Tx must complete without fatal error.
     while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
 
-    // Reentrancy is silently rejected before a Call entry is logged:
-    // exactly one Call entry (A → B); B → A leaves no trace beyond
-    // the failure marker B observed.
-    let call_count = vm.txlog.iter()
-        .filter(|e| matches!(e, crate::tx::TxEntry::Call { .. }))
-        .count();
-    assert_eq!(call_count, 1, "only A→B should be logged; reentrant B→A is rejected pre-log");
+    // Reentrancy is silently rejected with a `0` marker. Neither side
+    // wrote actor state (no load/save), so txlog has only the Header.
+    assert_eq!(vm.txlog.len(), 1,
+        "no actor state mutations → only Header in txlog");
 }
 
 #[test]
@@ -280,10 +270,41 @@ fn call_without_registry_errors() {
 }
 
 #[test]
+fn save_emits_actorsave_with_post_state_root() {
+    // op_save mutates the actor's persistent state and records a
+    // structural effect: `TxEntry::ActorSave { actor, post_state_root }`.
+    // A thin state machine consuming the TxLog can apply these in
+    // order to mutate the registry without re-running the script.
+    let mut reg = MemRegistry::new();
+    // Recv: load (0x96) then save (0x97). Round-trip with no changes
+    // still emits the ActorSave entry.
+    let recv = vec![0x96, 0x97];
+    let id = ActorID::Hash([0xab; 32]);
+    let mut state = ActorState::new();
+    state.public.insert(RECV_METHOD, Value::String(crate::String::from(recv.clone())));
+    reg.deploy(id.clone(), state, 10_000, 0).expect("deploy");
+
+    let mut vm = vm_for_actor(id.clone(), recv);
+    while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
+
+    let save = vm.txlog.iter().find_map(|e| match e {
+        crate::tx::TxEntry::ActorSave { actor, post_state_root } =>
+            Some((actor.clone(), *post_state_root)),
+        _ => None,
+    }).expect("ActorSave entry present");
+    assert_eq!(save.0, id);
+    assert_ne!(save.1, [0u8; 32], "state_root is a Merlin challenge, non-zero");
+    let save_count = vm.txlog.iter()
+        .filter(|e| matches!(e, crate::tx::TxEntry::ActorSave { .. }))
+        .count();
+    assert_eq!(save_count, 1);
+}
+
+#[test]
 fn call_to_unknown_actor_rejected_with_marker() {
     let mut reg = MemRegistry::new();
     // Caller exists; target does not — pre-frame registry lookup
-    // fails → marker `0` on caller's stack, no Call entry.
+    // fails → marker `0` on caller's stack. No side effects emitted.
     let ghost = ActorID::Hash([0xab; 32]);
     let a_script = call_script(&ghost, 0, 10_000);
     let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
@@ -295,10 +316,8 @@ fn call_to_unknown_actor_rejected_with_marker() {
                 Value::Int253(i) => assert_eq!(*i, Int253::from(0u64)),
                 _ => panic!("expected Int253 marker"),
             }
-            let calls = vm.txlog.iter()
-                .filter(|e| matches!(e, crate::tx::TxEntry::Call { .. }))
-                .count();
-            assert_eq!(calls, 0);
+            // Header only — no side effects from a rejected call.
+            assert_eq!(vm.txlog.len(), 1);
             return;
         }
     }

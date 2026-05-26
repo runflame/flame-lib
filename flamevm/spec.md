@@ -41,7 +41,10 @@ Like external, internal transactions produce effects:
 2. Outputs — creation of new entries in the Utreexo.
 3. Sends — messages sent to actors that produce other internal transactions.
 4. Issuance and retirement — creation and removal of tokens to/from circulation.
-5. Data entry — for data logging that does not occupy permanent storage.
+5. Actor-state mutations — `op_save` records the actor's post-save state hash, allowing a state machine to mutate the registry without re-running the script.
+6. Data entry — for data logging that does not occupy permanent storage.
+
+Note: calls themselves (the act of one actor invoking another) are intra-transaction control flow, not effects. Anything a callee does that the outer world cares about shows up via one of the effects above. See `../design.md` §"TxLog records effects, not control flow".
 
 Internal transactions do not support fee payment: they operate within gas- and memory limits set by the external transaction. They also do not support inputs, as those can be consumed only by external transactions with a Utreexo proof and (most of the time), a transaction signature.
 
@@ -222,6 +225,8 @@ Lazy multi-scalar-multiplication: a vector of `(scalar_i, point_i)` pairs that t
 
 **Batched verification.** `verify` on an MSM does **not** decompress or check anything immediately — it appends the term vector to the same `BatchVerifier` that holds the transaction's Schnorr / Musig signatures (with `basepoint_scalar = 0` so the MSM contributes only its dynamic terms). At finalize the entire batch is verified with a single Dalek `vartime_multiscalar_mul` (Strauss algorithm), amortising the ~4× speedup of batched MSM across every Sigma-protocol assertion and every signature in the transaction.
 
+**Per-frame batching.** The batch is a verifier-side optimization, not part of the consensus semantics — the on-chain `TxLog` and proof shapes are unchanged whether terms are batched globally, per call frame, or in any other grouping. Where rollback matters (call-frame failure under the failure-marker model), an implementation may carry one `BatchAccum` per active call frame, then **merge the child's accumulator into the parent's on clean return** by sampling a fresh random scalar `r` and folding the child's terms via `parent += r · child` (the same Schwartz–Zippel trick `BatchVerifier::append` already uses for each appended statement). On call failure, the child's accumulator is discarded with the frame. Probability of false-accept is `< #terms / 2²⁵²` per merge, identical to the existing per-statement bound.
+
 **Construction.** MSM has no dedicated constructor opcode. Instead, the arithmetic opcodes lift Point/MSM operands implicitly:
 
 | Operation | Result |
@@ -337,7 +342,7 @@ Every new cell and message is **anchored** by a unique 32-byte value embedded in
 - `None` at the start of an external tx — [`input`](#input) is the only way to seed it.
 - `Some(M)` at the start of an internal tx, where `M` is the delivering Message's anchor (a split-child from the originating external tx's `op_send`).
 
-Calls don't introduce new anchor slots. `op_call`, `op_open`, and `op_signcall` are all intra-transaction — they don't mint cross-tx entities, so they don't need their own anchor. The tx's single `last_anchor` flows through every frame; whatever a callee splits is what the caller sees on return.
+Calls split the anchor at entry. `op_call`, `op_open`, and `op_signcall` each split `last_anchor` into `(left, right)` at frame entry. The child's frame starts with `last_anchor = left`; the parent frame stashes `right` in its `post_call_anchor` slot, and `last_anchor` is restored to `right` when control returns (success or failure). This keeps the caller's anchor chain independent of whatever the callee does with its own half, which is what makes the `0` failure marker semantics safe — a failed call cannot corrupt the caller's anchor state.
 
 **Splitting.** Each opcode that produces a new unique-anchored *cross-tx* entity (cell-on-wire, message-to-actor) consumes `last_anchor` and replaces it with a fresh derived value. The split is a single Merlin transcript:
 
@@ -354,7 +359,7 @@ The `left` half is embedded in the new entity (cell anchor / SendID); the `right
 
 **Site that seeds without consuming**: [`input`](#input) sets `last_anchor = Anchor(cell.id())` directly (the spent UTXO's id is already unique on the wire — no split needed). Replacing any prior value is intentional: it lets a partial transaction depend only on its own input claim, not on what other parts of the tx contributed before it.
 
-**Sites that don't touch the anchor at all**: [`call`](#call), [`open`](#open), [`signcall`](#signcall). All three create new call frames but stay intra-tx — they don't produce on-chain entities themselves; only the leaf opcodes (`cell` / `output` / `send`) inside the called/opened script do, and those consume the same per-tx `last_anchor`. `op_call` does record a snapshot of `last_anchor` into `TxEntry::Call.callee_anchor` for Internal-TxID binding purposes, but the slot itself is unchanged.
+**Sites that split at call entry**: [`call`](#call), [`open`](#open), [`signcall`](#signcall). All three create new call frames and each splits `last_anchor` at entry. The `left` half seeds the child frame's `last_anchor`; the `right` half is held in the parent frame's `post_call_anchor` slot and replaces `last_anchor` when control returns (whether the call succeeded or returned the `0` failure marker). This makes anchor flow deterministic across call success/failure boundaries — the caller's anchor chain is independent of whatever the callee did with its left half.
 
 **Locality across parties.** Each `op_input` *replaces* the anchor unconditionally rather than mixing into a chain. So a multi-party tx where party A claims input A_in and produces outputs, then party B claims input B_in and produces outputs, has each party's output anchors rooted only in their own input id. B's claim wipes A's residue; that's fine because B's outputs derive from B_in's split-children, not from anything A did. A party signing their portion can predict their own output anchors locally from their own input cell ids.
 
@@ -1070,7 +1075,7 @@ Asynchronous message-send. Pops operands top-first:
 6. `k` (`Int253`) — args count.
 7. `args…` — k portable values, delivery payload.
 
-Splits the frame's `last_anchor` (see §Anchors): the `left` half becomes the message's `anchor` (= SendID, known at broadcast time), the `right` half replaces `last_anchor`. Hard-fails `AnchorMissing` if no anchor has been claimed yet. Emits `TxEntry::Send { anchor, target, method, refund_predicate, gas, vbytes, payload_hash }` and appends a `Message` to the VM's outbound send queue. The originator's actor id (if any) becomes the message's `caller`.
+Splits the frame's `last_anchor` (see §Anchors): the `left` half becomes the message's `anchor` (= SendID, known at broadcast time), the `right` half replaces `last_anchor`. Hard-fails `AnchorMissing` if no anchor has been claimed yet. Emits `TxEntry::Send { anchor, target, caller, method, refund_predicate, gas, vbytes, payload }`. The full message lives in the entry — there is no separate "sends queue"; the block builder reads `TxEntry::Send` records from the TxLog when constructing internal-tx deliveries. The originator's actor id (if any) becomes the entry's `caller`.
 
 Available in both contexts. Hard-fails `MalformedAddress` on wrong-size addr or refund, `NonPortableInSend` on non-portable args, `InvalidBitrange` on negative/overflowing allotments.
 
@@ -1082,7 +1087,9 @@ _args… k gas bytes method addr_ → _results… k'_
 
 Synchronous actor-to-actor call. Same operand shape as [`send`](#send) minus `refund`.
 
-Verifies the **re-entrancy guard** — the target actor must not already appear on the current call stack ([ADR 0003](../decisions/0003-forbid-reentrancy.md); errors `ReentrancyDetected`). Resolves the callee's method bytes via the registry, snapshots the callee's pre-state hash. Records a snapshot of the tx's current `last_anchor` (or the zero anchor if uninitialized) into `TxEntry::Call.callee_anchor` for Internal-TxID binding — the slot itself is **not** consumed (calls are intra-tx and don't mint cross-tx entities). Emits `TxEntry::Call { callee, method, pre_state_root, callee_anchor }`.
+Verifies the **re-entrancy guard** — the target actor must not already appear on the current call stack ([ADR 0003](../decisions/0003-forbid-reentrancy.md); on failure, returns the `0` failure marker rather than aborting the tx). Resolves the callee's method bytes via the registry, then splits the parent's anchor (left to the child frame, right held in `post_call_anchor` for restoration on return).
+
+**Emits no txlog entry.** Calls are intra-tx control flow; the structural effects produced inside the callee (`Output`, `Send`, `ActorSave`, `Issue`, `Retire`, `Fee`, `Data`) are what the state machine reads. The `(External TxID, Internal TxID)` of a tx is a merkle root over effects only — see `design.md` §"TxLog records effects, not control flow".
 
 Creates an isolated `CallKind::ActorCall { actor, method, caller, anchor }` frame with the popped `gas` / `bytes` allotments. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
 
@@ -1102,7 +1109,7 @@ Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `LoadAlreadyMar
 
 _dict_ → ø
 
-Pops a Dict, parses it as an `ActorState` (the two-entry wrapper shape with keys `0x00` public and `0x01` private), persists it against the current actor, and clears the mark.
+Pops a Dict, parses it as an `ActorState` (the two-entry wrapper shape with keys `0x00` public and `0x01` private), persists it against the current actor, and clears the mark. Emits `TxEntry::ActorSave { actor, post_state_root }` — the canonical hash of the post-save state is what a thin state machine consumes from the txlog to replay the actor-state mutation without re-running the script. See `design.md` §"TxLog records effects, not control flow".
 
 Hard-fails: `SaveWithoutLoad`, `MalformedActorState`, `OpcodeRequiresActorContext`, `RegistryUnavailable`.
 

@@ -56,7 +56,7 @@ what's left to build.
 **34 of 42 complete (81 %).** ◐ = partially done (Phase 35: the 5
 resource-introspection opcodes shipped; mem-cap allocator pending.
 Phase 38: spec.md restructured to zkvm-spec layout; ADR backfill
-pending). Total test count: 554 passing; build clean; remaining
+pending). Total test count: 555 passing; build clean; remaining
 compiler warnings target Phase 34 (gas charging) and Phase 35
 (mem-cap allocator).
 
@@ -651,6 +651,39 @@ with signatures.
 
 ---
 
+## Phase 43 — TxLog records effects, not control flow (landed)
+
+Implemented per `decisions/0014-txlog-records-effects-not-control-flow.md`:
+
+1. **Drop `TxEntry::Call`** — calls are intra-tx control flow and
+   emit nothing into the TxLog. `op_call` no longer pushes an entry,
+   no longer computes a pre-state hash.
+2. **Add `TxEntry::ActorSave { actor, post_state_root }`** — `op_save`
+   pushes one after the registry write succeeds. The `state_root`
+   helper moved from "called by `op_call`" to "called by `op_save`"
+   without changing its bytes.
+3. **MerkleItem encoding** updated accordingly: `b"save.actor"` +
+   `b"save.post_state_root"`. Domain tags fresh — old `b"call.*"`
+   tags retired.
+4. **Tests reworked**: `call_emits_txentry_call_with_pre_state_root_and_anchor`
+   replaced with `call_does_not_emit_txlog_entry_by_itself` (asserts
+   `txlog.len() == 1`, just the Header). Reentrancy tests updated to
+   assert "no side effects in TxLog" instead of counting Call entries.
+   New `save_emits_actorsave_with_post_state_root` test.
+5. **Spec + design synced**: `design.md` gains §"TxLog records effects,
+   not control flow" + the three-category framing (structural / CS /
+   batch). `flamevm/spec.md` §call drops the Emits-Call sentence,
+   §save gains the Emits-ActorSave sentence. ADR 0014 captures the
+   decision.
+6. **Companion notes** in `design.md` + `spec.md` §MultiscalarMul on
+   per-frame batch composition under call failure (RNG-based merge,
+   same Schwartz–Zippel pattern as `BatchVerification::append`). Not
+   yet implemented — design note for a future phase.
+
+Tests: 555 green (one new positive test; reused existing infra).
+
+---
+
 # Section 3 — Design-doc audit
 
 Walk every architectural commitment in `design.md` and trace to
@@ -669,7 +702,7 @@ its phase:
 | Atomic external-tx effects | ✅ Done | 18 + 21 |
 | Grace + freeze + maturity (ADR 0005) | ✅ Done (VM-side) | 28 |
 | TxID binding (signatures + ZK bind to TxID) | ✅ Done | 18 + 20 |
-| Internal TxID binds to touched-actor state (Q5) | ✅ Done | 26 (`TxEntry::Call.pre_state_root`) |
+| Internal TxID binds to touched-actor state (Q5) | ✅ Done | 43 (`TxEntry::ActorSave.post_state_root`) |
 | Concurrency (external parallel, internal serial) | ⏳ Consensus crate; VM hooks in 36 | 36 |
 | Block resource pools (4:1) | ⏳ Pending | 36 |
 | Bitcoin coupling (chain-info opcodes) | ⏳ Pending | 31 |

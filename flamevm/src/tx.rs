@@ -83,18 +83,15 @@ pub enum TxEntry {
     /// eventual `TxResult.total_fee`.
     Fee(u64),
 
-    /// Synchronous actor-to-actor call recorded by `op_call`. Binds
-    /// the callee's identity and its pre-call state hash into the
-    /// internal TxID merkle root — per Q5, this makes the
-    /// resulting Internal TxID unique to the exact actor states
-    /// observed during execution. The callee anchor is recorded
-    /// alongside to give external observers a deterministic
-    /// reference into the call chain.
-    Call {
-        callee: crate::actor::ActorID,
-        method: crate::Int253,
-        pre_state_root: [u8; 32],
-        callee_anchor: crate::vm::Anchor,
+    /// Actor-state mutation recorded by `op_save`. Carries the actor's
+    /// identity and the canonical hash of its post-save state. Together
+    /// with the actor's pre-tx state (known from the registry) this
+    /// fully defines the effect a thin state-machine applies — no
+    /// re-execution of the script needed. See design.md §"TxLog records
+    /// effects, not control flow".
+    ActorSave {
+        actor: crate::actor::ActorID,
+        post_state_root: [u8; 32],
     },
 
     /// Outbound asynchronous message scheduled by `op_send`. The
@@ -157,10 +154,9 @@ impl core::fmt::Debug for TxEntry {
             TxEntry::Fee(q) => {
                 f.debug_tuple("TxEntry::Fee").field(q).finish()
             }
-            TxEntry::Call { callee, method, .. } => f
-                .debug_struct("TxEntry::Call")
-                .field("callee", callee)
-                .field("method", method)
+            TxEntry::ActorSave { actor, .. } => f
+                .debug_struct("TxEntry::ActorSave")
+                .field("actor", actor)
                 .finish(),
             TxEntry::Send {
                 target, method, anchor, gas, vbytes, ..
@@ -212,23 +208,16 @@ impl MerkleItem for TxEntry {
                 // this from any other 8-byte append.
                 t.append_message(b"fee.qty", &qty.to_le_bytes());
             }
-            TxEntry::Call {
-                callee,
-                method,
-                pre_state_root,
-                callee_anchor,
+            TxEntry::ActorSave {
+                actor,
+                post_state_root,
             } => {
-                // Bind every cross-actor call into the Internal TxID
-                // merkle root: callee identity (canonical bytes),
-                // method key (canonical sign-magnitude), the callee's
-                // state hash at the moment of entry, and the callee
-                // anchor seed. Per Q5 this is what makes the resulting
-                // Internal TxID unique to the exact actor states
-                // observed during execution.
-                t.append_message(b"call.callee", &callee.to_bytes());
-                t.append_message(b"call.method", &method.to_bytes());
-                t.append_message(b"call.pre_state_root", pre_state_root);
-                t.append_message(b"call.callee_anchor", &callee_anchor.0);
+                // Bind every actor-state mutation into the TxID merkle
+                // root: actor identity + canonical hash of the new
+                // state. The state machine applies these in order to
+                // mutate the registry without re-running the script.
+                t.append_message(b"save.actor", &actor.to_bytes());
+                t.append_message(b"save.post_state_root", post_state_root);
             }
             TxEntry::Send {
                 anchor,

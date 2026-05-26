@@ -264,8 +264,8 @@ fn iter_actor_ids_on_stack<'a>(
 }
 
 /// Hashes an `ActorState` to its canonical 32-byte root via the
-/// `flamevm.actor.state.root` transcript domain. Used by `op_call`
-/// to bind the callee's pre-call state into `TxEntry::Call`.
+/// `flamevm.actor.state.root` transcript domain. Used by `op_save`
+/// to bind the actor's post-save state into `TxEntry::ActorSave`.
 fn state_root(state: &ActorState) -> Result<[u8; 32], VMError> {
     let mut buf = Vec::new();
     state.encode(&mut buf).map_err(|_| VMError::MalformedActorState)?;
@@ -2188,8 +2188,9 @@ impl VM {
     /// _args… k gas bytes method addr_ **call** → _results…_
     ///
     /// Synchronous actor-to-actor call. Re-entrancy guard rejects direct
-    /// or indirect cycles. Emits `TxEntry::Call` binding the callee's
-    /// pre-state hash and ratcheted anchor into the Internal TxID.
+    /// or indirect cycles. Emits no txlog entry — calls are intra-tx
+    /// control flow; the callee's state mutation (if any) is recorded
+    /// later via `TxEntry::ActorSave` when `op_save` runs.
     fn op_call(
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
@@ -2204,14 +2205,13 @@ impl VM {
         // Pre-frame setup. Any failure here ("cannot enter callee")
         // converts to a `0` failure marker on the caller's stack —
         // the call simply "did not happen" from the caller's POV.
-        let pre_frame: Result<(Vec<u8>, [u8; 32], u64, ActorID), VMError> = (|| {
+        let pre_frame: Result<(Vec<u8>, u64, ActorID), VMError> = (|| {
             if iter_actor_ids_on_stack(&self.current_call, &self.call_stack)
                 .any(|id| id == &callee)
             {
                 return Err(VMError::ReentrancyDetected);
             }
             let script = registry.resolve_method(&callee, method)?;
-            let pre_state_root = state_root(&registry.load_state(&callee)?)?;
             let mem_limit = registry.actor_vbytes(&callee)?.saturating_mul(4);
             let caller = self
                 .current_call
@@ -2219,9 +2219,9 @@ impl VM {
                 .actor()
                 .cloned()
                 .unwrap_or(ActorID::Hash([0u8; 32]));
-            Ok((script, pre_state_root, mem_limit, caller))
+            Ok((script, mem_limit, caller))
         })();
-        let (script, pre_state_root, mem_limit, caller) = match pre_frame {
+        let (script, mem_limit, caller) = match pre_frame {
             Ok(v) => v,
             Err(_) => {
                 // Pre-frame failure (reentrancy, missing actor, etc.):
@@ -2237,12 +2237,6 @@ impl VM {
         // return (success or failure). Also snapshots side-effect
         // cursors so we can roll back if the child errors out.
         let callee_anchor = self.split_anchor_for_call()?;
-        self.txlog.push(crate::tx::TxEntry::Call {
-            callee: callee.clone(),
-            method,
-            pre_state_root,
-            callee_anchor,
-        });
 
         let program = crate::program::Program::parse(&script)?;
         let mut frame = CallFrame::new(
@@ -2303,9 +2297,19 @@ impl VM {
             return Err(VMError::SaveWithoutLoad);
         }
         let state = ActorState::from_wrapper_dict(self.pop_value()?.to_dict()?)?;
+        // Hash the post-save state first so the txlog entry's
+        // post_state_root captures exactly what we're writing.
+        let post_state_root = state_root(&state)?;
         registry.save_state(&actor, state)?;
         registry.unmark_for_destruction(&actor);
         self.current_call.loaded = false;
+        // Record the actor-state mutation as a structural effect. A
+        // state machine consuming the TxLog mutates the actor registry
+        // by walking these entries; no re-execution of the script.
+        self.txlog.push(crate::tx::TxEntry::ActorSave {
+            actor,
+            post_state_root,
+        });
         Ok(())
     }
 
