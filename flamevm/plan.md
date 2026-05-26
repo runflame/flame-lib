@@ -39,21 +39,26 @@ what's left to build.
 | 27 | Re-entrancy guard                                                  | ✅      |
 | 28 | Actor lifecycle: grace + freeze + maturity (VM-side)               | ✅      |
 | 29 | Introspection: identity (4 opcodes)                                | ✅      |
-| 30 | Introspection: tx header (`timelock`, `version`)                   | ⏳      |
+| 30 | Introspection: tx header (`timelock`, `version`)                   | ✅      |
 | 31 | Chain info (6 opcodes)                                             | ⏳      |
 | 32 | `op_send` + `TxEntry::Send` + send queue                           | ✅      |
 | 33 | Encrypted `issue` (after ADR)                                      | ⏳      |
 | 34 | Gas-cost table + per-op charging                                   | ⏳      |
-| 35 | Memory-cap allocator + resource introspection (5 opcodes)          | ⏳      |
+| 35 | Memory-cap allocator + resource introspection (5 opcodes)          | ◐      |
 | 36 | Block resource pools (B_par : B_ser)                               | ⏳      |
 | 37 | Fuzz targets + canonicality sweeps                                 | ⏳      |
-| 38 | spec.md + design.md sync + ADR backfill                            | ⏳      |
+| 38 | spec.md + design.md sync + ADR backfill                            | ◐      |
 | 39 | End-to-end integration tests                                       | ⏳      |
-| 40 | Isolated calls: `open`/`signcall`/`call` unified frames (ADR 0013) | ⏳      |
+| 40 | Isolated calls: `open`/`signcall`/`call` unified frames (ADR 0013) | ✅      |
+| 41 | `Point` enum + `String::Point` unification                         | ✅      |
+| 42 | `MultiscalarMul` for Sigma-protocol verification                   | ✅      |
 
-**31 of 40 complete (78 %).** Total test count: 536 passing; build
-clean; remaining compiler warnings target Phases 34 / 35 (gas + mem
-accounting) and Phase 40 (frame creation paths for `open`/`signcall`).
+**34 of 42 complete (81 %).** ◐ = partially done (Phase 35: the 5
+resource-introspection opcodes shipped; mem-cap allocator pending.
+Phase 38: spec.md restructured to zkvm-spec layout; ADR backfill
+pending). Total test count: 554 passing; build clean; remaining
+compiler warnings target Phase 34 (gas charging) and Phase 35
+(mem-cap allocator).
 
 ### Actor build (Phases 24–29, 32) — landed in 8 units
 
@@ -90,23 +95,50 @@ The confidential N→M transaction test harness (Phase 23) exercises
 - 2→2 / 3→2 / 2→3 / 3→3 (two flavors)
 - 2 negative tests: imbalance rejected, flavor mismatch rejected
 
-### Gas + memory accounting is deferred (Phases 34–36)
+### Gas + memory accounting is partially in place (Phases 34–36)
 
-`gas_used` and `vbytes_used` currently always read `0` in `TxResult`.
-Every opcode is treated as costing **gas = 1, mem = 0** *implicitly*
-— no charging, no limit enforcement, no introspection.
+`gas_used` and `vbytes_used` are tracked on each CallFrame (set by
+`CallFrame::new`, read by the introspection opcodes shipped in
+Phase 35) but **no opcode currently charges them**. Every opcode is
+treated as costing **gas = 0, mem = 0** — no enforcement, no
+exhaustion error.
 
-All prerequisites for the resource pipeline are now in place:
+All prerequisites for the resource pipeline are in place:
 
 - ✅ real actor registry to size `mem_limit = 4 × vbytes(actor)` (Phase 24)
 - ✅ working call stack with refund hook so `op_call` gas refund makes sense (Phase 26)
 - ✅ re-entrancy guard so `mem_used` cleanup on frame exit is well-defined (Phase 27)
+- ✅ the 5 introspection opcodes that read the counters (Phase 35, partial)
 
-The remaining work is just the per-opcode tables + hooks (Phase 34
-gas, Phase 35 mem-cap, Phase 36 block pools). The introspection
-opcodes (`gas`, `bytes`, `gaslimit`, `memlimit`, `newbytes`) are
-gated on Phases 34/35 since they read counters those phases
-populate.
+Remaining work: per-opcode gas charging (Phase 34), mem-cap
+allocator hooks (Phase 35 finish), block resource pools (Phase 36).
+
+### Post-Phase-40 refactors (Phases 41–42, both landed)
+
+After the ADR 0013 isolation work shipped, two follow-up refactors
+unified the witness model across the type system:
+
+- **Phase 41 — `Point` enum.** `Point` became `enum { Opaque,
+  Commitment(Box<Commitment>), Predicate(Box<Predicate>) }`. The
+  String enum collapsed its `Commitment` and `Predicate` variants
+  into a single `String::Point(Point)`. `Instruction::PushPoint`
+  now takes a `Point` operand (still encoding to the same 32 wire
+  bytes), so the prover can attach witness data via `pushpoint`,
+  not only `pushstr`. `op_cell` / `op_output` route through
+  `Point::to_predicate` so a prover-side `PredicateTree` witness
+  flows into cell construction.
+
+- **Phase 42 — `MultiscalarMul`.** Resurrected as a first-class
+  `Value` type for lazy Sigma-protocol verification. Carries a
+  `Vec<(Scalar, Point)>` accumulator; lifts through `op_add` /
+  `op_neg` / `op_mul`; `op_verify` queues the MSM into the same
+  `BatchVerifier` lane as Schnorr / MuSig signatures as the
+  statement *"sum == identity point"*. Contracts can now express
+  custom Sigma protocols (encryption / re-encryption / pubkey
+  relations) without paying the per-statement multi-exponentiation
+  cost. Audit `audits/vm/2026-05-26-msm-design.md` flagged two
+  follow-ups (gas charge per term + per-frame size cap), both
+  rolled into Phase 34 / 35.
 
 ---
 
@@ -145,7 +177,12 @@ populate.
 | 27 | Re-entrancy guard                                  | (incl. in 26) | `iter_actor_ids_on_stack` walks current + suspended frames; hard-fail `ReentrancyDetected` covers direct + indirect cycles. |
 | 28 | Actor lifecycle (VM-side)                          | (incl. in 24) | `tick_block` + `VbytePool` queue/release; per-actor `frozen_since` / `active_blocks` / grace formula. Consensus-side per-block driver TBD by integrator. |
 | 29 | Identity opcodes                                   | 10    | `actorid` / `anchor` / `callerid` / `method`. `CallKind` extended with `method()` / `caller()` / `anchor()` accessors. |
+| 30 | Tx-header introspection                            | 4     | `0x9a timelock` (Bitcoin BIP-65 threshold, `LOCKTIME_TIMESTAMP_THRESHOLD = 500_000_000`) and `0x9b version`. |
 | 32 | `op_send` + `TxEntry::Send` + queue                | 7     | Anchor ratchet at send time (Q5); `Message` queue drained into `TxResult.sends`; `payload_hash` keeps Send entry fixed-size; `refund_predicate` operand for Q3 bounce path. |
+| 35 (partial) | Resource introspection opcodes           | 7     | `0x9e gas`, `0xa2 gaslimit`, `0xa3 memlimit`, `0xa4 newbytes` (all four "either context"); `0x9f bytes` (int.; requires actor + registry; routes through `ActorRegistry::actor_vbytes`). Counters read but not yet charged. |
+| 40 | Isolated `open` / `signcall` / `call` (ADR 0013)    | 13    | `signrun` → `signcall` rename incl. transcript label. `op_open` and `op_signcall` create isolated `CellOpen` frames with explicit `gas`/`bytes` operands. `CallKind::CellOpen { anchor, predicate, external_context }` snapshots caller's CS context. `enter_cell_open_frame` + `pop_gas_bytes` helpers shared by both opcodes. Confused-deputy class structurally eliminated. |
+| 41 | `Point` enum + `String::Point`                      | 0     | Refactor. `Point::{Opaque, Commitment(Box<Commitment>), Predicate(Box<Predicate>)}`. `String::Commitment` + `String::Predicate` collapse into `String::Point(Point)`. `Instruction::PushPoint(Point)` so `pushpoint` carries witnesses too. `op_cell`/`op_output` route through `Point::to_predicate`. No test count change (refactor is type-only). |
+| 42 | `MultiscalarMul` for Sigma protocols                | 13    | `MultiscalarMul` Value type (linear, portable, non-wire). Lazy `Vec<(Scalar, Point)>` accumulator; `op_add`/`neg`/`mul` lift point arithmetic; `op_verify` adds it to the existing `BatchVerifier` lane as `sum == identity`. Enables custom Schnorr-style proofs alongside MuSig signatures. Audit `2026-05-26-msm-design.md`: sound; 2 follow-ups (gas-per-term, size cap) deferred to 34/35. |
 
 ## Known wiring gap
 
@@ -161,11 +198,9 @@ populate.
 
 | Opcode / feature | Source | Phase |
 |---|---|---|
-| `0x9a timelock`, `0x9b version` | spec.md rows | 30 |
-| `0x9e gas`, `0x9f bytes`, `0xa2 gaslimit`, `0xa3 memlimit`, `0xa4 newbytes` | spec.md rows | 35 |
 | `0xa5..=0xaa` chain-info opcodes | spec.md rows | 31 |
 | Encrypted `issue` (Point → Token branch) | spec.md row, design.md | 33 |
-| Memory cap `4× vbytes` enforcement | design.md ADR 0002 | 35 |
+| Memory cap `4× vbytes` enforcement (allocator hooks) | design.md ADR 0002 | 35 |
 | Gas charging per opcode | design.md §Resources / Gas | 34 |
 | Block resource pools (`B_par : B_ser = 4:1`) | design.md §Block resource pools | 36 |
 | Per-block consensus-side `tick_block` driver | design.md ADR 0005 | (consensus / integrator) |
@@ -176,10 +211,13 @@ populate.
 
 | Topic | Blocking phase | Notes |
 |---|---|---|
+| Predicate-call isolation | — (landed as `decisions/0013-predicate-call-isolation.md`) | `open` / `signcall` / `call` all create isolated `CellOpen` / `ActorCall` frames with explicit `gas`/`bytes` operands. `CellOpen` has no actor identity. Confused-deputy class eliminated by construction. Implementation landed Phase 40. |
 | Input-cell witness encoding | — (resolved; refactored to zkvm parity) | Carrier is `String::Cell(Arc<Cell>)` — same pattern as zkvm's `String::Output`. Prover pushes `String::Cell(c)` with open commitments; verifier pushes `String::Opaque(bytes)`. `Instruction::Input` is a unit variant; no separate witness queue, no re-attachment step. ADR pending in Phase 38 housekeeping. |
 | Actor data model (Q1, Q2, Q4, Q6) | — (resolved during actor build) | Q1: `b"flamevm.actorid"` domain. Q2: vbyte = wire_len(state) + 32. Q4: Constructor-form id deploys transparently at first delivery. Q6: load-without-save is the destroy path. ADR `0010-actor-data-model` queued for Phase 38. |
 | Send-ID + Internal TxID (Q3, Q5) | — (resolved during actor build) | Q5: three IDs (External TxID, SendID = Send.anchor, Internal TxID); anchor ratcheted before emitting `TxEntry::Send`; Internal TxID binds to per-call `pre_state_root` via `TxEntry::Call`. Q3: send-failure bounce is a consensus-emitted Output, not a fresh sub-VM. ADR `0011-send-id-and-internal-txid` queued for Phase 38. |
 | Load/save re-entry lock (Q6) | — (resolved during actor build) | `mark_for_destruction` as the cross-frame lock; per-frame `loaded` flag layered on top; tx-end sweep destroys still-marked actors. ADR `0012-load-save-reentry-lock` queued for Phase 38. |
+| `Point` enum + `String::Point` unification | — (landed in Phase 41) | Type-system refactor — `Point` becomes an enum with witness variants; `String::Commitment`/`Predicate` collapse into `String::Point`. ADR pending: `0014-point-enum-and-string-point` for Phase 38. |
+| `MultiscalarMul` as first-class type | — (landed in Phase 42) | Lazy Sigma-protocol verification; queued into `BatchVerifier` as `sum == identity`. ADR pending: `0015-multiscalarmul-deferred-verification` for Phase 38. Audit `2026-05-26-msm-design.md` flagged size cap + gas-per-term as Phase 34/35 follow-ups. |
 | Encrypted `issue` semantics | 33 | Variable-only, Predicate-as-issuer, internal-only, or explicit-cid? |
 | Extension tag (255) policy | 37 | Reject vs reserve for soft-fork. Currently rejects. |
 
@@ -263,16 +301,17 @@ surface is in place):
 
 ---
 
-## Phase 30 — Introspection: tx header (`timelock`, `version`)
+## Phase 30 — Introspection: tx header (`timelock`, `version`) (landed)
 
-**Goal**: 2 opcodes that read `TxHeader`.
+Shipped in commit `f949b72` alongside the Phase-35 introspection
+opcodes. Both opcodes read `TxHeader` fields directly:
 
-**Items**:
-- `0x9a timelock` (`ø → n {0|1}` — header.locktime + flag for
-  height/timestamp).
-- `0x9b version` (`ø → n` — header.version).
+- `0x9a timelock` (`ø → n {0|1}`) — pushes `locktime` + Bitcoin
+  BIP-65 unit flag (`flag = 1` iff `locktime >=
+  LOCKTIME_TIMESTAMP_THRESHOLD = 500_000_000`).
+- `0x9b version` (`ø → n`) — pushes `header.version`.
 
-**Tests**: ~4 (positive each, encoding round-trip each).
+Both work in either context (every tx has a header).
 
 ---
 
@@ -354,32 +393,35 @@ leftover gas to parent, send-debits-caller, call-args-out-of-budget).
 
 ---
 
-## Phase 35 — Memory-cap allocator + resource introspection
+## Phase 35 — Memory-cap allocator + resource introspection (◐ partial)
 
-**Goal**: design.md ADR 0002 (memory cap) + 5 spec opcodes that
-report runtime resources.
+**Resource introspection opcodes — landed** in commit `f949b72`:
 
-**Items**:
+- `0x9e gas` (`ø → int` — `gas_limit - gas_used`, saturating).
+- `0xa2 gaslimit` (`ø → int` — `current_call.gas_limit`).
+- `0x9f bytes` (`ø → int`) — `int.` context (requires actor +
+  registry; routes through `ActorRegistry::actor_vbytes`).
+- `0xa3 memlimit` (`ø → int` — `current_call.mem_limit`).
+- `0xa4 newbytes` (`ø → int` — `current_call.newbytes`; 0 at
+  `ExternalRoot`).
+
+The counters are stored on `CallFrame` and read by these opcodes,
+but nothing currently increments them — every opcode is implicitly
+free.
+
+**Mem-cap allocator — pending**:
+
 - `VM::charge_mem(vbytes: u64) -> Result<(), VMError>` increments
   `current_call.mem_used`; errors `MemoryCapExceeded` if
   `mem_used > mem_limit` (where `mem_limit = 4 × vbytes(actor)`).
 - Hooks in every allocator: `String::append`,
   `String::append_bytes`, `Dict::insert`, `Cell::new`,
-  `Token::new`, `WideToken` paths.
+  `Token::new`, `WideToken` paths, `MultiscalarMul::push_term`.
 - Per-call `mem_used` is transient (discarded on call exit).
-- Resource introspection opcodes (depend on Phase 34 gas counter
-  + this phase's mem counter being live):
-  - `0x9e gas` (`ø → int` — `gas_limit - gas_used`).
-  - `0xa2 gaslimit` (`ø → int` — `gas_limit`).
-  - `0x9f bytes` (`ø → int` — actor's persistent vbytes; only
-    meaningful in internal context).
-  - `0xa3 memlimit` (`ø → int` — `mem_limit`).
-  - `0xa4 newbytes` (`ø → int` — newbytes delivered with this call).
 - `VMError::MemoryCapExceeded`.
 
-**Tests**: ~10 (memcap on String/Dict/Cell/Token allocators;
-per-call reset; each intro opcode positive + negative; mem
-charged on send/output).
+**Tests pending**: ~10 (memcap on String/Dict/Cell/Token/MSM
+allocators; per-call reset; mem charged on send/output).
 
 ---
 
@@ -438,16 +480,29 @@ at consensus seam, ratio enforcement).
   - `0012-load-save-reentry-lock` — `mark_for_destruction` as
     runtime enforcement of the load/save lock; per-frame
     `loaded` flag; tx-end commit sweep.
-  - `0013-predicate-call-isolation` — `open` / `signcall` / `call`
-    all create isolated call frames; `signrun` renamed to
-    `signcall`; cell-script sandbox eliminates confused-deputy
-    in actor context.
-  - `MultiscalarMul` removal.
+  - `0013-predicate-call-isolation` — **already landed** in
+    `decisions/`. `open` / `signcall` / `call` all create
+    isolated call frames; `signrun` renamed to `signcall`;
+    cell-script sandbox eliminates confused-deputy.
+  - `0014-point-enum-and-string-point` — `Point` as enum with
+    witness variants (Opaque / Commitment / Predicate);
+    `String::Commitment` + `String::Predicate` collapsed into
+    `String::Point(Point)`; `pushpoint` operand becomes a `Point`.
+  - `0015-multiscalarmul-deferred-verification` — MSM Value
+    type with lazy `(scalar, point)` accumulator, batched into
+    `Delegate::BatchVerifier` as `sum == identity` at finalize.
+  - Input-cell witness via `String::Cell` (Phase 22 refactor —
+    document the zkvm-parity choice).
   - `op_log` opcode addition.
   - Encrypted `issue` semantics (recording the Phase-33 decision).
   - `BulletproofGens` singleton.
-  - Input-cell witness re-attachment (Phase 22 design rationale).
   - Extension tag (255) policy (optional).
+- spec.md restructuring (commits `47a3501` → `951d61e`): every
+  opcode now has its own H3 section in zkvm-spec style; light
+  table at top with `Ctx` column instead of inline `[E]`/`[I]`
+  tags; per-opcode `Description` column for happy-path. No
+  semantic changes; quality gate is that the spec reflects the
+  current code.
 - Update `flamevm/design.md` (if it has stale content).
 - Update `status/vm-engineer.md`.
 - Resolve `threats/vm.md` "Open structural questions" against
@@ -492,71 +547,107 @@ Phase 23. Phase 39 focuses on the actor-side flows.
 
 ---
 
-## Phase 40 — Isolated calls: unify `open` / `signcall` / `call`
+## Phase 40 — Isolated calls: unify `open` / `signcall` / `call` (landed)
 
-**Goal**: implement ADR 0013 (design.md §Calls and isolation).
-Predicate-bound execution always creates a new call frame; the
-three call-creating opcodes share one mechanism.
+Implemented per `decisions/0013-predicate-call-isolation.md` across
+five commits (`28a00e6` → `8aee724`):
 
-**Status quo**: `op_open` and `op_signrun` use `enter_run` (Run-level,
-shared frame). `op_call` already creates a `CallKind::ActorCall`
-frame.
+1. **Rename** `signrun` → `signcall` everywhere — opcode constant,
+   enum variant, builder, `op_signrun` → `op_signcall`,
+   `signrun_message` → `signcall_message`, transcript label
+   `flamevm.signrun.v1` → `flamevm.signcall.v1` (consensus-fixed
+   one-shot break in flight). Wire byte unchanged (`0x99`).
+2. **`CallKind::CellOpen`** extended with `external_context: bool`
+   so `is_external()` propagates the caller's CS-availability
+   across the isolation boundary.
+3. **`op_open`** reshaped — pops `gas`, `bytes` operands; verifies
+   call-proof; creates new `CallKind::CellOpen { anchor, predicate,
+   external_context }` frame; payload + args land in the callee's
+   stack; results return via `return k'`. `enter_run` call gone.
+4. **`op_signcall`** mirrors `op_open`'s frame creation; signature
+   recorded before the swap.
+5. **Refactor**: `op_open` and `op_signcall` colocated; shared
+   helpers `enter_cell_open_frame` and `pop_gas_bytes` factored out
+   (also used by `op_call` / `op_send`).
 
-**Items**:
-- **Rename** `signrun` → `signcall` everywhere: opcode constant
-  `OP_SIGNRUN` → `OP_SIGNCALL` (byte stays `0x99`),
-  `Instruction::Signrun` → `Signcall`, `signrun_message` →
-  `signcall_message`, transcript label `flamevm.signrun.v1` →
-  `flamevm.signcall.v1` (consensus-fixed; documented in spec).
-- **Reshape `op_open`**:
-  - Pop additional `gas` + `bytes` operands (Int253) like `op_call`.
-    Spec stack: `cell ik nbrs pos script gas bytes args… k`.
-  - Verify call-proof as today.
-  - Build a `CallKind::CellOpen { anchor, predicate }` frame with
-    its own stack (payload + args), gas, mem_limit. No actor identity.
-  - Replace current Run-level enter; push parent onto `call_stack`.
-- **Reshape `op_signcall`**: same as `op_open`, authenticator
-  changes from merkle-path to signature.
-- **`CallKind::CellOpen`**:
-  - `actor()` returns `None` (no actor identity in cell scope).
-  - `method()` returns `None`.
-  - `caller()` returns `None`.
-  - `anchor()` returns the stored cell anchor.
-  - `op_load` / `op_save` / `op_call` / `op_send` all error
-    `OpcodeRequiresActorContext` from inside a CellOpen frame.
-- **Result protocol**: cell-script must `return k'` to exit; results
-  pour onto the parent's stack. `break:k` cascades past frames as
-  with actor calls. Stack must be empty at clean exit (the existing
-  `finish_call` invariant).
-- **External-context `is_external` semantics**: `CallKind::CellOpen`
-  nested under `ExternalRoot` returns `true` from `is_external`
-  (CS opcodes available); nested under `InternalRoot`/`ActorCall`
-  returns `false` (no CS, no actor authority). This preserves the
-  existing rule that external scripts can use the CS and internal
-  scripts can't.
-- **Tests**: ~12 new
-  - `open_creates_isolated_frame_with_own_stack_and_gas`
-  - `open_clears_remaining_gas_refunds_to_parent`
-  - `open_script_op_load_errors_no_actor`
-  - `open_script_op_call_errors_no_actor`
-  - `open_script_op_send_errors_no_actor`
-  - `open_external_ctx_allows_cs_opcodes`
-  - `open_internal_ctx_blocks_cs_opcodes`
-  - `signcall_isolation_matches_open`
-  - `signcall_message_label_v1`
-  - `open_return_arity_pours_to_parent`
-  - `open_break_cascades_past_frame`
-  - Existing `open_*` tests in `test_cells.rs` re-targeted to push
-    `gas` + `bytes` operands and consume returns.
+`CallKind::CellOpen.actor()` returns `None` → `op_load` /
+`op_save` / `op_call` / `op_send` / `op_actorid` / `op_method` all
+error `OpcodeRequiresActorContext` from inside a cell-open frame
+**with no additional code** (`require_actor` already gates them).
 
-**ADR**: `decisions/0013-predicate-call-isolation.md` formalizes
-the choice. Reserved alongside the actor-build backfill
-(0010 / 0011 / 0012) — see Phase 38.
+Tests: 13 new (4 ADR-0013 isolation invariants + retargeting of
+8 existing `open`/`signcall` tests + helper updates for the
+confidential N→M suite to push `gas`/`bytes` and use `return`-
+terminated leaf scripts).
 
-**Risk**: substantial. Existing scripts using cell-open and
-`signrun` need updated stack shapes. Audit every existing
-`open` / `signcall` test in `test_cells.rs` and
-`test_authorization.rs` to add `gas`/`bytes` and `return k`.
+---
+
+## Phase 41 — `Point` enum + `String::Point` unification (landed)
+
+Type-system refactor across three commits (`6735978`, `c4617fd`,
+`36b3c97`):
+
+- **`Point` becomes an enum** with `Opaque(CompressedRistretto)`,
+  `Commitment(Box<Commitment>)`, `Predicate(Box<Predicate>)`.
+  Inline Opaque + boxed witness variants. Lost `Copy`; gained
+  `Point::to_compressed` / `to_bytes` / `to_commitment` /
+  `to_predicate` accessors and downcasts.
+- **`String::Commitment` and `String::Predicate` collapsed** into
+  a single `String::Point(Point)`. Convenience constructors
+  `String::commitment(c)` / `String::predicate(p)` kept as thin
+  wrappers so existing call sites compile unchanged.
+- **`Instruction::PushPoint([u8; 32])` → `PushPoint(Point)`** —
+  wire bytes unchanged (still 32-byte payload). `pushpoint` can
+  now carry witnesses on the prover side, not only `pushstr`.
+- **`op_cell` / `op_output`** route through `Point::to_predicate`,
+  so a prover-side `PredicateTree` witness flows into cell
+  construction (cell can be unlocked later with the matching
+  call-proof or signature without re-deriving the tree).
+
+Documented in spec.md §Point and §String. ADR
+`0014-point-enum-and-string-point` queued for Phase 38.
+
+---
+
+## Phase 42 — `MultiscalarMul` for Sigma-protocol verification (landed)
+
+Resurrected `MultiscalarMul` as a first-class `Value` variant in
+commit `3a3ca3f`, audited in `audits/vm/2026-05-26-msm-design.md`.
+
+**Purpose**: let contract authors express custom Schnorr / Sigma
+protocols over encrypted data (encryption / decryption / re-
+encryption proofs, pubkey-relation proofs, …) and have the
+network batch-verify them efficiently. Strauss' algorithm makes
+each individual point-scalar multiplication ~4× cheaper when
+folded into a large multi-exponentiation batch.
+
+**Type model**:
+- `MultiscalarMul` is a linear, portable, non-wire-encodable
+  `Value` variant — analogous to `Expression` (lazy LC of CS
+  variables) but lifted to the curve group.
+- Internally a `Vec<(Scalar, Point)>` accumulator.
+- Arithmetic type is `Point`: addable with a `Point` or another
+  `MultiscalarMul`; multipliable by a scalar (`Int253`).
+
+**Opcode lift**:
+- `op_add` — `MSM + Point` / `Point + MSM` / `MSM + MSM` append
+  terms.
+- `op_neg` — flip all scalars.
+- `op_mul` — `MSM × Int253` scales every term's scalar.
+- `op_verify` — queues the MSM into the `Delegate::BatchVerifier`
+  as the statement *"sum of scalar·point terms == identity"*, then
+  returns `Ok` immediately. The actual multi-exponentiation runs
+  once per tx at finalize alongside Schnorr / MuSig signatures.
+
+**Audit findings** (in `audits/vm/2026-05-26-msm-design.md`):
+> Sound. Mirrors `Expression` (lazy linear composition) +
+> `BatchVerifier` (existing batching lane). Two follow-ups:
+> per-term gas charge (Phase 34), per-frame size cap to bound
+> verifier memory (Phase 35).
+
+Tests: 13 new in `flamevm/src/tests/test_msm.rs` covering
+construction, lifts, verify-success / verify-failure, batching
+with signatures.
 
 ---
 
@@ -586,7 +677,9 @@ its phase:
 | Actor data model + identity (Q1, Q2, Q4) | ✅ Done | 24 |
 | Send-id semantics + refund predicate (Q3, Q5) | ✅ Done | 32 |
 | Load/save as re-entry lock + self-destruct (Q6) | ✅ Done | 25 |
-| Isolated calls for `open` / `signcall` / `call` (ADR 0013) | ⏳ Pending | 40 |
+| Isolated calls for `open` / `signcall` / `call` (ADR 0013) | ✅ Done | 40 |
+| Witness types unified under `Point` / `String::Point` | ✅ Done | 41 |
+| MultiscalarMul for Sigma-protocol verification | ✅ Done | 42 |
 
 **Open structural questions** from design.md:
 - BFT family / stake / finality / validator rotation — consensus
