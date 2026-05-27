@@ -276,43 +276,47 @@ impl Program {
     /// `issuepriv` (0x91) — confidential mint under the enclosing
     /// predicate. See [`Instruction::IssuePriv`].
     pub fn issuepriv(mut self) -> Self { self.instructions.push(Instruction::IssuePriv); self }
-    /// `issuepub` (0x92) — cleartext mint under the enclosing actor.
+    /// `issueprivflv` (0x92) — consumer-side flavor helper for
+    /// `issuepriv`. See [`Instruction::IssuePrivFlv`].
+    pub fn issueprivflv(mut self) -> Self { self.instructions.push(Instruction::IssuePrivFlv); self }
+    /// `issuepub` (0x93) — cleartext mint under the enclosing actor.
     /// See [`Instruction::IssuePub`].
     pub fn issuepub(mut self) -> Self { self.instructions.push(Instruction::IssuePub); self }
+    /// `issuepubflv` (0x94) — consumer-side flavor helper for
+    /// `issuepub` (renamed from `issueflv`). See [`Instruction::IssuePubFlv`].
+    pub fn issuepubflv(mut self) -> Self { self.instructions.push(Instruction::IssuePubFlv); self }
     pub fn retire(mut self) -> Self { self.instructions.push(Instruction::Retire); self }
     pub fn borrow(mut self) -> Self { self.instructions.push(Instruction::Borrow); self }
     pub fn merge(mut self) -> Self { self.instructions.push(Instruction::Merge); self }
     pub fn split(mut self) -> Self { self.instructions.push(Instruction::Split); self }
 
-    /// `mix` (0x98) — see [`Instruction::Mix`].
+    /// `mix` (0x99) — see [`Instruction::Mix`].
     pub fn mix(mut self) -> Self {
         self.instructions.push(Instruction::Mix);
         self
     }
 
-    /// `decrypt` (0x99) — see [`Instruction::Decrypt`].
+    /// `decrypt` (0x9a) — see [`Instruction::Decrypt`].
     pub fn decrypt(mut self) -> Self {
         self.instructions.push(Instruction::Decrypt);
         self
     }
 
-    pub fn issue_flv(mut self) -> Self { self.instructions.push(Instruction::IssueFlv); self }
-
     // ── control flow ────────────────────────────────────
 
     pub fn verify(mut self) -> Self { self.instructions.push(Instruction::Verify); self }
 
-    /// `fee` (0x7a) — external-only.
+    /// `fee` (0x9b) — external-only.
     pub fn fee(mut self) -> Self { self.instructions.push(Instruction::Fee); self }
 
     pub fn run(mut self) -> Self { self.instructions.push(Instruction::Run); self }
 
-    /// `loop` (0x7c). Method named `loop_` because `loop` is a Rust keyword.
+    /// `loop` (0xa2). Method named `loop_` because `loop` is a Rust keyword.
     pub fn loop_(mut self) -> Self { self.instructions.push(Instruction::Loop); self }
 
     pub fn switch(mut self) -> Self { self.instructions.push(Instruction::Switch); self }
 
-    /// `return` (0x7e). Method named `return_` because `return` is a Rust keyword.
+    /// `return` (0xa4). Method named `return_` because `return` is a Rust keyword.
     pub fn return_(mut self) -> Self { self.instructions.push(Instruction::Return); self }
 
     pub fn type_(mut self) -> Self { self.instructions.push(Instruction::Type); self }
@@ -346,7 +350,7 @@ impl Program {
     pub fn load(mut self) -> Self { self.instructions.push(Instruction::Load); self }
     pub fn save(mut self) -> Self { self.instructions.push(Instruction::Save); self }
 
-    // ── Tx-level & frame introspection (0x9a..=0xa4) ───
+    // ── Tx-level & frame introspection (0xe0..=0xf1) ───
 
     pub fn timelock(mut self) -> Self { self.instructions.push(Instruction::Timelock); self }
     pub fn version(mut self) -> Self { self.instructions.push(Instruction::Version); self }

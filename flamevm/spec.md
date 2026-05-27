@@ -445,15 +445,16 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 |    | **Tokens** | | | |
 | 90 | [amount](#amount) | | t → t qty flv | Peek the quantity and flavor of a token without consuming it. |
 | 91 | [issuepriv](#issuepriv) | ext. | qty tag → T | Mint a confidential token under the current predicate's identity + `tag`. CellOpen frames only. |
-| 92 | [issuepub](#issuepub) | int. | qty tag → CT | Mint a cleartext token under the current actor's identity + `tag`. ActorCall frames only. |
-| 93 | [issueflv](#issueflv) | | cid tag → int | Compute the canonical flavor scalar for an actor id + tag. |
-| 94 | [retire](#retire) | | t → ø | Burn a token (emits a retire entry to the txlog). |
-| 95 | [borrow](#borrow) | | qty flv → −T +T | Borrow balanced ±token pair; debt must be balanced before tx end. |
-| 96 | [merge](#merge) | | a b → {c 1 \| a b 0} | Combine two same-flavor cleartokens; soft-fail on flavor mismatch. |
-| 97 | [split](#split) | | a q → a' b | Split quantity `q` off a cleartoken. |
-| 98 | [mix](#mix) | ext. | tokens… cmts… m n → tokens | Cloak: prove `m` input tokens balance `n` output commitments per flavor. |
-| 99 | [decrypt](#decrypt) | ext. | T f' f q' q → CT | Open an encrypted Token to a ClearToken using cleartext openings. |
-| 9a | [fee](#fee) | ext. | qty flv → −WT | Pay tx fee; push the balancing WideToken debt to net out via `mix`. |
+| 92 | [issueprivflv](#issueprivflv) | | pred tag → int | Consumer-side helper: recompute `flavor_from_predicate(pred, tag)`. |
+| 93 | [issuepub](#issuepub) | int. | qty tag → CT | Mint a cleartext token under the current actor's identity + `tag`. ActorCall frames only. |
+| 94 | [issuepubflv](#issuepubflv) | | cid tag → int | Consumer-side helper: recompute `flavor_from_actor(cid, tag)`. |
+| 95 | [retire](#retire) | | t → ø | Burn a token (emits a retire entry to the txlog). |
+| 96 | [borrow](#borrow) | | qty flv → −T +T | Borrow balanced ±token pair; debt must be balanced before tx end. |
+| 97 | [merge](#merge) | | a b → {c 1 \| a b 0} | Combine two same-flavor cleartokens; soft-fail on flavor mismatch. |
+| 98 | [split](#split) | | a q → a' b | Split quantity `q` off a cleartoken. |
+| 99 | [mix](#mix) | ext. | tokens… cmts… m n → tokens | Cloak: prove `m` input tokens balance `n` output commitments per flavor. |
+| 9a | [decrypt](#decrypt) | ext. | T f' f q' q → CT | Open an encrypted Token to a ClearToken using cleartext openings. |
+| 9b | [fee](#fee) | ext. | qty flv → −WT | Pay tx fee; push the balancing WideToken debt to net out via `mix`. |
 |    | **Control flow** | | | |
 | a0 | [verify](#verify) | | x → ø | Assert: hard-fail if int is zero, enforce a Constraint, or batch an MSM. |
 | a1 | [run](#run) | | s → … | Execute a sub-program in the *same* call frame. |
@@ -904,25 +905,39 @@ Peeks the top token-shaped value and pushes `(qty, flv)` above it. `ClearToken`:
 
 _qty tag_ → _T_
 
-Pops `tag` (String) and `qty` (`Variable` — a Pedersen commitment lifted via [`commit`](#commit)). Allocates a 64-bit range proof on `qty`. Builds `Token(qty_commitment, unblinded(flavor))` where `flavor = flavor_from_predicate(current_predicate, tag)`. Emits a confidential `TxEntry::Issue` binding the issuance to `current_predicate`, `tag`, and the qty commitment point. Pushes the `Token`.
+Pops `tag` (String) and `qty` (`Variable` — a Pedersen commitment lifted via [`commit`](#commit)). Allocates a 64-bit range proof on `qty`. Builds `Token(qty_commitment, unblinded(flavor))` where `flavor = flavor_from_predicate(current_predicate, tag)`. Emits `TxEntry::IssuePriv(qty_commitment_point, unblinded_flv_point)` — the confidential-issuance txlog effect. Pushes the `Token`.
 
 The current_predicate is the predicate stored on the enclosing `CallKind::CellOpen` frame — created by [`open`](#open) or [`signcall`](#signcall) against an empty cell whose predicate is the desired issuer. Hard-fails `OpcodeRequiresPredicateContext` from `ExternalRoot` (no enclosing predicate) and from any `ActorCall` frame (issuance binds to a predicate, not an actor; the two issuance domains are kept disjoint by construction). Hard-fails `ExternalOnly` in internal context (the CS lane is required for the range proof and the qty commitment).
 
 `Int253` or `Point` operands hard-fail `TypeNotVariable` — lift to a `Variable` via [`commit`](#commit) first.
 
-**Non-fungible tokens.** Mix the cell's [`anchor`](#anchor) into `tag` (e.g. `anchor … keccak256` against domain bytes) to derive a fresh flavor per issuance — the result is a non-fungible Token, since no other issuance will share the flavor.
+**Non-fungible tokens.** Mix the cell's [`anchor`](#anchor) into `tag` (e.g. `anchor … keccak256` against domain bytes) to derive a fresh flavor per issuance — the result is a non-fungible Token, since no other issuance will share the flavor. Use [`issueprivflv`](#issueprivflv) on the consumer side to recompute the same flavor scalar for verification.
+
+### issueprivflv
+
+_pred tag_ → _int_
+
+Pops `tag` (String) and `pred` (String, exactly 32 bytes — a compressed Ristretto predicate point). Pushes `flavor_from_predicate(pred, tag)` as `Int253`. Pure helper: no CS, no txlog entry, no predicate-context requirement. Domain separator is `flamevm.issuepriv.flavor` (consensus-fixed). Hard-fails `IndexOutOfRange` if `pred` is not exactly 32 bytes.
+
+The confidential token's flv commitment is unblinded, so its point uniquely determines this scalar — meaning a consumer who knows the issuing predicate's point and the tag can recompute the flavor and check that an incoming Token belongs to the expected issuance domain.
 
 ### issuepub
 
 _qty tag_ → _CT_
 
-Pops `tag` (String) and `qty` (`Int253` — cleartext). Builds `ClearToken(qty, flavor_from_actor(current_actor, tag))` and emits a cleartext `TxEntry::Issue` binding the issuance to `current_actor`, `tag`, and the cleartext `qty`. Pushes the `ClearToken`.
+Pops `tag` (String) and `qty` (`Int253` — cleartext). Builds `ClearToken(qty, flavor_from_actor(current_actor, tag))` and emits `TxEntry::IssuePub(qty, flv)` carrying the cleartext `(qty, flv)` pair directly as `Int253`s — publicly auditable on the wire without commitment indirection. Pushes the `ClearToken`.
 
 The current_actor is the actor stored on the enclosing `CallKind::ActorCall` frame. Hard-fails `OpcodeRequiresActorContext` from `ExternalRoot` and from any `CellOpen` frame (issuance binds to an actor, not a predicate; the two issuance domains are kept disjoint by construction). Runs without CS — internal context only.
 
 `Variable` or `Point` operands hard-fail `TypeNotInt253` — `issuepub` is the cleartext path; for confidential qty, use [`issuepriv`](#issuepriv) from a `CellOpen` frame.
 
-**Non-fungible tokens.** Mix the call's [`anchor`](#anchor) into `tag` to derive a fresh flavor per call — yields a unique non-fungible token. Use [`issueflv`](#issueflv) on the consumer side to recompute the same flavor scalar for verification.
+**Non-fungible tokens.** Mix the call's [`anchor`](#anchor) into `tag` to derive a fresh flavor per call — yields a unique non-fungible token. Use [`issuepubflv`](#issuepubflv) on the consumer side to recompute the same flavor scalar for verification.
+
+### issuepubflv
+
+_cid tag_ → _int_
+
+Pops `tag` (String) and `cid` (String, exactly 32 bytes — an actor id). Pushes `flavor_from_actor(cid, tag)` as `Int253`. Pure helper: no CS, no txlog entry, no actor-context requirement. Domain separator is `flamevm.issuepub.flavor` (consensus-fixed). Hard-fails `IndexOutOfRange` if `cid` is not exactly 32 bytes.
 
 ### retire
 
@@ -965,12 +980,6 @@ Hard-fails `MixDegenerate` if `m == 0` or `n == 0`. Mirrors zkvm's `cloak:m:n`.
 _T f' f q' q_ → _CT_
 
 Pops the cleartext blinding/value pairs (`q' q` for quantity, `f' f` for flavor) and the encrypted `Token`. Verifies that the supplied openings reconstruct the Token's commitment points; pushes a `ClearToken(q, f)` on success. Hard-fails on commitment mismatch.
-
-### issueflv
-
-_cid tag_ → _int_
-
-Pops `tag` (String) and `cid` (String, exactly 32 bytes — an actor id). Pushes `flavor_from_actor(cid, tag)` as `Int253`. Pure helper: no CS, no txlog entry, no actor-context requirement. Domain separator is `flamevm.token.flavor` (consensus-fixed).
 
 ## Control-flow instructions
 

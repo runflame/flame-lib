@@ -59,16 +59,20 @@ pub enum TxEntry {
     /// Output: a newly sealed cell, emitted by the `output` opcode.
     Output(crate::Cell),
 
-    /// Issuance: an asset value has just been *created* into circulation.
-    /// Carries `(qty_point, flv_point)` — Pedersen commitments to the
-    /// quantity and flavor scalars.
-    ///
-    /// For the cleartext issuance branch (`issue` with `Int253` qty),
-    /// both commitments are unblinded (blinding factor = 0). For the
-    /// encrypted branch, the commitments are the live
-    /// blinded points whose openings are proven through the constraint
-    /// system.
-    Issue(CompressedRistretto, CompressedRistretto),
+    /// Cleartext issuance (emitted by `op_issuepub`). Carries the
+    /// cleartext `(qty, flv)` pair as `Int253`s — public on the wire,
+    /// directly auditable. Flavor is `flavor_from_actor(actor, tag)`
+    /// for the actor that ran `issuepub`.
+    IssuePub(crate::Int253, crate::Int253),
+
+    /// Confidential issuance (emitted by `op_issuepriv`). Carries
+    /// `(qty_point, flv_point)` — the live Pedersen commitment to the
+    /// qty and the unblinded commitment to the flavor scalar. Flavor
+    /// is `flavor_from_predicate(predicate, tag)` for the predicate
+    /// whose `CellOpen` frame ran `issuepriv`. Soundness of the qty
+    /// commitment + 64-bit range proof is established through the
+    /// constraint system.
+    IssuePriv(CompressedRistretto, CompressedRistretto),
 
     /// Retirement: an asset value has been *destroyed* from circulation.
     /// Same `(qty_point, flv_point)` shape as `Issue`. Cleartext or
@@ -147,7 +151,8 @@ impl core::fmt::Debug for TxEntry {
                 f.debug_tuple("TxEntry::Input").field(id).finish()
             }
             TxEntry::Output(_) => f.write_str("TxEntry::Output(<cell>)"),
-            TxEntry::Issue(_, _) => f.write_str("TxEntry::Issue(<qty>, <flv>)"),
+            TxEntry::IssuePub(_, _) => f.write_str("TxEntry::IssuePub(<qty>, <flv>)"),
+            TxEntry::IssuePriv(_, _) => f.write_str("TxEntry::IssuePriv(<qty>, <flv>)"),
             TxEntry::Retire(_, _) => {
                 f.write_str("TxEntry::Retire(<qty>, <flv>)")
             }
@@ -194,9 +199,13 @@ impl MerkleItem for TxEntry {
                 let id = cell.id();
                 t.append_message(b"output", &id);
             }
-            TxEntry::Issue(qty_pt, flv_pt) => {
-                t.append_message(b"issue.qty", qty_pt.as_bytes());
-                t.append_message(b"issue.flv", flv_pt.as_bytes());
+            TxEntry::IssuePub(qty, flv) => {
+                t.append_message(b"issuepub.qty", &qty.to_bytes());
+                t.append_message(b"issuepub.flv", &flv.to_bytes());
+            }
+            TxEntry::IssuePriv(qty_pt, flv_pt) => {
+                t.append_message(b"issuepriv.qty", qty_pt.as_bytes());
+                t.append_message(b"issuepriv.flv", flv_pt.as_bytes());
             }
             TxEntry::Retire(qty_pt, flv_pt) => {
                 t.append_message(b"retire.qty", qty_pt.as_bytes());

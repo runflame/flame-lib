@@ -67,7 +67,7 @@ The split is structural, not policy: **privacy lives where the CS lives**. Predi
 
 The two issuer domains are **disjoint by construction**. Both opcodes seed a single Merlin transcript labelled `flamevm.token.flavor` (consensus-fixed), but `issuepub` opens it with first message `b"actor"` while `issuepriv` opens it with `b"predicate"`. A predicate-point that happens to be byte-identical to an actor id still produces a different flavor scalar — actors and predicates cannot collide on the same flavor by accident, and a predicate cannot forge an actor's flavor (or vice versa) by colliding identities.
 
-The `retire` opcode destroys a token regardless of how it was minted. Issuance and retirement are both explicit transaction [effects](#effect) (`TxEntry::Issue`, `TxEntry::Retire`), recorded so an outside observer can audit the money supply for any flavor.
+The `retire` opcode destroys a token regardless of how it was minted. Issuance and retirement are explicit transaction [effects](#effect) — `issuepub` emits `TxEntry::IssuePub(qty, flv)` (cleartext `Int253` pair on the wire), `issuepriv` emits `TxEntry::IssuePriv(qty_point, flv_point)` (Pedersen commitments), and `retire` emits `TxEntry::Retire(qty_point, flv_point)`. The split keeps the wire-level audit trail clean: a verifier can tell at a glance whether an issuance reveals its qty/flv directly or only via commitments.
 
 ### Constraint types
 

@@ -70,7 +70,7 @@ fn phase19_op_fee_rejects_negative_qty() {
     script.push(0x10);
     script.push(0);
     // fee
-    script.push(0x9a);
+    script.push(0x9b);
     let program = crate::Program::parse(&script).expect("decode");
     // Run all 3 instructions; the third (fee) must error.
     let mut vm = VM::new(
@@ -168,7 +168,7 @@ fn phase19_op_fee_rejects_internal_context() {
     // qty=1, flv=0, fee
     script.push(0x01); // push:1
     script.push(0x00); // push:0
-    script.push(0x9a); // fee
+    script.push(0x9b); // fee
     let mut vm = vm_with_script(script);
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::ExternalOnly));

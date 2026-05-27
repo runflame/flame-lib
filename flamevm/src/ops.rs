@@ -101,18 +101,20 @@ const OP_SHA3: u8 = 0x85;
 const OP_KECCAK256: u8 = 0x86;
 const OP_LOG: u8 = 0x87;
 
-// 0x9X — Tokens
+// 0x9X — Tokens. Mint opcodes and their consumer-side flavor helpers
+// are paired (priv ↔ privflv, pub ↔ pubflv) for adjacency.
 const OP_AMOUNT: u8 = 0x90;
 const OP_ISSUEPRIV: u8 = 0x91;
-const OP_ISSUEPUB: u8 = 0x92;
-const OP_ISSUEFLV: u8 = 0x93;
-const OP_RETIRE: u8 = 0x94;
-const OP_BORROW: u8 = 0x95;
-const OP_MERGE: u8 = 0x96;
-const OP_SPLIT: u8 = 0x97;
-const OP_MIX: u8 = 0x98;
-const OP_DECRYPT: u8 = 0x99;
-const OP_FEE: u8 = 0x9a;
+const OP_ISSUEPRIVFLV: u8 = 0x92;
+const OP_ISSUEPUB: u8 = 0x93;
+const OP_ISSUEPUBFLV: u8 = 0x94;
+const OP_RETIRE: u8 = 0x95;
+const OP_BORROW: u8 = 0x96;
+const OP_MERGE: u8 = 0x97;
+const OP_SPLIT: u8 = 0x98;
+const OP_MIX: u8 = 0x99;
+const OP_DECRYPT: u8 = 0x9a;
+const OP_FEE: u8 = 0x9b;
 
 // 0xaX — Control flow
 const OP_VERIFY: u8 = 0xa0;
@@ -220,15 +222,16 @@ pub enum Instruction {
     Sha3,                  // s sha3 → x
     Log,                   // s log → ø
     Amount,                // t amount → t qty flv
-    IssuePriv,             // qty:Variable tag issuepriv → T (predicate context)
-    IssuePub,              // qty:Int253  tag issuepub  → CT (actor context)
+    IssuePriv,             // qty:Variable tag issuepriv    → T  (predicate context)
+    IssuePrivFlv,          // pred tag    issueprivflv      → int (consumer-side flv helper for issuepriv)
+    IssuePub,              // qty:Int253  tag issuepub      → CT (actor context)
+    IssuePubFlv,           // cid tag     issuepubflv       → int (consumer-side flv helper for issuepub)
     Retire,                // t retire → ø
     Borrow,                // qty flv borrow → -T +T
     Merge,                 // a b merge → {c 1 | a b 0}
     Split,                 // a q split → a' b
     Mix,                   // tokens… cmts… m n mix → tokens
     Decrypt,               // T f' f q' q decrypt → CT
-    IssueFlv,              // cid tag issueflv → int
     Verify,                // x verify → ø
     Fee,                   // qty flv fee → -WT
     Run,                   // s run → …
@@ -344,14 +347,15 @@ impl Instruction {
             Instruction::Log => out.push(OP_LOG),
             Instruction::Amount => out.push(OP_AMOUNT),
             Instruction::IssuePriv => out.push(OP_ISSUEPRIV),
+            Instruction::IssuePrivFlv => out.push(OP_ISSUEPRIVFLV),
             Instruction::IssuePub => out.push(OP_ISSUEPUB),
+            Instruction::IssuePubFlv => out.push(OP_ISSUEPUBFLV),
             Instruction::Retire => out.push(OP_RETIRE),
             Instruction::Borrow => out.push(OP_BORROW),
             Instruction::Merge => out.push(OP_MERGE),
             Instruction::Split => out.push(OP_SPLIT),
             Instruction::Mix => out.push(OP_MIX),
             Instruction::Decrypt => out.push(OP_DECRYPT),
-            Instruction::IssueFlv => out.push(OP_ISSUEFLV),
             Instruction::Verify => out.push(OP_VERIFY),
             Instruction::Fee => out.push(OP_FEE),
             Instruction::Run => out.push(OP_RUN),
@@ -490,14 +494,15 @@ impl Instruction {
             OP_LOG => Ok(Instruction::Log),
             OP_AMOUNT => Ok(Instruction::Amount),
             OP_ISSUEPRIV => Ok(Instruction::IssuePriv),
+            OP_ISSUEPRIVFLV => Ok(Instruction::IssuePrivFlv),
             OP_ISSUEPUB => Ok(Instruction::IssuePub),
+            OP_ISSUEPUBFLV => Ok(Instruction::IssuePubFlv),
             OP_RETIRE => Ok(Instruction::Retire),
             OP_BORROW => Ok(Instruction::Borrow),
             OP_MERGE => Ok(Instruction::Merge),
             OP_SPLIT => Ok(Instruction::Split),
             OP_MIX => Ok(Instruction::Mix),
             OP_DECRYPT => Ok(Instruction::Decrypt),
-            OP_ISSUEFLV => Ok(Instruction::IssueFlv),
             OP_VERIFY => Ok(Instruction::Verify),
             OP_FEE => Ok(Instruction::Fee),
             OP_RUN => Ok(Instruction::Run),
@@ -819,8 +824,9 @@ mod tests {
             Instruction::Sha256,
             Instruction::Amount,
             Instruction::IssuePriv,
+            Instruction::IssuePrivFlv,
             Instruction::IssuePub,
-            Instruction::IssueFlv,
+            Instruction::IssuePubFlv,
             Instruction::Verify,
             Instruction::Return,
             Instruction::Input,

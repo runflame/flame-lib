@@ -802,7 +802,8 @@ impl VM {
             I::Borrow => self.op_borrow(delegate),
             I::Merge => self.op_merge(),
             I::Split => self.op_split(),
-            I::IssueFlv => self.op_issueflv(),
+            I::IssuePubFlv => self.op_issuepubflv(),
+            I::IssuePrivFlv => self.op_issueprivflv(),
 
             I::Alloc(w) => self.op_alloc(w, delegate),
             I::Expr => self.op_expr(delegate),
@@ -1904,10 +1905,10 @@ impl VM {
         };
         let actor = self.require_actor()?.clone();
         let flv = flavor_from_actor(&actor, &tag);
-        self.txlog.push(crate::tx::TxEntry::Issue(
-            Commitment::unblinded(qty).to_point(),
-            Commitment::unblinded(flv).to_point(),
-        ));
+        // Cleartext qty + flv go straight into the txlog as `Int253`s —
+        // no commitment indirection. The `IssuePub` entry is publicly
+        // auditable directly on the wire.
+        self.txlog.push(crate::tx::TxEntry::IssuePub(qty, flv));
         self.push_value(Value::ClearToken(ClearToken::new(qty, flv)));
         Ok(())
     }
@@ -1928,7 +1929,7 @@ impl VM {
     ///    `borrow`/`mix`/output-side bounds).
     /// 4. Compute `flv = flavor_from_predicate(current_predicate, tag)`
     ///    deterministically.
-    /// 5. Emit `TxEntry::Issue(qty_commitment_point, flv_unblinded_point)`.
+    /// 5. Emit `TxEntry::IssuePriv(qty_commitment_point, flv_unblinded_point)`.
     /// 6. Push `Token { qty: qty_commitment, flv: Commitment::unblinded(flv) }`.
     fn op_issuepriv<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         // Snapshot the predicate before any pop, so a wrong frame
@@ -1964,7 +1965,7 @@ impl VM {
         let flv = flavor_from_predicate(&predicate, &tag);
         let flv_commit = Commitment::unblinded(flv);
 
-        self.txlog.push(crate::tx::TxEntry::Issue(
+        self.txlog.push(crate::tx::TxEntry::IssuePriv(
             qty_var.commitment.to_point(),
             flv_commit.to_point(),
         ));
@@ -2058,10 +2059,15 @@ impl VM {
         }
     }
 
-    /// _cid tag_ **issueflv** → _int_
+    /// _cid tag_ **issuepubflv** → _int_
     ///
-    /// Pure helper: no CS, no txlog effect, no actor-context requirement.
-    fn op_issueflv(&mut self) -> Result<(), VMError> {
+    /// Consumer-side helper for `issuepub`: pops `tag` (String) and
+    /// `cid` (String, exactly 32 bytes — an actor id), pushes
+    /// `flavor_from_actor(cid, tag)` as `Int253`. Pure helper: no CS,
+    /// no txlog effect, no actor-context requirement. Use to
+    /// recompute and verify a cleartext token's flavor without
+    /// running the corresponding `issuepub`.
+    fn op_issuepubflv(&mut self) -> Result<(), VMError> {
         let tag = self.pop_value()?.to_string()?;
         let cid = self.pop_value()?.to_string()?;
         if cid.len() != 32 {
@@ -2070,6 +2076,31 @@ impl VM {
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(cid.as_bytes());
         let flv = flavor_from_actor(&ActorID::Hash(bytes), &tag);
+        self.push_value(Value::Int253(flv));
+        Ok(())
+    }
+
+    /// _pred tag_ **issueprivflv** → _int_
+    ///
+    /// Consumer-side helper for `issuepriv`: pops `tag` (String) and
+    /// `pred` (String, exactly 32 bytes — a compressed Ristretto
+    /// predicate point), pushes `flavor_from_predicate(pred, tag)` as
+    /// `Int253`. Pure helper: no CS, no txlog effect, no
+    /// predicate-context requirement. Use to recompute and verify a
+    /// confidential token's flavor (the flv commitment is unblinded,
+    /// so its point determines the scalar).
+    fn op_issueprivflv(&mut self) -> Result<(), VMError> {
+        let tag = self.pop_value()?.to_string()?;
+        let pred = self.pop_value()?.to_string()?;
+        if pred.len() != 32 {
+            return Err(VMError::IndexOutOfRange);
+        }
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(pred.as_bytes());
+        let predicate = crate::Predicate::opaque(
+            curve25519_dalek::ristretto::CompressedRistretto(bytes),
+        );
+        let flv = flavor_from_predicate(&predicate, &tag);
         self.push_value(Value::Int253(flv));
         Ok(())
     }

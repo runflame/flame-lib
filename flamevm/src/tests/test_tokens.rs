@@ -198,17 +198,15 @@ fn issuepub_clear_path_emits_txlog_and_returns_cleartoken() {
         _ => panic!("expected ClearToken"),
     }
 
-    // Txlog has Header + Issue entry with unblinded commitments.
+    // Txlog has Header + IssuePub entry with cleartext (qty, flv).
     assert_eq!(vm.txlog.len(), 2);
     assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
-    let expected_qty_pt = Commitment::unblinded(Int253::from(7u64)).to_point();
-    let expected_flv_pt = Commitment::unblinded(expected_flv).to_point();
     match &vm.txlog[1] {
-        crate::tx::TxEntry::Issue(q, f) => {
-            assert_eq!(*q, expected_qty_pt);
-            assert_eq!(*f, expected_flv_pt);
+        crate::tx::TxEntry::IssuePub(q, f) => {
+            assert_eq!(*q, Int253::from(7u64));
+            assert_eq!(*f, expected_flv);
         }
-        _ => panic!("expected TxEntry::Issue"),
+        _ => panic!("expected TxEntry::IssuePub"),
     }
 }
 
@@ -260,7 +258,7 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
     //   1. Register the qty commitment with the CS.
     //   2. Allocate a 64-bit range proof.
     //   3. Compute flavor = flavor_from_predicate(current_predicate, tag).
-    //   4. Emit TxEntry::Issue(qty_point, unblinded_flv_point).
+    //   4. Emit TxEntry::IssuePriv(qty_point, unblinded_flv_point).
     //   5. Push Token { qty, flv: unblinded(flv) }.
     use bulletproofs::PedersenGens;
     let pc_gens = PedersenGens::default();
@@ -324,16 +322,16 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
     assert_int(&vm.current_call.stack[1], Int253::from(1u64));
     assert_int(&vm.current_call.stack[2], Int253::from(1u64));
 
-    // Txlog: Header + Issue(qty_point, unblinded_flv_point).
+    // Txlog: Header + IssuePriv(qty_point, unblinded_flv_point).
     assert_eq!(vm.txlog.len(), 2);
     assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
     let expected_flv_pt = crate::Commitment::unblinded(expected_flv).to_point();
     match &vm.txlog[1] {
-        crate::tx::TxEntry::Issue(q, f) => {
+        crate::tx::TxEntry::IssuePriv(q, f) => {
             assert_eq!(*q, qty_commit.to_point());
             assert_eq!(*f, expected_flv_pt);
         }
-        _ => panic!("expected TxEntry::Issue"),
+        _ => panic!("expected TxEntry::IssuePriv"),
     }
 }
 
@@ -430,7 +428,7 @@ fn issuepriv_prove_then_verify_end_to_end() {
     //   stack at entry: [qty_witness_string]  (k=1 arg from `open`)
     //   commit:    pop String → Variable
     //   pushstr:   tag
-    //   issuepriv: Variable + tag → Token  (TxEntry::Issue)
+    //   issuepriv: Variable + tag → Token  (TxEntry::IssuePriv)
     //   retire:    Token → ø                 (TxEntry::Retire)
     //   push:0 return: exit with 0 results
     let inner = Program::new()
@@ -522,9 +520,9 @@ fn issuepriv_prove_then_verify_end_to_end() {
     let expected_qty_pt = qty_commit.to_point();
     let has_issue = verified.txlog.iter().any(|e| matches!(
         e,
-        crate::tx::TxEntry::Issue(q, f) if *q == expected_qty_pt && *f == expected_flv_pt,
+        crate::tx::TxEntry::IssuePriv(q, f) if *q == expected_qty_pt && *f == expected_flv_pt,
     ));
-    assert!(has_issue, "verifier's txlog must contain Issue(qty, flv)");
+    assert!(has_issue, "verifier's txlog must contain IssuePriv(qty, flv)");
     let has_retire = verified.txlog.iter().any(|e| matches!(
         e,
         crate::tx::TxEntry::Retire(q, f) if *q == expected_qty_pt && *f == expected_flv_pt,
@@ -714,16 +712,16 @@ fn split_above_qty_hard_fails() {
 }
 
 #[test]
-fn issueflv_pushes_correct_flavor() {
-    // pushstr <32-byte cid>, pushstr "gold", issueflv.
+fn issuepubflv_pushes_correct_flavor() {
+    // pushstr <32-byte cid>, pushstr "gold", issuepubflv.
     let actor_bytes = [0xab; 32];
     let script = Program::new()
         .push_str(String::from(actor_bytes.to_vec()))
         .push_str(String::from(b"gold".to_vec()))
-        .issue_flv()
+        .issuepubflv()
         .to_bytecode();
     let mut vm = vm_with_script(script);
-    run_to_end(&mut vm).expect("issueflv ok");
+    run_to_end(&mut vm).expect("issuepubflv ok");
     let expected = test_flavor_from_actor(
         &ActorID::Hash(actor_bytes),
         &String::from(b"gold".to_vec()),
@@ -733,11 +731,45 @@ fn issueflv_pushes_correct_flavor() {
 }
 
 #[test]
-fn issueflv_rejects_non_32_byte_cid() {
+fn issuepubflv_rejects_non_32_byte_cid() {
     let script = Program::new()
         .push_str(String::from(vec![0xab; 16]))     // bad 16-byte cid
         .push_str(String::from(b"gold".to_vec()))
-        .issue_flv()
+        .issuepubflv()
+        .to_bytecode();
+    let mut vm = vm_with_script(script);
+    let err = run_to_end(&mut vm).unwrap_err();
+    assert!(matches!(err, VMError::IndexOutOfRange));
+}
+
+#[test]
+fn issueprivflv_pushes_correct_flavor() {
+    // pushstr <32-byte predicate point>, pushstr "gold", issueprivflv.
+    let pred_bytes = [0xcd; 32];
+    let script = Program::new()
+        .push_str(String::from(pred_bytes.to_vec()))
+        .push_str(String::from(b"gold".to_vec()))
+        .issueprivflv()
+        .to_bytecode();
+    let mut vm = vm_with_script(script);
+    run_to_end(&mut vm).expect("issueprivflv ok");
+    let predicate = crate::Predicate::opaque(
+        curve25519_dalek::ristretto::CompressedRistretto(pred_bytes),
+    );
+    let expected = crate::token::flavor_from_predicate(
+        &predicate,
+        &String::from(b"gold".to_vec()),
+    );
+    assert_eq!(vm.current_call.stack.len(), 1);
+    assert_int(&vm.current_call.stack[0], expected);
+}
+
+#[test]
+fn issueprivflv_rejects_non_32_byte_predicate() {
+    let script = Program::new()
+        .push_str(String::from(vec![0xcd; 16]))     // bad 16-byte predicate
+        .push_str(String::from(b"gold".to_vec()))
+        .issueprivflv()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     let err = run_to_end(&mut vm).unwrap_err();

@@ -189,7 +189,7 @@ impl ClearToken {
 /// and uses a Flame-specific Merlin domain. Consensus-fixed string —
 /// any rename is a hard fork.
 pub fn flavor_from_actor(actor: &ActorID, tag: &String) -> Int253 {
-    let mut t = Transcript::new(b"flamevm.token.flavor");
+    let mut t = Transcript::new(b"flamevm.issuepub.flavor");
     // `to_hash()` collapses both enum variants to the canonical
     // 32-byte form; for the Hash variant it's the stored id, for
     // the Constructor variant it's the deterministic seed (per
@@ -213,7 +213,7 @@ pub fn flavor_from_predicate(
     predicate: &crate::cell::Predicate,
     tag: &String,
 ) -> Int253 {
-    let mut t = Transcript::new(b"flamevm.token.flavor");
+    let mut t = Transcript::new(b"flamevm.issuepriv.flavor");
     let point_bytes = predicate.to_point().to_bytes();
     t.append_message(b"predicate", &point_bytes);
     t.append_message(b"tag", tag.as_bytes());

@@ -197,7 +197,7 @@ unified the witness model, added a lazy MSM type, retired
 | 35 | `MultiscalarMul` for Sigma protocols                        | 13    | `MultiscalarMul` Value type (linear, portable, non-wire). Lazy `Vec<(Scalar, Point)>` accumulator; `op_add`/`neg`/`mul` lift point arithmetic; `op_verify` adds it to the existing `BatchVerifier` lane as `sum == identity`. |
 | 36 | TxLog records effects, not control flow (ADR 0014)          | 1 (new) | Drop `TxEntry::Call`; add `TxEntry::ActorSave { actor, post_state_root }` emitted by `op_save`. MerkleItem domain tags retired/added. Tests reworked: `call_emits_…` → `call_does_not_emit_txlog_entry_by_itself`. |
 | 37 | Batch rollback under call failure                           | 2 (new) | `starsig::BatchSnapshot` + `BatchCheckpoint` trait. `CallFrame::snap_batch` populated when child pushed; restored on failure. MSM + sig contributions from failed callees no longer pollute the caller's batch. |
-| 38 | Issuance redesign (`issuepub` + `issuepriv` split)          | 6 (new) | Two disjoint opcodes: `issuepub` (`0x92`, cleartext, ActorCall frames) + `issuepriv` (`0x91`, confidential, CellOpen frames). `flavor_from_predicate` helper added alongside `flavor_from_actor` (transcript label `flamevm.token.flavor` + first-message domain separation `b"predicate"`/`b"actor"`). `issuepriv` allocates a 64-bit range proof + registers the qty commitment with the CS, emits `TxEntry::Issue(qty_point, unblinded_flv_point)`. Full prove→verify roundtrip test ships in `test_tokens::issuepriv_prove_then_verify_end_to_end`. |
+| 38 | Issuance redesign (`issuepub` + `issuepriv` split, with `pubflv`/`privflv` helpers) | 8 (new) | Two disjoint mint opcodes + two consumer-side flavor helpers: `issuepriv` (`0x91`, confidential, CellOpen frames), `issueprivflv` (`0x92`), `issuepub` (`0x93`, cleartext, ActorCall frames), `issuepubflv` (`0x94`). Disjoint flavor domains via distinct Merlin labels (`flamevm.issuepriv.flavor` vs `flamevm.issuepub.flavor`). `issuepriv` allocates a 64-bit range proof + registers the qty commitment with the CS, emits `TxEntry::IssuePriv(qty_point, unblinded_flv_point)`. `issuepub` emits `TxEntry::IssuePub(qty:Int253, flv:Int253)` — cleartext on the wire. `fee`/`borrow`/`merge`/`split`/`mix`/`decrypt` shifted up one slot to make room. Full prove→verify roundtrip test in `test_tokens::issuepriv_prove_then_verify_end_to_end`. |
 
 ## Known wiring gap
 
@@ -252,7 +252,7 @@ draft was rejected in favour of disjoint opcodes:
 - **`issuepriv`** (`0x91`, external-only) — confidential mint under
   the enclosing predicate's identity. `qty:Variable tag → Token`.
   Allocates a 64-bit range proof on the qty commitment; emits
-  `TxEntry::Issue(qty_point, unblinded_flv_point)`. Requires a
+  `TxEntry::IssuePriv(qty_point, unblinded_flv_point)`. Requires a
   `CallKind::CellOpen` frame (errors `OpcodeRequiresPredicateContext`
   outside) AND external context (errors `ExternalOnly` in internal).
 
