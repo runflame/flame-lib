@@ -405,7 +405,6 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 4b | [bitxor](#bitxor) | | a b → c | Bitwise XOR of two equal-length strings. |
 | 4c | [shiftleft](#shiftleft) | | a n → b c | Shift a string left by `n` bits; `c` carries the displaced high bits. |
 | 4d | [shiftright](#shiftright) | | a n → b c | Shift a string right by `n` bits; `c` carries the displaced low bits. |
-| 4e | [keccak256](#keccak256) | | s → x | 32-byte Keccak-256 digest (Ethereum compatibility). |
 |    | **Math & logic**  | | | |
 | 50 | [abs](#abs) | | x → \|x\| s | Push magnitude and sign-bit of an int (`s` ∈ {0,1}). |
 | 51 | [eq](#eq) | | a b → a b {0\|1} or constraint | Equality test — cleartext peek, or lifted Constraint in the CS. |
@@ -435,13 +434,14 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 77 | [last](#first--last--next) | | dict → dict {k 1 \| 0} | Push the largest key, or `0` for an empty dict. |
 | 78 | [next](#first--last--next) | | dict k → dict {k' 1 \| 0} | Push the smallest key strictly greater than `k`. |
 |    | **Cryptography**  | | | |
-| 80 | [merlin](#merlin) | | label → merlin | Open a new Merlin transcript seeded with `label`. |
-| 81 | [merlinwrite](#merlinwrite) | | m label s → m | Append a labeled byte string to a transcript. |
-| 82 | [merlinread](#merlinread) | | m label n → m s | Challenge `n` bytes from a transcript under `label`. |
+| 80 | [transcript](#transcript) | | label → merlin | Open a new Merlin transcript seeded with `label`. |
+| 81 | [twrite](#twrite) | | m label s → m | Append a labeled byte string to a transcript. |
+| 82 | [tread](#tread) | | m label n → m s | Challenge `n` bytes from a transcript under `label`. |
 | 83 | [sha256](#sha256) | | s → x | 32-byte SHA-256 digest. |
 | 84 | [sha512](#sha512) | | s → x | 64-byte SHA-512 digest. |
 | 85 | [sha3](#sha3) | | s → x | 32-byte SHA3-256 (FIPS-202) digest. |
-| 86 | [log](#log) | | s → ø | Emit a byte string as a data entry into the transaction log. |
+| 86 | [keccak256](#keccak256) | | s → x | 32-byte Keccak-256 digest (Ethereum compatibility). |
+| 87 | [log](#log) | | s → ø | Emit a byte string as a data entry into the transaction log. |
 |    | **Tokens** | | | |
 | 90 | [amount](#amount) | | t → t qty flv | Peek the quantity and flavor of a token without consuming it. |
 | 91 | [issuepriv](#issuepriv) | ext. | qty tag → T | Mint a confidential token under the current predicate's identity + `tag`. CellOpen frames only. |
@@ -668,12 +668,6 @@ _a n_ → _b c_
 
 Mirror of `shiftleft`; displaced low-end bits land in `c` zero-padded on the right.
 
-### keccak256
-
-_s_ → _x_
-
-Returns a 32-byte Keccak-256 digest (Ethereum compatibility). Distinct from [`sha3`](#sha3) (FIPS-202).
-
 ## Arithmetic & logic instructions
 
 ### abs
@@ -848,19 +842,19 @@ Iteration helpers. Push the first/last key of the dict, or the key after `k`, or
 
 ## Cryptography instructions
 
-### merlin
+### transcript
 
 _label_ → _merlin_
 
-Creates a fresh [Merlin transcript](#types) seeded with `label`. The transcript is a linear value (never copyable, never droppable) consumed by `merlinwrite` / `merlinread` to build custom ZKP statements.
+Creates a fresh [Merlin transcript](#types) seeded with `label`. The transcript is a linear value (never copyable, never droppable) consumed by `twrite` / `tread` to build custom ZKP statements.
 
-### merlinwrite
+### twrite
 
 _merlin label s_ → _merlin_
 
 Appends `(label, s)` to the transcript and returns the same transcript on top.
 
-### merlinread
+### tread
 
 _merlin label n_ → _merlin s_
 
@@ -883,6 +877,12 @@ Returns a 64-byte SHA-512 digest.
 _s_ → _x_
 
 Returns a 32-byte SHA3-256 (FIPS-202) digest. Distinct from [`keccak256`](#keccak256).
+
+### keccak256
+
+_s_ → _x_
+
+Returns a 32-byte Keccak-256 digest (Ethereum compatibility). Distinct from [`sha3`](#sha3) (FIPS-202).
 
 ### log
 

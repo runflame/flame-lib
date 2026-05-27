@@ -186,7 +186,6 @@ impl Program {
     pub fn bit_xor(mut self) -> Self { self.instructions.push(Instruction::BitXor); self }
     pub fn shift_left(mut self) -> Self { self.instructions.push(Instruction::ShiftLeft); self }
     pub fn shift_right(mut self) -> Self { self.instructions.push(Instruction::ShiftRight); self }
-    pub fn keccak256(mut self) -> Self { self.instructions.push(Instruction::Keccak256); self }
 
     // ── Int253 arithmetic ───────────────────────────────
 
@@ -252,16 +251,20 @@ impl Program {
     pub fn last(mut self) -> Self { self.instructions.push(Instruction::Last); self }
     pub fn next(mut self) -> Self { self.instructions.push(Instruction::Next); self }
 
-    // ── Merlin + SHA ────────────────────────────────────
+    // ── Cryptography ────────────────────────────────────
 
-    pub fn merlin(mut self) -> Self { self.instructions.push(Instruction::Merlin); self }
-    pub fn merlin_write(mut self) -> Self { self.instructions.push(Instruction::MerlinWrite); self }
-    pub fn merlin_read(mut self) -> Self { self.instructions.push(Instruction::MerlinRead); self }
+    /// `transcript` (0x80) — open a fresh Merlin transcript.
+    pub fn transcript(mut self) -> Self { self.instructions.push(Instruction::Transcript); self }
+    /// `twrite` (0x81) — absorb `(label, data)` into the transcript.
+    pub fn twrite(mut self) -> Self { self.instructions.push(Instruction::TWrite); self }
+    /// `tread` (0x82) — squeeze `n` challenge bytes under `label`.
+    pub fn tread(mut self) -> Self { self.instructions.push(Instruction::TRead); self }
     pub fn sha256(mut self) -> Self { self.instructions.push(Instruction::Sha256); self }
     pub fn sha512(mut self) -> Self { self.instructions.push(Instruction::Sha512); self }
     pub fn sha3(mut self) -> Self { self.instructions.push(Instruction::Sha3); self }
+    pub fn keccak256(mut self) -> Self { self.instructions.push(Instruction::Keccak256); self }
 
-    /// `log` (0x6f) — see [`Instruction::Log`].
+    /// `log` (0x87) — see [`Instruction::Log`].
     pub fn log(mut self) -> Self {
         self.instructions.push(Instruction::Log);
         self

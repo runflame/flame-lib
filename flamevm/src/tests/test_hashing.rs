@@ -8,10 +8,10 @@ use super::test_helpers::*;
 fn s(bytes: &[u8]) -> String { String::from(bytes.to_vec()) }
 
 #[test]
-fn merlin_creates_transcript() {
+fn transcript_creates_merlin() {
     // pushstr [], merlin → Merlin on top
     let mut vm = vm_with_script(
-        Program::new().push_str(s(b"")).merlin().to_bytecode(),
+        Program::new().push_str(s(b"")).transcript().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[0] {
@@ -21,10 +21,10 @@ fn merlin_creates_transcript() {
 }
 
 #[test]
-fn merlin_is_noncopyable_and_nondroppable() {
+fn transcript_is_noncopyable_and_nondroppable() {
     // pushstr [], merlin, dup:0 → TypeNotCopyable
     let mut vm = vm_with_script(
-        Program::new().push_str(s(b"")).merlin().dup_k(0).to_bytecode(),
+        Program::new().push_str(s(b"")).transcript().dup_k(0).to_bytecode(),
     );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
@@ -33,7 +33,7 @@ fn merlin_is_noncopyable_and_nondroppable() {
 
     // pushstr [], merlin, drop → TypeNotDroppable
     let mut vm = vm_with_script(
-        Program::new().push_str(s(b"")).merlin().drop_().to_bytecode(),
+        Program::new().push_str(s(b"")).transcript().drop_().to_bytecode(),
     );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
@@ -42,14 +42,14 @@ fn merlin_is_noncopyable_and_nondroppable() {
 }
 
 #[test]
-fn merlin_write_then_read_produces_bytes() {
+fn transcript_write_then_read_produces_bytes() {
     // pushstr "init", merlin            -- transcript
     // pushstr "lbl", pushstr "data", merlinwrite  -- absorb data
     // pushstr "rd", push:8, merlinread  -- squeeze 8 bytes
     let script = Program::new()
-        .push_str(s(b"init")).merlin()
-        .push_str(s(b"lbl")).push_str(s(b"data")).merlin_write()
-        .push_str(s(b"rd")).push_int(8u64).merlin_read()
+        .push_str(s(b"init")).transcript()
+        .push_str(s(b"lbl")).push_str(s(b"data")).twrite()
+        .push_str(s(b"rd")).push_int(8u64).tread()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
@@ -66,14 +66,14 @@ fn merlin_write_then_read_produces_bytes() {
 }
 
 #[test]
-fn merlin_read_is_deterministic() {
+fn tread_is_deterministic() {
     // Two scripts that absorb the same input should produce the same
     // challenge bytes.
     fn build_script() -> Vec<u8> {
         Program::new()
-            .push_str(s(b"label")).merlin()
-            .push_str(s(b"k")).push_str(s(b"value")).merlin_write()
-            .push_str(s(b"r")).push_int(16u64).merlin_read()
+            .push_str(s(b"label")).transcript()
+            .push_str(s(b"k")).push_str(s(b"value")).twrite()
+            .push_str(s(b"r")).push_int(16u64).tread()
             .to_bytecode()
     }
     let mut a = vm_with_script(build_script());
@@ -92,13 +92,13 @@ fn merlin_read_is_deterministic() {
 }
 
 #[test]
-fn merlin_read_diverges_on_different_label() {
+fn tread_diverges_on_different_label() {
     // Same data, different label → different challenge bytes.
     fn build(label: &[u8]) -> Vec<u8> {
         Program::new()
-            .push_str(s(b"l")).merlin()
-            .push_str(s(b"k")).push_str(s(b"data")).merlin_write()
-            .push_str(s(label)).push_int(16u64).merlin_read()
+            .push_str(s(b"l")).transcript()
+            .push_str(s(b"k")).push_str(s(b"data")).twrite()
+            .push_str(s(label)).push_int(16u64).tread()
             .to_bytecode()
     }
     let mut a = vm_with_script(build(b"A"));
@@ -117,11 +117,11 @@ fn merlin_read_diverges_on_different_label() {
 }
 
 #[test]
-fn merlin_write_requires_merlin_on_bottom() {
+fn twrite_requires_merlin_on_bottom() {
     // push:5 (wrong type), pushstr "lbl", pushstr "data", merlinwrite
     let script = Program::new()
         .push_int(5u64)
-        .push_str(s(b"lbl")).push_str(s(b"data")).merlin_write()
+        .push_str(s(b"lbl")).push_str(s(b"data")).twrite()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     assert!(matches!(

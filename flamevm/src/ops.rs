@@ -59,7 +59,6 @@ const OP_BITAND: u8 = 0x4a;
 const OP_BITXOR: u8 = 0x4b;
 const OP_SHIFTLEFT: u8 = 0x4c;
 const OP_SHIFTRIGHT: u8 = 0x4d;
-const OP_KECCAK256: u8 = 0x4e;
 
 // 0x5X — Math & logic (incl. `size`)
 const OP_ABS: u8 = 0x50;
@@ -93,13 +92,14 @@ const OP_LAST: u8 = 0x77;
 const OP_NEXT: u8 = 0x78;
 
 // 0x8X — Cryptography
-const OP_MERLIN: u8 = 0x80;
-const OP_MERLINWRITE: u8 = 0x81;
-const OP_MERLINREAD: u8 = 0x82;
+const OP_TRANSCRIPT: u8 = 0x80;
+const OP_TWRITE: u8 = 0x81;
+const OP_TREAD: u8 = 0x82;
 const OP_SHA256: u8 = 0x83;
 const OP_SHA512: u8 = 0x84;
 const OP_SHA3: u8 = 0x85;
-const OP_LOG: u8 = 0x86;
+const OP_KECCAK256: u8 = 0x86;
+const OP_LOG: u8 = 0x87;
 
 // 0x9X — Tokens
 const OP_AMOUNT: u8 = 0x90;
@@ -212,9 +212,9 @@ pub enum Instruction {
     First,                 // dict first → dict {k 1 | 0}
     Last,                  // dict last → dict {k 1 | 0}
     Next,                  // dict k next → dict {k' 1 | 0}
-    Merlin,                // label merlin → merlin
-    MerlinWrite,           // m label s merlinwrite → m
-    MerlinRead,            // m label n merlinread → m s
+    Transcript,            // label transcript → merlin (opens a Merlin transcript)
+    TWrite,                // m label s twrite → m
+    TRead,                 // m label n tread → m s
     Sha256,                // s sha256 → x
     Sha512,                // s sha512 → x
     Sha3,                  // s sha3 → x
@@ -335,9 +335,9 @@ impl Instruction {
             Instruction::First => out.push(OP_FIRST),
             Instruction::Last => out.push(OP_LAST),
             Instruction::Next => out.push(OP_NEXT),
-            Instruction::Merlin => out.push(OP_MERLIN),
-            Instruction::MerlinWrite => out.push(OP_MERLINWRITE),
-            Instruction::MerlinRead => out.push(OP_MERLINREAD),
+            Instruction::Transcript => out.push(OP_TRANSCRIPT),
+            Instruction::TWrite => out.push(OP_TWRITE),
+            Instruction::TRead => out.push(OP_TREAD),
             Instruction::Sha256 => out.push(OP_SHA256),
             Instruction::Sha512 => out.push(OP_SHA512),
             Instruction::Sha3 => out.push(OP_SHA3),
@@ -481,9 +481,9 @@ impl Instruction {
             OP_FIRST => Ok(Instruction::First),
             OP_LAST => Ok(Instruction::Last),
             OP_NEXT => Ok(Instruction::Next),
-            OP_MERLIN => Ok(Instruction::Merlin),
-            OP_MERLINWRITE => Ok(Instruction::MerlinWrite),
-            OP_MERLINREAD => Ok(Instruction::MerlinRead),
+            OP_TRANSCRIPT => Ok(Instruction::Transcript),
+            OP_TWRITE => Ok(Instruction::TWrite),
+            OP_TREAD => Ok(Instruction::TRead),
             OP_SHA256 => Ok(Instruction::Sha256),
             OP_SHA512 => Ok(Instruction::Sha512),
             OP_SHA3 => Ok(Instruction::Sha3),
@@ -815,7 +815,7 @@ mod tests {
             Instruction::Expr,
             Instruction::Dict,
             Instruction::First,
-            Instruction::Merlin,
+            Instruction::Transcript,
             Instruction::Sha256,
             Instruction::Amount,
             Instruction::IssuePriv,

@@ -73,7 +73,7 @@ fn cell_opcode_rejects_non_portable_payload() {
     // Instead test with a `Merlin` (always non-portable).
     let script = Program::new()
         .push_str(String::from(Vec::<u8>::new())) // empty label
-        .merlin()                                  // → Merlin (non-portable)
+        .transcript()                                  // → Merlin (non-portable)
         .push_int(1u64)                            // count
         .push_point([0xaa; 32])
         .cell()

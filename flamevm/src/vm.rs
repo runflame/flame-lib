@@ -787,9 +787,9 @@ impl VM {
             I::Last => self.op_last(),
             I::Next => self.op_next(),
 
-            I::Merlin => self.op_merlin(),
-            I::MerlinWrite => self.op_merlin_write(),
-            I::MerlinRead => self.op_merlin_read(),
+            I::Transcript => self.op_transcript(),
+            I::TWrite => self.op_twrite(),
+            I::TRead => self.op_tread(),
             I::Sha256 => self.op_sha256(),
             I::Sha512 => self.op_sha512(),
             I::Sha3 => self.op_sha3(),
@@ -1028,18 +1028,18 @@ impl VM {
         Ok(())
     }
 
-    /// `0x69` `merlin` — `label → merlin`. Pops a label string, creates
-    /// a fresh transcript bound to it.
-    fn op_merlin(&mut self) -> Result<(), VMError> {
+    /// `0x80` `transcript` — `label → merlin`. Pops a label string,
+    /// creates a fresh Merlin transcript bound to it.
+    fn op_transcript(&mut self) -> Result<(), VMError> {
         let label = self.pop_value()?.to_string()?;
         self.push_value(Value::Merlin(Merlin::new(label.as_bytes())));
         Ok(())
     }
 
-    /// `0x6a` `merlinwrite` — `merlin label str → merlin`. Pops `str`
-    /// (top), `label`, and `merlin`; absorbs `(label, str)` into the
+    /// `0x81` `twrite` — `merlin label str → merlin`. Pops `str` (top),
+    /// `label`, and the merlin; absorbs `(label, str)` into the
     /// transcript; pushes merlin back.
-    fn op_merlin_write(&mut self) -> Result<(), VMError> {
+    fn op_twrite(&mut self) -> Result<(), VMError> {
         let data = self.pop_value()?.to_string()?;
         let label = self.pop_value()?.to_string()?;
         let mut m = self.pop_value()?.to_merlin()?;
@@ -1048,10 +1048,10 @@ impl VM {
         Ok(())
     }
 
-    /// `0x6b` `merlinread` — `merlin label n → merlin str`. Squeezes
-    /// `n` bytes of challenge from the transcript under `label`; pushes
-    /// the merlin back, then the new String.
-    fn op_merlin_read(&mut self) -> Result<(), VMError> {
+    /// `0x82` `tread` — `merlin label n → merlin str`. Squeezes `n`
+    /// bytes of challenge from the transcript under `label`; pushes the
+    /// merlin back, then the new String.
+    fn op_tread(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
         let label = self.pop_value()?.to_string()?;
         let mut m = self.pop_value()?.to_merlin()?;
@@ -1061,7 +1061,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x6c` `sha256` — pops a String, pushes the 32-byte SHA-256 digest.
+    /// `0x83` `sha256` — pops a String, pushes the 32-byte SHA-256 digest.
     fn op_sha256(&mut self) -> Result<(), VMError> {
         use sha2::{Digest, Sha256};
         let s = self.pop_value()?.to_string()?;
