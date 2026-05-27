@@ -62,6 +62,12 @@ impl ActorRegistry for StubRegistry {
     ) -> Result<(), VMError> {
         unimplemented!("StubRegistry::save_state — use MemRegistry for state-touching tests")
     }
+    fn push_checkpoint(&mut self) {
+        // StubRegistry has no mutable state worth snapshotting.
+    }
+    fn pop_checkpoint_commit(&mut self) {}
+    fn pop_checkpoint_rollback(&mut self) {}
+
     fn mark_for_destruction(&mut self, _id: &ActorID) {
         unimplemented!("StubRegistry::mark_for_destruction — use MemRegistry")
     }

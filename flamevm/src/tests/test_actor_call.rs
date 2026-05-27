@@ -268,12 +268,215 @@ fn call_without_registry_errors() {
     assert!(matches!(err, VMError::RegistryUnavailable), "got {:?}", err);
 }
 
+// ── F1 regression: actor-state rollback on call failure ─────────────
+
+/// Audit F1: a failed sub-call's `op_save` (or unmatched `op_load`)
+/// must not leak into the parent's registry view. Pre-fix, the
+/// callee's mark + state mutation would persist across
+/// `fail_current_call`, while the corresponding `TxEntry::ActorSave`
+/// was truncated from the txlog — letting a caller smuggle state
+/// mutations past the call boundary without an audit trail.
+///
+/// Test shape: an outer actor A calls inner X whose recv just `load`s
+/// and then throws (no `save`). Without F1, X's mark survives →
+/// tx-end self-destruct → X is destroyed. With F1, the failed
+/// sub-call's mark is rolled back → X survives.
 #[test]
-fn save_emits_actorsave_with_post_state_root() {
+fn f1_failed_subcall_load_does_not_destroy_actor() {
+    let mut reg = MemRegistry::new();
+    // X.recv: load (mark X), push:0, verify (throws after load,
+    // before save). On failure, the rollback must clear X's mark.
+    let evil_recv = Program::new()
+        .load()
+        .push_int(0u64)
+        .verify()
+        .to_bytecode();
+    let x_id = deploy_recv(&mut reg, evil_recv, 10_000);
+
+    // A.recv: call X (k=0, gas=5_000), drop the failure marker so
+    // A's frame exits clean (stack empty → no StackNotClean).
+    let a_recv = Program::new()
+        .push_int(0u64)                              // k = 0 args
+        .push_int(5_000u64)                          // gas
+        .push_int(0u64)                              // bytes
+        .push_int(RECV_METHOD)                       // method
+        .push_str(String::from(x_id.to_hash().to_vec())) // addr
+        .call()
+        .drop_()                                     // drop failure marker (0)
+        .to_bytecode();
+    let a_id = deploy_recv(&mut reg, a_recv, 10_000);
+
+    // Run via execute_internal targeting A.
+    let block = BlockContext { height: 100 };
+    let msg = Message {
+        target: a_id,
+        method: RECV_METHOD,
+        caller: None,
+        anchor: Anchor([0x42; 32]),
+        payload: Vec::new(),
+        gas: 100_000,
+        vbytes: 0,
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+    };
+    let _ = VM::execute_internal(dummy_header(), msg, &mut reg, &block)
+        .expect("outer tx succeeds (A drops the inner failure marker)");
+
+    // F1 invariant: X survives the failed sub-call. Pre-fix, X's
+    // mark would have persisted past the rollback boundary, and
+    // tx-end `commit_tx_destructions` would have destroyed X.
+    assert!(reg.exists(&x_id), "X must still exist after the failed sub-call");
+    assert!(
+        !reg.is_marked_for_destruction(&x_id),
+        "X's load-mark must be cleared by the call-frame rollback",
+    );
+}
+
+/// Audit F1 + F3: a sub-call that `save`s a mutated state and then
+/// throws must roll back the state write. Pre-fix, the laundering
+/// scenario was: evil's save mutates the registry; the failure
+/// truncates the corresponding ActorSave entry; a follow-up read
+/// observes the corrupted state without any txlog evidence of the
+/// mutation. With F1, the rollback restores the pre-call state.
+#[test]
+fn f1_failed_subcall_save_rolls_back_state_mutation() {
+    let mut reg = MemRegistry::new();
+    // X.recv: load (mark X), save (write same state back, unmark),
+    // then verify(0) (throw). The save+throw is the laundering
+    // pattern from the audit — without F1, save's registry write
+    // would persist after the rollback.
+    //
+    // We can't easily mutate the state via the script (Dict-manip
+    // would dwarf the test), so we check the rollback by comparing
+    // the state root before and after. The save writes the SAME
+    // state, so the root doesn't change observably from that alone
+    // — but the test verifies the ENTIRE path works, including the
+    // F2-shaped TxEntry::ActorSave being truncated from the txlog
+    // and the registry mark being rolled back.
+    let evil_recv = Program::new()
+        .load()
+        .save()
+        .push_int(0u64)
+        .verify()
+        .to_bytecode();
+    let x_id = deploy_recv(&mut reg, evil_recv, 10_000);
+    let root_before = reg.actor(&x_id).expect("X exists").state.root();
+
+    let a_recv = Program::new()
+        .push_int(0u64)
+        .push_int(5_000u64)
+        .push_int(0u64)
+        .push_int(RECV_METHOD)
+        .push_str(String::from(x_id.to_hash().to_vec()))
+        .call()
+        .drop_()
+        .to_bytecode();
+    let a_id = deploy_recv(&mut reg, a_recv, 10_000);
+
+    let block = BlockContext { height: 100 };
+    let msg = Message {
+        target: a_id,
+        method: RECV_METHOD,
+        caller: None,
+        anchor: Anchor([0x42; 32]),
+        payload: Vec::new(),
+        gas: 100_000,
+        vbytes: 0,
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+    };
+    let result = VM::execute_internal(dummy_header(), msg, &mut reg, &block)
+        .expect("outer tx succeeds");
+
+    // F1 invariants:
+    let x = reg.actor(&x_id).expect("X must still exist after rollback");
+    assert_eq!(
+        x.state.root(),
+        root_before,
+        "X's state must be the rolled-back pre-call root",
+    );
+    assert!(!reg.is_marked_for_destruction(&x_id));
+
+    // F2 / Phase-36 invariant: no ActorSave entry for X in the
+    // txlog. The failed sub-call's ActorSave was truncated by
+    // `fail_current_call`'s txlog rollback. A's recv didn't save
+    // anything, so its txlog should contain no ActorSave at all
+    // for either actor.
+    let x_save_count = result
+        .txlog
+        .iter()
+        .filter(|e| matches!(e,
+            crate::tx::TxEntry::ActorSave { actor, .. } if actor == &x_id
+        ))
+        .count();
+    assert_eq!(
+        x_save_count, 0,
+        "no ActorSave for X in the final txlog (the failed callee's entry was truncated)",
+    );
+}
+
+/// Audit F3: a save-time failure (`MalformedActorState` from a
+/// bad wrapper, etc.) must propagate as a call failure — and via
+/// F1 the rollback restores the actor as if the save had never
+/// been attempted. Pre-fix, a save error left the actor "stuck
+/// loaded" until tx-end's Q6 self-destruct kicked in. Now: the
+/// error propagates, the rollback runs, the actor survives.
+///
+/// Concrete trigger: evil's recv does `load; drop; push:0;
+/// save`. The save sees `Int253(0)`, not a Dict, fails
+/// `TypeNotDict`. Without F1, the actor was destroyed at tx end.
+/// With F1, the failure rolls back and the actor survives.
+#[test]
+fn f3_save_failure_rolls_back_and_preserves_actor() {
+    let mut reg = MemRegistry::new();
+    let evil_recv = Program::new()
+        .load()       // pop state (Dict), mark X
+        .drop_()      // drop the Dict (legal if state is droppable)
+        .push_int(0u64)
+        .save()       // save sees Int253(0), errors TypeNotDict
+        .to_bytecode();
+    let x_id = deploy_recv(&mut reg, evil_recv, 10_000);
+    let root_before = reg.actor(&x_id).expect("X exists").state.root();
+
+    let a_recv = Program::new()
+        .push_int(0u64)
+        .push_int(5_000u64)
+        .push_int(0u64)
+        .push_int(RECV_METHOD)
+        .push_str(String::from(x_id.to_hash().to_vec()))
+        .call()
+        .drop_()
+        .to_bytecode();
+    let a_id = deploy_recv(&mut reg, a_recv, 10_000);
+
+    let block = BlockContext { height: 100 };
+    let msg = Message {
+        target: a_id,
+        method: RECV_METHOD,
+        caller: None,
+        anchor: Anchor([0x42; 32]),
+        payload: Vec::new(),
+        gas: 100_000,
+        vbytes: 0,
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+    };
+    let _ = VM::execute_internal(dummy_header(), msg, &mut reg, &block)
+        .expect("outer tx succeeds (failure swallowed into marker)");
+
+    let x = reg
+        .actor(&x_id)
+        .expect("X must survive — save failure no longer destroys");
+    assert_eq!(x.state.root(), root_before);
+    assert!(!reg.is_marked_for_destruction(&x_id));
+}
+
+#[test]
+fn save_emits_actorsave_with_full_state() {
     // op_save mutates the actor's persistent state and records a
-    // structural effect: `TxEntry::ActorSave { actor, post_state_root }`.
-    // A thin state machine consuming the TxLog can apply these in
-    // order to mutate the registry without re-running the script.
+    // structural effect: `TxEntry::ActorSave { actor, state }`.
+    // The full state rides in the entry (symmetric with
+    // `Output(Cell)` carrying the full cell); the merkle leaf
+    // hashes `state.root()`. A thin state machine consuming the
+    // TxLog can apply these in order to mutate the registry
+    // without re-running the script.
     let mut reg = MemRegistry::new();
     // Recv: `load; save` — round-trip with no state change still
     // emits the ActorSave entry.
@@ -281,18 +484,20 @@ fn save_emits_actorsave_with_post_state_root() {
     let id = ActorID::Hash([0xab; 32]);
     let mut state = ActorState::new();
     state.public.insert(RECV_METHOD, Value::String(crate::String::from(recv.clone())));
+    let expected_root = state.root();
     reg.deploy(id.clone(), state, 10_000, 0).expect("deploy");
 
     let mut vm = vm_for_actor(id.clone(), recv);
     while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
 
     let save = vm.txlog.iter().find_map(|e| match e {
-        crate::tx::TxEntry::ActorSave { actor, post_state_root } =>
-            Some((actor.clone(), *post_state_root)),
+        crate::tx::TxEntry::ActorSave { actor, state } =>
+            Some((actor.clone(), state.root())),
         _ => None,
     }).expect("ActorSave entry present");
     assert_eq!(save.0, id);
-    assert_ne!(save.1, [0u8; 32], "state_root is a Merlin challenge, non-zero");
+    // The state is whatever was loaded then re-saved — same root.
+    assert_eq!(save.1, expected_root, "state.root() matches deployed state");
     let save_count = vm.txlog.iter()
         .filter(|e| matches!(e, crate::tx::TxEntry::ActorSave { .. }))
         .count();

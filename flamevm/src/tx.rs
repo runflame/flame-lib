@@ -97,15 +97,20 @@ pub enum TxEntry {
     /// eventual `TxResult.total_fee`.
     Fee(u64),
 
-    /// Actor-state mutation recorded by `op_save`. Carries the actor's
-    /// identity and the canonical hash of its post-save state. Together
-    /// with the actor's pre-tx state (known from the registry) this
-    /// fully defines the effect a thin state-machine applies — no
-    /// re-execution of the script needed. See design.md §"TxLog records
-    /// effects, not control flow".
+    /// Actor-state mutation recorded by `op_save`. Carries the
+    /// actor's identity and the **full** post-save state — symmetric
+    /// with `Output(Cell)` which carries the full Cell. The state
+    /// machine consumes this entry by replacing the actor's stored
+    /// state with `state`; no re-execution of the script needed. See
+    /// design.md §"TxLog records effects, not control flow".
+    ///
+    /// The MerkleItem encoding hashes `(actor.to_hash(),
+    /// state.root())` — i.e. the merkle leaf commits to the
+    /// canonical state root, not the full bytes, just as
+    /// `Output(Cell)`'s leaf commits to `cell.id()`.
     ActorSave {
         actor: crate::actor::ActorID,
-        post_state_root: [u8; 32],
+        state: crate::ActorState,
     },
 
     /// Outbound asynchronous message scheduled by `op_send`. The
@@ -233,16 +238,15 @@ impl MerkleItem for TxEntry {
                 // this from any other 8-byte append.
                 t.append_message(b"fee.qty", &qty.to_le_bytes());
             }
-            TxEntry::ActorSave {
-                actor,
-                post_state_root,
-            } => {
+            TxEntry::ActorSave { actor, state } => {
                 // Bind every actor-state mutation into the TxID merkle
-                // root: actor identity + canonical hash of the new
-                // state. The state machine applies these in order to
-                // mutate the registry without re-running the script.
-                t.append_message(b"save.actor", &actor.to_bytes());
-                t.append_message(b"save.post_state_root", post_state_root);
+                // root: actor identity (canonical 32-byte hash, not
+                // variant-tagged wire form) + state root. State bytes
+                // ride in the entry itself; the merkle leaf commits
+                // only to the root, matching Output's Cell-as-id
+                // pattern.
+                t.append_message(b"save.actor", &actor.to_hash());
+                t.append_message(b"save.post_state_root", &state.root());
             }
             TxEntry::Send {
                 anchor,

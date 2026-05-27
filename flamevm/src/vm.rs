@@ -20,6 +20,7 @@ use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
 // existing import shape. The types themselves live in `actor.rs`
 // and `send.rs`; vm.rs just plumbs them.
 pub use crate::actor::{ActorID, ActorRegistry, ActorState};
+use crate::actor::vbyte_size;
 pub use crate::send::Message;
 
 /// Bitcoin BIP-65 convention threshold for distinguishing
@@ -272,20 +273,6 @@ fn iter_actor_ids_on_stack<'a>(
         .chain(suspended.iter().map(|f| &f.kind))
         .filter_map(|k| k.actor())
 }
-
-/// Hashes an `ActorState` to its canonical 32-byte root via the
-/// `flamevm.actor.state.root` transcript domain. Used by `op_save`
-/// to bind the actor's post-save state into `TxEntry::ActorSave`.
-fn state_root(state: &ActorState) -> Result<[u8; 32], VMError> {
-    let mut buf = Vec::new();
-    state.encode(&mut buf).map_err(|_| VMError::MalformedActorState)?;
-    let mut t = Transcript::new(b"flamevm.actor.state.root");
-    t.append_message(b"state", &buf);
-    let mut h = [0u8; 32];
-    t.challenge_bytes(b"root", &mut h);
-    Ok(h)
-}
-
 
 /// An isolated execution scope. Holds its own stack, run, gas budget, and
 /// transient-memory cap. Created by `call`, `open`, or the outermost frame
@@ -553,7 +540,31 @@ impl VM {
         // post-Header effect identifies *what consumed-once entity*
         // brought this tx into existence.
         vm.txlog.push(crate::tx::TxEntry::Receive(send_id));
-        while vm.step_internal_with_registry(registry)? {}
+
+        // Tx-level checkpoint: if the script aborts at the root
+        // frame (no caller to swallow into a failure marker), the
+        // registry must roll back any mutations the failed run
+        // wrote. Symmetric with per-frame checkpointing inside
+        // `step`. Without this, an op_save that succeeded then a
+        // later opcode that errored at root would persist the save
+        // even though the tx aborts.
+        registry.push_checkpoint();
+        let mut run_err: Option<VMError> = None;
+        loop {
+            match vm.step_internal_with_registry(registry) {
+                Ok(true) => continue,
+                Ok(false) => break,
+                Err(e) => {
+                    run_err = Some(e);
+                    break;
+                }
+            }
+        }
+        if let Some(e) = run_err {
+            registry.pop_checkpoint_rollback();
+            return Err(e);
+        }
+        registry.pop_checkpoint_commit();
         let _cleared = registry.commit_tx_destructions(block.height);
         Ok(vm.into_result(Vec::new(), None))
     }
@@ -693,7 +704,33 @@ impl VM {
         // context (`InternalDelegate::batch_verifier` panics, so we
         // can't query it in internal mode — see `is_external`).
         let depth_before = self.call_stack.len();
-        match self.step_inner(delegate, registry) {
+        // Two paths to keep the borrow checker happy: registry is
+        // either None (no checkpoint to do) or Some(r), in which case
+        // we reborrow `r` for step_inner and use the outer `r`
+        // afterwards. Logic is identical on both sides modulo the
+        // registry-touching calls.
+        match registry {
+            None => {
+                let result = self.step_inner(delegate, None);
+                self.post_step_no_registry(delegate, depth_before, result)
+            }
+            Some(r) => {
+                let result = self.step_inner(delegate, Some(&mut *r));
+                self.post_step_with_registry(delegate, r, depth_before, result)
+            }
+        }
+    }
+
+    /// Step post-processing when no registry is in play (external
+    /// tx, test path with `InternalDelegate`). Mirrors the registry
+    /// variant minus the checkpoint calls.
+    fn post_step_no_registry<D: Delegate>(
+        &mut self,
+        delegate: &mut D,
+        depth_before: usize,
+        result: Result<bool, VMError>,
+    ) -> Result<bool, VMError> {
+        match result {
             Ok(cont) => {
                 let depth_after = self.call_stack.len();
                 if depth_after > depth_before && self.is_external() {
@@ -709,14 +746,55 @@ impl VM {
                 Ok(cont)
             }
             Err(e) => {
-                // Outermost frame errors propagate (kill the tx).
                 if self.call_stack.is_empty() {
                     return Err(e);
                 }
-                // Nested call errored — discard the failed frame,
-                // restore the parent's anchor + roll back side
-                // effects, push failure marker `0` onto parent.
-                self.fail_current_call(delegate);
+                self.fail_current_call(delegate, None);
+                Ok(true)
+            }
+        }
+    }
+
+    /// Step post-processing with a live registry. Adds checkpoint
+    /// push/commit/rollback alongside the batch/CS bookkeeping so a
+    /// failed callee's `op_save` writes are rolled back — closes F1
+    /// of the op_save audit.
+    fn post_step_with_registry<D: Delegate>(
+        &mut self,
+        delegate: &mut D,
+        registry: &mut dyn ActorRegistry,
+        depth_before: usize,
+        result: Result<bool, VMError>,
+    ) -> Result<bool, VMError> {
+        match result {
+            Ok(cont) => {
+                let depth_after = self.call_stack.len();
+                if depth_after > depth_before {
+                    if self.is_external() {
+                        use musig::BatchCheckpoint;
+                        use r1cs::CheckpointableConstraintSystem;
+                        let batch_snap = delegate.batch_verifier().snapshot();
+                        let cs_snap = delegate.cs().checkpoint();
+                        if let Some(parent) = self.call_stack.last_mut() {
+                            parent.snap_batch = Some(batch_snap);
+                            parent.snap_cs = Some(cs_snap);
+                        }
+                    }
+                    // Snapshot the registry so a future failure of the
+                    // newly-pushed frame can roll back any `op_save`
+                    // writes (and lingering re-entrancy marks).
+                    registry.push_checkpoint();
+                } else if depth_after < depth_before {
+                    // Clean exit: keep effects, drop the snapshot.
+                    registry.pop_checkpoint_commit();
+                }
+                Ok(cont)
+            }
+            Err(e) => {
+                if self.call_stack.is_empty() {
+                    return Err(e);
+                }
+                self.fail_current_call(delegate, Some(registry));
                 Ok(true)
             }
         }
@@ -915,9 +993,16 @@ impl VM {
     /// failed call are preserved; the parent script continues at
     /// the instruction after the call.
     ///
-    /// Note: actor-state rollback is NOT yet implemented — that
-    /// requires per-actor snapshots in the registry (next iteration).
-    fn fail_current_call<D: Delegate>(&mut self, delegate: &mut D) {
+    /// Actor-state rollback is wired via the registry's checkpoint
+    /// stack (push on frame entry, restore here). Closes the F1 audit
+    /// finding — a failed callee's `op_save` writes (and any leftover
+    /// re-entrancy marks from unmatched `op_load`s) are restored, so
+    /// the registry stays consistent with the truncated txlog.
+    fn fail_current_call<D: Delegate>(
+        &mut self,
+        delegate: &mut D,
+        mut registry: Option<&mut dyn ActorRegistry>,
+    ) {
         // Cannot fail the outermost frame — caller of this helper
         // must ensure call_stack is non-empty.
         let parent = self
@@ -930,6 +1015,10 @@ impl VM {
         self.txlog.truncate(self.current_call.snap_txlog_len);
         self.deferred_sigs.truncate(self.current_call.snap_deferred_sigs_len);
         self.total_fee = self.current_call.snap_total_fee;
+        // Restore actor registry state (F1).
+        if let Some(r) = registry.as_mut() {
+            r.pop_checkpoint_rollback();
+        }
         // Restore the delegate's MSM/sig batch to its pre-call state
         // so any non-identity statements the failed callee appended
         // are discarded. Only in external context — internal-mode
@@ -2487,18 +2576,31 @@ impl VM {
             return Err(VMError::SaveWithoutLoad);
         }
         let state = ActorState::from_wrapper_dict(self.pop_value()?.to_dict()?)?;
-        // Hash the post-save state first so the txlog entry's
-        // post_state_root captures exactly what we're writing.
-        let post_state_root = state_root(&state)?;
+        // Validate encodability — fails MalformedActorState if the
+        // state can't round-trip through `encode`. Done BEFORE any
+        // registry mutation so a bad state is rejected without side
+        // effects on this frame. The state is then cloned for both
+        // the registry write and the txlog entry (the registry needs
+        // ownership; the txlog needs a record).
+        let _ = vbyte_size(&state)?;
+        let state_for_log = ActorState {
+            public: state.public.try_clone()
+                .map_err(|_| VMError::MalformedActorState)?,
+            private: state.private.try_clone()
+                .map_err(|_| VMError::MalformedActorState)?,
+        };
         registry.save_state(&actor, state)?;
         registry.unmark_for_destruction(&actor);
         self.current_call.loaded = false;
         // Record the actor-state mutation as a structural effect. A
-        // state machine consuming the TxLog mutates the actor registry
-        // by walking these entries; no re-execution of the script.
+        // state machine consuming the TxLog applies these in order
+        // (last-write-wins per actor) to mutate the registry without
+        // re-running the script. The entry carries the FULL state —
+        // the merkle leaf hashes its root, but consumers reading the
+        // txlog directly get the bytes.
         self.txlog.push(crate::tx::TxEntry::ActorSave {
             actor,
-            post_state_root,
+            state: state_for_log,
         });
         Ok(())
     }

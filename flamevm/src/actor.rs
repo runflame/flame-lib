@@ -240,6 +240,28 @@ impl ActorState {
         d
     }
 
+    /// Canonical 32-byte commitment to this state — Merlin-hashed
+    /// over the wire-encoded form under domain `flamevm.actor.state.root`.
+    /// Used by `TxEntry::ActorSave`'s MerkleItem impl to bind state
+    /// mutations into the TxID without inlining the full state bytes
+    /// in the merkle leaf.
+    ///
+    /// Infallible: the registry only stores encodable states (op_save
+    /// validates encodability on the way in), so a state obtained
+    /// from the registry always round-trips. A script that builds a
+    /// non-encodable state and tries to op_save it will fail at the
+    /// op_save step, before reaching the registry.
+    pub fn root(&self) -> [u8; 32] {
+        let mut buf = Vec::new();
+        self.encode(&mut buf)
+            .expect("ActorState in valid registry context is encodable");
+        let mut t = Transcript::new(b"flamevm.actor.state.root");
+        t.append_message(b"state", &buf);
+        let mut h = [0u8; 32];
+        t.challenge_bytes(b"root", &mut h);
+        h
+    }
+
     /// Parses a wrapper Dict back into an `ActorState`. Inverse of
     /// [`ActorState::to_wrapper_dict`].
     pub fn from_wrapper_dict(mut d: Dict) -> Result<Self, VMError> {
@@ -523,6 +545,29 @@ pub trait ActorRegistry {
     /// `Constructor`) from frozen/loaded states.
     fn exists(&self, actor: &ActorID) -> bool;
 
+    // ── checkpoint / rollback (call-frame atomicity) ───────────
+
+    /// Snapshot current registry state (actors + marks) onto an
+    /// internal stack. Called by the VM at every call-frame entry
+    /// (and once per tx) so that a failed sub-call can roll back
+    /// any registry mutations made by the failed callee — including
+    /// any `op_save` writes and `op_load` marks that haven't been
+    /// matched by an `op_save` yet. Pairs LIFO with
+    /// [`Self::pop_checkpoint_commit`] / [`Self::pop_checkpoint_rollback`].
+    fn push_checkpoint(&mut self);
+
+    /// Pop the topmost snapshot and discard it (keep current state).
+    /// Called on clean call-frame exit / clean tx end.
+    fn pop_checkpoint_commit(&mut self);
+
+    /// Pop the topmost snapshot and restore registry state from it.
+    /// Called when a call frame fails (via `VM::fail_current_call`)
+    /// or when the outermost tx fails. Restores both actor states
+    /// and re-entrancy marks; the vbyte pool is not snapshotted
+    /// because it doesn't change within a tx (only via tx-end
+    /// `commit_tx_destructions` and per-block `tick_block`).
+    fn pop_checkpoint_rollback(&mut self);
+
     // ── re-entrancy lock + self-destruct (Q6) ──────────────────
 
     /// Marks the actor as currently loaded. Subsequent loads error
@@ -608,6 +653,40 @@ pub struct MemRegistry {
     actors: std::collections::BTreeMap<[u8; 32], Actor>,
     marks: std::collections::BTreeSet<[u8; 32]>,
     pool: VbytePool,
+    /// LIFO snapshot stack for call-frame / tx-level rollback.
+    /// Pushed by `push_checkpoint`; consumed by `pop_checkpoint_commit`
+    /// (discard) or `pop_checkpoint_rollback` (restore).
+    snapshots: Vec<MemRegistrySnapshot>,
+}
+
+/// One frame's-worth of (actor-state + marks) snapshot, used by
+/// `MemRegistry`'s checkpoint stack. Captures everything that can
+/// be mutated mid-tx; the vbyte pool isn't snapshotted because it's
+/// only touched by tx-end / per-block hooks.
+struct MemRegistrySnapshot {
+    actors: std::collections::BTreeMap<[u8; 32], Actor>,
+    marks: std::collections::BTreeSet<[u8; 32]>,
+}
+
+/// Deep-clones an `Actor`. Helper for `push_checkpoint`. The state's
+/// inner `Dict`s carry portable values only (op_save's wrapper-shape
+/// check + the post-save state-root encoding round-trip ensure this),
+/// so `try_clone` is expected to succeed. Failure indicates registry
+/// corruption — panic with a clear message rather than silently
+/// producing an incorrect snapshot.
+fn clone_actor(a: &Actor) -> Actor {
+    Actor {
+        state: ActorState {
+            public: a.state.public.try_clone()
+                .expect("registry invariant: actor public state is portable"),
+            private: a.state.private.try_clone()
+                .expect("registry invariant: actor private state is portable"),
+        },
+        vbytes: a.vbytes,
+        active_blocks: a.active_blocks,
+        last_activation_height: a.last_activation_height,
+        frozen_since: a.frozen_since,
+    }
 }
 
 impl MemRegistry {
@@ -617,6 +696,7 @@ impl MemRegistry {
             actors: std::collections::BTreeMap::new(),
             marks: std::collections::BTreeSet::new(),
             pool: VbytePool::new(),
+            snapshots: Vec::new(),
         }
     }
 
@@ -711,6 +791,27 @@ impl ActorRegistry for MemRegistry {
 
     fn exists(&self, actor: &ActorID) -> bool {
         self.actors.contains_key(&actor.to_hash())
+    }
+
+    fn push_checkpoint(&mut self) {
+        let actors = self
+            .actors
+            .iter()
+            .map(|(k, a)| (*k, clone_actor(a)))
+            .collect();
+        let marks = self.marks.clone();
+        self.snapshots.push(MemRegistrySnapshot { actors, marks });
+    }
+
+    fn pop_checkpoint_commit(&mut self) {
+        let _ = self.snapshots.pop();
+    }
+
+    fn pop_checkpoint_rollback(&mut self) {
+        if let Some(snap) = self.snapshots.pop() {
+            self.actors = snap.actors;
+            self.marks = snap.marks;
+        }
     }
 
     fn mark_for_destruction(&mut self, id: &ActorID) {

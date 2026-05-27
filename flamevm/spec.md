@@ -1151,9 +1151,11 @@ Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `LoadAlreadyMar
 
 _dict_ → ø
 
-Pops a Dict, parses it as an `ActorState` (the two-entry wrapper shape with keys `0x00` public and `0x01` private), persists it against the current actor, and clears the mark. Emits `TxEntry::ActorSave { actor, post_state_root }` — the canonical hash of the post-save state is what a thin state machine consumes from the txlog to replay the actor-state mutation without re-running the script. See `design.md` §"TxLog records effects, not control flow".
+Pops a Dict, parses it as an `ActorState` (the two-entry wrapper shape with keys `0x00` public and `0x01` private), persists it against the current actor, and clears the mark. Emits `TxEntry::ActorSave { actor, state }` carrying the **full** post-save state — symmetric with `Output(Cell)` which carries the full Cell. The merkle leaf for this entry hashes `(actor.to_hash(), state.root())`, so the TxID commits to the state root while consumers reading the txlog directly get the bytes (no separate state-witness channel needed).
 
-Hard-fails: `SaveWithoutLoad`, `MalformedActorState`, `OpcodeRequiresActorContext`, `RegistryUnavailable`.
+**Atomicity.** A `save` failure (`MalformedActorState` from a non-wrapper Dict, `TypeNotDict` from a non-Dict operand, `ActorNotFound` if the registry record vanished) propagates as a frame failure. The frame's call boundary rolls back both the txlog (truncating any ActorSave entry the failed callee may have written earlier) and the actor registry (restoring pre-frame state + marks), so the actor stays consistent with the truncated txlog. At the outermost frame, `execute_internal` applies the same rollback at the tx level.
+
+Hard-fails: `SaveWithoutLoad`, `MalformedActorState`, `TypeNotDict`, `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorNotFound`.
 
 ### signtx
 
