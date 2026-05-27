@@ -3,8 +3,9 @@
 use readerwriter::ReadError;
 
 use crate::{
-    grace_window, vbyte_size, Actor, ActorID, ActorRegistry, ActorState, Dict, Int253,
-    MemRegistry, String, VbytePool, Value, VMError,
+    empty_state, grace_window, resolve_method, state_with_public, vbyte_size,
+    Actor, ActorID, ActorRegistry, Dict, Int253, MemRegistry, String, VbytePool,
+    Value, VMError,
     GRACE_BLOCKS_CAP, RECV_METHOD,
     VBYTES_PER_BLOCK,
 };
@@ -74,12 +75,12 @@ fn actorid_registry_treats_both_forms_as_same_actor() {
     let ctor = ActorID::Constructor(ctor_bytes.clone());
     let hash_form = ActorID::Hash(ctor.to_hash());
 
-    r.deploy(ctor.clone(), ActorState::new(), 1_000, 0)
+    r.deploy(ctor.clone(), empty_state(), 1_000, 0)
         .expect("deploy via Constructor");
     assert!(r.exists(&ctor));
     assert!(r.exists(&hash_form));
     let err = r
-        .deploy(hash_form, ActorState::new(), 1_000, 0)
+        .deploy(hash_form, empty_state(), 1_000, 0)
         .expect_err("collide");
     assert!(matches!(err, VMError::ActorAlreadyExists));
 }
@@ -99,105 +100,43 @@ fn actorid_unresolved_for_constructor_form() {
 }
 
 #[test]
-fn actorstate_resolve_method_returns_script() {
-    let mut s = ActorState::new();
-    s.public.insert(
+fn state_resolve_method_returns_script() {
+    let mut public = Dict::new();
+    public.insert(
         Int253::from(7u64),
         Value::String(String::from(b"\x1d".to_vec())),
     );
+    let s = state_with_public(public);
     let m = Int253::from(7u64);
-    assert!(s.has_method(&m));
-    let script = s.resolve_method(&m).expect("present");
+    let script = resolve_method(&s, &m).expect("present");
     assert_eq!(script.bytes_view().as_ref(), b"\x1d");
 }
 
 #[test]
-fn actorstate_resolve_method_missing_returns_none() {
-    let s = ActorState::new();
-    assert!(s.resolve_method(&Int253::from(42u64)).is_none());
+fn state_resolve_method_missing_returns_none() {
+    let s = empty_state();
+    assert!(resolve_method(&s, &Int253::from(42u64)).is_none());
 }
 
 #[test]
-fn actorstate_resolve_method_wrong_type_returns_none() {
-    let mut s = ActorState::new();
-    s.public
-        .insert(Int253::from(0u64), Value::Int253(Int253::from(99u64)));
-    assert!(s.resolve_method(&RECV_METHOD).is_none());
-}
-
-#[test]
-fn actorstate_wrapper_dict_roundtrip() {
-    let mut s = ActorState::new();
-    s.public
-        .insert(Int253::from(0u64), Value::String(String::from(b"\x1d".to_vec())));
-    s.private
-        .insert(Int253::from(1u64), Value::Int253(Int253::from(123u64)));
-    let d = s.to_wrapper_dict();
-    let back = ActorState::from_wrapper_dict(d).expect("from_wrapper_dict");
-    assert_eq!(back.public.len(), 1);
-    assert_eq!(back.private.len(), 1);
-    assert!(back.resolve_method(&RECV_METHOD).is_some());
-}
-
-#[test]
-fn actorstate_encode_decode_roundtrip() {
-    let mut s = ActorState::new();
-    s.public.insert(
-        Int253::from(0u64),
-        Value::String(String::from(b"\x1d\x1d".to_vec())),
-    );
-    s.private
-        .insert(Int253::from(0u64), Value::Int253(Int253::from(7u64)));
-    let mut buf = Vec::new();
-    s.encode(&mut buf).expect("encode");
-    let mut r = buf.as_slice();
-    let back = ActorState::decode(&mut r).expect("decode");
-    assert_eq!(back.public.len(), 1);
-    assert_eq!(back.private.len(), 1);
-    let mut buf2 = Vec::new();
-    back.encode(&mut buf2).expect("re-encode");
-    assert_eq!(buf2, buf, "canonical: re-encode == encode");
-}
-
-#[test]
-fn actorstate_empty_encode_decode_roundtrip() {
-    let s = ActorState::new();
-    let mut buf = Vec::new();
-    s.encode(&mut buf).expect("encode");
-    let mut r = buf.as_slice();
-    let back = ActorState::decode(&mut r).expect("decode");
-    assert!(back.public.is_empty());
-    assert!(back.private.is_empty());
-    let mut buf2 = Vec::new();
-    back.encode(&mut buf2).expect("re-encode");
-    assert_eq!(buf2, buf);
-}
-
-#[test]
-fn actorstate_from_wrapper_rejects_wrong_shape() {
-    let mut d = Dict::new();
-    d.insert(Int253::from(0u64), Value::Dict(Dict::new()));
-    let err = ActorState::from_wrapper_dict(d).expect_err("must error");
-    assert!(matches!(err, VMError::MalformedActorState));
-}
-
-#[test]
-fn actorstate_from_wrapper_rejects_non_dict_slots() {
-    let mut d = Dict::new();
-    d.insert(Int253::from(0u64), Value::Int253(Int253::zero()));
-    d.insert(Int253::from(1u64), Value::Dict(Dict::new()));
-    let err = ActorState::from_wrapper_dict(d).expect_err("must error");
-    assert!(matches!(err, VMError::MalformedActorState));
+fn state_resolve_method_wrong_type_returns_none() {
+    let mut public = Dict::new();
+    public.insert(Int253::from(0u64), Value::Int253(Int253::from(99u64)));
+    let s = state_with_public(public);
+    assert!(resolve_method(&s, &RECV_METHOD).is_none());
 }
 
 #[test]
 fn vbyte_size_grows_with_state() {
-    let small = ActorState::new();
-    let mut big = ActorState::new();
-    big.private.insert(
+    let small = empty_state();
+    let mut big_private = Dict::new();
+    big_private.insert(
         Int253::from(0u64),
         Value::String(String::from(vec![0u8; 100])),
     );
+    let mut big = Dict::new();
+    big.insert(Int253::from(0u64), Value::Dict(Dict::new()));
+    big.insert(Int253::from(1u64), Value::Dict(big_private));
     let n_small = vbyte_size(&small).expect("vbyte_size");
     let n_big = vbyte_size(&big).expect("vbyte_size");
     assert!(n_big > n_small, "bigger state → bigger vbytes");
@@ -247,13 +186,13 @@ fn grace_window_capped_at_six_months() {
     assert_eq!(grace_window(u64::MAX), GRACE_BLOCKS_CAP);
 }
 
-fn fixture_state() -> ActorState {
-    let mut s = ActorState::new();
-    s.public.insert(
+fn fixture_state() -> Dict {
+    let mut public = Dict::new();
+    public.insert(
         RECV_METHOD,
         Value::String(String::from(b"\x1d".to_vec())),
     );
-    s
+    state_with_public(public)
 }
 
 /// Test helper: arbitrary canonical id (real deployments derive it
@@ -269,7 +208,7 @@ fn memregistry_deploy_load_roundtrip() {
     let id = fixture_id(0xab);
     r.deploy(id.clone(), s, 1000, 5).expect("deploy");
     let loaded = r.load_state(&id).expect("load");
-    assert!(loaded.has_method(&RECV_METHOD));
+    assert!(resolve_method(&loaded, &RECV_METHOD).is_some());
     assert!(r.exists(&id));
     assert_eq!(r.actor_vbytes(&id).expect("vbytes"), 1000);
 }
@@ -299,15 +238,22 @@ fn memregistry_save_persists_state() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([1u8; 32]);
     r.deploy(id.clone(), fixture_state(), 1000, 0).expect("deploy");
-    let mut updated = ActorState::new();
-    updated.private.insert(
+    let mut updated_private = Dict::new();
+    updated_private.insert(
         Int253::from(99u64),
         Value::Int253(Int253::from(7u64)),
     );
+    let mut updated = Dict::new();
+    updated.insert(Int253::from(0u64), Value::Dict(Dict::new()));
+    updated.insert(Int253::from(1u64), Value::Dict(updated_private));
     r.save_state(&id, updated).expect("save");
     let loaded = r.load_state(&id).expect("load");
-    assert_eq!(loaded.private.len(), 1);
-    assert!(!loaded.has_method(&RECV_METHOD));
+    // Private dict (key 1) has 1 entry; public dict (key 0) is empty.
+    match loaded.get(&Int253::from(1u64)) {
+        Some(Value::Dict(d)) => assert_eq!(d.len(), 1),
+        _ => panic!("expected private dict"),
+    }
+    assert!(resolve_method(&loaded, &RECV_METHOD).is_none());
 }
 
 #[test]
@@ -323,7 +269,7 @@ fn memregistry_resolve_method_returns_script() {
 fn memregistry_resolve_method_missing_errors() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([3u8; 32]);
-    r.deploy(id.clone(), ActorState::new(), 100, 0).expect("deploy");
+    r.deploy(id.clone(), empty_state(), 100, 0).expect("deploy");
     let err = r
         .resolve_method(&id, Int253::from(42u64))
         .expect_err("must error");

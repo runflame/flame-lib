@@ -182,6 +182,38 @@ impl Value {
         }
     }
 
+    /// Rust-level deep clone for serialization / storage / snapshot
+    /// purposes. Distinct from [`Value::try_clone`]: ignores VM
+    /// linear-type discipline (which gates *stack* duplication
+    /// semantics) and just produces a structurally identical Rust
+    /// value via each variant's `Clone` impl.
+    ///
+    /// Used by the actor registry's checkpoint stack and by
+    /// `op_save`'s txlog-entry construction — both situations where
+    /// we need a separate copy of the data structure but never
+    /// "show" both copies to a script simultaneously.
+    ///
+    /// Errors only for variants that don't have a Rust `Clone`
+    /// (`Cell` is documented as non-cloneable; `Merlin` wraps a
+    /// transcript that isn't Clone). Both are non-portable, so a
+    /// portable Dict never contains them.
+    pub fn deep_clone(&self) -> Result<Value, VMError> {
+        match self {
+            Value::Int253(i) => Ok(Value::Int253(*i)),
+            Value::String(s) => Ok(Value::String(s.clone())),
+            Value::Point(p) => Ok(Value::Point(p.clone())),
+            Value::Dict(d) => Ok(Value::Dict(d.deep_clone()?)),
+            Value::Token(t) => Ok(Value::Token(t.clone())),
+            Value::ClearToken(t) => Ok(Value::ClearToken(*t)),
+            Value::WideToken(t) => Ok(Value::WideToken(*t)),
+            Value::Variable(v) => Ok(Value::Variable(v.clone())),
+            Value::Expression(e) => Ok(Value::Expression(e.clone())),
+            Value::Constraint(c) => Ok(Value::Constraint(c.clone())),
+            Value::MultiscalarMul(m) => Ok(Value::MultiscalarMul(m.clone())),
+            Value::Cell(_) | Value::Merlin(_) => Err(VMError::TypeNotCopyable),
+        }
+    }
+
     /// True iff this value's type permits duplication (`dup`/`getdup`).
     /// Plain-data and copyable containers; never linear types.
     pub fn is_copyable(&self) -> bool {
@@ -215,16 +247,39 @@ impl Value {
         }
     }
 
-    /// Returns true iff this value can be silently discarded by `drop`.
-    /// Plain-data types are always droppable; cleartokens are droppable
-    /// when quantity is zero; empty dicts are droppable; everything else
-    /// (including cells — they're linear) is not.
+    /// Returns true iff this value can be silently discarded by `drop`
+    /// without losing embedded asset value. The rule:
+    ///
+    /// - **Every copyable type is droppable.** Discarding it is a strict
+    ///   subset of duplicate-then-discard, and the type holds no
+    ///   exclusive content. Plain-data: `Int253`, `String`, `Point`.
+    ///   Dicts: droppable iff their sticky `droppable` flag is set.
+    /// - **Zero-quantity `ClearToken`** is droppable. It's a flavor
+    ///   nameplate with no balance attached.
+    /// - **Pure-computation values** are droppable: `Expression`,
+    ///   `Variable`, `Constraint`, `Merlin`, `MultiscalarMul`. They
+    ///   carry CS / transcript bookkeeping, not asset value, so
+    ///   abandoning them costs the script nothing.
+    /// - **Asset-bearing values are not droppable.** `Token` /
+    ///   `ClearToken(qty ≠ 0)` / `WideToken` / `Cell` would silently
+    ///   destroy value or break linearity.
     pub fn is_droppable(&self) -> bool {
         match self {
+            // Copyable plain-data.
             Value::Int253(_) | Value::String(_) | Value::Point(_) => true,
-            Value::Dict(d) => d.is_empty(),
+            // Dict: droppable iff its sticky flag is set (every value
+            // ever inserted was droppable).
+            Value::Dict(d) => d.is_droppable(),
+            // Zero-qty CT is the empty-flavor case.
             Value::ClearToken(t) => t.is_zero_qty(),
-            _ => false,
+            // Pure computation — no embedded asset value to lose.
+            Value::Expression(_)
+            | Value::Variable(_)
+            | Value::Constraint(_)
+            | Value::Merlin(_)
+            | Value::MultiscalarMul(_) => true,
+            // Asset-bearing values: dropping would lose value.
+            Value::Token(_) | Value::WideToken(_) | Value::Cell(_) => false,
         }
     }
 

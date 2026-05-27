@@ -21,8 +21,9 @@ fn transcript_creates_merlin() {
 }
 
 #[test]
-fn transcript_is_noncopyable_and_nondroppable() {
-    // pushstr [], merlin, dup:0 → TypeNotCopyable
+fn transcript_is_noncopyable_but_droppable() {
+    // pushstr [], transcript, dup:0 → TypeNotCopyable (still linear
+    // wrt stack duplication — has internal CS-style state).
     let mut vm = vm_with_script(
         Program::new().push_str(s(b"")).transcript().dup_k(0).to_bytecode(),
     );
@@ -31,14 +32,14 @@ fn transcript_is_noncopyable_and_nondroppable() {
         VMError::TypeNotCopyable
     ));
 
-    // pushstr [], merlin, drop → TypeNotDroppable
+    // pushstr [], transcript, drop → succeeds. Transcript carries no
+    // asset value (pure computation), so dropping it is legal — see
+    // `Value::is_droppable`.
     let mut vm = vm_with_script(
         Program::new().push_str(s(b"")).transcript().drop_().to_bytecode(),
     );
-    assert!(matches!(
-        run_to_end(&mut vm).unwrap_err(),
-        VMError::TypeNotDroppable
-    ));
+    run_to_end(&mut vm).expect("transcript is droppable (pure computation)");
+    assert!(vm.current_call.stack.is_empty());
 }
 
 #[test]

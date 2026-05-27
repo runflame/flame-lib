@@ -98,19 +98,20 @@ pub enum TxEntry {
     Fee(u64),
 
     /// Actor-state mutation recorded by `op_save`. Carries the
-    /// actor's identity and the **full** post-save state — symmetric
-    /// with `Output(Cell)` which carries the full Cell. The state
-    /// machine consumes this entry by replacing the actor's stored
-    /// state with `state`; no re-execution of the script needed. See
-    /// design.md §"TxLog records effects, not control flow".
+    /// actor's identity and the **full** post-save state Dict —
+    /// symmetric with `Output(Cell)` which carries the full Cell.
+    /// The state machine consumes this entry by replacing the
+    /// actor's stored state with `state`; no re-execution of the
+    /// script needed. See design.md §"TxLog records effects, not
+    /// control flow".
     ///
     /// The MerkleItem encoding hashes `(actor.to_hash(),
-    /// state.root())` — i.e. the merkle leaf commits to the
+    /// state_root(&state))` — i.e. the merkle leaf commits to the
     /// canonical state root, not the full bytes, just as
     /// `Output(Cell)`'s leaf commits to `cell.id()`.
     ActorSave {
         actor: crate::actor::ActorID,
-        state: crate::ActorState,
+        state: crate::Dict,
     },
 
     /// Outbound asynchronous message scheduled by `op_send`. The
@@ -246,7 +247,7 @@ impl MerkleItem for TxEntry {
                 // only to the root, matching Output's Cell-as-id
                 // pattern.
                 t.append_message(b"save.actor", &actor.to_hash());
-                t.append_message(b"save.post_state_root", &state.root());
+                t.append_message(b"save.post_state_root", &crate::actor::state_root(state));
             }
             TxEntry::Send {
                 anchor,

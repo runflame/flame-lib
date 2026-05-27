@@ -300,14 +300,16 @@ fn empty_dict_is_droppable() {
 }
 
 #[test]
-fn nonempty_dict_is_not_droppable() {
+fn nonempty_dict_of_droppable_values_is_droppable() {
+    // Under the revised drop rules, a dict is droppable iff every
+    // value it has ever held is droppable. A dict of plain Int253s
+    // is droppable, including non-empty ones — dropping it has no
+    // value-loss semantics.
     let script = Program::new()
         .push_int(50u64).push_int(5u64).push_int(1u64).dict()
         .drop_()
         .to_bytecode();
     let mut vm = vm_with_script(script);
-    assert!(matches!(
-        run_to_end(&mut vm).unwrap_err(),
-        VMError::TypeNotDroppable
-    ));
+    run_to_end(&mut vm).expect("non-empty dict of droppable values is droppable");
+    assert!(vm.current_call.stack.is_empty());
 }

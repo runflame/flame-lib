@@ -162,8 +162,11 @@ pub enum VMError {
     #[error("Malformed cell encoding")]
     MalformedCellEncoding,
 
-    /// This error occurs when an ActorState wrapper Dict has the wrong shape.
-    #[error("Malformed ActorState")]
+    /// This error occurs when an actor-state Dict can't be encoded
+    /// to its canonical wire form (a value variant without an
+    /// encoder slipped in). Distinct from `NonPortableInState`,
+    /// which is the portability gate at op_save.
+    #[error("Malformed actor state")]
     MalformedActorState,
 
     /// This error occurs when Address bytes do not decode to a known wire shape.
@@ -225,6 +228,14 @@ pub enum VMError {
     /// This error occurs when an opcode requires a predicate (CellOpen) context but the frame has none.
     #[error("Opcode requires predicate context")]
     OpcodeRequiresPredicateContext,
+
+    /// This error occurs when `op_save` is called with an actor-state
+    /// Dict that contains non-portable values (Cell, Merlin, Variable,
+    /// negative ClearToken, WideToken, Expression, Constraint,
+    /// MultiscalarMul). Long-term storage requires portable values
+    /// only — see `flamevm/spec.md` §save.
+    #[error("Non-portable value in actor state Dict")]
+    NonPortableInState,
 
     /// This error occurs when a token opcode needs a live constraint system but has none.
     #[error("Token opcode branch requires a live constraint system")]

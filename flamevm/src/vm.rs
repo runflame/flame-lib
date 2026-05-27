@@ -19,8 +19,8 @@ use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
 // test helpers, which inherit `super::super::*`) keep their
 // existing import shape. The types themselves live in `actor.rs`
 // and `send.rs`; vm.rs just plumbs them.
-pub use crate::actor::{ActorID, ActorRegistry, ActorState};
-use crate::actor::vbyte_size;
+pub use crate::actor::{ActorID, ActorRegistry};
+use crate::actor::state_root;
 pub use crate::send::Message;
 
 /// Bitcoin BIP-65 convention threshold for distinguishing
@@ -2543,9 +2543,13 @@ impl VM {
 
     /// **load** → _dict_
     ///
-    /// Loads the current actor's state, marks the actor for destruction
-    /// (re-entry blocked until `save`), and pushes the wrapper Dict.
-    /// An unmatched load destroys the actor at tx commit (Q6).
+    /// Loads the current actor's state Dict, marks the actor for
+    /// destruction (re-entry blocked until `save`), and pushes the
+    /// Dict onto the stack. The Dict's conventional shape is
+    /// `{0x00 → public, 0x01 → private}` (see spec.md §Actors), but
+    /// the VM doesn't enforce the shape — scripts decide what's in
+    /// their state. An unmatched load destroys the actor at tx
+    /// commit (Q6).
     fn op_load(
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
@@ -2558,46 +2562,50 @@ impl VM {
         let state = registry.load_state(&actor)?;
         registry.mark_for_destruction(&actor);
         self.current_call.loaded = true;
-        self.push_value(Value::Dict(state.to_wrapper_dict()));
+        self.push_value(Value::Dict(state));
         Ok(())
     }
 
     /// _dict_ **save** → ø
     ///
-    /// Pops a wrapper Dict, persists it as the current actor's state,
-    /// and clears the re-entrancy mark set by `load`.
+    /// Pops a Dict, validates portability, persists it as the
+    /// current actor's state, and clears the re-entrancy mark set
+    /// by `load`. Portability is the canonical storage gate — every
+    /// inserted value must be portable (`Int253`, `String`, `Point`,
+    /// `Dict` of portable, non-negative `ClearToken`, `Token`).
+    /// Non-portable values (`Cell`, `Merlin`, `Variable`,
+    /// `Expression`, `Constraint`, `MultiscalarMul`, `WideToken`,
+    /// negative `ClearToken`) hard-fail `NonPortableInState`.
     fn op_save(
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<(), VMError> {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
-        let actor = self.require_actor()?.clone();
+        let actor = ActorID::Hash(self.require_actor()?.to_hash());
         if !self.current_call.loaded {
             return Err(VMError::SaveWithoutLoad);
         }
-        let state = ActorState::from_wrapper_dict(self.pop_value()?.to_dict()?)?;
-        // Validate encodability — fails MalformedActorState if the
-        // state can't round-trip through `encode`. Done BEFORE any
-        // registry mutation so a bad state is rejected without side
-        // effects on this frame. The state is then cloned for both
-        // the registry write and the txlog entry (the registry needs
-        // ownership; the txlog needs a record).
-        let _ = vbyte_size(&state)?;
-        let state_for_log = ActorState {
-            public: state.public.try_clone()
-                .map_err(|_| VMError::MalformedActorState)?,
-            private: state.private.try_clone()
-                .map_err(|_| VMError::MalformedActorState)?,
-        };
+        let state = self.pop_value()?.to_dict()?;
+        // Portability is the canonical storage gate — checked here
+        // before any registry mutation so a bad state is rejected
+        // cleanly. Distinct from encodability (which the encoder may
+        // or may not implement for a given variant).
+        if !state.is_portable() {
+            return Err(VMError::NonPortableInState);
+        }
+        // Rust-level deep clone for the txlog entry. The registry
+        // takes ownership of one copy; the txlog gets another.
+        // `deep_clone` ignores VM stack-copyability rules so portable
+        // linear values (Token) survive — those are exactly what
+        // actor state is for.
+        let state_for_log = state.deep_clone()?;
         registry.save_state(&actor, state)?;
         registry.unmark_for_destruction(&actor);
         self.current_call.loaded = false;
-        // Record the actor-state mutation as a structural effect. A
-        // state machine consuming the TxLog applies these in order
-        // (last-write-wins per actor) to mutate the registry without
-        // re-running the script. The entry carries the FULL state —
-        // the merkle leaf hashes its root, but consumers reading the
-        // txlog directly get the bytes.
+        // Structural effect. State-machine replay applies these
+        // last-write-wins per actor; the merkle leaf hashes
+        // `state_root(state)`, while the entry carries the full
+        // Dict for direct consumers.
         self.txlog.push(crate::tx::TxEntry::ActorSave {
             actor,
             state: state_for_log,

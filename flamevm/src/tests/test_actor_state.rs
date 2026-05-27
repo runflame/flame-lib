@@ -4,18 +4,19 @@
 
 use super::test_helpers::*;
 
-use crate::{ActorID, ActorState, MemRegistry, Int253, RECV_METHOD};
+use crate::{state_with_public, ActorID, Dict, MemRegistry, Int253, RECV_METHOD};
 
 /// Builds an empty state with a single `recv` method that runs the
 /// caller-supplied bytes. Returns (state, id).
 fn deploy_with_recv(reg: &mut MemRegistry, recv: Vec<u8>, vbytes: u64, height: u64)
     -> ActorID
 {
-    let mut state = ActorState::new();
-    state.public.insert(
+    let mut public = Dict::new();
+    public.insert(
         RECV_METHOD,
         Value::String(String::from(recv.clone())),
     );
+    let state = state_with_public(public);
     // Derive the id from the recv bytes (stand-in for the
     // real constructor that would deploy this state).
     let id = ActorID::Hash(ActorID::Constructor(recv).to_hash());
@@ -184,28 +185,29 @@ fn save_without_load_errors() {
 }
 
 #[test]
-fn save_with_malformed_dict_errors_malformed_actor_state() {
-    // To exercise the "wrong-shape Dict" branch of `op_save`
-    // without dragging in the wrapper-emptying choreography (the
-    // wrapper Dict has 2 entries, so it can't be `drop`'d
-    // directly), we set the frame's `loaded` flag by hand and
-    // hit save with an empty Dict pre-pushed.
+fn save_accepts_arbitrary_portable_dict_shape() {
+    // The VM no longer enforces the conventional `{0x00 → public,
+    // 0x01 → private}` wrapper shape at `op_save`. Any portable
+    // Dict is accepted; the shape is purely a script-side
+    // convention. (Method dispatch via `resolve_method` consults
+    // 0x00 — scripts that ignore the convention just won't be
+    // dispatchable, but that's their choice.)
     let mut reg = MemRegistry::new();
     let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
     reg.mark_for_destruction(&id); // simulate prior load
 
-    // Script: push:0; dict; save. Pre-save = 2 instructions.
+    // Script: push:0; dict; save. Empty Dict, no wrapper shape.
     let script = Program::new().push_int(0u64).dict().save().to_bytecode();
     let mut vm = vm_for(id, script);
     vm.current_call.loaded = true; // simulate prior op_load on this frame
-    for i in 0..2 {
-        vm.step_internal_with_registry(&mut reg)
-            .unwrap_or_else(|e| panic!("pre-save step {} errored: {:?}", i, e));
+    for _ in 0..3 {
+        vm.step_internal_with_registry(&mut reg).expect("step ok");
     }
-    let err = vm
-        .step_internal_with_registry(&mut reg)
-        .expect_err("save must error");
-    assert!(matches!(err, VMError::MalformedActorState), "got {:?}", err);
+    // Save succeeded; an ActorSave entry is in the txlog.
+    let save_count = vm.txlog.iter()
+        .filter(|e| matches!(e, crate::tx::TxEntry::ActorSave { .. }))
+        .count();
+    assert_eq!(save_count, 1);
 }
 
 #[test]

@@ -157,16 +157,15 @@ fn msm_dup_rejects() {
     ));
 }
 
-/// MSM is non-droppable: `drop` rejects.
+/// MSM IS droppable: it's a pure-computation accumulator with no
+/// embedded asset value. `drop` succeeds and the stack ends clean.
 #[test]
-fn msm_drop_rejects() {
+fn msm_drop_succeeds() {
     let mut vm = vm_with_script(
         Program::new().push_point([0x55; 32]).neg().drop_().to_bytecode(),
     );
-    assert!(matches!(
-        run_to_end(&mut vm).unwrap_err(),
-        VMError::TypeNotDroppable
-    ));
+    run_to_end(&mut vm).expect("MSM is droppable (pure computation)");
+    assert!(vm.current_call.stack.is_empty());
 }
 
 /// MSM is non-portable: cannot be sealed into a cell payload.

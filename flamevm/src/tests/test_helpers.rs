@@ -52,13 +52,13 @@ impl ActorRegistry for StubRegistry {
     // pin this stub — once Units 5–8 land the affected tests
     // construct a `MemRegistry` instead. Surface a clear panic
     // so a future test that strays here gets an obvious error.
-    fn load_state(&mut self, _id: &ActorID) -> Result<crate::ActorState, VMError> {
+    fn load_state(&mut self, _id: &ActorID) -> Result<crate::Dict, VMError> {
         unimplemented!("StubRegistry::load_state — use MemRegistry for state-touching tests")
     }
     fn save_state(
         &mut self,
         _id: &ActorID,
-        _state: crate::ActorState,
+        _state: crate::Dict,
     ) -> Result<(), VMError> {
         unimplemented!("StubRegistry::save_state — use MemRegistry for state-touching tests")
     }
@@ -83,7 +83,7 @@ impl ActorRegistry for StubRegistry {
     fn deploy(
         &mut self,
         _id: ActorID,
-        _state: crate::ActorState,
+        _state: crate::Dict,
         _vbytes: u64,
         _height: u64,
     ) -> Result<(), VMError> {

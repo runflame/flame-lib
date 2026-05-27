@@ -10,12 +10,13 @@ use crate::int253::Int253;
 use crate::string::String;
 use crate::value::Value;
 
-/// Reserved method key in `ActorState.public`. Dispatched for every
-/// inbound message send (`recv`); other keys are reachable only via
-/// `op_call` between actors.
+/// Reserved method key in the actor-state `public` sub-Dict.
+/// Dispatched for every inbound message send (`recv`); other keys
+/// are reachable only via `op_call` between actors.
 pub const RECV_METHOD: Int253 = Int253::ZERO;
 
-/// Reserved dict keys inside the `ActorState` wrapper Dict.
+/// Reserved top-level Dict keys for an actor's state. `public#0x00`
+/// holds the method table; `private#0x01` holds the actor's data.
 pub const ACTOR_STATE_PUBLIC_KEY_RAW: u64 = 0x00;
 pub const ACTOR_STATE_PRIVATE_KEY_RAW: u64 = 0x01;
 
@@ -136,182 +137,91 @@ impl ActorID {
     }
 }
 
-// ── ActorState ───────────────────────────────────────────────────
+// ── Actor state helpers (state IS a Dict) ────────────────────────
+//
+// The actor's state is a plain `Dict` with the conventional shape
+// `{ 0x00 → public_dict, 0x01 → private_dict }` (see spec.md §Actors).
+// Scripts construct it on the stack via `dict` / `put`, push it back
+// via `op_save`, and observe it via `op_load`. No wrapper struct —
+// the convention is encoded directly in the Dict's contents.
+//
+// The two helpers below navigate the convention from registry-side
+// code (`resolve_method` for method dispatch) and provide a canonical
+// commitment hash (`state_root` for `TxEntry::ActorSave`'s merkle leaf).
 
-/// The full mutable state of an actor — a Dict with two reserved
-/// keys: `public` (methods callable by other actors / external
-/// senders) and `private` (internal state visible only to the
-/// actor's own scripts). Per `flamevm/spec.md` §Actors.
-///
-/// The two halves are kept as distinct fields rather than a flat
-/// wrapper Dict so callers don't have to round-trip through
-/// `get`/`put` to mutate one side. Wire form is the wrapper Dict
-/// via [`ActorState::encode`] / [`ActorState::decode`].
-pub struct ActorState {
-    /// Methods callable by message sends (`recv` at key 0) and by
-    /// other actors' `op_call`. Keys: `Int253`; values: `String` of
-    /// method script bytes.
-    pub public: Dict,
-
-    /// Internal state and helpers. Keys: `Int253`; values:
-    /// arbitrary portable [`Value`]s.
-    pub private: Dict,
+/// Constructs an empty actor state: a Dict with `{0x00 → empty_dict,
+/// 0x01 → empty_dict}`. Used by tests and the bootstrap deploy path.
+pub fn empty_state() -> Dict {
+    let mut s = Dict::new();
+    s.insert(
+        Int253::from(ACTOR_STATE_PUBLIC_KEY_RAW),
+        Value::Dict(Dict::new()),
+    );
+    s.insert(
+        Int253::from(ACTOR_STATE_PRIVATE_KEY_RAW),
+        Value::Dict(Dict::new()),
+    );
+    s
 }
 
-impl ActorState {
-    /// Constructs an empty state.
-    pub fn new() -> Self {
-        Self {
-            public: Dict::new(),
-            private: Dict::new(),
-        }
-    }
+/// Constructs an actor state with a pre-populated public Dict and an
+/// empty private Dict. Convenience for tests that only care about
+/// the method table.
+pub fn state_with_public(public: Dict) -> Dict {
+    let mut s = Dict::new();
+    s.insert(Int253::from(ACTOR_STATE_PUBLIC_KEY_RAW), Value::Dict(public));
+    s.insert(
+        Int253::from(ACTOR_STATE_PRIVATE_KEY_RAW),
+        Value::Dict(Dict::new()),
+    );
+    s
+}
 
-    /// Constructs a state with a pre-populated `public` Dict. Used
-    /// when deploying an actor with a fixed method table.
-    pub fn with_public(public: Dict) -> Self {
-        Self {
-            public,
-            private: Dict::new(),
-        }
-    }
-
-    /// Looks up a method script by key. Returns `None` if the key
-    /// is absent or the value at that key isn't a `String`.
-    pub fn resolve_method(&self, key: &Int253) -> Option<&String> {
-        match self.public.get(key)? {
+/// Looks up a method script in the canonical state shape:
+/// `state[0x00 = public][method]`. Returns `None` if the state isn't
+/// in canonical shape, the method key is absent, or the value at the
+/// method key isn't a `String`.
+pub fn resolve_method<'a>(state: &'a Dict, method: &Int253) -> Option<&'a String> {
+    match state.get(&Int253::from(ACTOR_STATE_PUBLIC_KEY_RAW))? {
+        Value::Dict(public) => match public.get(method)? {
             Value::String(s) => Some(s),
             _ => None,
-        }
-    }
-
-    /// True iff `public` contains a method at `key`.
-    pub fn has_method(&self, key: &Int253) -> bool {
-        self.public.get(key).is_some()
-    }
-
-    /// Writes the canonical wire form — the wrapper Dict
-    /// (`0x00 → public`, `0x01 → private`). Errors only if a
-    /// `private` payload value lacks an encoder; `public` is
-    /// guaranteed encodable (entries are all `String`).
-    pub fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
-        let wrapper = self.to_wrapper_dict();
-        write_dict(w, &wrapper)
-    }
-
-    /// Reads the canonical wire form. Strict: rejects any deviation
-    /// from the 2-entry shape or non-Dict values at either slot.
-    ///
-    /// The wrapper is itself a Dict — the encoder uniformly hands
-    /// either the list-style form (sequential 0/1 keys, shortest
-    /// encoding) or dict-style. We use the top-level `read_value`
-    /// and downcast: that way both shapes decode without us having
-    /// to peek at the tag byte.
-    pub fn decode(r: &mut impl Reader) -> Result<Self, ReadError> {
-        match read_value(r)? {
-            Some(Value::Dict(d)) => {
-                Self::from_wrapper_dict(d).map_err(|_| ReadError::InvalidFormat)
-            }
-            _ => Err(ReadError::InvalidFormat),
-        }
-    }
-
-    /// Returns the wrapper Dict that mirrors the wire form. Useful
-    /// when callers want to push the actor state onto the VM stack
-    /// (`op_load` will consume this).
-    pub fn to_wrapper_dict(&self) -> Dict {
-        let mut d = Dict::new();
-        d.insert(
-            Int253::from(ACTOR_STATE_PUBLIC_KEY_RAW),
-            Value::Dict(
-                self.public
-                    .try_clone()
-                    .expect("public dict (Strings only) is always copyable"),
-            ),
-        );
-        d.insert(
-            Int253::from(ACTOR_STATE_PRIVATE_KEY_RAW),
-            Value::Dict(
-                self.private
-                    .try_clone()
-                    .expect("private dict must hold copyable portable values"),
-            ),
-        );
-        d
-    }
-
-    /// Canonical 32-byte commitment to this state — Merlin-hashed
-    /// over the wire-encoded form under domain `flamevm.actor.state.root`.
-    /// Used by `TxEntry::ActorSave`'s MerkleItem impl to bind state
-    /// mutations into the TxID without inlining the full state bytes
-    /// in the merkle leaf.
-    ///
-    /// Infallible: the registry only stores encodable states (op_save
-    /// validates encodability on the way in), so a state obtained
-    /// from the registry always round-trips. A script that builds a
-    /// non-encodable state and tries to op_save it will fail at the
-    /// op_save step, before reaching the registry.
-    pub fn root(&self) -> [u8; 32] {
-        let mut buf = Vec::new();
-        self.encode(&mut buf)
-            .expect("ActorState in valid registry context is encodable");
-        let mut t = Transcript::new(b"flamevm.actor.state.root");
-        t.append_message(b"state", &buf);
-        let mut h = [0u8; 32];
-        t.challenge_bytes(b"root", &mut h);
-        h
-    }
-
-    /// Parses a wrapper Dict back into an `ActorState`. Inverse of
-    /// [`ActorState::to_wrapper_dict`].
-    pub fn from_wrapper_dict(mut d: Dict) -> Result<Self, VMError> {
-        let public_key = Int253::from(ACTOR_STATE_PUBLIC_KEY_RAW);
-        let private_key = Int253::from(ACTOR_STATE_PRIVATE_KEY_RAW);
-        if d.len() != 2 {
-            return Err(VMError::MalformedActorState);
-        }
-        let public = match d.remove(&public_key) {
-            Some(Value::Dict(d)) => d,
-            _ => return Err(VMError::MalformedActorState),
-        };
-        let private = match d.remove(&private_key) {
-            Some(Value::Dict(d)) => d,
-            _ => return Err(VMError::MalformedActorState),
-        };
-        Ok(Self { public, private })
+        },
+        _ => None,
     }
 }
 
-impl Default for ActorState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Manual `Debug` impl — `Dict` lacks `#[derive(Debug)]` (because
-/// its `Value` payloads include linear types that can't derive
-/// `Debug`), so the standard derive doesn't apply. Print just the
-/// public/private slot counts — useful for `Result::expect_err`
-/// callers without leaking internal payload structure.
-impl core::fmt::Debug for ActorState {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ActorState")
-            .field("public.len", &self.public.len())
-            .field("private.len", &self.private.len())
-            .finish()
-    }
+/// Canonical 32-byte commitment to an actor state Dict, used by
+/// `TxEntry::ActorSave`'s MerkleItem impl. Hashes the wire-encoded
+/// state under domain `flamevm.actor.state.root`.
+///
+/// Infallible: the registry only ever stores portable states (op_save
+/// validates portability on the way in), and every portable value is
+/// expected to be wire-encodable. A non-encodable portable value
+/// would surface here as a panic — see the architect's queue item
+/// about the `ClearToken` vs encoder gap.
+pub fn state_root(state: &Dict) -> [u8; 32] {
+    let mut buf = Vec::new();
+    write_dict(&mut buf, state)
+        .expect("actor state in valid registry context is wire-encodable");
+    let mut t = Transcript::new(b"flamevm.actor.state.root");
+    t.append_message(b"state", &buf);
+    let mut h = [0u8; 32];
+    t.challenge_bytes(b"root", &mut h);
+    h
 }
 
 // ── Actor (full record, including lifecycle counters) ────────────
 
 /// Full per-actor record stored in the registry. Combines the
-/// mutable [`ActorState`] (visible to scripts) with the
-/// protocol-managed lifecycle counters (vbyte balance, activation
-/// tracking, freeze state). Per `flamevm/spec.md` §Storage and ADR
-/// 0005.
+/// mutable script-visible state Dict with the protocol-managed
+/// lifecycle counters (vbyte balance, activation tracking, freeze
+/// state). Per `flamevm/spec.md` §Storage and ADR 0005.
 pub struct Actor {
-    /// Mutable script-visible state.
-    pub state: ActorState,
+    /// Mutable script-visible state. The canonical shape is
+    /// `{0x00 → public_dict, 0x01 → private_dict}`; helpers in this
+    /// module navigate it (`resolve_method`, `state_root`).
+    pub state: Dict,
 
     /// Persistent vbyte balance. Bled per block during `tick_block`
     /// (Unit 3). `0` puts the actor in the frozen state
@@ -337,7 +247,7 @@ pub struct Actor {
 impl Actor {
     /// Constructs a fresh actor with the given initial state and
     /// vbyte funding, activated at `height`.
-    pub fn new_active(state: ActorState, vbytes: u64, height: u64) -> Self {
+    pub fn new_active(state: Dict, vbytes: u64, height: u64) -> Self {
         Self {
             state,
             vbytes,
@@ -353,14 +263,13 @@ impl Actor {
     }
 }
 
-/// Manual `Debug` impl — `ActorState` has its own manual impl (see
-/// above), so derive doesn't compose for `Actor`. Print the
-/// lifecycle counters; defer state-shape printing to the
-/// `ActorState` impl.
+/// Manual `Debug` impl — `Dict` lacks `#[derive(Debug)]` (its `Value`
+/// payloads include linear types that can't derive `Debug`). Print
+/// just the lifecycle counters and the top-level state slot count.
 impl core::fmt::Debug for Actor {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Actor")
-            .field("state", &self.state)
+            .field("state.len", &self.state.len())
             .field("vbytes", &self.vbytes)
             .field("active_blocks", &self.active_blocks)
             .field("last_activation_height", &self.last_activation_height)
@@ -371,19 +280,21 @@ impl core::fmt::Debug for Actor {
 
 // ── Vbyte sizing ──────────────────────────────────────────────────
 
-/// Computes the canonical vbyte size of an actor's state, per Q2:
-/// `wire_len(ActorState::encode()) + STORAGE_OVERHEAD`.
-/// The lifecycle overhead covers the protocol-managed counters
-/// every actor carries regardless of state shape.
+/// Computes the canonical vbyte size of an actor's state Dict, per
+/// Q2: `wire_len(state) + STORAGE_OVERHEAD`. The lifecycle overhead
+/// covers the protocol-managed counters every actor carries
+/// regardless of state shape.
 ///
-/// Returns `Err(VMError::MalformedActorState)` if the state can't
-/// be encoded (a `private` payload containing non-portable values).
-pub fn vbyte_size(state: &ActorState) -> Result<u64, VMError> {
+/// Returns `Err(VMError::MalformedActorState)` if the state can't be
+/// encoded (a payload containing a value with no wire encoding).
+/// Note: encodability is not the same as portability — op_save's
+/// `is_portable` check is the authoritative storage gate; this
+/// function reports a separate failure mode for the rare case where
+/// a portable value lacks an encoder.
+pub fn vbyte_size(state: &Dict) -> Result<u64, VMError> {
     const STORAGE_OVERHEAD: u64 = 32;
     let mut buf = Vec::new();
-    state
-        .encode(&mut buf)
-        .map_err(|_| VMError::MalformedActorState)?;
+    write_dict(&mut buf, state).map_err(|_| VMError::MalformedActorState)?;
     Ok(buf.len() as u64 + STORAGE_OVERHEAD)
 }
 
@@ -513,15 +424,17 @@ impl VbytePool {
 pub trait ActorRegistry {
     // ── lookup ─────────────────────────────────────────────────
 
-    /// Returns a cloned snapshot of the actor's state. `op_load`
-    /// pushes this onto the stack; `op_call` uses it to resolve
-    /// the callee's method bytes without retaining a borrow.
-    fn load_state(&mut self, id: &ActorID) -> Result<ActorState, VMError>;
+    /// Returns a (Rust-)cloned snapshot of the actor's state Dict.
+    /// `op_load` pushes this onto the stack; `op_call` uses it to
+    /// resolve the callee's method bytes without retaining a borrow.
+    fn load_state(&mut self, id: &ActorID) -> Result<Dict, VMError>;
 
     /// Persists `state` against `id`. Re-sizes the actor's vbyte
     /// occupancy under the new state (the lifecycle ticker will
-    /// reconcile balance on the next block).
-    fn save_state(&mut self, id: &ActorID, state: ActorState) -> Result<(), VMError>;
+    /// reconcile balance on the next block). The caller is
+    /// responsible for ensuring `state` is portable (op_save checks
+    /// this before calling).
+    fn save_state(&mut self, id: &ActorID, state: Dict) -> Result<(), VMError>;
 
     /// Resolves a method's script bytes. Equivalent to
     /// `load_state(id)?.resolve_method(method)?` but exists as a
@@ -598,7 +511,7 @@ pub trait ActorRegistry {
     fn deploy(
         &mut self,
         id: ActorID,
-        state: ActorState,
+        state: Dict,
         vbytes: u64,
         height: u64,
     ) -> Result<(), VMError>;
@@ -668,25 +581,23 @@ struct MemRegistrySnapshot {
     marks: std::collections::BTreeSet<[u8; 32]>,
 }
 
-/// Deep-clones an `Actor`. Helper for `push_checkpoint`. The state's
-/// inner `Dict`s carry portable values only (op_save's wrapper-shape
-/// check + the post-save state-root encoding round-trip ensure this),
-/// so `try_clone` is expected to succeed. Failure indicates registry
-/// corruption — panic with a clear message rather than silently
-/// producing an incorrect snapshot.
-fn clone_actor(a: &Actor) -> Actor {
-    Actor {
-        state: ActorState {
-            public: a.state.public.try_clone()
-                .expect("registry invariant: actor public state is portable"),
-            private: a.state.private.try_clone()
-                .expect("registry invariant: actor private state is portable"),
-        },
+/// Deep-clones an `Actor` at the Rust level. Used by
+/// `push_checkpoint` for snapshotting and by `load_state` for the
+/// per-load copy that flows onto the VM stack. Uses `Dict::deep_clone`
+/// (which ignores VM linear-type discipline) rather than `try_clone`
+/// (which would reject portable-but-non-copyable values like `Token`).
+///
+/// Errors only for a value that can't be Rust-cloned at all — only
+/// `Cell` and `Merlin` qualify, and they're non-portable, so a
+/// portable state Dict never holds them.
+fn clone_actor(a: &Actor) -> Result<Actor, VMError> {
+    Ok(Actor {
+        state: a.state.deep_clone()?,
         vbytes: a.vbytes,
         active_blocks: a.active_blocks,
         last_activation_height: a.last_activation_height,
         frozen_since: a.frozen_since,
-    }
+    })
 }
 
 impl MemRegistry {
@@ -725,7 +636,7 @@ impl Default for MemRegistry {
 }
 
 impl ActorRegistry for MemRegistry {
-    fn load_state(&mut self, id: &ActorID) -> Result<ActorState, VMError> {
+    fn load_state(&mut self, id: &ActorID) -> Result<Dict, VMError> {
         let actor = self
             .actors
             .get(&id.to_hash())
@@ -733,26 +644,17 @@ impl ActorRegistry for MemRegistry {
         if actor.is_frozen() {
             return Err(VMError::ActorFrozen);
         }
-        // Clone the state (Dicts implement try_clone for portable
-        // payloads; the load path requires payloads to be portable
-        // since they're being moved across the wire / VM boundary).
-        let public = actor
-            .state
-            .public
-            .try_clone()
-            .map_err(|_| VMError::MalformedActorState)?;
-        let private = actor
-            .state
-            .private
-            .try_clone()
-            .map_err(|_| VMError::MalformedActorState)?;
-        Ok(ActorState { public, private })
+        // Rust-level deep clone (ignores VM stack-copyability rules).
+        // The state may contain portable-but-non-copyable values like
+        // `Token` — those are valid actor-state contents (balance
+        // tracking, etc.) and must round-trip through load/save.
+        actor.state.deep_clone()
     }
 
     fn save_state(
         &mut self,
         id: &ActorID,
-        state: ActorState,
+        state: Dict,
     ) -> Result<(), VMError> {
         let actor = self
             .actors
@@ -774,9 +676,7 @@ impl ActorRegistry for MemRegistry {
         if a.is_frozen() {
             return Err(VMError::ActorFrozen);
         }
-        let script = a
-            .state
-            .resolve_method(&method)
+        let script = resolve_method(&a.state, &method)
             .ok_or(VMError::MethodNotFound)?;
         Ok(script.to_bytes_vec())
     }
@@ -794,10 +694,23 @@ impl ActorRegistry for MemRegistry {
     }
 
     fn push_checkpoint(&mut self) {
+        // Deep-clone each actor via Rust-level cloning (ignoring VM
+        // linear-type rules — those gate stack `dup`, not storage).
+        // `clone_actor` returns Err only for `Cell` / `Merlin` in
+        // state, which are non-portable and op_save rejects on the
+        // way in; failure here would indicate registry corruption,
+        // so panic with a clear message rather than silently
+        // dropping the rollback.
         let actors = self
             .actors
             .iter()
-            .map(|(k, a)| (*k, clone_actor(a)))
+            .map(|(k, a)| {
+                (
+                    *k,
+                    clone_actor(a)
+                        .expect("registry invariant: stored actor state is deep-cloneable"),
+                )
+            })
             .collect();
         let marks = self.marks.clone();
         self.snapshots.push(MemRegistrySnapshot { actors, marks });
@@ -846,13 +759,20 @@ impl ActorRegistry for MemRegistry {
     fn deploy(
         &mut self,
         id: ActorID,
-        state: ActorState,
+        state: Dict,
         vbytes: u64,
         height: u64,
     ) -> Result<(), VMError> {
         let key = id.to_hash();
         if self.actors.contains_key(&key) {
             return Err(VMError::ActorAlreadyExists);
+        }
+        // Defensive: reject non-portable initial state — the same
+        // gate op_save uses. Without this check, a buggy deploy
+        // path could plant non-portable values that subsequent
+        // load/snapshot paths can't round-trip.
+        if !state.is_portable() {
+            return Err(VMError::NonPortableInState);
         }
         self.actors
             .insert(key, Actor::new_active(state, vbytes, height));

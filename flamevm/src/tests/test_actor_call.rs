@@ -3,18 +3,19 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::{ActorID, ActorRegistry, ActorState, MemRegistry, Int253, RECV_METHOD};
+use crate::{state_with_public, ActorID, ActorRegistry, Dict, MemRegistry, Int253, RECV_METHOD};
 
 /// Helper: deploys an actor whose `recv` method runs `script`.
 /// Derives the actor's id from the script bytes (treats `script`
 /// as a stand-in for the constructor — real deployments would
 /// hash the actual constructor that produces this state).
 fn deploy_recv(reg: &mut MemRegistry, script: Vec<u8>, vbytes: u64) -> ActorID {
-    let mut state = ActorState::new();
-    state.public.insert(
+    let mut public = Dict::new();
+    public.insert(
         RECV_METHOD,
         Value::String(String::from(script.clone())),
     );
+    let state = state_with_public(public);
     let id = ActorID::Hash(ActorID::Constructor(script).to_hash());
     reg.deploy(id.clone(), state, vbytes, 0).expect("deploy");
     id
@@ -122,11 +123,12 @@ fn call_does_not_emit_txlog_entry_by_itself() {
 #[test]
 fn direct_self_call_rejected_as_reentrancy() {
     let mut reg = MemRegistry::new();
-    let mut state = ActorState::new();
-    state.public.insert(
+    let mut public = Dict::new();
+    public.insert(
         RECV_METHOD,
         Value::String(String::from(nop_recv())),
     );
+    let state = state_with_public(public);
     let id = ActorID::Hash([0xa1; 32]);
     reg.deploy(id.clone(), state, 10_000, 0).expect("deploy");
 
@@ -170,19 +172,21 @@ fn indirect_cycle_rejected_as_reentrancy() {
     let a_id = ActorID::Hash([0xaa; 32]);
     let b_id = ActorID::Hash([0xbb; 32]);
 
-    let mut a_state = ActorState::new();
-    a_state.public.insert(
+    let mut a_public = Dict::new();
+    a_public.insert(
         RECV_METHOD,
         Value::String(String::from(nop_recv())),
     );
-    reg.deploy(a_id.clone(), a_state, 100_000, 0).expect("deploy A");
+    reg.deploy(a_id.clone(), state_with_public(a_public), 100_000, 0)
+        .expect("deploy A");
 
-    let mut b_state = ActorState::new();
-    b_state.public.insert(
+    let mut b_public = Dict::new();
+    b_public.insert(
         RECV_METHOD,
         Value::String(String::from(nop_recv())),
     );
-    reg.deploy(b_id.clone(), b_state, 100_000, 0).expect("deploy B");
+    reg.deploy(b_id.clone(), state_with_public(b_public), 100_000, 0)
+        .expect("deploy B");
 
     // B's recv: call A (re-entry — fails with marker 0), drop the
     // marker, return cleanly.
@@ -191,12 +195,13 @@ fn indirect_cycle_rejected_as_reentrancy() {
         p.push_instr(crate::ops::Instruction::Drop);
         p.to_bytecode()
     };
-    let mut new_b_state = ActorState::new();
-    new_b_state.public.insert(
+    let mut new_b_public = Dict::new();
+    new_b_public.insert(
         RECV_METHOD,
         Value::String(String::from(b_recv)),
     );
-    reg.save_state(&b_id, new_b_state).expect("update B");
+    reg.save_state(&b_id, state_with_public(new_b_public))
+        .expect("update B");
 
     // A's recv: call B (B returns 0 results successfully), drop the
     // [count, success] markers.
@@ -359,7 +364,7 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
         .verify()
         .to_bytecode();
     let x_id = deploy_recv(&mut reg, evil_recv, 10_000);
-    let root_before = reg.actor(&x_id).expect("X exists").state.root();
+    let root_before = crate::state_root(&reg.actor(&x_id).expect("X exists").state);
 
     let a_recv = Program::new()
         .push_int(0u64)
@@ -389,7 +394,7 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
     // F1 invariants:
     let x = reg.actor(&x_id).expect("X must still exist after rollback");
     assert_eq!(
-        x.state.root(),
+        crate::state_root(&x.state),
         root_before,
         "X's state must be the rolled-back pre-call root",
     );
@@ -434,7 +439,7 @@ fn f3_save_failure_rolls_back_and_preserves_actor() {
         .save()       // save sees Int253(0), errors TypeNotDict
         .to_bytecode();
     let x_id = deploy_recv(&mut reg, evil_recv, 10_000);
-    let root_before = reg.actor(&x_id).expect("X exists").state.root();
+    let root_before = crate::state_root(&reg.actor(&x_id).expect("X exists").state);
 
     let a_recv = Program::new()
         .push_int(0u64)
@@ -464,7 +469,7 @@ fn f3_save_failure_rolls_back_and_preserves_actor() {
     let x = reg
         .actor(&x_id)
         .expect("X must survive — save failure no longer destroys");
-    assert_eq!(x.state.root(), root_before);
+    assert_eq!(crate::state_root(&x.state), root_before);
     assert!(!reg.is_marked_for_destruction(&x_id));
 }
 
@@ -482,9 +487,10 @@ fn save_emits_actorsave_with_full_state() {
     // emits the ActorSave entry.
     let recv = Program::new().load().save().to_bytecode();
     let id = ActorID::Hash([0xab; 32]);
-    let mut state = ActorState::new();
-    state.public.insert(RECV_METHOD, Value::String(crate::String::from(recv.clone())));
-    let expected_root = state.root();
+    let mut public = Dict::new();
+    public.insert(RECV_METHOD, Value::String(crate::String::from(recv.clone())));
+    let state = state_with_public(public);
+    let expected_root = crate::state_root(&state);
     reg.deploy(id.clone(), state, 10_000, 0).expect("deploy");
 
     let mut vm = vm_for_actor(id.clone(), recv);
@@ -492,7 +498,7 @@ fn save_emits_actorsave_with_full_state() {
 
     let save = vm.txlog.iter().find_map(|e| match e {
         crate::tx::TxEntry::ActorSave { actor, state } =>
-            Some((actor.clone(), state.root())),
+            Some((actor.clone(), crate::state_root(state))),
         _ => None,
     }).expect("ActorSave entry present");
     assert_eq!(save.0, id);

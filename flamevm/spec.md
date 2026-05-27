@@ -1141,7 +1141,7 @@ Returns via `return k'`. Hard-fails `RegistryUnavailable` outside an internal-tx
 
 ø → _dict_
 
-Loads the current actor's `ActorState` from the registry, marks the actor as locked (re-entry blocked until `save`), and pushes the wrapper Dict.
+Loads the current actor's state Dict from the registry, marks the actor as locked (re-entry blocked until `save`), and pushes the Dict onto the stack. The Dict's conventional shape is `{0x00 → public, 0x01 → private}` (see [Actors](#actors)) but the VM doesn't enforce it.
 
 Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `LoadAlreadyMarked`, `ActorNotFound`, `ActorFrozen`.
 
@@ -1151,11 +1151,15 @@ Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `LoadAlreadyMar
 
 _dict_ → ø
 
-Pops a Dict, parses it as an `ActorState` (the two-entry wrapper shape with keys `0x00` public and `0x01` private), persists it against the current actor, and clears the mark. Emits `TxEntry::ActorSave { actor, state }` carrying the **full** post-save state — symmetric with `Output(Cell)` which carries the full Cell. The merkle leaf for this entry hashes `(actor.to_hash(), state.root())`, so the TxID commits to the state root while consumers reading the txlog directly get the bytes (no separate state-witness channel needed).
+Pops a Dict, **validates portability** (every value must be portable per `Value::is_portable`), persists it against the current actor, and clears the mark. Emits `TxEntry::ActorSave { actor, state }` carrying the **full** post-save state — symmetric with `Output(Cell)` which carries the full Cell. The merkle leaf for this entry hashes `(actor.to_hash(), state_root(&state))`, so the TxID commits to the canonical state root while consumers reading the txlog directly get the bytes (no separate state-witness channel needed).
 
-**Atomicity.** A `save` failure (`MalformedActorState` from a non-wrapper Dict, `TypeNotDict` from a non-Dict operand, `ActorNotFound` if the registry record vanished) propagates as a frame failure. The frame's call boundary rolls back both the txlog (truncating any ActorSave entry the failed callee may have written earlier) and the actor registry (restoring pre-frame state + marks), so the actor stays consistent with the truncated txlog. At the outermost frame, `execute_internal` applies the same rollback at the tx level.
+**State shape.** The VM does not enforce the conventional `{0x00 → public, 0x01 → private}` wrapper shape at save time; that's a script-side convention used by `op_call`'s method-dispatch lookup. Any portable Dict is accepted as state. Methods that never get called via `op_call` simply aren't reachable.
 
-Hard-fails: `SaveWithoutLoad`, `MalformedActorState`, `TypeNotDict`, `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorNotFound`.
+**Portability is the canonical storage gate.** Portable values: `Int253`, `String`, `Point`, `Dict` of portable, non-negative `ClearToken`, `Token`. Non-portable values (`Cell`, `Merlin`, `Variable`, `Expression`, `Constraint`, `MultiscalarMul`, `WideToken`, negative `ClearToken`) hard-fail `NonPortableInState`. Portability is distinct from VM stack-copyability (Tokens are portable but not copyable — they survive the load/save round-trip via Rust-level deep clone, ignoring the linear-type discipline that gates `dup`).
+
+**Atomicity.** A `save` failure (`NonPortableInState`, `TypeNotDict`, `MalformedActorState` from an unencodable value, `ActorNotFound` if the registry record vanished) propagates as a frame failure. The frame's call boundary rolls back both the txlog (truncating any ActorSave entry the failed callee may have written earlier) and the actor registry (restoring pre-frame state + marks), so the actor stays consistent with the truncated txlog. At the outermost frame, `execute_internal` applies the same rollback at the tx level.
+
+Hard-fails: `SaveWithoutLoad`, `NonPortableInState`, `TypeNotDict`, `MalformedActorState`, `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorNotFound`.
 
 ### signtx
 

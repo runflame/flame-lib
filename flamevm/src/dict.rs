@@ -11,7 +11,7 @@ use crate::Value;
 /// per call. Iteration yields entries in ascending key order, which the
 /// wire encoder relies on for canonical output.
 ///
-/// Carries two **sticky** flags that summarize member types:
+/// Carries three **sticky** flags that summarize member types:
 ///
 /// - `copyable` — true iff every value ever inserted was copyable. Once
 ///   a non-copyable value enters, the flag stays false even if the
@@ -19,20 +19,40 @@ use crate::Value;
 ///   matches the script's intuition that a poisoned dict stays poisoned.
 /// - `portable` — same shape, tracking whether any non-portable value
 ///   has ever been inserted.
+/// - `droppable` — same shape, tracking whether any non-droppable
+///   value has ever been inserted. A non-empty dict whose only members
+///   are `Variable` / `Constraint` / zero-qty `ClearToken` etc. is
+///   still droppable even though it isn't copyable.
 pub struct Dict {
     entries: BTreeMap<Int253, Value>,
     copyable: bool,
     portable: bool,
+    droppable: bool,
+}
+
+/// Manual `Debug` — `Value` payloads include linear types that don't
+/// derive `Debug`. Print just the entry count and the sticky flags;
+/// callers that need deeper inspection can iterate `entries()`.
+impl core::fmt::Debug for Dict {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Dict")
+            .field("len", &self.entries.len())
+            .field("copyable", &self.copyable)
+            .field("portable", &self.portable)
+            .field("droppable", &self.droppable)
+            .finish()
+    }
 }
 
 impl Dict {
-    /// Creates an empty dictionary. An empty dict is both copyable and
-    /// portable (vacuously).
+    /// Creates an empty dictionary. An empty dict is copyable,
+    /// portable, and droppable (all vacuously).
     pub fn new() -> Self {
         Dict {
             entries: BTreeMap::new(),
             copyable: true,
             portable: true,
+            droppable: true,
         }
     }
 
@@ -112,8 +132,23 @@ impl Dict {
         self.portable
     }
 
-    /// Deep clone. Errors with `TypeNotCopyable` if the sticky copyable
-    /// flag is false (some non-copyable member entered at some point).
+    /// Returns true iff this dict can be silently discarded by `drop`
+    /// (every member ever inserted was droppable). A dict containing
+    /// only `Variable` / `Constraint` / pure-computation values is
+    /// droppable but not copyable.
+    pub fn is_droppable(&self) -> bool {
+        self.droppable
+    }
+
+    /// VM-level clone — enforces stack-copyability discipline. Errors
+    /// with `TypeNotCopyable` if the sticky copyable flag is false
+    /// (some non-copyable member entered at some point). Used by the
+    /// `dup` family of stack opcodes.
+    ///
+    /// Distinct from [`Self::deep_clone`], which is the Rust-level
+    /// data-duplication path used by registry snapshotting / txlog
+    /// entry construction. Linear-type values (Token, Cell, …) get
+    /// rejected here but accepted by `deep_clone`.
     pub fn try_clone(&self) -> Result<Dict, VMError> {
         if !self.copyable {
             return Err(VMError::TypeNotCopyable);
@@ -127,6 +162,28 @@ impl Dict {
         // another all-copyable dict).
         new.copyable = self.copyable;
         new.portable = self.portable;
+        new.droppable = self.droppable;
+        Ok(new)
+    }
+
+    /// Rust-level deep clone. Ignores VM stack-copyability rules and
+    /// produces a structurally identical Dict via each value's
+    /// `Clone` impl. Used for registry snapshotting, txlog entry
+    /// construction, and other serialization-shaped operations where
+    /// we need a separate copy without invoking VM linear-type
+    /// discipline.
+    ///
+    /// Errors only if a contained value cannot be Rust-cloned at all
+    /// (`Cell`, `Merlin` — both non-portable, so a portable dict
+    /// never holds them).
+    pub fn deep_clone(&self) -> Result<Dict, VMError> {
+        let mut new = Dict::new();
+        for (k, v) in self.entries() {
+            new.entries.insert(*k, v.deep_clone()?);
+        }
+        new.copyable = self.copyable;
+        new.portable = self.portable;
+        new.droppable = self.droppable;
         Ok(new)
     }
 
@@ -160,6 +217,9 @@ impl Dict {
         }
         if !v.is_portable() {
             self.portable = false;
+        }
+        if !v.is_droppable() {
+            self.droppable = false;
         }
     }
 }
