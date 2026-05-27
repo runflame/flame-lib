@@ -44,7 +44,7 @@ A composite value (a `Dict`) inherits these flags from its members: once a non-p
 
 A token is a linear value type representing an asset instance. Tokens are bearer instruments: they cannot be duplicated, created out of thin air, or destroyed except through explicit issuance, retirement, or token-balanced merge/split.
 
-Each token has a [quantity](#quantity) (number of atomic units) and a [flavor](#flavor) (identifier of the asset kind, derived from the issuing [actor](#actor)'s ID). Both may be encrypted. The built-in currency — also called *flame* — has the same type as any user-defined token. Tokens are suitable for both financial instruments and capabilities (voting rights, access rights, and similar).
+Each token has a [quantity](#quantity) (number of atomic units) and a [flavor](#flavor) (identifier of the asset kind, derived from the issuing [actor](#actor)'s id or [predicate](#predicate)'s point — see [Issuance and retirement](#issuance-and-retirement)). Both may be encrypted. The built-in currency — also called *flame* — has the same type as any user-defined token. Tokens are suitable for both financial instruments and capabilities (voting rights, access rights, and similar).
 
 Three concrete variants:
 
@@ -58,9 +58,16 @@ Three concrete variants:
 
 ### Issuance and retirement
 
-The `issue` opcode produces a new token; the resulting type depends on inputs (cleartext gives `ClearToken`, point-committed gives `Token`). [Flavor](#flavor) is bound to the issuing actor's ID via `issueflv`, so two distinct actors cannot issue tokens of the same flavor.
+Two opcodes mint tokens, split by execution context:
 
-The `retire` opcode destroys a token, removing it from circulation. Both issuance and retirement are explicit transaction [effects](#effect), recorded so an outside observer can audit the money supply for any flavor.
+- **`issuepub`** — runs only in an [actor](#actor) frame (internal context). Cleartext `qty` (`Int253`); pushes a [`ClearToken`](#cleartoken). [Flavor](#flavor) is `flavor_from_actor(current_actor, tag)`.
+- **`issuepriv`** — runs only in a [`CellOpen`](#predicate) frame (external context). Confidential `qty` (a `Variable` lifted from a Pedersen commitment), range-proven to 64 bits; pushes a `Token`. Flavor is `flavor_from_predicate(current_predicate, tag)`.
+
+The split is structural, not policy: **privacy lives where the CS lives**. Predicate-opened frames execute in external context where R1CS and the batch verifier are available, so the confidential opcode lives there. Actor-call frames execute in internal context where there is no CS lane, so only the cleartext opcode is usable. There is no dispatch on operand type — wrong-type operands hard-fail at the opcode boundary, and each opcode rejects the wrong frame kind (`OpcodeRequiresActorContext` / `OpcodeRequiresPredicateContext`).
+
+The two issuer domains are **disjoint by construction**. Both opcodes seed a single Merlin transcript labelled `flamevm.token.flavor` (consensus-fixed), but `issuepub` opens it with first message `b"actor"` while `issuepriv` opens it with `b"predicate"`. A predicate-point that happens to be byte-identical to an actor id still produces a different flavor scalar — actors and predicates cannot collide on the same flavor by accident, and a predicate cannot forge an actor's flavor (or vice versa) by colliding identities.
+
+The `retire` opcode destroys a token regardless of how it was minted. Issuance and retirement are both explicit transaction [effects](#effect) (`TxEntry::Issue`, `TxEntry::Retire`), recorded so an outside observer can audit the money supply for any flavor.
 
 ### Constraint types
 
@@ -202,7 +209,7 @@ An external transaction may emit:
 | Output       | Appends a new entry to Utreexo. |
 | Send         | Schedules an [internal transaction](#internal-transaction) against an [actor](#actor). |
 | Fee          | Records a transaction fee in *flames*. |
-| Issuance     | Creates [tokens](#token) of a flavor bound to the issuing [actor](#actor). |
+| Issuance     | Creates [tokens](#token); flavor bound to the issuing [actor](#actor) (cleartext, `issuepub`) or [predicate](#predicate) (confidential, `issuepriv`). |
 | Retirement   | Destroys tokens, removing them from circulation. |
 | Data         | Arbitrary binary log entry; not stored persistently. |
 
@@ -213,7 +220,7 @@ An internal transaction may emit:
 | Receive      | Consumes the [message send](#message-send) that triggered the internal transaction. |
 | Output       | Appends a new entry to Utreexo. |
 | Send         | Schedules a further internal transaction. |
-| Issuance     | Creates tokens. |
+| Issuance     | Creates [tokens](#token); cleartext only (`issuepub`) — no CS in internal context. |
 | Retirement   | Destroys tokens. |
 | Data         | Log entry. |
 
@@ -459,7 +466,7 @@ Linear [value](#value) representing an asset instance. Bearer: cannot be duplica
 Number of atomic units in a [token](#token). May be encrypted.
 
 ### Flavor
-Asset-kind identifier of a [token](#token), derived from the issuing [actor](#actor)'s ID. May be encrypted.
+Asset-kind identifier of a [token](#token), derived from the issuing [actor](#actor)'s id (cleartext path) or [predicate](#predicate)'s point (confidential path), with a sub-flavor `tag`. May be encrypted. See [Issuance and retirement](#issuance-and-retirement).
 
 ### ClearToken
 [Token](#token) with unencrypted [quantity](#quantity) and [flavor](#flavor). May be negative; portable only when non-negative.
@@ -483,7 +490,7 @@ In-[FlameVM](#flamevm) form of an [output](#output): a compressed, single-use co
 Long-living, addressable entity holding persistent state and [scripts](#script). Stored uncompressed. Receives [message sends](#message-send) and [method calls](#method-call); supports concurrent multi-user interaction.
 
 ### Issuance
-[Effect](#effect) that creates new [tokens](#token) of a flavor bound to the issuing [actor](#actor).
+[Effect](#effect) that creates new [tokens](#token). Flavor binds to the issuing [actor](#actor) (cleartext path, `issuepub`) or [predicate](#predicate) (confidential path, `issuepriv`). See [Issuance and retirement](#issuance-and-retirement).
 
 ### Retirement
 [Effect](#effect) that destroys [tokens](#token), removing them from circulation.

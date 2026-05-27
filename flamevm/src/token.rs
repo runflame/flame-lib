@@ -200,3 +200,24 @@ pub fn flavor_from_actor(actor: &ActorID, tag: &String) -> Int253 {
     t.challenge_bytes(b"flavor", &mut buf);
     Int253::from(Scalar::from_bytes_mod_order_wide(&buf))
 }
+
+/// Computes a deterministic flavor scalar from a predicate identity
+/// and a `tag` byte string. The predicate's 32-byte compressed point
+/// keys the flavor; the `tag` lets one predicate mint multiple
+/// flavors. Same transcript label as `flavor_from_actor` but with a
+/// distinct first message (`b"predicate"` vs `b"actor"`), so the two
+/// issuance domains are disjoint by construction — an actor and a
+/// predicate cannot collide on the same flavor scalar even if their
+/// 32-byte identities are numerically equal.
+pub fn flavor_from_predicate(
+    predicate: &crate::cell::Predicate,
+    tag: &String,
+) -> Int253 {
+    let mut t = Transcript::new(b"flamevm.token.flavor");
+    let point_bytes = predicate.to_point().to_bytes();
+    t.append_message(b"predicate", &point_bytes);
+    t.append_message(b"tag", tag.as_bytes());
+    let mut buf = [0u8; 64];
+    t.challenge_bytes(b"flavor", &mut buf);
+    Int253::from(Scalar::from_bytes_mod_order_wide(&buf))
+}

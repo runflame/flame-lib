@@ -248,6 +248,309 @@ fn issuepub_at_external_root_errors_actor_context() {
     assert!(matches!(err, VMError::OpcodeRequiresActorContext));
 }
 
+// ── issuepriv tests ─────────────────────────────────────────────────
+
+#[test]
+fn issuepriv_emits_token_with_predicate_bound_flavor() {
+    // Inside a CellOpen frame in external context: push a blinded
+    // commitment as a witness-bearing String, lift it to a Variable
+    // via `commit`, push a tag, run `issuepriv`. Then `push:1 return`
+    // so the Token returns to the parent frame cleanly. The opcode
+    // does:
+    //   1. Register the qty commitment with the CS.
+    //   2. Allocate a 64-bit range proof.
+    //   3. Compute flavor = flavor_from_predicate(current_predicate, tag).
+    //   4. Emit TxEntry::Issue(qty_point, unblinded_flv_point).
+    //   5. Push Token { qty, flv: unblinded(flv) }.
+    use bulletproofs::PedersenGens;
+    let pc_gens = PedersenGens::default();
+    let qty_int = Int253::from(42u64);
+    let qty_blind = curve25519_dalek::scalar::Scalar::from(11u64);
+    let qty_commit = crate::Commitment::blinded_with_factor(qty_int, qty_blind);
+    let tag_str = crate::String::from(b"gold".to_vec());
+
+    // Build the VM by hand instead of going through bytecode — the
+    // bytecode roundtrip would strip the prover-side commitment
+    // witness from `String::commitment(...)`, leaving a `Closed`
+    // commitment that `Prover::commit_variable` rejects with
+    // `WitnessMissing`. Same pattern as the encrypted-borrow test.
+    use curve25519_dalek::ristretto::CompressedRistretto;
+    let program = Program::new()
+        .push_str(crate::String::commitment(qty_commit.clone()))
+        .commit()
+        .push_str(tag_str.clone())
+        .issuepriv()
+        .push_int(1u64)
+        .return_();
+    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
+    let child_kind = CallKind::CellOpen {
+        anchor: Anchor([0u8; 32]),
+        predicate: crate::Predicate::opaque(CompressedRistretto([0u8; 32])),
+        external_context: true,
+    };
+    let child = CallFrame::new(program.into_instructions(), child_kind, 500, 0, 0);
+    let mut vm = VM::new(dummy_header(), parent);
+    let p = core::mem::replace(&mut vm.current_call, child);
+    vm.call_stack.push(p);
+
+    let mut prover = Prover::new(&pc_gens);
+    while !vm.current_call.current_run.is_finished() {
+        vm.step_external(&mut prover).expect("step ok");
+    }
+
+    // After `return k=1`: parent stack = [Token, k=1, success=1].
+    let predicate = crate::Predicate::opaque(
+        curve25519_dalek::ristretto::CompressedRistretto([0u8; 32]),
+    );
+    let expected_flv = crate::token::flavor_from_predicate(&predicate, &tag_str);
+    assert_eq!(vm.current_call.stack.len(), 3);
+    match &vm.current_call.stack[0] {
+        Value::Token(t) => {
+            assert_eq!(t.qty.assignment(), Some(qty_int), "qty witness preserved");
+            assert_eq!(
+                t.flv.assignment(),
+                Some(expected_flv),
+                "flavor binds to predicate+tag",
+            );
+            // Sanity: the flv commitment is unblinded → matches the
+            // canonical unblinded point for the flavor scalar.
+            assert_eq!(
+                t.flv.to_point(),
+                crate::Commitment::unblinded(expected_flv).to_point(),
+            );
+        }
+        other => panic!("expected Token, got {}", value_kind(other)),
+    }
+    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+
+    // Txlog: Header + Issue(qty_point, unblinded_flv_point).
+    assert_eq!(vm.txlog.len(), 2);
+    assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+    let expected_flv_pt = crate::Commitment::unblinded(expected_flv).to_point();
+    match &vm.txlog[1] {
+        crate::tx::TxEntry::Issue(q, f) => {
+            assert_eq!(*q, qty_commit.to_point());
+            assert_eq!(*f, expected_flv_pt);
+        }
+        _ => panic!("expected TxEntry::Issue"),
+    }
+}
+
+#[test]
+fn issuepriv_disjoint_flavor_from_issuepub() {
+    // Domain separation: a predicate whose 32-byte point is byte-
+    // identical to an actor id must still produce a *different*
+    // flavor — because the transcripts diverge at the first message
+    // (`b"predicate"` vs `b"actor"`). This is the load-bearing
+    // invariant that keeps the two issuance domains from colliding.
+    let id_bytes = [0xab; 32];
+    let actor = ActorID::Hash(id_bytes);
+    let predicate = crate::Predicate::opaque(
+        curve25519_dalek::ristretto::CompressedRistretto(id_bytes),
+    );
+    let tag = crate::String::from(b"gold".to_vec());
+    let flv_actor = crate::token::flavor_from_actor(&actor, &tag);
+    let flv_pred = crate::token::flavor_from_predicate(&predicate, &tag);
+    assert_ne!(flv_actor, flv_pred);
+}
+
+#[test]
+fn issuepriv_at_external_root_errors_predicate_context() {
+    // ExternalRoot has no enclosing predicate — error propagates at
+    // root frame (call_stack is empty).
+    let script = Program::new().issuepriv().to_bytecode();
+    let mut vm = VM::new(
+        dummy_header(),
+        CallFrame::new(
+            Program::parse(&script).expect("parse").into_instructions(),
+            CallKind::ExternalRoot, 1_000_000, 0, 0,
+        ),
+    );
+    let mut delegate = make_stub_delegate();
+    let err = drive_external(&mut vm, &mut delegate).unwrap_err();
+    assert!(matches!(err, VMError::OpcodeRequiresPredicateContext));
+}
+
+#[test]
+fn issuepriv_in_internal_context_yields_failure_marker() {
+    // CellOpen with external_context: false: `require_external()` in
+    // op_issuepriv errors `ExternalOnly`. Since it's inside a nested
+    // frame, `fail_current_call` swallows the error and pushes `0`
+    // onto the parent's stack — mirrors the
+    // `op_open_cs_blocked_when_external_context_false` pattern in
+    // test_cells.rs.
+    use crate::vm::{Anchor, CallFrame, CallKind, VM};
+    use curve25519_dalek::ristretto::CompressedRistretto;
+    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
+    let script = Program::new().issuepriv().to_bytecode();
+    let child_kind = CallKind::CellOpen {
+        anchor: Anchor([0u8; 32]),
+        predicate: crate::Predicate::opaque(CompressedRistretto([0u8; 32])),
+        external_context: false, // → require_external() will error
+    };
+    let child = CallFrame::new(
+        Program::parse(&script).expect("parse").into_instructions(),
+        child_kind,
+        500,
+        0,
+        0,
+    );
+    let mut vm = VM::new(dummy_header(), parent);
+    let p = core::mem::replace(&mut vm.current_call, child);
+    vm.call_stack.push(p);
+    vm.step_internal().expect("step ok — error swallowed into marker");
+    // Child frame unwound back into parent (ExternalRoot).
+    assert!(vm.call_stack.is_empty());
+    // Parent now carries the `0` failure marker.
+    assert_eq!(vm.current_call.stack.len(), 1);
+    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+}
+
+#[test]
+fn issuepriv_prove_then_verify_end_to_end() {
+    // End-to-end: outer external script opens a cell whose leaf
+    // contains `commit ; pushstr(tag) ; issuepriv ; retire ; push:0 ;
+    // return`. The leaf mints a confidential token under the cell's
+    // predicate identity, then retires it (so the child stack is
+    // clean at frame exit). Prover produces a proof; Verifier
+    // verifies it against the same bytecode. The full pipeline —
+    // CS variable commitment, 64-bit range proof, batch verifier,
+    // TxID-bound finalize — is exercised.
+    use bulletproofs::PedersenGens;
+    use curve25519_dalek::ristretto::CompressedRistretto;
+
+    let pc_gens = PedersenGens::default();
+    let qty_int = Int253::from(42u64);
+    let qty_blind = curve25519_dalek::scalar::Scalar::from(11u64);
+    let qty_commit = crate::Commitment::blinded_with_factor(qty_int, qty_blind);
+    let tag_str = crate::String::from(b"gold".to_vec());
+
+    // Leaf script — runs inside the isolated CellOpen frame on open:
+    //   stack at entry: [qty_witness_string]  (k=1 arg from `open`)
+    //   commit:    pop String → Variable
+    //   pushstr:   tag
+    //   issuepriv: Variable + tag → Token  (TxEntry::Issue)
+    //   retire:    Token → ø                 (TxEntry::Retire)
+    //   push:0 return: exit with 0 results
+    let inner = Program::new()
+        .commit()
+        .push_str(tag_str.clone())
+        .issuepriv()
+        .retire()
+        .push_int(0u64)
+        .return_();
+    let inner_bytes = inner.to_bytecode();
+
+    // Single-leaf NUMS-only predicate tree.
+    let tree = crate::PredicateTree::scripts_only(
+        vec![inner_bytes.clone()],
+        TEST_BLINDING_KEY,
+    )
+    .expect("scripts_only tree");
+    let cp = tree.callproof_for(0).expect("callproof for leaf 0");
+    let pred_point = tree.compute_point();
+
+    // Cell with empty payload — the witness rides on the open arg.
+    let cell = crate::Cell::new(
+        crate::Predicate::opaque(pred_point),
+        Anchor([0xa1; 32]),
+        vec![],
+    );
+    let cell_bytes = encode_cell_to_bytes(&cell);
+
+    // Outer:
+    //   pushstr(cell_bytes); input;
+    //   pushpoint(internal_key);
+    //   neighbors-dict; position;
+    //   push_script(inner) (witness-preserving);
+    //   gas=1024; bytes=1024;
+    //   pushstr(qty_witness); k=1; open;
+    //   verify; drop  (consume the success + count markers)
+    let mut outer = Program::new()
+        .push_str(crate::String::from(cell_bytes))
+        .input()
+        .push_point(*cp.internal_key.as_bytes());
+    for (i, h) in cp.neighbors.iter().enumerate() {
+        outer = outer
+            .push_str(crate::String::from(h.to_vec()))
+            .push_int(i as u64);
+    }
+    let outer = outer
+        .push_int(cp.neighbors.len() as u64)
+        .dict()
+        .push_str(crate::String::from(cp.position.clone()))
+        .push_script(inner)                                  // witness-bearing
+        .push_int(1024u64)                                   // gas
+        .push_int(1024u64)                                   // bytes
+        .push_str(crate::String::commitment(qty_commit.clone())) // qty witness arg
+        .push_int(1u64)                                      // k = 1 arg
+        .open()
+        .verify()                                            // pops success marker (1)
+        .drop_();                                            // pops count (0)
+
+    // Prove.
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+        .expect("prove ok");
+    let txid_p = result.txid;
+    let TxResult { bytecode, proof, .. } = result;
+    let proof = proof.expect("proof set");
+
+    // Verify against the same bytecode — the verifier sees no
+    // witnesses on the wire (the leaf bytes encode just the opaque
+    // commitment point and the bare opcodes).
+    let pc_gens_v = PedersenGens::default();
+    let verified = crate::Verifier::verify(
+        &pc_gens_v,
+        bytecode,
+        &proof,
+        dummy_header(),
+        1_000_000,
+        0,
+        None,
+    )
+    .expect("verify ok");
+    assert_eq!(verified.txid, txid_p, "txid round-trips");
+
+    // The verifier's txlog must contain a matching Issue entry
+    // (predicate-bound flavor) and a Retire entry. Use the prover's
+    // result.txid as ground truth — the verifier reconstructs the
+    // identical txlog by replaying the bytecode.
+    let predicate = crate::Predicate::opaque(pred_point);
+    let expected_flv = crate::token::flavor_from_predicate(&predicate, &tag_str);
+    let expected_flv_pt = crate::Commitment::unblinded(expected_flv).to_point();
+    let expected_qty_pt = qty_commit.to_point();
+    let has_issue = verified.txlog.iter().any(|e| matches!(
+        e,
+        crate::tx::TxEntry::Issue(q, f) if *q == expected_qty_pt && *f == expected_flv_pt,
+    ));
+    assert!(has_issue, "verifier's txlog must contain Issue(qty, flv)");
+    let has_retire = verified.txlog.iter().any(|e| matches!(
+        e,
+        crate::tx::TxEntry::Retire(q, f) if *q == expected_qty_pt && *f == expected_flv_pt,
+    ));
+    assert!(has_retire, "verifier's txlog must contain matching Retire");
+}
+
+#[test]
+fn issuepriv_with_int_qty_yields_failure_marker() {
+    // issuepriv requires a Variable; an Int253 qty errors
+    // `TypeNotVariable`. Failure-marker pattern (same reason as
+    // `issuepriv_in_internal_context_yields_failure_marker`).
+    let script = Program::new()
+        .push_int(7u64)
+        .push_str(crate::String::from(b"gold".to_vec()))
+        .issuepriv()
+        .to_bytecode();
+    let mut vm = vm_with_nested_child_script(script);
+    vm.step_internal().expect("step push:7");
+    vm.step_internal().expect("step pushstr");
+    vm.step_internal().expect("step issuepriv — error swallowed into marker");
+    assert!(vm.call_stack.is_empty());
+    assert_eq!(vm.current_call.stack.len(), 1);
+    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+}
+
 #[test]
 fn retire_cleartoken_emits_txlog() {
     // Pre-load a ClearToken, run `retire`.

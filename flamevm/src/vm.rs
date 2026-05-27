@@ -12,7 +12,7 @@ use crate::errors::VMError;
 use crate::tx::TxHeader;
 use crate::cell::{CallProof, Cell, Predicate};
 use crate::constraints::Commitment;
-use crate::token::flavor_from_actor;
+use crate::token::{flavor_from_actor, flavor_from_predicate};
 use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
 
 // Re-export from canonical homes so vm.rs callers (notably the
@@ -796,7 +796,7 @@ impl VM {
             I::Log => self.op_log(),
 
             I::Amount => self.op_amount(),
-            I::IssuePriv => self.op_issuepriv(),
+            I::IssuePriv => self.op_issuepriv(delegate),
             I::IssuePub => self.op_issuepub(),
             I::Retire => self.op_retire(),
             I::Borrow => self.op_borrow(delegate),
@@ -1915,19 +1915,64 @@ impl VM {
     /// _qty:Variable tag_ **issuepriv** → _T_
     ///
     /// Confidential mint under the enclosing predicate's identity.
-    /// Stub: full implementation lands in Phase 38 (the Issuance
-    /// redesign). For now, gates context to flag obvious misuse —
-    /// errors `OpcodeRequiresPredicateContext` outside `CellOpen`,
-    /// `ExternalOnly` in internal context. The Variable-qty +
-    /// range-proof + flavor-from-predicate machinery is not yet
-    /// wired; calls from a valid `CellOpen` external frame currently
-    /// error `TokenRequiresCS` as a placeholder.
-    fn op_issuepriv(&mut self) -> Result<(), VMError> {
-        if !matches!(self.current_call.kind, CallKind::CellOpen { .. }) {
-            return Err(VMError::OpcodeRequiresPredicateContext);
-        }
+    /// Requires a `CallKind::CellOpen` frame (errors
+    /// `OpcodeRequiresPredicateContext` otherwise) AND external
+    /// context (errors `ExternalOnly`; the CS lane is needed for the
+    /// range proof and the qty commitment registration).
+    ///
+    /// 1. Pop `tag` (String) and `qty` (`Variable` — non-Variable
+    ///    operands error `TypeNotVariable`).
+    /// 2. Register the qty commitment with the CS via
+    ///    `delegate.commit_variable`, getting back an r1cs::Variable.
+    /// 3. Allocate a 64-bit range proof on the qty (matches
+    ///    `borrow`/`mix`/output-side bounds).
+    /// 4. Compute `flv = flavor_from_predicate(current_predicate, tag)`
+    ///    deterministically.
+    /// 5. Emit `TxEntry::Issue(qty_commitment_point, flv_unblinded_point)`.
+    /// 6. Push `Token { qty: qty_commitment, flv: Commitment::unblinded(flv) }`.
+    fn op_issuepriv<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        // Snapshot the predicate before any pop, so a wrong frame
+        // surfaces before we mutate the stack.
+        let predicate = match &self.current_call.kind {
+            CallKind::CellOpen { predicate, .. } => predicate.clone(),
+            _ => return Err(VMError::OpcodeRequiresPredicateContext),
+        };
         self.require_external()?;
-        Err(VMError::TokenRequiresCS)
+        use spacesuit::BitRange;
+
+        let tag = self.pop_value()?.to_string()?;
+        let qty_var = self.pop_value()?.to_variable()?;
+        // Register the Pedersen commitment with the CS. On the prover
+        // the open assignment travels through; on the verifier only
+        // the closed point. Same r1cs::Variable on both sides.
+        let (_qty_point, qty_r1cs) = delegate.commit_variable(&qty_var.commitment)?;
+        // 64-bit range proof on the qty commitment — `borrow`/`mix`
+        // already enforce this for confidential token paths.
+        let qty_assignment = match qty_var.commitment.assignment() {
+            Some(i) => Some(int253_to_signed_integer(i)?),
+            None => None,
+        };
+        spacesuit::range_proof(
+            delegate.cs(),
+            qty_r1cs.into(),
+            qty_assignment,
+            BitRange::max(),
+        )
+        .map_err(VMError::R1CSError)?;
+
+        // Flavor binds to the enclosing predicate + tag.
+        let flv = flavor_from_predicate(&predicate, &tag);
+        let flv_commit = Commitment::unblinded(flv);
+
+        self.txlog.push(crate::tx::TxEntry::Issue(
+            qty_var.commitment.to_point(),
+            flv_commit.to_point(),
+        ));
+        self.push_value(Value::Token(crate::Token::new(
+            qty_var.commitment,
+            flv_commit,
+        )));
+        Ok(())
     }
 
     /// _token_ **retire** → ø

@@ -8,7 +8,7 @@ what's left to build.
 
 ## Status overview
 
-### Completed phases (1–37)
+### Completed phases (1–38)
 
 | #  | Phase                                                              |
 |----|--------------------------------------------------------------------|
@@ -49,17 +49,17 @@ what's left to build.
 | 35 | `MultiscalarMul` for Sigma-protocol verification                   |
 | 36 | TxLog records effects, not control flow (ADR 0014)                 |
 | 37 | Batch rollback under call failure                                  |
+| 38 | Issuance redesign (`issuepub` / `issuepriv` split; ADR-pending)    |
 
-### Pending phases (38–41)
+### Pending phases (39–41)
 
 | #  | Phase                                                              |
 |----|--------------------------------------------------------------------|
-| 38 | Issuance redesign (external + internal; possibly encrypted qty)    |
 | 39 | Gas-cost estimation (incl. block resource pool consideration)      |
 | 40 | Memory cap (allocator hooks + enforcement)                         |
 | 41 | Integration tests (incl. fuzzing & canonicality sweeps)            |
 
-**37 of 41 complete (~90 %).** Total test count: 557 passing; build
+**38 of 41 complete (~93 %).** Total test count: 566 passing; build
 clean. Remaining compiler warnings target Phase 39 (gas charging) and
 Phase 40 (mem-cap allocator).
 
@@ -197,12 +197,12 @@ unified the witness model, added a lazy MSM type, retired
 | 35 | `MultiscalarMul` for Sigma protocols                        | 13    | `MultiscalarMul` Value type (linear, portable, non-wire). Lazy `Vec<(Scalar, Point)>` accumulator; `op_add`/`neg`/`mul` lift point arithmetic; `op_verify` adds it to the existing `BatchVerifier` lane as `sum == identity`. |
 | 36 | TxLog records effects, not control flow (ADR 0014)          | 1 (new) | Drop `TxEntry::Call`; add `TxEntry::ActorSave { actor, post_state_root }` emitted by `op_save`. MerkleItem domain tags retired/added. Tests reworked: `call_emits_…` → `call_does_not_emit_txlog_entry_by_itself`. |
 | 37 | Batch rollback under call failure                           | 2 (new) | `starsig::BatchSnapshot` + `BatchCheckpoint` trait. `CallFrame::snap_batch` populated when child pushed; restored on failure. MSM + sig contributions from failed callees no longer pollute the caller's batch. |
+| 38 | Issuance redesign (`issuepub` + `issuepriv` split)          | 6 (new) | Two disjoint opcodes: `issuepub` (`0x92`, cleartext, ActorCall frames) + `issuepriv` (`0x91`, confidential, CellOpen frames). `flavor_from_predicate` helper added alongside `flavor_from_actor` (transcript label `flamevm.token.flavor` + first-message domain separation `b"predicate"`/`b"actor"`). `issuepriv` allocates a 64-bit range proof + registers the qty commitment with the CS, emits `TxEntry::Issue(qty_point, unblinded_flv_point)`. Full prove→verify roundtrip test ships in `test_tokens::issuepriv_prove_then_verify_end_to_end`. |
 
 ## Known wiring gap
 
 | Area | Gap | Severity | Targeted in phase |
 |---|---|---|---|
-| Issuance | encrypted `qty` + external-context entry path | Medium | 38 |
 | `String::as_bytes` panic on witness variants | Sharp edge — documented but no CI lint. | Low | 41 (lint) |
 | `decrypt` uses default `PedersenGens` only | Future multi-gens use would need parameterization. | Low | (deferred) |
 | `BatchSignatureVerificationFailed` is opaque | Doesn't say which sig failed. | Low | (accepted) |
@@ -212,7 +212,6 @@ unified the witness model, added a lazy MSM type, retired
 
 | Opcode / feature | Source | Phase |
 |---|---|---|
-| Encrypted `issue` (Point → Token) + external-context entry | spec.md row, design.md | 38 |
 | Gas charging per opcode | design.md §Resources / Gas | 39 |
 | Block resource pools (`B_par : B_ser = 4:1`) | design.md §Block resource pools | 39 (consideration) |
 | Memory cap `4× vbytes` enforcement (allocator hooks) | design.md ADR 0002 | 40 |
@@ -233,59 +232,68 @@ unified the witness model, added a lazy MSM type, retired
 | TxLog records effects, not control flow | — (landed as `decisions/0014-txlog-records-effects-not-control-flow.md`, Phase 36) | Dropped `TxEntry::Call`; added `TxEntry::ActorSave`. |
 | `Point` enum + `String::Point` unification | — (landed Phase 34) | ADR `0015-point-enum-and-string-point` queued. |
 | `MultiscalarMul` as first-class type | — (landed Phase 35) | ADR `0016-multiscalarmul-deferred-verification` queued. Audit `2026-05-26-msm-design.md` flagged size cap + gas-per-term as Phase 39/40 follow-ups. |
-| Issuance redesign | 38 | External + internal context, encrypted qty option, issuer identity model. |
+| Issuance redesign | — (landed Phase 38) | Two-opcode split: `issuepub` (cleartext, actor frames) + `issuepriv` (confidential, CellOpen frames). `flavor_from_predicate` helper added alongside `flavor_from_actor`. ADR `00XX-issuance-redesign` queued. |
 | Extension tag (255) policy | 41 | Reject vs reserve for soft-fork. Currently rejects. |
 
 ---
 
 # Section 2 — Pending phases
 
-## Phase 38 — Issuance redesign
+## Phase 38 — Issuance redesign (landed)
 
-**Goal**: redesign `issue` so it works in *both* external and
-internal transactions, and (likely) supports an encrypted-qty branch.
-The current `issue` requires actor context — so it can't run at
-external root — and only supports clear-qty. Both restrictions need
-revisiting together.
+Implemented per the two-opcode design (see spec.md §issuepriv /
+§issuepub). The dispatch-peek / branched-`issue` of the previous
+draft was rejected in favour of disjoint opcodes:
 
-**Design axes** (to be settled in an ADR before code lands):
+- **`issuepub`** (`0x92`, internal-only) — cleartext mint under the
+  enclosing actor's identity. `qty:Int253 tag → ClearToken`. Same
+  semantics as the old `op_issue` cleartext path, just renamed and
+  type-tightened (Point-qty → `TypeNotInt253`).
+- **`issuepriv`** (`0x91`, external-only) — confidential mint under
+  the enclosing predicate's identity. `qty:Variable tag → Token`.
+  Allocates a 64-bit range proof on the qty commitment; emits
+  `TxEntry::Issue(qty_point, unblinded_flv_point)`. Requires a
+  `CallKind::CellOpen` frame (errors `OpcodeRequiresPredicateContext`
+  outside) AND external context (errors `ExternalOnly` in internal).
 
-- **Issuer identity in external context.** At external root there's
-  no caller actor, so `flavor_from_actor` has no domain seed.
-  Options:
-  1. Take an explicit issuer `Predicate` operand (verified at issue
-     time via Schnorr in the batch verifier).
-  2. Take an explicit 32-byte `cid` String operand directly (issuer
-     binds out-of-band — no signature, but matches CleanToken
-     fixtures' shape).
-  3. Forbid external-root issuance entirely, keep internal-only.
-     Reject only the encrypted variant if too sharp.
-- **Cleartext vs encrypted qty.** Internal-context `issue` should
-  retain the cleartext-only path it has today (cheap, no CS work).
-  Encrypted-qty `issue` takes a `Variable` (already committed) +
-  range proof; routes through `op_issue_encrypted`. Dispatch peeks
-  the operand type per the spec's `pure` / `wide` pattern.
-- **TxLog encoding.** `TxEntry::Issue` may need to disambiguate
-  between cleartext and encrypted variants on the wire (today it
-  carries the cleartext qty).
-- **Range proof budget.** Encrypted-qty `issue` allocates one 64-bit
-  range proof (matches the bounds elsewhere — `borrow` /
-  confidential outputs).
+**Flavor derivation.** New helper `flavor_from_predicate` alongside
+`flavor_from_actor`. Same transcript label (`flamevm.token.flavor`,
+consensus-fixed); the two are domain-separated by their first message
+(`b"predicate"` vs `b"actor"`), so a predicate point that happens to
+be byte-identical to an actor id still produces a *different* flavor.
 
-**Items**:
+**Structural justification**: privacy lives where CS lives. Predicate
+frames run in external context (R1CS + batch verifier present) → the
+confidential opcode lives here. Actor frames run in internal context
+(no CS lane) → the cleartext opcode lives there. The opcode-vs-context
+split is mechanical, not policy.
 
-- ADR (architect-side) settling the four axes above.
-- `dispatch_external` peek for the operand type (mirrors `borrow`).
-- `op_issue_clear` / `op_issue_encrypted` dispatch split.
-- External-root entry path enabled.
-- `flavor_from_*` rebound per ADR (per-issuer-key, per-cid, etc.).
-- `TxEntry::Issue` encoding revisited (versioned variant if needed).
+**Tests**: 6 new (in `test_tokens.rs`):
+- `issuepriv_emits_token_with_predicate_bound_flavor` — positive
+  unit test (CellOpen + external, manual VM setup to preserve
+  prover-side commitment witness).
+- `issuepriv_disjoint_flavor_from_issuepub` — domain-separation
+  invariant.
+- `issuepriv_at_external_root_errors_predicate_context` — wrong-frame
+  rejection at root.
+- `issuepriv_in_internal_context_yields_failure_marker` — CellOpen
+  with `external_context: false` → `ExternalOnly` (swallowed into
+  failure marker on parent's stack).
+- `issuepriv_with_int_qty_yields_failure_marker` — `TypeNotVariable`
+  rejection (failure-marker pattern).
+- `issuepriv_prove_then_verify_end_to_end` — full Prover→Verifier
+  roundtrip with an outer external script opening a cell whose leaf
+  runs `commit ; issuepriv ; retire`; verifier reproduces the same
+  txlog with matching `Issue` and `Retire` entries bound to the
+  predicate-derived flavor.
 
-**Tests**: ~10 — cleartext external + internal happy paths,
-encrypted internal happy path (prove+verify), encrypted external
-happy path if ADR permits, flavor binding determinism, range-overflow
-rejected, mismatched-issuer-key signature rejected, dispatch peek on
-operand type.
+Plus 3 `issuepub` tests carried over from the previous Phase 38
+draft (renamed from the old `op_issue` tests; one negative case
+flipped from `TokenRequiresCS` to `TypeNotInt253`).
+
+**ADR backfill (pending)** — `decisions/00XX-issuance-redesign.md`
+to record the two-opcode design, the domain-separation invariant,
+and the "privacy lives where CS lives" structural argument.
 
 ---
 
@@ -451,7 +459,7 @@ its phase:
 | MultiscalarMul for Sigma-protocol verification | ✅ Done | 35 |
 | TxLog records effects, not control flow (ADR 0014) | ✅ Done | 36 |
 | Batch rollback under call failure | ✅ Done | 37 |
-| Issuance in external + internal context, encrypted qty | ⏳ Pending | 38 |
+| Issuance in external + internal context, encrypted qty | ✅ Done (`issuepub` / `issuepriv` split) | 38 |
 
 **Open structural questions** from design.md:
 
