@@ -444,7 +444,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 6f | [log](#log) | | s → ø | Emit a byte string as a data entry into the transaction log. |
 |    | **Tokens** | | | | |
 | 70 | [amount](#amount) | | t → t qty flv | Peek the quantity and flavor of a token without consuming it. |
-| 71 | [issue](#issue) | | qty tag → T | Mint a token under the current actor's identity + `tag`. |
+| 71 | [issuepriv](#issuepriv) | ext. | qty tag → T | Mint a confidential token under the current predicate's identity + `tag`. CellOpen frames only. |
 | 72 | [retire](#retire) | | t → ø | Burn a token (emits a retire entry to the txlog). |
 | 73 | [borrow](#borrow) | | qty flv → −T +T | Borrow balanced ±token pair; debt must be balanced before tx end. |
 | 74 | [merge](#merge) | | a b → {c 1 \| a b 0} | Combine two same-flavor cleartokens; soft-fail on flavor mismatch. |
@@ -490,6 +490,8 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | a8 | [blockweight](#blockweight) | int. | h → n | Push block weight at height `h`. *planned; maturity 100* |
 | a9 | [blockrate](#blockrate) | int. | h → n | Push sparks-per-satoshi mint rate at height `h`. *planned; maturity 100* |
 | aa | [chainstate](#chainstate) | int. | n → dict | Push a dict of block stats at height `n`. *planned; maturity 100* |
+|    | **Tokens (continued)** | | | |
+| ab | [issuepub](#issuepub) | int. | qty tag → CT | Mint a cleartext token under the current actor's identity + `tag`. ActorCall frames only. |
 
 Opcodes marked *planned* are reserved in the byte map; their handlers are not yet wired. Scripts using them error `UnknownOpcode` until the corresponding implementation phase lands (see `flamevm/plan.md`).
 
@@ -897,13 +899,29 @@ _t_ → _t qty flv_
 
 Peeks the top token-shaped value and pushes `(qty, flv)` above it. `ClearToken`: both as `Int253` (cleartext). `Token`: both as `Point` (the compressed commitment points; works without a live CS). `WideToken`: hard-fails `TypeNotToken` — its quantity isn't yet range-proven.
 
-### issue
+### issuepriv
 
 _qty tag_ → _T_
 
-Cleartext branch (`qty: Int253`): builds `ClearToken(qty, flavor_from_actor(current_actor, tag))`, emits `TxEntry::Issue(unblinded_qty, unblinded_flv)`. Requires actor context — hard-fails `OpcodeRequiresActorContext` from `ExternalRoot`. Use [`issueflv`](#issueflv) to compute a flavor without actor context.
+Pops `tag` (String) and `qty` (`Variable` — a Pedersen commitment lifted via [`commit`](#commit)). Allocates a 64-bit range proof on `qty`. Builds `Token(qty_commitment, unblinded(flavor))` where `flavor = flavor_from_predicate(current_predicate, tag)`. Emits a confidential `TxEntry::Issue` binding the issuance to `current_predicate`, `tag`, and the qty commitment point. Pushes the `Token`.
 
-Encrypted branch (`qty: Point`) is planned but not yet wired (hard-fails `TokenRequiresCS`).
+The current_predicate is the predicate stored on the enclosing `CallKind::CellOpen` frame — created by [`open`](#open) or [`signcall`](#signcall) against an empty cell whose predicate is the desired issuer. Hard-fails `OpcodeRequiresPredicateContext` from `ExternalRoot` (no enclosing predicate) and from any `ActorCall` frame (issuance binds to a predicate, not an actor; the two issuance domains are kept disjoint by construction). Hard-fails `ExternalOnly` in internal context (the CS lane is required for the range proof and the qty commitment).
+
+`Int253` or `Point` operands hard-fail `TypeNotVariable` — lift to a `Variable` via [`commit`](#commit) first.
+
+**Non-fungible tokens.** Mix the cell's [`anchor`](#anchor) into `tag` (e.g. `anchor … keccak256` against domain bytes) to derive a fresh flavor per issuance — the result is a non-fungible Token, since no other issuance will share the flavor.
+
+### issuepub
+
+_qty tag_ → _CT_
+
+Pops `tag` (String) and `qty` (`Int253` — cleartext). Builds `ClearToken(qty, flavor_from_actor(current_actor, tag))` and emits a cleartext `TxEntry::Issue` binding the issuance to `current_actor`, `tag`, and the cleartext `qty`. Pushes the `ClearToken`.
+
+The current_actor is the actor stored on the enclosing `CallKind::ActorCall` frame. Hard-fails `OpcodeRequiresActorContext` from `ExternalRoot` and from any `CellOpen` frame (issuance binds to an actor, not a predicate; the two issuance domains are kept disjoint by construction). Runs without CS — internal context only.
+
+`Variable` or `Point` operands hard-fail `TypeNotInt253` — `issuepub` is the cleartext path; for confidential qty, use [`issuepriv`](#issuepriv) from a `CellOpen` frame.
+
+**Non-fungible tokens.** Mix the call's [`anchor`](#anchor) into `tag` to derive a fresh flavor per call — yields a unique non-fungible token. Use [`issueflv`](#issueflv) on the consumer side to recompute the same flavor scalar for verification.
 
 ### retire
 
@@ -1511,7 +1529,7 @@ contract Prime {
     let q = f.qty * Flame.btc_burned / circulation
     self.btc_issued += q
     self.flames_deposited = merge(self.flames_deposited, f)
-    return issue(“btc”, q)
+    return issuepub(“btc”, q)
   }
   
   pub fn revert(btc: Token) -> Token {
