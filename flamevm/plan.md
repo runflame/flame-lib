@@ -175,11 +175,11 @@ unified the witness model, added a lazy MSM type, retired
 | 13 | Rich `String` + scalar/commit/decrypt                       | 13    | `String` becomes enum (Opaque + Commitment + Scalar + Predicate). End-to-end prove+verify with witness-bearing stack values. |
 | 14 | Encrypted `borrow` + `mix` cloak gadget                     | 3     | `op_borrow_encrypted`. `op_mix` invokes `spacesuit::cloak`. `WideToken` constructible. |
 | 15 | Batch verifier + `Explicit` deferred sigs                   | 2     | `Delegate::BatchVerifier`, `musig::BatchVerifier<ThreadRng>` on both sides. `MultiscalarMul` deleted (resurrected in Phase 35). |
-| 16 | TxID merkle root + `log` opcode                             | 6     | `TxID::from_log` over txlog, domain `flamevm.txid.v1`. `MerkleItem for TxEntry`. `0x6f log` opcode. |
+| 16 | TxID merkle root + `log` opcode                             | 6     | `TxID::from_log` over txlog, domain `flamevm.txid`. `MerkleItem for TxEntry`. `0x6f log` opcode. |
 | 17 | Hygiene sweep                                               | 4     | `MixDegenerate` guard. `BulletproofGens` singleton. spec.md row sync. |
 | 18 | `TxEntry::Header` + TxID transcript binding                 | 4     | Header at txlog[0]. `cs.transcript().append_message(b"flamevm.txid", &txid.0)` on both sides. |
 | 19 | `op_fee` + `CheckedFee`                                     | 14    | `0x7a fee` allocates WideToken debt; `MAX_FEE = 2²⁴` per-tx cap. `TxEntry::Fee(u64)`. |
-| 20 | TxBound multi-sig batch verification                        | 7     | `DeferredSig::TxBound { vk, cell_id }`. `verify_multi_batched` against `flamevm.signtx.v1` transcript bound to TxID. |
+| 20 | TxBound multi-sig batch verification                        | 7     | `DeferredSig::TxBound { vk, cell_id }`. `verify_multi_batched` against `flamevm.signtx` transcript bound to TxID. |
 | 21 | `TxResult` shape                                            | 4     | Unified return: `{ txid, txlog, total_fee, gas_used, vbytes_used, bytecode, proof, deferred_sigs, sends }`. |
 | 22 | Input-cell witness via `String::Cell` (zkvm-parity)         | 6     | `String::Cell(Arc<Cell>)` is the prover-side carrier; verifier pushes `String::Opaque(bytes)`. `to_cell()` handles both shapes. `Instruction::Input` is a unit variant. |
 | 23 | Confidential N→M test harness                               | 13    | Full input→open→mix→output prove/verify round-trip. Matrix: N∈{1,2,3} × M∈{1,2,3} × {1,2 flavors} + 2 negatives. |

@@ -417,7 +417,7 @@ impl PredicateTree {
 /// blinding factor's LSB picks whether the program sits on the left or
 /// right of its blinding sibling.
 fn create_merkle_leaves(progs: &[Vec<u8>], blinding_key: &[u8; 32]) -> Vec<PredicateLeaf> {
-    let mut t = Transcript::new(b"flamevm.taproot.blinding.v1");
+    let mut t = Transcript::new(b"flamevm.taproot.blinding");
     let n = progs.len() as u64;
     t.append_message(b"n", &n.to_le_bytes());
     t.append_message(b"key", blinding_key);
@@ -556,7 +556,7 @@ impl Cell {
     /// encode; non-portable types are rejected by `op_cell` /
     /// `op_output` before reaching here).
     pub fn id(&self) -> [u8; 32] {
-        let mut t = Transcript::new(b"flamevm.cell.id.v1");
+        let mut t = Transcript::new(b"flamevm.cell.id");
         t.append_message(b"predicate", self.predicate.to_point().as_bytes());
         t.append_message(b"anchor", &self.anchor.0);
         let len = self.payload.len() as u64;
@@ -671,7 +671,7 @@ impl Cell {
 
 /// `H(X, M)` — the Taproot tweak scalar.
 fn taproot_tweak(internal_key: &CompressedRistretto, merkle_root: &[u8; 32]) -> Scalar {
-    let mut t = Transcript::new(b"flamevm.taproot.v1");
+    let mut t = Transcript::new(b"flamevm.taproot");
     t.append_message(b"key", internal_key.as_bytes());
     t.append_message(b"root", merkle_root);
     let mut buf = [0u8; 64];
@@ -690,7 +690,7 @@ fn leaf_hash(leaf: &PredicateLeaf) -> [u8; 32] {
 /// Merkle leaf hash for a program leaf — also what the verifier
 /// computes from `CallProof::program` before walking up.
 fn program_leaf_hash(program: &[u8]) -> [u8; 32] {
-    let mut t = Transcript::new(b"flamevm.merkle.leaf.v1");
+    let mut t = Transcript::new(b"flamevm.merkle.leaf");
     t.append_message(b"program", program);
     let mut h = [0u8; 32];
     t.challenge_bytes(b"hash", &mut h);
@@ -700,7 +700,7 @@ fn program_leaf_hash(program: &[u8]) -> [u8; 32] {
 /// Merkle leaf hash for a blinding leaf. Distinct domain from the
 /// program leaf so a prover can't substitute one for the other.
 fn blinding_leaf_hash(bytes: &[u8; 32]) -> [u8; 32] {
-    let mut t = Transcript::new(b"flamevm.merkle.leaf.v1");
+    let mut t = Transcript::new(b"flamevm.merkle.leaf");
     t.append_message(b"blinding", bytes);
     let mut h = [0u8; 32];
     t.challenge_bytes(b"hash", &mut h);
@@ -709,7 +709,7 @@ fn blinding_leaf_hash(bytes: &[u8; 32]) -> [u8; 32] {
 
 /// Merkle node hash combining two child hashes.
 fn merkle_node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    let mut t = Transcript::new(b"flamevm.merkle.node.v1");
+    let mut t = Transcript::new(b"flamevm.merkle.node");
     t.append_message(b"left", left);
     t.append_message(b"right", right);
     let mut h = [0u8; 32];

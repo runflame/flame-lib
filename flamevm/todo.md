@@ -226,7 +226,7 @@ Spec (`0x60 dict`): "Creates a new dict with 2*n items as key-value pairs."
 
 `merlin::Transcript::new(label: &'static [u8])` requires a 'static label, but user-supplied labels are runtime-only.
 
-> Implementation today: every `Merlin` opens with a fixed domain separator `flamevm::merlin.v1` passed to `Transcript::new`; the user label is appended immediately as the first message under a fixed tag `b"label"`. Net effect: two transcripts with different user labels diverge from byte 0. Protocol security preserved.
+> Implementation today: every `Merlin` opens with a fixed domain separator `flamevm::merlin` passed to `Transcript::new`; the user label is appended immediately as the first message under a fixed tag `b"label"`. Net effect: two transcripts with different user labels diverge from byte 0. Protocol security preserved.
 >
 > Stakes: the literal byte stream of the transcript is not the same as a hypothetical reference implementation that managed to feed the user label directly into `Transcript::new`. Consensus-critical if `merlin*` opcodes are ever observable on-chain.
 >
@@ -280,7 +280,7 @@ Spec (`0x98 signtx`): "Defers external transaction signature verification."
 
 > Implementation today: the deferred sig's `message` is a Merlin transcript over the cell's `id()` only:
 > ```
-> transcript = Transcript::new(b"flamevm.signtx.v1")
+> transcript = Transcript::new(b"flamevm.signtx")
 > transcript.append(b"cell_id", cell.id())
 > message = transcript.challenge_bytes(b"msg", 32)
 > ```
@@ -305,7 +305,7 @@ Spec (`0x99 signrun`): "Executes a signed program on behalf of the actor. The pr
 
 > Implementation today:
 > ```
-> transcript = Transcript::new(b"flamevm.signrun.v1")
+> transcript = Transcript::new(b"flamevm.signrun")
 > transcript.append(b"cell_id", cell.id())
 > transcript.append(b"program", program)
 > message = transcript.challenge_bytes(b"msg", 32)

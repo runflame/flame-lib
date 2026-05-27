@@ -152,18 +152,18 @@ fn signcall_explicit_sig_batch_verifies_correctly() {
     // Build the message exactly as `op_signcall`'s
     // `signcall_message(program)` helper does.
     let inner_prog = vec![0x1c]; // drop
-    let mut prog_t = merlin::Transcript::new(b"flamevm.signcall.v1");
+    let mut prog_t = merlin::Transcript::new(b"flamevm.signcall");
     prog_t.append_message(b"program", &inner_prog);
     let mut msg_bytes = vec![0u8; 32];
     prog_t.challenge_bytes(b"msg", &mut msg_bytes);
     // Sign over a transcript with that message appended (matches
     // `Verifier::verify`'s reconstruction).
-    let mut sign_t = merlin::Transcript::new(b"flamevm.signcall.v1");
+    let mut sign_t = merlin::Transcript::new(b"flamevm.signcall");
     sign_t.append_message(b"msg", &msg_bytes);
     let signature = musig::Signature::sign(&mut sign_t, sk);
     // Verifier-side batch check.
     let mut batch = musig::BatchVerifier::new(rand::thread_rng());
-    let mut t = merlin::Transcript::new(b"flamevm.signcall.v1");
+    let mut t = merlin::Transcript::new(b"flamevm.signcall");
     t.append_message(b"msg", &msg_bytes);
     let vk = musig::VerificationKey::from_compressed(vk_point);
     signature.verify_batched(&mut t, vk, &mut batch);
@@ -179,11 +179,11 @@ fn signcall_tampered_sig_batch_rejects() {
     let sk = Scalar::from(42u64);
     let vk_point = (RISTRETTO_BASEPOINT_TABLE * &sk).compress();
     let inner_prog = vec![0x1c];
-    let mut prog_t = merlin::Transcript::new(b"flamevm.signcall.v1");
+    let mut prog_t = merlin::Transcript::new(b"flamevm.signcall");
     prog_t.append_message(b"program", &inner_prog);
     let mut msg_bytes = vec![0u8; 32];
     prog_t.challenge_bytes(b"msg", &mut msg_bytes);
-    let mut sign_t = merlin::Transcript::new(b"flamevm.signcall.v1");
+    let mut sign_t = merlin::Transcript::new(b"flamevm.signcall");
     sign_t.append_message(b"msg", &msg_bytes);
     let sig = musig::Signature::sign(&mut sign_t, sk);
     // Tamper: flip a bit in the signature's `s` scalar.
@@ -200,7 +200,7 @@ fn signcall_tampered_sig_batch_rejects() {
             })
         })
         .unwrap();
-    let mut t = merlin::Transcript::new(b"flamevm.signcall.v1");
+    let mut t = merlin::Transcript::new(b"flamevm.signcall");
     t.append_message(b"msg", &msg_bytes);
     let vk = musig::VerificationKey::from_compressed(vk_point);
     tampered.verify_batched(&mut t, vk, &mut batch);
@@ -233,7 +233,7 @@ fn phase20_single_txbound_verifies_with_multisig() {
     let TxResult { bytecode, proof, .. } = prover_result;
     let proof = proof.expect("proof set");
     // Sign multi-message context bound to TxID.
-    let mut t = merlin::Transcript::new(b"flamevm.signtx.v1");
+    let mut t = merlin::Transcript::new(b"flamevm.signtx");
     t.append_message(b"txid", &txid.0);
     let items =
         vec![(musig::VerificationKey::from_compressed(vk), cell_id)];
@@ -307,7 +307,7 @@ fn phase20_two_txbound_verifies_with_multisig() {
         (musig::VerificationKey::from_compressed(vk1), cell1_id),
         (musig::VerificationKey::from_compressed(vk2), cell2_id),
     ];
-    let mut t = merlin::Transcript::new(b"flamevm.signtx.v1");
+    let mut t = merlin::Transcript::new(b"flamevm.signtx");
     t.append_message(b"txid", &txid.0);
     let sig = musig::Signature::sign_multi(vec![sk1, sk2], items, &mut t)
         .expect("sign_multi");
@@ -412,7 +412,7 @@ fn phase20_tampered_signature_rejected() {
     let proof = proof.expect("proof set");
     let items =
         vec![(musig::VerificationKey::from_compressed(vk), cell_id)];
-    let mut t = merlin::Transcript::new(b"flamevm.signtx.v1");
+    let mut t = merlin::Transcript::new(b"flamevm.signtx");
     t.append_message(b"txid", &txid.0);
     let sig =
         musig::Signature::sign_multi(vec![sk_wrong], items, &mut t)
@@ -463,7 +463,7 @@ fn phase20_no_txbound_no_signature_roundtrip() {
 }
 
 /// Signature over the *wrong TxID* (different header) → rejected.
-/// Confirms TxID-binding in `flamevm.signtx.v1` is load-bearing:
+/// Confirms TxID-binding in `flamevm.signtx` is load-bearing:
 /// a replay attack across headers fails.
 #[test]
 fn phase20_signature_over_wrong_txid_rejected() {
@@ -482,7 +482,7 @@ fn phase20_signature_over_wrong_txid_rejected() {
     let wrong_txid = [0x99u8; 32];
     let items =
         vec![(musig::VerificationKey::from_compressed(vk), cell_id)];
-    let mut t = merlin::Transcript::new(b"flamevm.signtx.v1");
+    let mut t = merlin::Transcript::new(b"flamevm.signtx");
     t.append_message(b"txid", &wrong_txid);
     let sig = musig::Signature::sign_multi(vec![sk], items, &mut t)
         .expect("sign_multi");

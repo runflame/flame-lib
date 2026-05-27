@@ -119,10 +119,10 @@ pub enum TxEntry {
 impl TxID {
     /// Computes the canonical 32-byte transaction identifier as a
     /// merkle root over the txlog entries (header + effect list).
-    /// Domain-separated by `flamevm.txid.v1`. Mirrors zkvm's
+    /// Domain-separated by `flamevm.txid`. Mirrors zkvm's
     /// `TxID::from_log` exactly in shape.
     pub fn from_log(txlog: &[TxEntry]) -> Self {
-        TxID(MerkleTree::root(b"flamevm.txid.v1", txlog))
+        TxID(MerkleTree::root(b"flamevm.txid", txlog))
     }
 }
 

@@ -610,7 +610,7 @@ fn phase21_deferred_sigs_in_txresult() {
     let TxResult { bytecode, proof, .. } = prover_result;
     let proof = proof.expect("proof");
     // Sign + verify.
-    let mut t = merlin::Transcript::new(b"flamevm.signtx.v1");
+    let mut t = merlin::Transcript::new(b"flamevm.signtx");
     t.append_message(b"txid", &prover_txid.0);
     let sig = musig::Signature::sign_multi(
         vec![sk],

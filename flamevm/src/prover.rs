@@ -43,7 +43,7 @@ impl<'g> Prover<'g> {
     /// Reuses the process-wide [`shared_bp_gens`] singleton to avoid
     /// re-allocating ~16 KB of generators per prover instance.
     pub fn new(pc_gens: &'g PedersenGens) -> Self {
-        let cs = r1cs::Prover::new(pc_gens, Transcript::new(b"flamevm.r1cs.v1"));
+        let cs = r1cs::Prover::new(pc_gens, Transcript::new(b"flamevm.r1cs"));
         Self {
             cs,
             batch: musig::BatchVerifier::new(rand::thread_rng()),

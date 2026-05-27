@@ -347,7 +347,7 @@ Calls split the anchor at entry. `op_call`, `op_open`, and `op_signcall` each sp
 **Splitting.** Each opcode that produces a new unique-anchored *cross-tx* entity (cell-on-wire, message-to-actor) consumes `last_anchor` and replaces it with a fresh derived value. The split is a single Merlin transcript:
 
 ```
-t = Transcript::new(b"flamevm.anchor.split.v1");
+t = Transcript::new(b"flamevm.anchor.split");
 t.append_message(b"parent", &last_anchor.0);
 left  = t.challenge_bytes(b"left",  32);
 right = t.challenge_bytes(b"right", 32);
@@ -951,7 +951,7 @@ Pops the cleartext blinding/value pairs (`q' q` for quantity, `f' f` for flavor)
 
 _cid tag_ → _int_
 
-Pops `tag` (String) and `cid` (String, exactly 32 bytes — an actor id). Pushes `flavor_from_actor(cid, tag)` as `Int253`. Pure helper: no CS, no txlog entry, no actor-context requirement. Domain separator is `flamevm.token.flavor.v1` (consensus-fixed).
+Pops `tag` (String) and `cid` (String, exactly 32 bytes — an actor id). Pushes `flavor_from_actor(cid, tag)` as `Int253`. Pure helper: no CS, no txlog entry, no actor-context requirement. Domain separator is `flamevm.token.flavor` (consensus-fixed).
 
 ## Control-flow instructions
 
@@ -1135,7 +1135,7 @@ Pops the cell, records a `DeferredSig::TxBound { verification_key: cell.predicat
 
 **No new frame** — the cell-holder is authorizing the existing transaction in place.
 
-The deferred signature is verified at finalize: the prover aggregates all `TxBound` keys via MuSig and supplies the envelope signature; the verifier batches all `TxBound` items against the `flamevm.signtx.v1` transcript bound to TxID. Errors `BatchSignatureVerificationFailed` or `MissingTxBoundSignature` at finalize.
+The deferred signature is verified at finalize: the prover aggregates all `TxBound` keys via MuSig and supplies the envelope signature; the verifier batches all `TxBound` items against the `flamevm.signtx` transcript bound to TxID. Errors `BatchSignatureVerificationFailed` or `MissingTxBoundSignature` at finalize.
 
 ### signcall
 
@@ -1146,7 +1146,7 @@ Same call-frame mechanics as [`open`](#open) — taproot reveal is replaced by s
 1. Pops `m` (Int253), `args` (m portable values), `bytes`, `gas`.
 2. Pops `sig` (String, exactly 64 bytes — Schnorr signature).
 3. Pops `script` (String) and `cell`.
-4. Records `DeferredSig::Explicit { verification_key: cell.predicate.point, message: signcall_message(script_bytes), signature }`. The message is built via a Merlin transcript labelled `flamevm.signcall.v1` over the script bytes only — scripts bind themselves to further context (anchor, actor identity, tx data) via explicit checks inside the script body.
+4. Records `DeferredSig::Explicit { verification_key: cell.predicate.point, message: signcall_message(script_bytes), signature }`. The message is built via a Merlin transcript labelled `flamevm.signcall` over the script bytes only — scripts bind themselves to further context (anchor, actor identity, tx data) via explicit checks inside the script body.
 5. Creates a new isolated `CallKind::CellOpen` frame matching [`open`](#open), pours payload + args, enters the signed script.
 
 The deferred signatures are batch-verified at finalize alongside any `signtx` items.

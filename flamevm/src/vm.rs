@@ -46,7 +46,7 @@ impl Anchor {
     /// prior splits over that source, both children are unique
     /// within the network.
     pub fn split(&self) -> (Anchor, Anchor) {
-        let mut t = Transcript::new(b"flamevm.anchor.split.v1");
+        let mut t = Transcript::new(b"flamevm.anchor.split");
         t.append_message(b"parent", &self.0);
         let mut left = [0u8; 32];
         let mut right = [0u8; 32];
@@ -2035,7 +2035,7 @@ impl VM {
     /// program bytes only. Programs add further context (anchor,
     /// actor identity) via explicit checks inside their script.
     fn signcall_message(program: &[u8]) -> Vec<u8> {
-        let mut t = Transcript::new(b"flamevm.signcall.v1");
+        let mut t = Transcript::new(b"flamevm.signcall");
         t.append_message(b"program", program);
         let mut out = vec![0u8; 32];
         t.challenge_bytes(b"msg", &mut out);

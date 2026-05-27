@@ -34,7 +34,7 @@ impl Verifier {
     /// prover's exactly — divergence here would silently invalidate
     /// every proof. Reuses [`shared_bp_gens`] for the generators.
     pub fn new() -> Self {
-        let cs = r1cs::Verifier::new(Transcript::new(b"flamevm.r1cs.v1"));
+        let cs = r1cs::Verifier::new(Transcript::new(b"flamevm.r1cs"));
         Self {
             cs,
             batch: musig::BatchVerifier::new(rand::thread_rng()),
@@ -62,7 +62,7 @@ impl Verifier {
     ///    verifier via `Signature::verify_batched`.
     /// 2. if any `DeferredSig::TxBound` items were recorded,
     ///    requires the caller to pass the aggregate multi-signature
-    ///    in `txbound_signature`, builds the `flamevm.signtx.v1`
+    ///    in `txbound_signature`, builds the `flamevm.signtx`
     ///    transcript, binds it to TxID, and adds the multi-message
     ///    verification to the batch via
     ///    `Multisignature::verify_multi_batched`.
@@ -112,7 +112,7 @@ impl Verifier {
                 let starsig = musig::Signature::from_bytes(*signature)
                     .map_err(|_| VMError::BadSignatureBytes)?;
                 let vk = musig::VerificationKey::from_compressed(*verification_key);
-                let mut t = merlin::Transcript::new(b"flamevm.signcall.v1");
+                let mut t = merlin::Transcript::new(b"flamevm.signcall");
                 t.append_message(b"msg", message);
                 starsig.verify_batched(&mut t, vk, &mut verifier.batch);
             }
@@ -129,7 +129,7 @@ impl Verifier {
             .append_message(b"flamevm.txid", &txid.0);
         // Collect TxBound items and add the multi-message
         // verification to the batch. The transcript domain is
-        // `flamevm.signtx.v1` bound to TxID — the prover must use
+        // `flamevm.signtx` bound to TxID — the prover must use
         // the same transcript when constructing the
         // multi-signature.
         let txbound_items: Vec<(musig::VerificationKey, [u8; 32])> = result
@@ -150,7 +150,7 @@ impl Verifier {
             use musig::Multisignature;
             let signature = txbound_signature
                 .ok_or(VMError::MissingTxBoundSignature)?;
-            let mut t = merlin::Transcript::new(b"flamevm.signtx.v1");
+            let mut t = merlin::Transcript::new(b"flamevm.signtx");
             t.append_message(b"txid", &txid.0);
             signature.verify_multi_batched(&mut t, txbound_items, &mut verifier.batch);
         } else if txbound_signature.is_some() {
