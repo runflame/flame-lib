@@ -37,7 +37,7 @@ Internal transactions do not have a pre-determined effect and therefore do not s
 
 Like external, internal transactions produce effects:
 
-1. Receives — received messages from external and internal transactions
+1. Receive — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating Send's anchor (`SendID`) into the Internal TxID merkle root. Symmetric with `Input` for external transactions.
 2. Outputs — creation of new entries in the Utreexo.
 3. Sends — messages sent to actors that produce other internal transactions.
 4. Issuance and retirement — creation and removal of tokens to/from circulation.

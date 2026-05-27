@@ -528,6 +528,9 @@ impl VM {
     ) -> Result<TxResult, VMError> {
         let script = registry.resolve_method(&message.target, message.method)?;
         let mem_limit = registry.actor_vbytes(&message.target)?.saturating_mul(4);
+        // Capture the SendID before move — `message.anchor` doubles as
+        // SendID (per Q5: SendID == originating Send's anchor).
+        let send_id = message.anchor.0;
         let kind = CallKind::InternalRoot {
             actor: message.target,
             method: message.method,
@@ -545,6 +548,11 @@ impl VM {
                 message.vbytes,
             ),
         );
+        // Commit the triggering SendID into the Internal TxID merkle
+        // root. Symmetric with `op_input` for external txs: the first
+        // post-Header effect identifies *what consumed-once entity*
+        // brought this tx into existence.
+        vm.txlog.push(crate::tx::TxEntry::Receive(send_id));
         while vm.step_internal_with_registry(registry)? {}
         let _cleared = registry.commit_tx_destructions(block.height);
         Ok(vm.into_result(Vec::new(), None))

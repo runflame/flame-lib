@@ -59,7 +59,7 @@ what's left to build.
 | 40 | Memory cap (allocator hooks + enforcement)                         |
 | 41 | Integration tests (incl. fuzzing & canonicality sweeps)            |
 
-**38 of 41 complete (~93 %).** Total test count: 566 passing; build
+**38 of 41 complete (~93 %).** Total test count: 571 passing; build
 clean. Remaining compiler warnings target Phase 39 (gas charging) and
 Phase 40 (mem-cap allocator).
 
@@ -197,7 +197,7 @@ unified the witness model, added a lazy MSM type, retired
 | 35 | `MultiscalarMul` for Sigma protocols                        | 13    | `MultiscalarMul` Value type (linear, portable, non-wire). Lazy `Vec<(Scalar, Point)>` accumulator; `op_add`/`neg`/`mul` lift point arithmetic; `op_verify` adds it to the existing `BatchVerifier` lane as `sum == identity`. |
 | 36 | TxLog records effects, not control flow (ADR 0014)          | 1 (new) | Drop `TxEntry::Call`; add `TxEntry::ActorSave { actor, post_state_root }` emitted by `op_save`. MerkleItem domain tags retired/added. Tests reworked: `call_emits_…` → `call_does_not_emit_txlog_entry_by_itself`. |
 | 37 | Batch rollback under call failure                           | 2 (new) | `starsig::BatchSnapshot` + `BatchCheckpoint` trait. `CallFrame::snap_batch` populated when child pushed; restored on failure. MSM + sig contributions from failed callees no longer pollute the caller's batch. |
-| 38 | Issuance redesign (`issuepub` + `issuepriv` split, with `pubflv`/`privflv` helpers) | 8 (new) | Two disjoint mint opcodes + two consumer-side flavor helpers: `issuepriv` (`0x91`, confidential, CellOpen frames), `issueprivflv` (`0x92`), `issuepub` (`0x93`, cleartext, ActorCall frames), `issuepubflv` (`0x94`). Disjoint flavor domains via distinct Merlin labels (`flamevm.issuepriv.flavor` vs `flamevm.issuepub.flavor`). `issuepriv` allocates a 64-bit range proof + registers the qty commitment with the CS, emits `TxEntry::IssuePriv(qty_point, unblinded_flv_point)`. `issuepub` emits `TxEntry::IssuePub(qty:Int253, flv:Int253)` — cleartext on the wire. `fee`/`borrow`/`merge`/`split`/`mix`/`decrypt` shifted up one slot to make room. Full prove→verify roundtrip test in `test_tokens::issuepriv_prove_then_verify_end_to_end`. |
+| 38 | Issuance redesign + `TxEntry::Receive`                       | 11 (new) | Two disjoint mint opcodes + two consumer-side flavor helpers: `issuepriv` (`0x91`, confidential, CellOpen frames), `issueprivflv` (`0x92`), `issuepub` (`0x93`, cleartext, ActorCall frames), `issuepubflv` (`0x94`). Disjoint flavor domains via distinct Merlin labels (`flamevm.issuepriv.flavor` vs `flamevm.issuepub.flavor`). `issuepriv` allocates a 64-bit range proof + registers the qty commitment with the CS, emits `TxEntry::IssuePriv(qty_point, unblinded_flv_point)`. `issuepub` emits `TxEntry::IssuePub(qty:Int253, flv:Int253)` — cleartext on the wire. `fee`/`borrow`/`merge`/`split`/`mix`/`decrypt` shifted up one slot to make room. Full prove→verify roundtrip test in `test_tokens::issuepriv_prove_then_verify_end_to_end`. **Companion**: `TxEntry::Receive([u8; 32])` — the triggering Send's anchor, emitted as first effect after Header by `VM::execute_internal` so the Internal TxID merkle root commits to its originating SendID (closes a design-doc/code gap). |
 
 ## Known wiring gap
 
@@ -227,7 +227,7 @@ unified the witness model, added a lazy MSM type, retired
 | Predicate-call isolation | — (landed as `decisions/0013-predicate-call-isolation.md`, Phase 33) | `open` / `signcall` / `call` all create isolated frames with explicit `gas`/`bytes`. `CellOpen` has no actor identity. Confused-deputy class eliminated by construction. |
 | Input-cell witness encoding | — (resolved Phase 22) | Carrier is `String::Cell(Arc<Cell>)` — same pattern as zkvm's `String::Output`. `Instruction::Input` is a unit variant. ADR pending. |
 | Actor data model (Q1, Q2, Q4, Q6) | — (resolved during actor build) | Q1: `b"flamevm.actorid"` domain. Q2: vbyte = wire_len(state) + 32. Q4: Constructor-form id deploys transparently at first delivery. Q6: load-without-save is the destroy path. ADR `0010-actor-data-model` queued. |
-| Send-ID + Internal TxID (Q3, Q5) | — (resolved during actor build) | Three IDs (External TxID, SendID = Send.anchor, Internal TxID). Anchor ratcheted before emitting `TxEntry::Send`. Internal TxID binds to per-call state via `TxEntry::ActorSave` (Phase 36). ADR `0011-send-id-and-internal-txid` queued. |
+| Send-ID + Internal TxID (Q3, Q5) | — (resolved during actor build) | Three IDs (External TxID, SendID = Send.anchor, Internal TxID). Anchor ratcheted before emitting `TxEntry::Send`. Internal TxID binds to per-call state via `TxEntry::ActorSave` (Phase 36) and to its triggering Send via `TxEntry::Receive(send_id)` emitted as the first effect after Header (Phase 38). ADR `0011-send-id-and-internal-txid` queued. |
 | Load/save re-entry lock (Q6) | — (resolved during actor build) | `mark_for_destruction` as the cross-frame lock; per-frame `loaded` flag; tx-end commit sweep. ADR `0012-load-save-reentry-lock` queued. |
 | TxLog records effects, not control flow | — (landed as `decisions/0014-txlog-records-effects-not-control-flow.md`, Phase 36) | Dropped `TxEntry::Call`; added `TxEntry::ActorSave`. |
 | `Point` enum + `String::Point` unification | — (landed Phase 34) | ADR `0015-point-enum-and-string-point` queued. |
@@ -294,6 +294,17 @@ flipped from `TokenRequiresCS` to `TypeNotInt253`).
 **ADR backfill (pending)** — `decisions/00XX-issuance-redesign.md`
 to record the two-opcode design, the domain-separation invariant,
 and the "privacy lives where CS lives" structural argument.
+
+**Companion change — `TxEntry::Receive` landed in the same batch.**
+Closes the long-standing gap where `design.md` lists "Receive" as an
+internal-tx effect but the code never emitted it. The new variant
+`TxEntry::Receive([u8; 32])` carries the originating Send's anchor
+(== SendID). `VM::execute_internal` pushes it as the first effect
+after `Header`, so the Internal TxID merkle root commits to the
+triggering Send — symmetric with `op_input` for external txs. Three
+new tests in `test_actor_state.rs` confirm: (a) `Receive` lands at
+txlog[1] with the correct SendID; (b) different anchors → different
+Internal TxIDs; (c) same anchor → identical Internal TxIDs.
 
 ---
 

@@ -217,7 +217,7 @@ An internal transaction may emit:
 
 | Effect       | Description |
 |--------------|-------------|
-| Receive      | Consumes the [message send](#message-send) that triggered the internal transaction. |
+| Receive      | Consumes the [message send](#message-send) that triggered the internal transaction. Emitted as `TxEntry::Receive(send_id)` — the originating Send's anchor bytes — so the Internal TxID merkle root commits to the triggering Send. Symmetric with `Input` for external transactions. |
 | Output       | Appends a new entry to Utreexo. |
 | Send         | Schedules a further internal transaction. |
 | Issuance     | Creates [tokens](#token); cleartext only (`issuepub`) — no CS in internal context. |

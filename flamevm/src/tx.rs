@@ -56,6 +56,16 @@ pub enum TxEntry {
     /// the Utreexo proof outside the VM.
     Input(crate::cell::CellID),
 
+    /// Receive: the SendID consumed by an internal transaction. Emitted
+    /// by `VM::execute_internal` as the first effect after `Header`,
+    /// committing the originating `Send`'s anchor into the Internal TxID
+    /// merkle root. Without this entry, the Internal TxID would not
+    /// commit to its triggering Send (the originating `TxEntry::Send`
+    /// lives in the *external* tx's log, hence in External TxID only).
+    /// Symmetric with `Input` for external transactions: both are
+    /// "what triggered me" effects emitted before the body runs.
+    Receive([u8; 32]),
+
     /// Output: a newly sealed cell, emitted by the `output` opcode.
     Output(crate::Cell),
 
@@ -150,6 +160,9 @@ impl core::fmt::Debug for TxEntry {
             TxEntry::Input(id) => {
                 f.debug_tuple("TxEntry::Input").field(id).finish()
             }
+            TxEntry::Receive(send_id) => {
+                f.debug_tuple("TxEntry::Receive").field(send_id).finish()
+            }
             TxEntry::Output(_) => f.write_str("TxEntry::Output(<cell>)"),
             TxEntry::IssuePub(_, _) => f.write_str("TxEntry::IssuePub(<qty>, <flv>)"),
             TxEntry::IssuePriv(_, _) => f.write_str("TxEntry::IssuePriv(<qty>, <flv>)"),
@@ -191,6 +204,9 @@ impl MerkleItem for TxEntry {
             }
             TxEntry::Input(cell_id) => {
                 t.append_message(b"input", cell_id);
+            }
+            TxEntry::Receive(send_id) => {
+                t.append_message(b"receive.send_id", send_id);
             }
             TxEntry::Output(cell) => {
                 // Bind to the cell's canonical 32-byte identity hash.

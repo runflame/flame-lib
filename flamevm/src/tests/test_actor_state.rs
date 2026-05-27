@@ -270,3 +270,118 @@ fn load_followed_by_save_preserves_actor() {
     assert!(reg.exists(&id));
     assert!(!reg.is_marked_for_destruction(&id));
 }
+
+// ── Receive (SendID committed into Internal TxID) ───────────────────
+
+/// `VM::execute_internal` emits `TxEntry::Receive(send_id)` as the
+/// first effect after the Header so the Internal TxID commits to the
+/// triggering Send's anchor. Symmetric with `op_input` for external
+/// transactions. Without this entry, an internal tx's TxID would say
+/// nothing about which Send produced it.
+#[test]
+fn receive_committed_as_first_effect_after_header() {
+    let mut reg = MemRegistry::new();
+    // Minimal recv: a single `nop`. The script does nothing, but
+    // execute_internal still pushes Header + Receive into the txlog.
+    let id = deploy_with_recv(
+        &mut reg,
+        Program::new().nop().to_bytecode(),
+        10_000,
+        0,
+    );
+    let block = BlockContext { height: 100 };
+    let known_anchor = [0xab; 32];
+    let msg = Message {
+        target: id.clone(),
+        method: RECV_METHOD,
+        caller: None,
+        anchor: Anchor(known_anchor),
+        payload: Vec::new(),
+        gas: 1_000_000,
+        vbytes: 0,
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+    };
+    let result = VM::execute_internal(dummy_header(), msg, &mut reg, &block)
+        .expect("execute_internal ok");
+
+    // txlog[0] = Header, txlog[1] = Receive(known_anchor).
+    assert!(result.txlog.len() >= 2, "txlog too short: {}", result.txlog.len());
+    assert!(matches!(result.txlog[0], crate::tx::TxEntry::Header(_)));
+    match &result.txlog[1] {
+        crate::tx::TxEntry::Receive(send_id) => {
+            assert_eq!(*send_id, known_anchor, "Receive must carry the originating SendID");
+        }
+        other => panic!("expected txlog[1] to be TxEntry::Receive, got {:?}", other),
+    }
+}
+
+/// Two internal txs with identical scripts + identical (empty) actor
+/// state mutations but DIFFERENT Send anchors must produce DIFFERENT
+/// Internal TxIDs — because the Internal TxID merkle root binds to
+/// the Receive entry. Regression guard: if `Receive` ever gets
+/// dropped, both internal txs would hash to the same TxID, conflating
+/// distinct sends in any state-machine indexer.
+#[test]
+fn receive_makes_internal_txid_bind_to_send_anchor() {
+    fn run_with_anchor(anchor_bytes: [u8; 32]) -> crate::tx::TxID {
+        let mut reg = MemRegistry::new();
+        let id = deploy_with_recv(
+            &mut reg,
+            Program::new().nop().to_bytecode(),
+            10_000,
+            0,
+        );
+        let block = BlockContext { height: 100 };
+        let msg = Message {
+            target: id,
+            method: RECV_METHOD,
+            caller: None,
+            anchor: Anchor(anchor_bytes),
+            payload: Vec::new(),
+            gas: 1_000_000,
+            vbytes: 0,
+            refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+        };
+        VM::execute_internal(dummy_header(), msg, &mut reg, &block)
+            .expect("execute_internal ok")
+            .txid
+    }
+    let txid_a = run_with_anchor([0x01; 32]);
+    let txid_b = run_with_anchor([0x02; 32]);
+    assert_ne!(
+        txid_a.0, txid_b.0,
+        "Internal TxID must distinguish runs by their triggering SendID",
+    );
+}
+
+/// Sanity: same anchor + same actor + same script → identical
+/// Internal TxIDs. Confirms that the Receive-binding is deterministic
+/// (no stray randomness leaked into the merkle root via the anchor
+/// path).
+#[test]
+fn receive_internal_txid_is_deterministic_for_same_anchor() {
+    fn run() -> crate::tx::TxID {
+        let mut reg = MemRegistry::new();
+        let id = deploy_with_recv(
+            &mut reg,
+            Program::new().nop().to_bytecode(),
+            10_000,
+            0,
+        );
+        let block = BlockContext { height: 100 };
+        let msg = Message {
+            target: id,
+            method: RECV_METHOD,
+            caller: None,
+            anchor: Anchor([0xcd; 32]),
+            payload: Vec::new(),
+            gas: 1_000_000,
+            vbytes: 0,
+            refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+        };
+        VM::execute_internal(dummy_header(), msg, &mut reg, &block)
+            .expect("execute_internal ok")
+            .txid
+    }
+    assert_eq!(run().0, run().0);
+}
