@@ -258,7 +258,7 @@ fn op_decrypt_rejects_wrong_witness() {
         curve25519_dalek::scalar::Scalar::from(13u64),
     );
     let token = crate::Token::new(qty_commit, flv_commit);
-    let mut vm = vm_external_with_script(vec![0x77]);
+    let mut vm = vm_external_with_script(vec![0x99]);
     vm.push_value(Value::Token(token));
     vm.push_value(Value::Int253(f));
     vm.push_value(Value::Int253(Int253::from(99u64))); // wrong f_blind

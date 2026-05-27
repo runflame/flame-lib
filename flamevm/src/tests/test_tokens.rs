@@ -173,18 +173,18 @@ fn amount_on_non_token_errors_typenottoken() {
 }
 
 #[test]
-fn issue_clear_path_emits_txlog_and_returns_cleartoken() {
-    // Script: push:7, pushstr "gold", issue.
+fn issuepub_clear_path_emits_txlog_and_returns_cleartoken() {
+    // Script: push:7, pushstr "gold", issuepub.
     // Run under InternalRoot with a known actor identity so
-    // `op_issue` can resolve a flavor.
+    // `op_issuepub` can resolve a flavor.
     let actor = ActorID::Hash([0x55; 32]);
     let script = Program::new()
         .push_int(7u64)
         .push_str(String::from(b"gold".to_vec()))
-        .issue()
+        .issuepub()
         .to_bytecode();
     let mut vm = vm_internal_with_actor(script, actor.clone());
-    run_to_end(&mut vm).expect("issue ok");
+    run_to_end(&mut vm).expect("issuepub ok");
 
     // Stack: [ClearToken(7, flavor)].
     assert_eq!(vm.current_call.stack.len(), 1);
@@ -213,26 +213,28 @@ fn issue_clear_path_emits_txlog_and_returns_cleartoken() {
 }
 
 #[test]
-fn issue_with_point_qty_errors_tokenrequirescs() {
-    // Pushpoint then pushstr then issue → encrypted branch (deferred).
+fn issuepub_with_point_qty_errors_typenotint253() {
+    // `issuepub` is cleartext-only; non-Int253 qty hard-fails. Under
+    // the new design (spec.md §issuepub), the confidential variant
+    // lives in `issuepriv`, not in dispatch-peek on this opcode.
     let actor = ActorID::Hash([0x55; 32]);
     let script = Program::new()
         .push_point([0u8; 32])
         .push_str(String::from(b"gold".to_vec()))
-        .issue()
+        .issuepub()
         .to_bytecode();
     let mut vm = vm_internal_with_actor(script, actor);
     let err = run_to_end(&mut vm).unwrap_err();
-    assert!(matches!(err, VMError::TokenRequiresCS));
+    assert!(matches!(err, VMError::TypeNotInt253));
 }
 
 #[test]
-fn issue_at_external_root_errors_actor_context() {
+fn issuepub_at_external_root_errors_actor_context() {
     // ExternalRoot has no actor identity.
     let script = Program::new()
         .push_int(7u64)
         .push_str(String::from(b"gold".to_vec()))
-        .issue()
+        .issuepub()
         .to_bytecode();
     let mut vm = VM::new(
         dummy_header(),

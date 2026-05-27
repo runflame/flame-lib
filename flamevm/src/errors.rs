@@ -222,6 +222,10 @@ pub enum VMError {
     #[error("Opcode requires actor context")]
     OpcodeRequiresActorContext,
 
+    /// This error occurs when an opcode requires a predicate (CellOpen) context but the frame has none.
+    #[error("Opcode requires predicate context")]
+    OpcodeRequiresPredicateContext,
+
     /// This error occurs when a token opcode needs a live constraint system but has none.
     #[error("Token opcode branch requires a live constraint system")]
     TokenRequiresCS,

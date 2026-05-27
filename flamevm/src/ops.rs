@@ -10,7 +10,15 @@ use crate::string::String;
 
 // ── Opcode bytes ─────────────────────────────────────────────────────
 
+// Byte map: see `flamevm/spec.md` §"Instruction table" for the
+// canonical view. The high nibble is the block; low nibble is either
+// the slot or, for k-class ops (`push:k`, `dup:k`, `roll:k`,
+// `break:k`), the inline operand.
+
+// 0x0X — push:k (inline small int)
 const OP_PUSH_SMALL_MAX: u8 = 0x0f;
+
+// 0x1X — stack & literals
 const OP_PUSHINT8_POS: u8 = 0x10;
 const OP_PUSHINT8_NEG: u8 = 0x11;
 const OP_PUSHINT16_POS: u8 = 0x12;
@@ -27,10 +35,16 @@ const OP_DROP: u8 = 0x1c;
 const OP_NOP: u8 = 0x1d;
 const OP_DUP: u8 = 0x1e;
 const OP_ROLL: u8 = 0x1f;
+
+// 0x2X — dup:k
 const OP_DUPK_BASE: u8 = 0x20;
 const OP_DUPK_MAX: u8 = 0x2f;
+
+// 0x3X — roll:k
 const OP_ROLLK_BASE: u8 = 0x30;
 const OP_ROLLK_MAX: u8 = 0x3f;
+
+// 0x4X — String
 const OP_READBITS: u8 = 0x40;
 const OP_READINT: u8 = 0x41;
 const OP_READSTR: u8 = 0x42;
@@ -46,6 +60,8 @@ const OP_BITXOR: u8 = 0x4b;
 const OP_SHIFTLEFT: u8 = 0x4c;
 const OP_SHIFTRIGHT: u8 = 0x4d;
 const OP_KECCAK256: u8 = 0x4e;
+
+// 0x5X — Math & logic (incl. `size`)
 const OP_ABS: u8 = 0x50;
 const OP_EQ: u8 = 0x51;
 const OP_NEG: u8 = 0x52;
@@ -56,67 +72,89 @@ const OP_MOD252: u8 = 0x56;
 const OP_NOT: u8 = 0x57;
 const OP_AND: u8 = 0x58;
 const OP_OR: u8 = 0x59;
-const OP_SCALAR: u8 = 0x5a;
-const OP_COMMIT: u8 = 0x5b;
-const OP_ALLOC: u8 = 0x5c;
-const OP_EXPR: u8 = 0x5d;
-const OP_RANGE: u8 = 0x5e;
-const OP_SIZE: u8 = 0x5f;
-const OP_DICT: u8 = 0x60;
-const OP_PUT: u8 = 0x61;
-const OP_REPLACE: u8 = 0x62;
-const OP_GET: u8 = 0x63;
-const OP_GETOPT: u8 = 0x64;
-const OP_GETDUP: u8 = 0x65;
-const OP_FIRST: u8 = 0x66;
-const OP_LAST: u8 = 0x67;
-const OP_NEXT: u8 = 0x68;
-const OP_MERLIN: u8 = 0x69;
-const OP_MERLINWRITE: u8 = 0x6a;
-const OP_MERLINREAD: u8 = 0x6b;
-const OP_SHA256: u8 = 0x6c;
-const OP_SHA512: u8 = 0x6d;
-const OP_SHA3: u8 = 0x6e;
-const OP_LOG: u8 = 0x6f;
-const OP_AMOUNT: u8 = 0x70;
-const OP_ISSUE: u8 = 0x71;
-const OP_RETIRE: u8 = 0x72;
-const OP_BORROW: u8 = 0x73;
-const OP_MERGE: u8 = 0x74;
-const OP_SPLIT: u8 = 0x75;
-const OP_MIX: u8 = 0x76;
-const OP_DECRYPT: u8 = 0x77;
-const OP_ISSUEFLV: u8 = 0x78;
-const OP_VERIFY: u8 = 0x79;
-const OP_FEE: u8 = 0x7a;
-const OP_RUN: u8 = 0x7b;
-const OP_LOOP: u8 = 0x7c;
-const OP_SWITCH: u8 = 0x7d;
-const OP_RETURN: u8 = 0x7e;
-const OP_TYPE: u8 = 0x7f;
-const OP_BREAKK_BASE: u8 = 0x80;
-const OP_BREAKK_MAX: u8 = 0x8f;
-const OP_INPUT: u8 = 0x90;
-const OP_CELL: u8 = 0x91;
-const OP_OUTPUT: u8 = 0x92;
-const OP_OPEN: u8 = 0x93;
-const OP_SEND: u8 = 0x94;
-const OP_CALL: u8 = 0x95;
-const OP_LOAD: u8 = 0x96;
-const OP_SAVE: u8 = 0x97;
-const OP_SIGNTX: u8 = 0x98;
-const OP_SIGNCALL: u8 = 0x99;
-const OP_TIMELOCK: u8 = 0x9a;
-const OP_VERSION: u8 = 0x9b;
-const OP_ACTORID: u8 = 0x9c;
-const OP_ANCHOR: u8 = 0x9d;
-const OP_GAS: u8 = 0x9e;
-const OP_BYTES: u8 = 0x9f;
-const OP_CALLERID: u8 = 0xa0;
-const OP_METHOD: u8 = 0xa1;
-const OP_GASLIMIT: u8 = 0xa2;
-const OP_MEMLIMIT: u8 = 0xa3;
-const OP_NEWBYTES: u8 = 0xa4;
+const OP_SIZE: u8 = 0x5a;
+
+// 0x6X — Constraints
+const OP_SCALAR: u8 = 0x60;
+const OP_COMMIT: u8 = 0x61;
+const OP_ALLOC: u8 = 0x62;
+const OP_EXPR: u8 = 0x63;
+const OP_RANGE: u8 = 0x64;
+
+// 0x7X — Dict
+const OP_DICT: u8 = 0x70;
+const OP_PUT: u8 = 0x71;
+const OP_REPLACE: u8 = 0x72;
+const OP_GET: u8 = 0x73;
+const OP_GETOPT: u8 = 0x74;
+const OP_GETDUP: u8 = 0x75;
+const OP_FIRST: u8 = 0x76;
+const OP_LAST: u8 = 0x77;
+const OP_NEXT: u8 = 0x78;
+
+// 0x8X — Cryptography
+const OP_MERLIN: u8 = 0x80;
+const OP_MERLINWRITE: u8 = 0x81;
+const OP_MERLINREAD: u8 = 0x82;
+const OP_SHA256: u8 = 0x83;
+const OP_SHA512: u8 = 0x84;
+const OP_SHA3: u8 = 0x85;
+const OP_LOG: u8 = 0x86;
+
+// 0x9X — Tokens
+const OP_AMOUNT: u8 = 0x90;
+const OP_ISSUEPRIV: u8 = 0x91;
+const OP_ISSUEPUB: u8 = 0x92;
+const OP_ISSUEFLV: u8 = 0x93;
+const OP_RETIRE: u8 = 0x94;
+const OP_BORROW: u8 = 0x95;
+const OP_MERGE: u8 = 0x96;
+const OP_SPLIT: u8 = 0x97;
+const OP_MIX: u8 = 0x98;
+const OP_DECRYPT: u8 = 0x99;
+const OP_FEE: u8 = 0x9a;
+
+// 0xaX — Control flow
+const OP_VERIFY: u8 = 0xa0;
+const OP_RUN: u8 = 0xa1;
+const OP_LOOP: u8 = 0xa2;
+const OP_SWITCH: u8 = 0xa3;
+const OP_RETURN: u8 = 0xa4;
+const OP_TYPE: u8 = 0xa5;
+
+// 0xbX — break:k
+const OP_BREAKK_BASE: u8 = 0xb0;
+const OP_BREAKK_MAX: u8 = 0xbf;
+
+// 0xcX — Cells & predicates
+const OP_INPUT: u8 = 0xc0;
+const OP_CELL: u8 = 0xc1;
+const OP_OUTPUT: u8 = 0xc2;
+const OP_OPEN: u8 = 0xc3;
+const OP_SIGNTX: u8 = 0xc4;
+const OP_SIGNCALL: u8 = 0xc5;
+
+// 0xdX — Actors
+const OP_SEND: u8 = 0xd0;
+const OP_CALL: u8 = 0xd1;
+const OP_LOAD: u8 = 0xd2;
+const OP_SAVE: u8 = 0xd3;
+
+// 0xeX — Frame introspection
+const OP_ACTORID: u8 = 0xe0;
+const OP_ANCHOR: u8 = 0xe1;
+const OP_CALLERID: u8 = 0xe2;
+const OP_METHOD: u8 = 0xe3;
+const OP_GAS: u8 = 0xe4;
+const OP_GASLIMIT: u8 = 0xe5;
+const OP_BYTES: u8 = 0xe6;
+const OP_MEMLIMIT: u8 = 0xe7;
+const OP_NEWBYTES: u8 = 0xe8;
+
+// 0xfX — Tx & chain info (chain-info opcodes 0xf2-0xf7 are reserved
+// for future implementation; the parser routes them through `Ext`.)
+const OP_TIMELOCK: u8 = 0xf0;
+const OP_VERSION: u8 = 0xf1;
 
 // ── Instruction enum ─────────────────────────────────────────────────
 
@@ -182,7 +220,8 @@ pub enum Instruction {
     Sha3,                  // s sha3 → x
     Log,                   // s log → ø
     Amount,                // t amount → t qty flv
-    Issue,                 // qty tag issue → T
+    IssuePriv,             // qty:Variable tag issuepriv → T (predicate context)
+    IssuePub,              // qty:Int253  tag issuepub  → CT (actor context)
     Retire,                // t retire → ø
     Borrow,                // qty flv borrow → -T +T
     Merge,                 // a b merge → {c 1 | a b 0}
@@ -304,7 +343,8 @@ impl Instruction {
             Instruction::Sha3 => out.push(OP_SHA3),
             Instruction::Log => out.push(OP_LOG),
             Instruction::Amount => out.push(OP_AMOUNT),
-            Instruction::Issue => out.push(OP_ISSUE),
+            Instruction::IssuePriv => out.push(OP_ISSUEPRIV),
+            Instruction::IssuePub => out.push(OP_ISSUEPUB),
             Instruction::Retire => out.push(OP_RETIRE),
             Instruction::Borrow => out.push(OP_BORROW),
             Instruction::Merge => out.push(OP_MERGE),
@@ -449,7 +489,8 @@ impl Instruction {
             OP_SHA3 => Ok(Instruction::Sha3),
             OP_LOG => Ok(Instruction::Log),
             OP_AMOUNT => Ok(Instruction::Amount),
-            OP_ISSUE => Ok(Instruction::Issue),
+            OP_ISSUEPRIV => Ok(Instruction::IssuePriv),
+            OP_ISSUEPUB => Ok(Instruction::IssuePub),
             OP_RETIRE => Ok(Instruction::Retire),
             OP_BORROW => Ok(Instruction::Borrow),
             OP_MERGE => Ok(Instruction::Merge),
@@ -777,6 +818,8 @@ mod tests {
             Instruction::Merlin,
             Instruction::Sha256,
             Instruction::Amount,
+            Instruction::IssuePriv,
+            Instruction::IssuePub,
             Instruction::IssueFlv,
             Instruction::Verify,
             Instruction::Return,
@@ -810,10 +853,11 @@ mod tests {
     #[test]
     fn ext_opcode_for_unknown_bytes() {
         // 0x4f remains unassigned (0x4e is keccak256, 0x50 is abs).
-        // 0xa5..=0xaa are reserved for the planned chain-info family.
+        // 0xf2..=0xf7 are reserved for the planned chain-info family
+        // (height/blockhash/blockburn/blockweight/blockrate/chainstate).
         // 0xff is a sentinel "definitely unassigned" byte for fuzzing
         // future extensions.
-        let unused = [0x4f, 0xa5, 0xff];
+        let unused = [0x4f, 0xf2, 0xff];
         for b in unused {
             let mut r: &[u8] = &[b];
             let parsed = Instruction::parse(&mut r).expect("parses");

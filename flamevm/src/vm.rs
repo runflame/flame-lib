@@ -796,7 +796,8 @@ impl VM {
             I::Log => self.op_log(),
 
             I::Amount => self.op_amount(),
-            I::Issue => self.op_issue(),
+            I::IssuePriv => self.op_issuepriv(),
+            I::IssuePub => self.op_issuepub(),
             I::Retire => self.op_retire(),
             I::Borrow => self.op_borrow(delegate),
             I::Merge => self.op_merge(),
@@ -1887,14 +1888,18 @@ impl VM {
         }
     }
 
-    /// _qty tag_ **issue** → _token_
+    /// _qty:Int253 tag_ **issuepub** → _CT_
     ///
-    /// Cleartext branch only; encrypted `qty: Point` errors `TokenRequiresCS`.
-    fn op_issue(&mut self) -> Result<(), VMError> {
+    /// Cleartext mint under the enclosing actor's identity. Requires
+    /// `CallKind::ActorCall`; from `ExternalRoot` errors
+    /// `OpcodeRequiresActorContext`, from `CellOpen` the same (issuance
+    /// domains are disjoint — see spec.md §issuepub). Non-`Int253` qty
+    /// hard-fails `TypeNotInt253`; the confidential path lives in
+    /// [`op_issuepriv`].
+    fn op_issuepub(&mut self) -> Result<(), VMError> {
         let tag = self.pop_value()?.to_string()?;
         let qty = match self.pop_value()? {
             Value::Int253(i) => i,
-            Value::Point(_) => return Err(VMError::TokenRequiresCS),
             _ => return Err(VMError::TypeNotInt253),
         };
         let actor = self.require_actor()?.clone();
@@ -1905,6 +1910,24 @@ impl VM {
         ));
         self.push_value(Value::ClearToken(ClearToken::new(qty, flv)));
         Ok(())
+    }
+
+    /// _qty:Variable tag_ **issuepriv** → _T_
+    ///
+    /// Confidential mint under the enclosing predicate's identity.
+    /// Stub: full implementation lands in Phase 38 (the Issuance
+    /// redesign). For now, gates context to flag obvious misuse —
+    /// errors `OpcodeRequiresPredicateContext` outside `CellOpen`,
+    /// `ExternalOnly` in internal context. The Variable-qty +
+    /// range-proof + flavor-from-predicate machinery is not yet
+    /// wired; calls from a valid `CellOpen` external frame currently
+    /// error `TokenRequiresCS` as a placeholder.
+    fn op_issuepriv(&mut self) -> Result<(), VMError> {
+        if !matches!(self.current_call.kind, CallKind::CellOpen { .. }) {
+            return Err(VMError::OpcodeRequiresPredicateContext);
+        }
+        self.require_external()?;
+        Err(VMError::TokenRequiresCS)
     }
 
     /// _token_ **retire** → ø

@@ -37,7 +37,7 @@ fn run_creates_nested_run() {
     // pushstr [push:7], run — after run, current_run is the
     // subprogram and outer is suspended.
     let mut script = pushstr_bytes(&[0x07]);
-    script.push(0x7b);
+    script.push(0xa1);
     let mut vm = vm_with_script(script);
     vm.step_internal().unwrap(); // pushstr
     assert_eq!(vm.current_call.stack.len(), 1);
@@ -52,7 +52,7 @@ fn run_creates_nested_run() {
 fn run_resumes_outer_after_subprogram_finishes() {
     // pushstr [push:7, drop], run — subprog cleans up, outer ends empty.
     let mut script = pushstr_bytes(&[0x07, 0x1c]);
-    script.push(0x7b);
+    script.push(0xa1);
     let mut reg = StubRegistry { script };
     let block = BlockContext { height: 0 };
     VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block).unwrap();
@@ -185,7 +185,7 @@ fn switch_picks_a_when_x_nonzero() {
     let mut script = vec![0x01];
     script.extend_from_slice(&pushstr_bytes(&[0x09, 0x1c]));
     script.extend_from_slice(&pushstr_bytes(&[0x08, 0x1c]));
-    script.push(0x7d);
+    script.push(0xa3);
     let mut reg = StubRegistry { script };
     let block = BlockContext { height: 0 };
     VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block)
@@ -199,7 +199,7 @@ fn switch_a_actually_runs_when_x_nonzero() {
     let mut script = vec![0x01];
     script.extend_from_slice(&pushstr_bytes(&[0x09]));
     script.extend_from_slice(&pushstr_bytes(&[0x08]));
-    script.push(0x7d);
+    script.push(0xa3);
     let mut vm = vm_with_script(script);
     while !vm.current_call.run_stack.is_empty()
         || !vm.current_call.current_run.is_finished()
@@ -229,7 +229,7 @@ fn switch_picks_b_when_x_zero() {
     let mut script = vec![0x00];
     script.extend_from_slice(&pushstr_bytes(&[0x09, 0x1c]));
     script.extend_from_slice(&pushstr_bytes(&[0x08, 0x1c]));
-    script.push(0x7d);
+    script.push(0xa3);
     let mut reg = StubRegistry { script };
     let block = BlockContext { height: 0 };
     // x=0 → runs branch b (push:8, drop) → empty stack at end → ok.
@@ -351,8 +351,8 @@ fn break_zero_ends_current_run_only() {
     // Outer: pushstr [break:0, pushint8 99], run
     // — break:0 stops the subprog before pushint8 runs; outer resumes
     //   with empty stack and the tx exits clean.
-    let mut script = pushstr_bytes(&[0x80, 0x10, 99]);
-    script.push(0x7b);
+    let mut script = pushstr_bytes(&[0xb0, 0x10, 99]);
+    script.push(0xa1);
     let mut reg = StubRegistry { script };
     let block = BlockContext { height: 0 };
     VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block)
@@ -367,8 +367,8 @@ fn break_one_ends_subprog_and_outer() {
     //    with empty stack.
     // (push:99 is encoded as pushint8 + byte, but break:1 makes it
     // unreachable, so we don't even need to keep stack clean for it.)
-    let mut script = pushstr_bytes(&[0x81]); // [break:1]
-    script.push(0x7b); // run
+    let mut script = pushstr_bytes(&[0xb1]); // [break:1]
+    script.push(0xa1); // run
     script.push(0x10); // pushint8
     script.push(99);
     let mut reg = StubRegistry { script };
@@ -411,7 +411,7 @@ fn type_pushes_int253_code() {
 #[test]
 fn type_pushes_string_code() {
     let mut script = pushstr_bytes(&[]); // empty string
-    script.push(0x7f); // type
+    script.push(0xa5); // type
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[1], Int253::from(68u64));

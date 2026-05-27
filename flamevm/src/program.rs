@@ -270,19 +270,24 @@ impl Program {
     // ── Tokens ──────────────────────────────────────────
 
     pub fn amount(mut self) -> Self { self.instructions.push(Instruction::Amount); self }
-    pub fn issue(mut self) -> Self { self.instructions.push(Instruction::Issue); self }
+    /// `issuepriv` (0x91) — confidential mint under the enclosing
+    /// predicate. See [`Instruction::IssuePriv`].
+    pub fn issuepriv(mut self) -> Self { self.instructions.push(Instruction::IssuePriv); self }
+    /// `issuepub` (0x92) — cleartext mint under the enclosing actor.
+    /// See [`Instruction::IssuePub`].
+    pub fn issuepub(mut self) -> Self { self.instructions.push(Instruction::IssuePub); self }
     pub fn retire(mut self) -> Self { self.instructions.push(Instruction::Retire); self }
     pub fn borrow(mut self) -> Self { self.instructions.push(Instruction::Borrow); self }
     pub fn merge(mut self) -> Self { self.instructions.push(Instruction::Merge); self }
     pub fn split(mut self) -> Self { self.instructions.push(Instruction::Split); self }
 
-    /// `mix` (0x76) — see [`Instruction::Mix`].
+    /// `mix` (0x98) — see [`Instruction::Mix`].
     pub fn mix(mut self) -> Self {
         self.instructions.push(Instruction::Mix);
         self
     }
 
-    /// `decrypt` (0x77) — see [`Instruction::Decrypt`].
+    /// `decrypt` (0x99) — see [`Instruction::Decrypt`].
     pub fn decrypt(mut self) -> Self {
         self.instructions.push(Instruction::Decrypt);
         self

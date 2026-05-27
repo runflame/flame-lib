@@ -760,7 +760,7 @@ pub(crate) fn build_input_cell(inp: &NMInputSpec) -> (Cell, CallProof) {
     // Leaf script `push:1, return` — under ADR 0013 the opened cell
     // runs in an isolated frame, so the leaf must explicitly return
     // its single-Token payload to the caller.
-    let leaf = vec![0x01, 0x7e];
+    let leaf = vec![0x01, 0xa4];
     let tree = PredicateTree::scripts_only(
         vec![leaf],
         input_blinding_for(inp),

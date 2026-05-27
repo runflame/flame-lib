@@ -13,7 +13,7 @@ fn instruction_alloc_witness_roundtrip() {
         .alloc(None)
         .alloc(Some(Int253::from(3u64)));
     let bytecode = p.to_bytecode();
-    assert_eq!(bytecode, vec![0x5c, 0x5c, 0x5c]);
+    assert_eq!(bytecode, vec![0x62, 0x62, 0x62]);
     let witnesses: Vec<_> = p.to_witnesses().into();
     assert_eq!(witnesses.len(), 3);
     assert!(matches!(witnesses[0], Some(_)));
@@ -33,7 +33,8 @@ fn program_builder_emits_expected_bytecode() {
         .verify();
     assert_eq!(
         p.to_bytecode(),
-        vec![0x5c, 0x5c, 0x53, 0x5c, 0x51, 0x79]
+        // alloc(0x62) alloc(0x62) add(0x53) alloc(0x62) eq(0x51) verify(0xa0)
+        vec![0x62, 0x62, 0x53, 0x62, 0x51, 0xa0]
     );
     let wits: Vec<_> = p.to_witnesses().into();
     assert_eq!(wits.len(), 3);
