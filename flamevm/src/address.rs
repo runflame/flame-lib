@@ -39,18 +39,6 @@ impl Address {
     /// Tag value for the [`Address::MessageTarget`] variant on the wire.
     pub const TAG_MESSAGE_TARGET: u8 = 0x01;
 
-    /// Writes the canonical wire form: a list-Dict whose first
-    /// entry is the tag byte (as `Int253`) and whose remaining
-    /// entries are the variant payload.
-    ///
-    /// Layout:
-    /// - `Predicate`: `[tag, point]`.
-    /// - `MessageTarget`: `[tag, dst_string, method_int, args_dict, gas_int]`.
-    ///
-    /// `dst` is wrapped as a `String` carrying the bytes of
-    /// [`ActorID::encode`] so the outer list-Dict reader sees a
-    /// uniform value-typed payload. The same convention applies
-    /// downstream when scripts build addresses by hand.
     /// Convenience: encode to a fresh `Vec<u8>`. Returns the
     /// `WriteError` from `Encodable::encode` (a non-portable Dict in
     /// `args` is encoded as `InsufficientCapacity` via `try_clone`).
@@ -62,8 +50,16 @@ impl Address {
 }
 
 /// Canonical wire form: a list-Dict whose first entry is the tag
-/// byte (as `Int253`) and whose remaining entries are the variant
-/// payload. See `Address::TAG_*` constants.
+/// byte (as `Int253`), remaining entries the variant payload. See
+/// `Address::TAG_*` constants.
+///
+/// Layout:
+/// - `Predicate`: `[tag, point]`.
+/// - `MessageTarget`: `[tag, dst_string, method_int, args_dict, gas_int]`.
+///
+/// `dst` is wrapped as a `String` carrying the bytes of
+/// [`ActorID::encode`] so the outer list-Dict reader sees a uniform
+/// value-typed payload.
 impl Encodable for Address {
     fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
         match self {

@@ -60,9 +60,8 @@ impl ActorID {
     /// Tag value for [`ActorID::Constructor`] on the wire.
     pub const TAG_CONSTRUCTOR: u8 = 0x01;
 
-    /// Returns this id's canonical 32-byte hash. Both enum variants
-    /// resolve to the **same** value when they refer to the same
-    /// actor — that's the equivalence invariant from the type docs.
+    /// Returns this id's canonical 32-byte hash. Both variants resolve
+    /// to the **same** value (the equivalence invariant from the type docs).
     pub fn to_hash(&self) -> [u8; 32] {
         match self {
             ActorID::Hash(h) => *h,
@@ -76,11 +75,8 @@ impl ActorID {
         }
     }
 
-    /// Returns this id in its compact `Hash` form. For
-    /// [`ActorID::Hash`] this is a cheap clone; for
-    /// [`ActorID::Constructor`] it hashes the bytes and wraps.
-    /// Use this when you want to compare ids by canonical value
-    /// without keeping the constructor bytes around.
+    /// Returns this id in its compact `Hash` form. Use this to compare
+    /// ids by canonical value without keeping the constructor bytes around.
     pub fn to_canonical(&self) -> ActorID {
         match self {
             ActorID::Hash(_) => self.clone(),

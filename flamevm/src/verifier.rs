@@ -54,32 +54,20 @@ impl Verifier {
             .map_err(|_| VMError::InvalidR1CSProof)
     }
 
-    /// Public entry point: runs `bytecode` through the VM in
-    /// external context, computes `TxID::from_log(&txlog)`, binds
-    /// it into the R1CS transcript under domain `b"flamevm.txid"`,
-    /// then:
-    /// 1. appends each `DeferredSig::Explicit` to the batch
-    ///    verifier via `Signature::verify_batched`.
-    /// 2. if any `DeferredSig::TxBound` items were recorded,
-    ///    requires the caller to pass the aggregate multi-signature
-    ///    in `txbound_signature`, builds the `flamevm.signtx`
-    ///    transcript, binds it to TxID, and adds the multi-message
-    ///    verification to the batch via
-    ///    `Multisignature::verify_multi_batched`.
-    /// 3. Verifies the R1CS proof.
-    /// 4. Drains the batch.
+    /// Public entry point: runs `bytecode` through the VM in external
+    /// context, then verifies the R1CS proof and drains the deferred
+    /// signature batch (both Explicit sigs and, when present, the
+    /// TxBound multi-signature). The canonical TxID is bound into the
+    /// R1CS transcript under `b"flamevm.txid"` — this must mirror the
+    /// prover step exactly or every proof silently fails to verify.
     ///
-    /// Returns the [`TxResult`] with `proof = None` — the proof
-    /// has been verified by this point, so the caller doesn't need
-    /// to handle it. `result.txid`, `result.txlog`, and
-    /// `result.deferred_sigs` are populated for downstream
-    /// inspection.
+    /// Returns the [`TxResult`] with `proof = None` (already verified
+    /// here); `txid` / `txlog` / `deferred_sigs` are populated.
     ///
     /// `txbound_signature` is `None` for transactions without TxBound
-    /// items (e.g. pure cell-open transactions). It is `Some(sig)` for
-    /// transactions that emitted at least one `signtx`; passing
-    /// `None` while TxBound items are present errors
-    /// `MissingTxBoundSignature`.
+    /// items. Passing `None` while TxBound items are present errors
+    /// `MissingTxBoundSignature`; passing `Some` with no TxBound items
+    /// errors `SpuriousTxBoundSignature`.
     pub fn verify(
         pc_gens: &PedersenGens,
         bytecode: Vec<u8>,

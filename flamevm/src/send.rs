@@ -81,11 +81,9 @@ pub struct Message {
 }
 
 impl Message {
-    /// Computes the canonical [`SendID`] for this message — the
-    /// 32-byte hash of `Encodable::encode_to_vec()` under a Merlin
-    /// transcript labelled `flamevm.send.id`. Analogous to
-    /// `Cell::id()` for cells: one wire encoding, one hash, one
-    /// identity.
+    /// Computes the canonical [`SendID`] — the 32-byte hash of the
+    /// wire encoding under Merlin domain `flamevm.send.id`. Analogous
+    /// to `Cell::id()`: one wire encoding, one hash, one identity.
     pub fn id(&self) -> SendID {
         let buf = self.encode_to_vec();
         let mut t = Transcript::new(b"flamevm.send.id");

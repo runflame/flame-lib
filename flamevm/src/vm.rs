@@ -279,7 +279,6 @@ impl CallKind {
     }
 }
 
-/// Iterates over the actor ids of every live frame — current call
 /// Walks actor ids of every live frame — current first, then suspended
 /// innermost-out. Used by the re-entrancy guard inside `op_call`.
 fn iter_actor_ids_on_stack<'a>(
@@ -2036,17 +2035,6 @@ impl VM {
     /// `OpcodeRequiresPredicateContext` otherwise) AND external
     /// context (errors `ExternalOnly`; the CS lane is needed for the
     /// range proof and the qty commitment registration).
-    ///
-    /// 1. Pop `tag` (String) and `qty` (`Variable` — non-Variable
-    ///    operands error `TypeNotVariable`).
-    /// 2. Register the qty commitment with the CS via
-    ///    `delegate.commit_variable`, getting back an r1cs::Variable.
-    /// 3. Allocate a 64-bit range proof on the qty (matches
-    ///    `borrow`/`mix`/output-side bounds).
-    /// 4. Compute `flv = flavor_from_predicate(current_predicate, tag)`
-    ///    deterministically.
-    /// 5. Emit `TxEntry::IssuePriv(qty_commitment_point, flv_unblinded_point)`.
-    /// 6. Push `Token { qty: qty_commitment, flv: Commitment::unblinded(flv) }`.
     fn op_issuepriv<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         // Snapshot the predicate before any pop, so a wrong frame
         // surfaces before we mutate the stack.

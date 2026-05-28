@@ -207,12 +207,9 @@ impl String {
     }
 
     /// Downcasts to a `Vec<Instruction>` — the runtime form the VM
-    /// walks. For `Script(instrs)`, returns the witness-bearing
-    /// instructions directly (prover side); for `Opaque(bytes)`,
-    /// parses the bytes via `Program::parse` (verifier side, or
-    /// for scripts that came from the wire); errors for other
-    /// variants since they're 32-byte points/scalars, not
-    /// executable bytecode.
+    /// walks. `Script` returns witnesses inline (prover side);
+    /// `Opaque` parses via `Program::parse` (verifier side); 32-byte
+    /// point/scalar variants are not executable bytecode and error.
     ///
     /// Used by `op_run`, `op_switch`, `op_signcall` to enter a
     /// sub-script — letting the prover keep witnesses inline
@@ -256,15 +253,10 @@ impl String {
     ///
     /// Used by `op_input` — matches zkvm's `String::to_output` shape.
     ///
-    /// For `String::Cell`, the cell is held in an `Arc` (so clones
-    /// of the wrapping `String` share ownership and preserve
-    /// witnesses). If this is the sole reference (the common case
-    /// — pushed once, consumed by `op_input` once), `Arc::try_unwrap`
-    /// returns the owned cell directly. If the Arc has been cloned
-    /// (rare — `dup` on a witness-bearing pushed cell), we fall back
-    /// to encoding the shared cell to canonical bytes and decoding a
-    /// fresh closed-commitment copy — the witness is lost only in
-    /// this multi-reference path, and only for this consumer.
+    /// The witness-bearing cell is held in an `Arc`. On the sole
+    /// reference (common case) the owned cell unwraps directly,
+    /// witnesses intact; if shared (rare — `dup` on a pushed cell)
+    /// it is deep-cloned so witnesses survive into this consumer.
     pub fn to_cell(self) -> Result<crate::cell::Cell, VMError> {
         match self {
             String::Cell(arc) => match Arc::try_unwrap(arc) {

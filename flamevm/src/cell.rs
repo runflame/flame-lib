@@ -52,12 +52,10 @@ pub trait PredicateWitness: Any + Send + Sync + fmt::Debug {
     fn to_point(&self) -> CompressedRistretto;
 
     /// Clones the witness behind a fresh boxed trait object. Used
-    /// by `<Predicate as Clone>::clone`. Implementations are
-    /// almost always `Box::new(self.clone())`.
+    /// by `<Predicate as Clone>::clone`.
     fn clone_witness(&self) -> Box<dyn PredicateWitness>;
 
-    /// Bridge to `Any` so callers can downcast. Implementations
-    /// return `self`.
+    /// Bridge to `Any` so callers can downcast.
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -94,9 +92,7 @@ pub struct Predicate {
 }
 
 impl Clone for Predicate {
-    /// Clones the point and asks the witness to clone itself behind
-    /// a fresh boxed trait object via
-    /// [`PredicateWitness::clone_witness`].
+    /// Clones the point; delegates witness cloning to [`PredicateWitness::clone_witness`].
     fn clone(&self) -> Self {
         Predicate {
             point: self.point,
@@ -270,17 +266,16 @@ impl Predicate {
         &self,
         cp: &'a CallProof,
     ) -> Result<&'a [u8], VMError> {
-        // 1. Compute the merkle root from program + neighbors + position.
+        // Reconstruct the tweaked point P' = X + H(X, M)·B from the proof
+        // and require it to equal the predicate's opaque point.
         let leaf = program_leaf_hash(&cp.program);
         let root = merkle_walk_up(leaf, &cp.neighbors, &cp.position)?;
-        // 2. Compute h = H(X, M) and the expected point P' = X + h·B.
         let h = taproot_tweak(&cp.internal_key, &root);
         let x_point = cp
             .internal_key
             .decompress()
             .ok_or(VMError::CallProofMismatch)?;
         let p_prime = x_point + RISTRETTO_BASEPOINT_TABLE * &h;
-        // 3. Compare to the predicate's opaque point.
         if p_prime.compress() != self.to_point() {
             return Err(VMError::CallProofMismatch);
         }
@@ -539,17 +534,12 @@ impl Cell {
     /// Deep-clone preserving prover-side witnesses on Token payloads.
     ///
     /// Used by `String::to_cell` when the wrapping `Arc<Cell>` is
-    /// shared (e.g. because `Run::next_instruction` cloned the
-    /// outer `PushStr` instruction and the original Arc is still
-    /// pinned in `instructions[]`). Walks the payload, cloning each
-    /// entry via its derive-Clone — Token/ClearToken/Int253/Point
-    /// are all cheap to clone, and `Commitment::Open` is preserved
-    /// so downstream `op_mix` finds the witness intact.
+    /// shared. `Commitment::Open` is preserved so downstream `op_mix`
+    /// finds the witness intact.
     ///
     /// Errors if any payload entry isn't a portable type (a contract
     /// violation — payload is filtered through `pop_n_portable` at
-    /// construction). Non-portable variants like Merlin/Variable
-    /// would have nothing to clone to anyway.
+    /// construction).
     pub fn try_clone_with_witnesses(&self) -> Result<Cell, VMError> {
         let mut new_payload = Vec::with_capacity(self.payload.len());
         for v in &self.payload {
@@ -626,14 +616,10 @@ impl Cell {
 /// VM-level gate, see [`Cell::validate_portable`].
 impl Encodable for Cell {
     fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
-        // Outer wrapper: list-Dict with exactly 3 entries.
         write_list_prefix(w, 3)?;
-        // Entry 0: predicate as Point value.
         let pred_point = Point::from_compressed(self.predicate.to_point());
         write_value(w, &Value::Point(pred_point))?;
-        // Entry 1: anchor as a 32-byte String value.
         write_value(w, &Value::String(String::from(self.anchor.0.to_vec())))?;
-        // Entry 2: payload as a list-Dict of values.
         write_list_prefix(w, self.payload.len())?;
         for v in &self.payload {
             write_value(w, v)?;
@@ -761,12 +747,10 @@ fn merkle_walk_up(
     Ok(hash)
 }
 
-/// Clone a Value that's known to be portable. Portable types
-/// (Int253, String, Dict, Point, Token, ClearToken, Cell) all have
-/// either derive-Clone or a manual Clone; non-portable variants
-/// (Merlin / Variable / Expression / Constraint / WideToken) are
-/// never present in `Cell::payload` (construction filters via
-/// `pop_n_portable`) and would error here.
+/// Clone a Value that's known to be portable. Non-portable variants
+/// (Merlin / Variable / Expression / Constraint / WideToken) are never
+/// present in `Cell::payload` (construction filters via `pop_n_portable`)
+/// and error here.
 ///
 /// Distinct from `Value::try_clone`, which is the *stack-level*
 /// linearity gate that rejects Token/Cell to prevent implicit
