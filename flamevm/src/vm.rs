@@ -515,9 +515,11 @@ impl VM {
     ) -> Result<TxResult, VMError> {
         let script = registry.resolve_method(&message.target, message.method)?;
         let mem_limit = registry.actor_vbytes(&message.target)?.saturating_mul(4);
-        // Capture the SendID before move — `message.anchor` doubles as
-        // SendID (per Q5: SendID == originating Send's anchor).
-        let send_id = message.anchor.0;
+        // SendID is the canonical hash of the whole send (anchor,
+        // target, caller, method, payload, gas, vbytes, refund
+        // predicate) — analogous to CellID for Output. Capture
+        // before the move below.
+        let send_id = *message.id().as_bytes();
         let kind = CallKind::InternalRoot {
             actor: message.target,
             method: message.method,
@@ -2448,19 +2450,22 @@ impl VM {
 
         let anchor = self.consume_anchor()?;
         let caller = self.current_call.kind.actor().cloned();
-        // Single source of truth: the full message lives in the
-        // TxLog. The block builder scans `TxEntry::Send` entries to
-        // construct internal-tx deliveries — no separate queue.
-        self.txlog.push(crate::tx::TxEntry::Send {
-            anchor,
+        // Single source of truth: the full Message lives in the
+        // TxLog as `TxEntry::Send(Message)` — symmetric with
+        // `TxEntry::Output(Cell)`. The block builder scans these
+        // entries to construct internal-tx deliveries; no separate
+        // queue.
+        let message = crate::send::Message {
             target,
-            caller,
             method,
-            refund_predicate,
+            caller,
+            anchor,
+            payload: args,
             gas,
             vbytes,
-            payload: args,
-        });
+            refund_predicate,
+        };
+        self.txlog.push(crate::tx::TxEntry::Send(message));
         Ok(())
     }
 

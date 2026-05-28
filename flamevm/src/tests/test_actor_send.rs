@@ -64,32 +64,23 @@ fn send_queues_message_and_emits_txentry() {
     // Send entry recorded in txlog (after Header). The full message
     // (including payload + caller) lives in the entry — no separate
     // sends queue.
-    let send_count = vm.txlog.iter().filter(|e| matches!(e, crate::tx::TxEntry::Send { .. })).count();
+    let send_count = vm.txlog.iter().filter(|e| matches!(e, crate::tx::TxEntry::Send(_))).count();
     assert_eq!(send_count, 1);
-    match vm.txlog.iter().find(|e| matches!(e, crate::tx::TxEntry::Send { .. })) {
-        Some(crate::tx::TxEntry::Send {
-            anchor,
-            target: t,
-            caller,
-            method,
-            refund_predicate,
-            gas,
-            vbytes,
-            payload,
-        }) => {
-            assert_eq!(*t, target);
-            assert_eq!(*method, Int253::from(3u64));
-            assert_eq!(*gas, 10_000);
-            assert_eq!(*vbytes, 500);
-            assert_eq!(refund_predicate.to_point().as_bytes(), &refund_bytes);
+    match vm.txlog.iter().find(|e| matches!(e, crate::tx::TxEntry::Send(_))) {
+        Some(crate::tx::TxEntry::Send(msg)) => {
+            assert_eq!(msg.target, target);
+            assert_eq!(msg.method, Int253::from(3u64));
+            assert_eq!(msg.gas, 10_000);
+            assert_eq!(msg.vbytes, 500);
+            assert_eq!(msg.refund_predicate.to_point().as_bytes(), &refund_bytes);
             // Anchor is the LEFT half of split(InternalRoot.anchor)
             // (the zero seed in this test fixture).
             let (expected_send_anchor, _) = Anchor([0u8; 32]).split();
-            assert_eq!(*anchor, expected_send_anchor);
+            assert_eq!(msg.anchor, expected_send_anchor);
             // Caller = the executing actor (InternalRoot's `actor`).
-            assert_eq!(*caller, Some(ActorID::Hash([0xaa; 32])));
+            assert_eq!(msg.caller, Some(ActorID::Hash([0xaa; 32])));
             // No payload args in this test.
-            assert!(payload.is_empty());
+            assert!(msg.payload.is_empty());
         }
         _ => panic!("expected Send entry"),
     }
@@ -112,7 +103,7 @@ fn two_sends_get_distinct_split_anchors() {
         .txlog
         .iter()
         .filter_map(|e| match e {
-            crate::tx::TxEntry::Send { anchor, .. } => Some(*anchor),
+            crate::tx::TxEntry::Send(msg) => Some(msg.anchor),
             _ => None,
         })
         .collect();
@@ -145,7 +136,7 @@ fn send_from_external_root_has_no_caller() {
     vm.last_anchor = Some(Anchor([0xaa; 32]));
     while vm.step_internal().expect("step ok") {}
     let caller = vm.txlog.iter().find_map(|e| match e {
-        crate::tx::TxEntry::Send { caller, .. } => Some(caller.clone()),
+        crate::tx::TxEntry::Send(msg) => Some(msg.caller.clone()),
         _ => None,
     });
     assert_eq!(caller, Some(None), "no caller from ExternalRoot");
@@ -183,7 +174,7 @@ fn send_payload_in_txlog_differs_across_args() {
         vm.txlog
             .iter()
             .find_map(|e| match e {
-                crate::tx::TxEntry::Send { payload, .. } => Some(payload
+                crate::tx::TxEntry::Send(msg) => Some(msg.payload
                     .iter()
                     .map(|v| match v {
                         Value::Int253(i) => *i,

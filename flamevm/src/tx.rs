@@ -114,26 +114,18 @@ pub enum TxEntry {
         state: crate::Dict,
     },
 
-    /// Outbound asynchronous message scheduled by `op_send`. The
-    /// `anchor` is the `left` half of a split of `last_anchor` at
-    /// the send site; it doubles as the SendID (deterministic at
+    /// Outbound asynchronous message scheduled by `op_send`. Carries
+    /// the full [`Message`](crate::send::Message) — its `anchor` is
+    /// the `left` half of a split of `last_anchor` at the send site,
+    /// and its `id()` is the canonical SendID (deterministic at
     /// broadcast time, identifies the future internal-tx delivery).
     ///
-    /// `payload` is the full argument vector the future internal
-    /// tx will receive. The block builder reads `TxEntry::Send`
-    /// entries directly from the TxLog — there is no separate
-    /// "sends" queue. `caller` is the actor that issued the send
-    /// (or `None` if the send originated at ExternalRoot).
-    Send {
-        anchor: crate::vm::Anchor,
-        target: crate::actor::ActorID,
-        caller: Option<crate::actor::ActorID>,
-        method: crate::Int253,
-        refund_predicate: crate::cell::Predicate,
-        gas: u64,
-        vbytes: u64,
-        payload: Vec<crate::Value>,
-    },
+    /// The block builder reads `TxEntry::Send` entries directly from
+    /// the TxLog — there is no separate "sends" queue — and feeds the
+    /// embedded `Message` straight into `VM::execute_internal`.
+    /// Symmetric with `TxEntry::Output(Cell)`: each effect that owns
+    /// an addressable artifact embeds the artifact itself.
+    Send(crate::send::Message),
 }
 
 impl TxID {
@@ -182,16 +174,9 @@ impl core::fmt::Debug for TxEntry {
                 .debug_struct("TxEntry::ActorSave")
                 .field("actor", actor)
                 .finish(),
-            TxEntry::Send {
-                target, method, anchor, gas, vbytes, ..
-            } => f
-                .debug_struct("TxEntry::Send")
-                .field("anchor", anchor)
-                .field("target", target)
-                .field("method", method)
-                .field("gas", gas)
-                .field("vbytes", vbytes)
-                .finish(),
+            TxEntry::Send(msg) => {
+                f.debug_tuple("TxEntry::Send").field(msg).finish()
+            }
         }
     }
 }
@@ -249,50 +234,15 @@ impl MerkleItem for TxEntry {
                 t.append_message(b"save.actor", &actor.to_hash());
                 t.append_message(b"save.post_state_root", &crate::actor::state_root(state));
             }
-            TxEntry::Send {
-                anchor,
-                target,
-                caller,
-                method,
-                refund_predicate,
-                gas,
-                vbytes,
-                payload,
-            } => {
-                // Bind a complete summary of the send into the
-                // external TxID merkle root so the (External
-                // TxID, SendID) pair commits to every parameter
-                // the future internal tx will be delivered with.
-                t.append_message(b"send.anchor", &anchor.0);
-                t.append_message(b"send.target", &target.to_bytes());
-                // Caller absence encoded as 0x00; presence as
-                // 0x01 || actor-bytes — fixed-shape encoding to
-                // keep the merkle leaf canonical.
-                match caller {
-                    None => t.append_message(b"send.caller", &[0u8]),
-                    Some(c) => {
-                        let mut buf = vec![1u8];
-                        buf.extend_from_slice(&c.to_bytes());
-                        t.append_message(b"send.caller", &buf);
-                    }
-                }
-                t.append_message(b"send.method", &method.to_bytes());
-                t.append_message(
-                    b"send.refund_predicate",
-                    refund_predicate.to_point().as_bytes(),
-                );
-                t.append_message(b"send.gas", &gas.to_le_bytes());
-                t.append_message(b"send.vbytes", &vbytes.to_le_bytes());
-                // Iterate the payload values; each value's canonical
-                // wire form contributes to the merkle leaf.
-                t.append_message(b"send.payload.len", &(payload.len() as u64).to_le_bytes());
-                let mut buf = Vec::new();
-                for v in payload {
-                    buf.clear();
-                    crate::encoding::write_value(&mut buf, v)
-                        .expect("portable values encode (op_send enforces portability)");
-                    t.append_message(b"send.payload.item", &buf);
-                }
+            TxEntry::Send(msg) => {
+                // Bind to the send's canonical 32-byte SendID hash,
+                // analogous to `Output(Cell)` committing only to
+                // `cell.id()`. `Message::id()` absorbs the message's
+                // canonical wire encoding under domain
+                // `flamevm.send.id`, so this single leaf commits to
+                // every parameter the future internal tx will be
+                // delivered with.
+                t.append_message(b"send", msg.id().as_bytes());
             }
         }
     }

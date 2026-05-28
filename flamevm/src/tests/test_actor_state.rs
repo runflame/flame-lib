@@ -277,9 +277,14 @@ fn load_followed_by_save_preserves_actor() {
 
 /// `VM::execute_internal` emits `TxEntry::Receive(send_id)` as the
 /// first effect after the Header so the Internal TxID commits to the
-/// triggering Send's anchor. Symmetric with `op_input` for external
+/// triggering Send's identity. Symmetric with `op_input` for external
 /// transactions. Without this entry, an internal tx's TxID would say
 /// nothing about which Send produced it.
+///
+/// SendID is the canonical hash of the entire Send (anchor, target,
+/// caller, method, payload, gas, vbytes, refund predicate) — not just
+/// the anchor — so the comparison rebuilds the expected SendID from
+/// the originating `Message`.
 #[test]
 fn receive_committed_as_first_effect_after_header() {
     let mut reg = MemRegistry::new();
@@ -303,15 +308,19 @@ fn receive_committed_as_first_effect_after_header() {
         vbytes: 0,
         refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     };
+    let expected_send_id = *msg.id().as_bytes();
     let result = VM::execute_internal(dummy_header(), msg, &mut reg, &block)
         .expect("execute_internal ok");
 
-    // txlog[0] = Header, txlog[1] = Receive(known_anchor).
+    // txlog[0] = Header, txlog[1] = Receive(send_id).
     assert!(result.txlog.len() >= 2, "txlog too short: {}", result.txlog.len());
     assert!(matches!(result.txlog[0], crate::tx::TxEntry::Header(_)));
     match &result.txlog[1] {
         crate::tx::TxEntry::Receive(send_id) => {
-            assert_eq!(*send_id, known_anchor, "Receive must carry the originating SendID");
+            assert_eq!(
+                *send_id, expected_send_id,
+                "Receive must carry the originating Message's SendID"
+            );
         }
         other => panic!("expected txlog[1] to be TxEntry::Receive, got {:?}", other),
     }

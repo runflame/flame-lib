@@ -916,7 +916,7 @@ pub(crate) fn assert_nm_txlog(
         "confidential N→M matrix tests must not emit deferred sigs"
     );
     assert!(
-        !result.txlog.iter().any(|e| matches!(e, crate::tx::TxEntry::Send { .. })),
+        !result.txlog.iter().any(|e| matches!(e, crate::tx::TxEntry::Send(_))),
         "confidential N→M matrix tests must not emit sends"
     );
 }

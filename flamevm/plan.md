@@ -55,13 +55,13 @@ what's left to build.
 
 | #  | Phase                                                              |
 |----|--------------------------------------------------------------------|
-| 39 | Gas-cost estimation (incl. block resource pool consideration)      |
-| 40 | Memory cap (allocator hooks + enforcement)                         |
-| 41 | Integration tests (incl. fuzzing & canonicality sweeps)            |
+| 40 | Gas-cost estimation (incl. block resource pool consideration)      |
+| 41 | Memory cap (allocator hooks + enforcement)                         |
+| 42 | Integration tests (incl. fuzzing & canonicality sweeps)            |
 
-**38 of 41 complete (~93 %).** Total test count: 574 passing; build
-clean. Remaining compiler warnings target Phase 39 (gas charging) and
-Phase 40 (mem-cap allocator).
+**39 of 42 complete (~93 %).** Total test count: 579 passing; build
+clean. Remaining compiler warnings target Phase 40 (gas charging) and
+Phase 41 (mem-cap allocator).
 
 ### Actor build (Phases 24–29, 31) — landed in 8 units
 
@@ -76,7 +76,7 @@ awaiting ADR backfill `0010` / `0011` / `0012`).
 | 1 — actor.rs data model | 24 | `ActorID` (Hash + Constructor), `MethodKey(Int253)`, `ActorState`, `Actor`, `vbyte_size` (Q2), `b"flamevm.actorid"` domain (Q1). |
 | 2 — `address.rs` | 24 | `Address::Predicate` / `MessageTarget` enum + canonical wire encoding. |
 | 3 — Registry trait + `MemRegistry` + `VbytePool` | 24 + 28 | `ActorRegistry` trait (load/save/resolve/mark/deploy/credit_vbytes/tick_block); `VbytePool` (5000/block introduction + 100-block maturity); per-block ACTIVE↔FROZEN↔CLEARED state machine. |
-| 4 — Move Message/ActorID out of vm.rs; add `send.rs` | (sub-task of 31) | `Message` gains `refund_predicate` (Q3); new `SendID` newtype (Q5 — SendID == Message.anchor). |
+| 4 — Move Message/ActorID out of vm.rs; add `send.rs` | (sub-task of 31) | `Message` gains `refund_predicate` (Q3); new `SendID` newtype (Q5). Originally SendID == `Message.anchor`; later (Phase 39) redefined as the canonical hash of the whole Send (analogous to CellID for cells). |
 | 5 — `op_load` + `op_save` | 25 | Per-frame `loaded` flag; cross-frame `mark_for_destruction` as re-entry lock; tx-end `commit_tx_destructions` hook = Q6 self-destruct. |
 | 6 — `op_call` + re-entrancy | 26 + 27 | `ActorCall` frame with caller + anchor; `iter_actor_ids_on_stack` walks the live frame chain for the guard. |
 | 7 — Identity opcodes | 29 | `actorid` / `anchor` / `callerid` / `method`. `CallKind::ActorCall` extended with `anchor`. All four hard-fail `OpcodeRequiresActorContext` from external root. |
@@ -198,23 +198,24 @@ unified the witness model, added a lazy MSM type, retired
 | 36 | TxLog records effects, not control flow (ADR 0014)          | 1 (new) | Drop `TxEntry::Call`; add `TxEntry::ActorSave { actor, post_state_root }` emitted by `op_save`. MerkleItem domain tags retired/added. Tests reworked: `call_emits_…` → `call_does_not_emit_txlog_entry_by_itself`. |
 | 37 | Batch rollback under call failure                           | 2 (new) | `starsig::BatchSnapshot` + `BatchCheckpoint` trait. `CallFrame::snap_batch` populated when child pushed; restored on failure. MSM + sig contributions from failed callees no longer pollute the caller's batch. |
 | 38 | Issuance redesign + `TxEntry::Receive` + op_save audit fixes (F1, F2, F3) | 14 (new) | Two disjoint mint opcodes + two consumer-side flavor helpers (`issuepriv`/`issueprivflv` at `0x91`/`0x92`, `issuepub`/`issuepubflv` at `0x93`/`0x94`); distinct Merlin labels `flamevm.{issuepriv,issuepub}.flavor`; typed `TxEntry::IssuePub(Int253, Int253)` / `TxEntry::IssuePriv(point, point)`. `TxEntry::Receive([u8; 32])` emitted as the first effect after `Header` in `VM::execute_internal` so Internal TxID commits to its triggering SendID. **op_save audit fixes**: F1 — actor-state rollback on call failure via `ActorRegistry::{push_checkpoint, pop_checkpoint_commit, pop_checkpoint_rollback}` (snapshots on frame entry, restores on `fail_current_call` + tx-level rollback in `execute_internal`); closes the laundering-via-failed-subcall hole. F2 — `TxEntry::ActorSave { actor, state }` now carries the full state (symmetric with `Output(Cell)`); merkle leaf hashes `(actor.to_hash(), state.root())`. F3 — save failures propagate as call failures, rolled back via F1 (no more silent self-destruct on save error). |
+| 39 | SendID content-addressing + `TxEntry::Send(Message)` unification | 13 (new) | (a) `TxEntry::Send` collapsed from an eight-field struct variant to a single-field tuple variant carrying `Message` — symmetric with `TxEntry::Output(Cell)`. Removes a duplicated field list, the `op_send` field-by-field copy, and the consensus-side reconstruction step. (b) `Message::encode(w)` defines the canonical wire form (`anchor` raw bytes → canonical `ActorID::encode` for target → option byte + canonical `ActorID::encode` for caller → `Int253` for method → 32-byte point for refund predicate → LE-u64 gas/vbytes → LE-u64 payload count + canonical `write_value` per item). `Message::id()` is `H(b"flamevm.send.id" ‖ encode())` — one wire encoding, one hash, one identity, mirroring `Cell::id()`. (c) `MerkleItem` for `TxEntry::Send` commits the 32-byte SendID under tag `b"send"`. (d) `VM::execute_internal` uses `message.id().as_bytes()` for `TxEntry::Receive`. New tests guard determinism + divergence on every field (incl. vbytes, caller, refund predicate) and canonical actor/caller form equivalence. Uniqueness still inherited from the embedded anchor. |
 
 ## Known wiring gap
 
 | Area | Gap | Severity | Targeted in phase |
 |---|---|---|---|
-| `String::as_bytes` panic on witness variants | Sharp edge — documented but no CI lint. | Low | 41 (lint) |
+| `String::as_bytes` panic on witness variants | Sharp edge — documented but no CI lint. | Low | 42 (lint) |
 | `decrypt` uses default `PedersenGens` only | Future multi-gens use would need parameterization. | Low | (deferred) |
 | `BatchSignatureVerificationFailed` is opaque | Doesn't say which sig failed. | Low | (accepted) |
-| Sub-varint U64 branch overflow regression test missing | Pre-existing finding. | Low | 41 |
+| Sub-varint U64 branch overflow regression test missing | Pre-existing finding. | Low | 42 |
 
 ## Documented but unimplemented
 
 | Opcode / feature | Source | Phase |
 |---|---|---|
-| Gas charging per opcode | design.md §Resources / Gas | 39 |
-| Block resource pools (`B_par : B_ser = 4:1`) | design.md §Block resource pools | 39 (consideration) |
-| Memory cap `4× vbytes` enforcement (allocator hooks) | design.md ADR 0002 | 40 |
+| Gas charging per opcode | design.md §Resources / Gas | 40 |
+| Block resource pools (`B_par : B_ser = 4:1`) | design.md §Block resource pools | 40 (consideration) |
+| Memory cap `4× vbytes` enforcement (allocator hooks) | design.md ADR 0002 | 41 |
 | Chain-state introspection opcodes (`height`, `blockhash`, `blockburn`, `blockweight`, `blockrate`, `chainstate`) | design.md §Chain-state introspection (forward-looking) | deferred |
 | Per-block consensus-side `tick_block` driver | design.md ADR 0005 | (consensus / integrator) |
 | Transparent Constructor deploy at delivery | Q4 | (consensus / integrator) |
@@ -227,7 +228,7 @@ unified the witness model, added a lazy MSM type, retired
 | Predicate-call isolation | — (landed as `decisions/0013-predicate-call-isolation.md`, Phase 33) | `open` / `signcall` / `call` all create isolated frames with explicit `gas`/`bytes`. `CellOpen` has no actor identity. Confused-deputy class eliminated by construction. |
 | Input-cell witness encoding | — (resolved Phase 22) | Carrier is `String::Cell(Arc<Cell>)` — same pattern as zkvm's `String::Output`. `Instruction::Input` is a unit variant. ADR pending. |
 | Actor data model (Q1, Q2, Q4, Q6) | — (resolved during actor build) | Q1: `b"flamevm.actorid"` domain. Q2: vbyte = wire_len(state) + 32. Q4: Constructor-form id deploys transparently at first delivery. Q6: load-without-save is the destroy path. ADR `0010-actor-data-model` queued. |
-| Send-ID + Internal TxID (Q3, Q5) | — (resolved during actor build) | Three IDs (External TxID, SendID = Send.anchor, Internal TxID). Anchor ratcheted before emitting `TxEntry::Send`. Internal TxID binds to per-call state via `TxEntry::ActorSave` (Phase 36) and to its triggering Send via `TxEntry::Receive(send_id)` emitted as the first effect after Header (Phase 38). ADR `0011-send-id-and-internal-txid` queued. |
+| Send-ID + Internal TxID (Q3, Q5) | — (resolved during actor build) | Three IDs (External TxID, SendID, Internal TxID). Anchor ratcheted before emitting `TxEntry::Send(Message)`. `Message::id() = H(b"flamevm.send.id" ‖ Message.encode())` (Phase 39) — one canonical wire form, one hash, one identity. Uniqueness still inherited from the embedded anchor; the id commits to every parameter the delivery will carry, mirroring `Cell::id()`. Internal TxID binds to per-call state via `TxEntry::ActorSave` (Phase 36) and to its triggering Send via `TxEntry::Receive(send_id)` emitted as the first effect after Header (Phase 38). ADR `0011-send-id-and-internal-txid` queued. |
 | Load/save re-entry lock (Q6) | — (resolved during actor build) | `mark_for_destruction` as the cross-frame lock; per-frame `loaded` flag; tx-end commit sweep. ADR `0012-load-save-reentry-lock` queued. |
 | TxLog records effects, not control flow | — (landed as `decisions/0014-txlog-records-effects-not-control-flow.md`, Phase 36) | Dropped `TxEntry::Call`; added `TxEntry::ActorSave`. |
 | `Point` enum + `String::Point` unification | — (landed Phase 34) | ADR `0015-point-enum-and-string-point` queued. |

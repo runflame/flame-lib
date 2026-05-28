@@ -498,7 +498,7 @@ fn phase21_txresult_populated_for_trivial_program() {
     assert!(!prover_result.bytecode.is_empty());
     assert!(prover_result.proof.is_some());
     assert!(prover_result.deferred_sigs.is_empty());
-    assert!(!prover_result.txlog.iter().any(|e| matches!(e, crate::tx::TxEntry::Send { .. })));
+    assert!(!prover_result.txlog.iter().any(|e| matches!(e, crate::tx::TxEntry::Send(_))));
     // Verifier side: same TxID and txlog; proof is None (consumed).
     let prover_txid = prover_result.txid;
     let TxResult { bytecode, proof, .. } = prover_result;

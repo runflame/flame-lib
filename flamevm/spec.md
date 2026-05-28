@@ -37,7 +37,7 @@ Internal transactions do not have a pre-determined effect and therefore do not s
 
 Like external, internal transactions produce effects:
 
-1. Receive — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating Send's anchor (`SendID`) into the Internal TxID merkle root. Symmetric with `Input` for external transactions.
+1. Receive — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating `SendID` (canonical 32-byte hash of the whole Send: anchor, target, caller, method, payload, gas, vbytes, refund predicate — analogous to `CellID` for cells) into the Internal TxID merkle root. Symmetric with `Input` for external transactions.
 2. Outputs — creation of new entries in the Utreexo.
 3. Sends — messages sent to actors that produce other internal transactions.
 4. Issuance and retirement — creation and removal of tokens to/from circulation.
@@ -1117,7 +1117,20 @@ Asynchronous message-send. Pops operands top-first:
 6. `k` (`Int253`) — args count.
 7. `args…` — k portable values, delivery payload.
 
-Splits the frame's `last_anchor` (see §Anchors): the `left` half becomes the message's `anchor` (= SendID, known at broadcast time), the `right` half replaces `last_anchor`. Hard-fails `AnchorMissing` if no anchor has been claimed yet. Emits `TxEntry::Send { anchor, target, caller, method, refund_predicate, gas, vbytes, payload }`. The full message lives in the entry — there is no separate "sends queue"; the block builder reads `TxEntry::Send` records from the TxLog when constructing internal-tx deliveries. The originator's actor id (if any) becomes the entry's `caller`.
+Splits the frame's `last_anchor` (see §Anchors): the `left` half becomes the message's `anchor`, the `right` half replaces `last_anchor`. Hard-fails `AnchorMissing` if no anchor has been claimed yet. Emits `TxEntry::Send(Message)` — the full `Message` lives in the entry, symmetric with `TxEntry::Output(Cell)`. There is no separate "sends queue"; the block builder reads `TxEntry::Send` records from the TxLog when constructing internal-tx deliveries. The originator's actor id (if any) becomes the message's `caller`.
+
+The send's identity is the canonical 32-byte `SendID = H(b"flamevm.send.id" ‖ Message.encode())` — `Message::id()`. The wire encoding `Message.encode()` writes the fields in fixed order:
+
+1. `anchor` — 32 raw bytes.
+2. `target` — canonical `ActorID` (Hash or Constructor) via `ActorID::encode`, with the variant force-canonicalized so a Hash form and a Constructor form of the same actor produce identical bytes.
+3. `caller` — `0x00` for None, `0x01 ‖ ActorID::encode(canonical)` for Some.
+4. `method` — `Int253` canonical encoding.
+5. `refund_predicate` — 32-byte compressed Ristretto.
+6. `gas` — little-endian u64.
+7. `vbytes` — little-endian u64.
+8. `payload` — little-endian u64 count, then each value's canonical `Value` encoding.
+
+The merkle leaf for `TxEntry::Send` commits to this single 32-byte SendID, just as `TxEntry::Output(Cell)`'s leaf commits to `Cell::id()`. Uniqueness is inherited from `anchor`: every distinct send carries a distinct anchor, hence a distinct SendID.
 
 Available in both contexts. Hard-fails `MalformedAddress` on wrong-size addr or refund, `NonPortableInSend` on non-portable args, `InvalidBitrange` on negative/overflowing allotments.
 
