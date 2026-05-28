@@ -185,15 +185,12 @@ pub fn resolve_method<'a>(state: &'a Dict, method: &Int253) -> Option<&'a String
     }
 }
 
-/// Canonical 32-byte commitment to an actor state Dict, used by
-/// `TxEntry::ActorSave`'s MerkleItem impl. Hashes the wire-encoded
-/// state under domain `flamevm.actor.state.root`.
+/// Canonical 32-byte commitment to an actor's state Dict — the
+/// `TxEntry::ActorSave` merkle leaf.
 ///
-/// Infallible: the registry only ever stores portable states (op_save
-/// validates portability on the way in), and every portable value is
-/// expected to be wire-encodable. A non-encodable portable value
-/// would surface here as a panic — see the architect's queue item
-/// about the `ClearToken` vs encoder gap.
+/// Infallible in valid registry context (op_save gates stored states on
+/// portability). Panics on a portable-but-unencodable value — see the
+/// architect's queue item on the `ClearToken`-vs-encoder gap.
 pub fn state_root(state: &Dict) -> [u8; 32] {
     let mut buf = Vec::new();
     write_dict(&mut buf, state)
@@ -274,17 +271,14 @@ impl core::fmt::Debug for Actor {
 
 // ── Vbyte sizing ──────────────────────────────────────────────────
 
-/// Computes the canonical vbyte size of an actor's state Dict, per
-/// Q2: `wire_len(state) + STORAGE_OVERHEAD`. The lifecycle overhead
-/// covers the protocol-managed counters every actor carries
-/// regardless of state shape.
+/// Canonical vbyte size of an actor's state Dict (Q2): `wire_len(state) +
+/// STORAGE_OVERHEAD`, the overhead covering the protocol-managed lifecycle
+/// counters every actor carries.
 ///
-/// Returns `Err(VMError::MalformedActorState)` if the state can't be
-/// encoded (a payload containing a value with no wire encoding).
-/// Note: encodability is not the same as portability — op_save's
-/// `is_portable` check is the authoritative storage gate; this
-/// function reports a separate failure mode for the rare case where
-/// a portable value lacks an encoder.
+/// `Err(MalformedActorState)` if the state can't be encoded. Note:
+/// encodability ≠ portability — op_save's `is_portable` check is the
+/// authoritative storage gate; this reports the rare case of a portable
+/// value that lacks an encoder.
 pub fn vbyte_size(state: &Dict) -> Result<u64, VMError> {
     const STORAGE_OVERHEAD: u64 = 32;
     let mut buf = Vec::new();

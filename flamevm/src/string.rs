@@ -251,7 +251,7 @@ impl String {
     /// `Commitment::Closed`). Hard-fails `MalformedCellEncoding` on
     /// malformed bytes, trailing data, or any non-decodable variant.
     ///
-    /// Used by `op_input` — matches zkvm's `String::to_output` shape.
+    /// Used by `op_input`.
     ///
     /// The witness-bearing cell is held in an `Arc`. On the sole
     /// reference (common case) the owned cell unwraps directly,

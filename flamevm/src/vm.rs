@@ -1217,10 +1217,9 @@ impl VM {
     }
 
     /// `0x6f` `log` — `str → ø`. Pops a String, emits
-    /// `TxEntry::Data(bytes)` into the txlog. Mirrors zkvm's
-    /// `log` opcode (same byte). Witness-bearing String variants
-    /// serialize via `to_bytes` so prover and verifier emit the
-    /// same canonical bytes.
+    /// `TxEntry::Data(bytes)` into the txlog. Witness-bearing String
+    /// variants serialize via `to_bytes` so prover and verifier emit
+    /// the same canonical bytes.
     fn op_log(&mut self) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
         self.txlog.push(crate::tx::TxEntry::Data(s.to_bytes()));
@@ -2251,7 +2250,7 @@ impl VM {
     /// open commitments on Token payloads; the verifier pushes
     /// `String::Opaque(cell_bytes)` and `to_cell()` decodes to closed
     /// commitments. No separate witness operand — witnesses ride the
-    /// stack with the value, matching zkvm's `to_output()` pattern.
+    /// stack with the value.
     fn op_input(&mut self) -> Result<(), VMError> {
         self.require_external()?;
         let cell = self.pop_value()?.to_string()?.to_cell()?;
@@ -2818,8 +2817,6 @@ impl VM {
                 Ok(())
             }
             crate::Expression::LinearCombination(terms, assignment) => {
-                // Build the LC from the term list. zkvm uses
-                // `r1cs::LinearCombination::from_iter(terms)`.
                 let lc: LC = terms.iter().cloned().collect();
                 // Convert the witness (if present) to spacesuit's
                 // SignedInteger. Non-negative Int253s up to u64::MAX
@@ -2865,7 +2862,6 @@ impl VM {
     /// popped `(qty, flv)` and verified both are `Variable`; this
     /// just runs the CS plumbing — range-proof + additive-inverse
     /// allocation — and pushes the `WideToken` / `Token` pair.
-    /// Mirrors zkvm's `borrow` exactly.
     fn op_borrow_encrypted_inner<D: Delegate>(
         &mut self,
         qty: crate::Variable,
@@ -2886,7 +2882,7 @@ impl VM {
             None => None,
         };
         let flv_assignment = flv.commitment.assignment().map(|i| i.to_scalar_mod_order());
-        // 64-bit range proof on the positive qty (matches zkvm BitRange::max()).
+        // 64-bit range proof on the positive qty.
         spacesuit::range_proof(
             delegate.cs(),
             qty_var.into(),
@@ -3025,8 +3021,7 @@ impl VM {
                 Value::Token(token.clone()),
                 delegate,
             )?;
-            // Insert at front so the deepest output ends up at cloak_outs[0],
-            // matching zkvm's ordering convention.
+            // Insert at front so the deepest output ends up at cloak_outs[0].
             output_tokens.insert(0, token);
             cloak_outs.insert(0, allocated);
         }

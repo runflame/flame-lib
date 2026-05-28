@@ -370,7 +370,7 @@ impl Program {
 
 // ── ProgramItem ─────────────────────────────────────────────────────
 
-/// Represents a view of a program. Mirrors zkvm's `ProgramItem`:
+/// A view of a program:
 ///
 /// - `Bytecode(Vec<u8>)` — verifier's view (opaque bytes).
 /// - `Program(Program)` — prover's view (typed instructions plus

@@ -28,8 +28,7 @@ pub type CellID = [u8; 32];
 ///
 /// Today the only impl is [`PredicateTree`] — the Taproot merkle
 /// witness with internal key + program leaves. Other anticipated
-/// witnesses (per zkvm's lead, commit 4a9ec80 in the slingshot
-/// tree) include:
+/// witnesses include:
 ///
 /// - **Raw private keys** for tests / build-and-sign flows.
 /// - **Keytree derivation indices** so wallets can re-derive a
@@ -361,9 +360,8 @@ impl PredicateTree {
         self.point
     }
 
-    /// Computes the merkle root over the leaves. For a single leaf the
-    /// root is its leaf hash; otherwise the tree is balanced by repeatedly
-    /// splitting at `next_power_of_two(n) / 2`.
+    /// The predicate's merkle commitment `M` — the root over its program/
+    /// blinding leaves.
     pub fn merkle_root(&self) -> [u8; 32] {
         merkle_root_of_leaves(&self.leaves)
     }
@@ -552,21 +550,13 @@ impl Cell {
         })
     }
 
-    /// Computes the canonical identity hash of this cell, via a Merlin
-    /// transcript that absorbs the opaque predicate point, the anchor,
-    /// and each payload value's **canonical wire encoding**.
+    /// Unique content identity of this cell — commits to its predicate,
+    /// anchor, and payload. Used as the `Output` txlog entry and as the
+    /// `signtx`/`signcall` signed message. Uniqueness comes from the anchor;
+    /// the payload bytes are bound so the id is a true content commitment.
     ///
-    /// Anchor uniqueness across a tx (guaranteed by the ratchet chain
-    /// from inputs forward) makes cell-ids unique without needing the
-    /// payload to disambiguate; binding the payload bytes here is
-    /// belt-and-suspenders to make `id()` a true commitment to the
-    /// cell's contents — needed for protocol messages (signtx/signcall)
-    /// and for the txlog Output entry.
-    ///
-    /// Panics if a payload value's type has no canonical encoder
-    /// (all portable types — Int253, String, Dict, Point, Token —
-    /// encode; non-portable types are rejected by `op_cell` /
-    /// `op_output` before reaching here).
+    /// Panics on a payload value with no canonical encoder; `op_cell` /
+    /// `op_output` reject non-portable payloads upstream.
     pub fn id(&self) -> [u8; 32] {
         let mut t = Transcript::new(b"flamevm.cell.id");
         t.append_message(b"predicate", self.predicate.to_point().as_bytes());

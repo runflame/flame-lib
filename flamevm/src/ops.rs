@@ -408,9 +408,8 @@ impl Instruction {
     ///   full encoded negative zero.
     ///
     /// Unknown opcode bytes return `Instruction::Ext(b)` rather than
-    /// erroring — mirrors zkvm's extension-opcode handling so future
-    /// protocol versions can introduce new opcodes without breaking
-    /// older verifiers.
+    /// erroring, so future protocol versions can introduce new opcodes
+    /// without breaking older verifiers.
     pub fn parse(reader: &mut impl Reader) -> Result<Instruction, VMError> {
         let byte = reader.read_u8().map_err(|_| VMError::UnexpectedEndOfScript)?;
         match byte {

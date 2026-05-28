@@ -180,14 +180,10 @@ impl ClearToken {
 
 // ── Flavor helper ────────────────────────────────────────────────
 
-/// Computes a deterministic flavor scalar from an actor identity and
-/// a `tag` byte string. Returns the result wrapped in `Int253` (always
-/// non-negative since it comes from a wide-mod-order scalar reduction).
-///
-/// Mirrors `zkvm::Value::issue_flavor` but keyed on `ActorID` (Flame
-/// uses actor identities rather than predicates as issuance authority)
-/// and uses a Flame-specific Merlin domain. Consensus-fixed string —
-/// any rename is a hard fork.
+/// Flavor scalar identifying an asset type minted by `actor`. The `tag`
+/// lets one actor mint multiple distinct flavors. Always non-negative
+/// (wide-mod-order scalar reduction). The Merlin domain is consensus-fixed —
+/// a rename is a hard fork.
 pub fn flavor_from_actor(actor: &ActorID, tag: &String) -> Int253 {
     let mut t = Transcript::new(b"flamevm.issuepub.flavor");
     // `to_hash()` collapses both enum variants to the canonical
@@ -201,14 +197,11 @@ pub fn flavor_from_actor(actor: &ActorID, tag: &String) -> Int253 {
     Int253::from(Scalar::from_bytes_mod_order_wide(&buf))
 }
 
-/// Computes a deterministic flavor scalar from a predicate identity
-/// and a `tag` byte string. The predicate's 32-byte compressed point
-/// keys the flavor; the `tag` lets one predicate mint multiple
-/// flavors. Same transcript label as `flavor_from_actor` but with a
-/// distinct first message (`b"predicate"` vs `b"actor"`), so the two
-/// issuance domains are disjoint by construction — an actor and a
-/// predicate cannot collide on the same flavor scalar even if their
-/// 32-byte identities are numerically equal.
+/// Flavor scalar identifying an asset type minted under `predicate`. The
+/// `tag` lets one predicate mint multiple flavors. Uses the same transcript
+/// label as `flavor_from_actor` but a distinct first message (`b"predicate"`
+/// vs `b"actor"`), so actor- and predicate-issued flavors can never collide
+/// even when their 32-byte identities are numerically equal.
 pub fn flavor_from_predicate(
     predicate: &crate::cell::Predicate,
     tag: &String,

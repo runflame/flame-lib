@@ -10,15 +10,9 @@ use crate::int253::Int253;
 use crate::value::Value;
 use crate::vm::Anchor;
 
-/// Deterministic identity for a scheduled internal transaction —
-/// the canonical 32-byte hash of the Send's canonical wire encoding.
-/// Analogous to `Cell::id()` for the `Output` effect: the id uniquely
-/// names the send and commits to every parameter the resulting
-/// internal tx will be delivered with.
-///
-/// Uniqueness is inherited from the embedded `anchor` (each send
-/// consumes a unique-anchored split, so two distinct sends from any
-/// tx always carry different anchors → different SendIDs).
+/// Unique identity of a scheduled internal transaction (a queued `Send`).
+/// Uniqueness is inherited from the embedded `anchor`: each send consumes a
+/// unique-anchored split, so two distinct sends always carry distinct SendIDs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SendID(pub [u8; 32]);
 
@@ -81,9 +75,9 @@ pub struct Message {
 }
 
 impl Message {
-    /// Computes the canonical [`SendID`] — the 32-byte hash of the
-    /// wire encoding under Merlin domain `flamevm.send.id`. Analogous
-    /// to `Cell::id()`: one wire encoding, one hash, one identity.
+    /// Unique ID identifying the message that spawns the internal transaction.
+    /// Note: SendID is not the same as TxID, which can only be determined after
+    /// processing the message.
     pub fn id(&self) -> SendID {
         let buf = self.encode_to_vec();
         let mut t = Transcript::new(b"flamevm.send.id");

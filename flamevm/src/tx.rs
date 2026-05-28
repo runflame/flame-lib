@@ -44,7 +44,6 @@ pub struct TxID(pub Hash);
 pub enum TxEntry {
     /// Tx header — bound at run start as the first txlog entry so
     /// `version` and `locktime` participate in `TxID::from_log`.
-    /// Mirrors zkvm's `TxEntry::Header(TxHeader)`.
     Header(TxHeader),
 
     /// Plain data entry created by `log` instruction. Contains arbitrary binary string.
@@ -129,10 +128,8 @@ pub enum TxEntry {
 }
 
 impl TxID {
-    /// Computes the canonical 32-byte transaction identifier as a
-    /// merkle root over the txlog entries (header + effect list).
-    /// Domain-separated by `flamevm.txid`. Mirrors zkvm's
-    /// `TxID::from_log` exactly in shape.
+    /// Canonical transaction identity: the merkle root over the txlog
+    /// (header + effect list).
     pub fn from_log(txlog: &[TxEntry]) -> Self {
         TxID(MerkleTree::root(b"flamevm.txid", txlog))
     }

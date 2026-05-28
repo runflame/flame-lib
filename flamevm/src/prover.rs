@@ -60,11 +60,10 @@ impl<'g> Prover<'g> {
     }
 
     /// Public entry point: runs `program` through the VM in external
-    /// context (with witnesses attached to each Alloc Instruction),
-    /// computes `TxID::from_log(&txlog)`, binds it into the R1CS
-    /// transcript under domain `b"flamevm.txid"`, and emits the
-    /// proof — folded into the returned [`TxResult`]. Mirrors
-    /// zkvm's `prover::Prover::build_tx`.
+    /// context (witnesses attached to each Alloc) and produces the proof.
+    /// The canonical TxID is bound into the R1CS transcript under
+    /// `b"flamevm.txid"` — the verifier must mirror this exactly or every
+    /// proof fails.
     ///
     /// Returns the full [`TxResult`]: `proof = Some(...)`,
     /// `bytecode = program.to_bytecode()` (the verifier walks the

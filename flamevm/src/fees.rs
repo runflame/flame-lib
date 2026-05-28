@@ -5,8 +5,7 @@ use crate::errors::VMError;
 /// Maximum fee an external transaction may accumulate across all
 /// `fee` opcodes. Allows overflow-safe `size_bytes × fee` math in any
 /// downstream fee-rate computation: `MAX_FEE = 2^24` flames means a
-/// 2^40-byte transaction (~1 TB) still leaves 24 bits of `u64`
-/// headroom. Matches zkvm verbatim.
+/// 2^40-byte transaction (~1 TB) still leaves 24 bits of `u64` headroom.
 pub const MAX_FEE: u64 = 1 << 24;
 
 /// Per-transaction fee accumulator. Constructed at `VM::new`, mutated
