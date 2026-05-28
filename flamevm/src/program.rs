@@ -4,6 +4,8 @@ use std::collections::VecDeque;
 
 use crate::errors::VMError;
 use crate::int253::Int253;
+use readerwriter::Encodable;
+
 use crate::ops::Instruction;
 use crate::string::String;
 
@@ -70,7 +72,8 @@ impl Program {
     pub fn to_bytecode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for instr in &self.instructions {
-            instr.encode(&mut out);
+            // `Vec<u8>` writer is infallible.
+            instr.encode(&mut out).expect("Vec writer never fails");
         }
         out
     }

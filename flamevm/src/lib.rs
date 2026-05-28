@@ -48,3 +48,11 @@ pub use value::Value;
 pub use verifier::Verifier;
 
 pub use tx::{ExternalTx, InternalTx};
+
+// Re-export the wire-format traits so downstream crates don't need
+// a direct `readerwriter` dep. Most flamevm types implement these
+// (ActorID, Anchor, Predicate, Cell, Message, Address, Instruction).
+pub use readerwriter::{
+    Codable, Decodable, Encodable, ExactSizeEncodable,
+    ReadError, Reader, WriteError, Writer,
+};

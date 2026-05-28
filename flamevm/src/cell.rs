@@ -7,7 +7,7 @@ use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
-use readerwriter::{Reader, WriteError, Writer};
+use readerwriter::{Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer};
 
 use crate::encoding::{read_list_prefix, read_value, write_list_prefix, write_value};
 use crate::errors::VMError;
@@ -228,6 +228,28 @@ impl Predicate {
     pub fn verification_key(&self) -> CompressedRistretto {
         self.point
     }
+}
+
+/// 32-byte compressed Ristretto — the verifier's view. Any
+/// prover-side witness is dropped on the wire.
+impl Encodable for Predicate {
+    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
+        w.write(b"predicate", self.point.as_bytes())
+    }
+}
+
+impl ExactSizeEncodable for Predicate {
+    fn encoded_size(&self) -> usize { 32 }
+}
+
+impl Decodable for Predicate {
+    fn decode(r: &mut impl Reader) -> Result<Self, ReadError> {
+        let pt = r.read_u8x32()?;
+        Ok(Predicate::opaque(CompressedRistretto(pt)))
+    }
+}
+
+impl Predicate {
 
     /// The secondary Pedersen generator `B_blinding`, compressed.
     /// Suitable as an internal key when no key-path spend is desired:
@@ -575,15 +597,35 @@ impl Cell {
         h
     }
 
-    /// Writes the canonical wire form: a list-style `Dict` with three
-    /// entries — predicate (`Point`), anchor (32-byte `String`), payload
-    /// (nested list-style `Dict` of portable values).
-    ///
-    /// Errors only if a payload value's type has no canonical encoder.
-    /// Payload portability is guaranteed by the cell-construction ops
-    /// (`cell` / `output`) which run `pop_n_portable`; this method is
-    /// not the place to re-check.
-    pub fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
+    /// Canonical wire bytes — thin wrapper over `Encodable::encode_to_vec`
+    /// for callers that want an owned `Vec<u8>` (e.g. `String::Cell`
+    /// serialization). Cannot fail: `Vec<u8>` is an infallible writer
+    /// and payload entries are guaranteed portable by construction.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.encode_to_vec()
+    }
+
+    /// Validates that every payload value is portable. Pure VM-level
+    /// check, distinct from parsing — `Decodable::decode` accepts any
+    /// well-formed cell shape; this is the gate `op_input` applies on
+    /// cells coming off the witness path.
+    pub fn validate_portable(&self) -> Result<(), VMError> {
+        for v in &self.payload {
+            if !v.is_portable() {
+                return Err(VMError::MalformedCellEncoding);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Canonical wire form: a list-style `Dict` with three entries —
+/// predicate (`Point`), anchor (32-byte `String`), payload (nested
+/// list-style `Dict` of values). The `Decodable` side accepts any
+/// well-formed shape; portability of payload values is a separate
+/// VM-level gate, see [`Cell::validate_portable`].
+impl Encodable for Cell {
+    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
         // Outer wrapper: list-Dict with exactly 3 entries.
         write_list_prefix(w, 3)?;
         // Entry 0: predicate as Point value.
@@ -591,76 +633,54 @@ impl Cell {
         write_value(w, &Value::Point(pred_point))?;
         // Entry 1: anchor as a 32-byte String value.
         write_value(w, &Value::String(String::from(self.anchor.0.to_vec())))?;
-        // Entry 2: payload as a list-Dict of values (no nested Dict
-        // struct allocation — we just emit the prefix + each value).
+        // Entry 2: payload as a list-Dict of values.
         write_list_prefix(w, self.payload.len())?;
         for v in &self.payload {
             write_value(w, v)?;
         }
         Ok(())
     }
+}
 
-    /// Canonical wire bytes — convenience wrapper over [`Cell::encode`]
-    /// for callers that need an owned `Vec<u8>` (e.g. `String::Cell`
-    /// serialization). Cannot fail: `Vec<u8>` is an infallible writer
-    /// and payload entries are guaranteed portable by construction.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        self.encode(&mut buf).expect("cell encodes; payload portable by construction");
-        buf
-    }
-
-    /// Reads the canonical wire form. The reader is advanced past the
-    /// cell's bytes on success. Errors with `MalformedCellEncoding` on
-    /// any deviation:
-    ///
-    /// - Outer shape is not a list-Dict of exactly 3 entries.
-    /// - Entry 0 is not a `Point`.
-    /// - Entry 1 is not a `String` of exactly 32 bytes.
-    /// - Entry 2 is not a list-style Dict, or any payload value is
-    ///   non-portable or unencodable.
-    ///
-    /// Strict canonicality: the caller is responsible for checking that
-    /// no bytes remain after the cell (the `input` opcode does this).
-    pub fn decode(r: &mut impl Reader) -> Result<Cell, VMError> {
-        let outer_count =
-            read_list_prefix(r).map_err(|_| VMError::MalformedCellEncoding)?;
+/// Reads the canonical wire form. Pure parse — accepts any
+/// well-formed cell shape regardless of payload portability;
+/// callers that require portable payloads call
+/// [`Cell::validate_portable`] after decoding (`op_input` does).
+///
+/// `ReadError::InvalidFormat` on:
+/// - outer shape != list-Dict of exactly 3 entries,
+/// - entry 0 not a `Point`,
+/// - entry 1 not a 32-byte `String`,
+/// - entry 2 not a list-Dict,
+/// - any payload value missing or unparseable.
+impl Decodable for Cell {
+    fn decode(r: &mut impl Reader) -> Result<Cell, ReadError> {
+        let outer_count = read_list_prefix(r).map_err(|_| ReadError::InvalidFormat)?;
         if outer_count != 3 {
-            return Err(VMError::MalformedCellEncoding);
+            return Err(ReadError::InvalidFormat);
         }
-
-        // Entry 0: predicate Point.
         let predicate = match read_value(r) {
             Ok(Some(Value::Point(p))) => Predicate::opaque(p.to_compressed()),
-            _ => return Err(VMError::MalformedCellEncoding),
+            _ => return Err(ReadError::InvalidFormat),
         };
-
-        // Entry 1: anchor — 32-byte String.
         let anchor = match read_value(r) {
             Ok(Some(Value::String(s))) => {
                 if s.len() != 32 {
-                    return Err(VMError::MalformedCellEncoding);
+                    return Err(ReadError::InvalidFormat);
                 }
                 let mut a = [0u8; 32];
                 a.copy_from_slice(s.as_bytes());
                 Anchor(a)
             }
-            _ => return Err(VMError::MalformedCellEncoding),
+            _ => return Err(ReadError::InvalidFormat),
         };
-
-        // Entry 2: payload — list-Dict; read prefix and N values directly.
         let payload_count =
-            read_list_prefix(r).map_err(|_| VMError::MalformedCellEncoding)?;
+            read_list_prefix(r).map_err(|_| ReadError::InvalidFormat)?;
         let mut payload = Vec::with_capacity(payload_count);
         for _ in 0..payload_count {
             match read_value(r) {
-                Ok(Some(v)) => {
-                    if !v.is_portable() {
-                        return Err(VMError::MalformedCellEncoding);
-                    }
-                    payload.push(v);
-                }
-                _ => return Err(VMError::MalformedCellEncoding),
+                Ok(Some(v)) => payload.push(v),
+                _ => return Err(ReadError::InvalidFormat),
             }
         }
         Ok(Cell::new(predicate, anchor, payload))

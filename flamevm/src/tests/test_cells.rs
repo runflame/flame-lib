@@ -622,7 +622,7 @@ fn cell_encode_decode_roundtrip() {
     // Decode and confirm equivalence by cell id (the canonical
     // identity hash binds predicate point + anchor + payload bytes).
     let mut reader: &[u8] = &bytes;
-    let decoded = Cell::decode(&mut reader).expect("decodes");
+    let decoded = <Cell as readerwriter::Decodable>::decode(&mut reader).expect("decodes");
     assert!(reader.is_empty(), "decoder must consume the full input");
     assert_eq!(original.id(), decoded.id());
     assert_eq!(original.anchor.0, decoded.anchor.0);

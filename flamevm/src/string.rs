@@ -7,6 +7,8 @@ use crate::constraints::Commitment;
 use crate::crypto::Point;
 use crate::errors::VMError;
 use crate::int253::Int253;
+use readerwriter::Encodable;
+
 use crate::ops::Instruction;
 
 /// Variable-length binary string with optional witness-bearing
@@ -276,10 +278,13 @@ impl String {
             },
             String::Opaque(data) => {
                 let mut reader: &[u8] = &data;
-                let cell = crate::cell::Cell::decode(&mut reader)?;
+                let cell = <crate::cell::Cell as readerwriter::Decodable>::decode(&mut reader)
+                    .map_err(|_| VMError::MalformedCellEncoding)?;
                 if !reader.is_empty() {
                     return Err(VMError::MalformedCellEncoding);
                 }
+                // VM-level gate: portable payload required (op_input).
+                cell.validate_portable()?;
                 Ok(cell)
             }
             _ => Err(VMError::MalformedCellEncoding),
@@ -468,7 +473,7 @@ impl std::fmt::Debug for String {
 fn compile_instructions(instrs: &[Instruction]) -> Vec<u8> {
     let mut out = Vec::new();
     for instr in instrs {
-        instr.encode(&mut out);
+        instr.encode(&mut out).expect("Vec writer never fails");
     }
     out
 }

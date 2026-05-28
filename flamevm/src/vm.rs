@@ -7,6 +7,7 @@ use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
 use core::mem;
 use merlin::Transcript;
+use readerwriter::{Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer};
 
 use crate::errors::VMError;
 use crate::tx::TxHeader;
@@ -20,7 +21,6 @@ use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
 // existing import shape. The types themselves live in `actor.rs`
 // and `send.rs`; vm.rs just plumbs them.
 pub use crate::actor::{ActorID, ActorRegistry};
-use crate::actor::state_root;
 pub use crate::send::Message;
 
 /// Bitcoin BIP-65 convention threshold for distinguishing
@@ -54,6 +54,23 @@ impl Anchor {
         t.challenge_bytes(b"left", &mut left);
         t.challenge_bytes(b"right", &mut right);
         (Anchor(left), Anchor(right))
+    }
+}
+
+/// 32 raw bytes — fixed size, no tag, no length prefix.
+impl Encodable for Anchor {
+    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
+        w.write(b"anchor", &self.0)
+    }
+}
+
+impl ExactSizeEncodable for Anchor {
+    fn encoded_size(&self) -> usize { 32 }
+}
+
+impl Decodable for Anchor {
+    fn decode(r: &mut impl Reader) -> Result<Self, ReadError> {
+        Ok(Anchor(r.read_u8x32()?))
     }
 }
 

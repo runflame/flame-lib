@@ -363,13 +363,15 @@ pub(crate) fn fixture_cell() -> Cell {
 
 /// Helper: `Cell::decode` returns a `Cell` on success, which lacks
 /// `Debug`. This wrapper drops the cell so tests can use the usual
-/// `.unwrap_err()` shape on a `Debug`-able result.
+/// `.unwrap_err()` shape on a `Debug`-able result. Returns
+/// `MalformedCellEncoding` on any parse failure OR non-portable
+/// payload — i.e. the same gate `op_input` applies.
 pub(crate) fn decode_cell_dropping_ok(bytes: &[u8]) -> Result<(), VMError> {
     let mut r: &[u8] = bytes;
-    match Cell::decode(&mut r) {
-        Ok(_) => Ok(()),
-        Err(e) => Err(e),
-    }
+    let cell = <Cell as readerwriter::Decodable>::decode(&mut r)
+        .map_err(|_| VMError::MalformedCellEncoding)?;
+    cell.validate_portable()?;
+    Ok(())
 }
 
 //

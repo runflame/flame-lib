@@ -1,6 +1,6 @@
 //! Routing addresses: spend predicates and actor message targets.
 
-use readerwriter::{Reader, WriteError, Writer};
+use readerwriter::{Decodable, Encodable, ReadError, Reader, WriteError, Writer};
 
 use crate::actor::ActorID;
 use crate::cell::Predicate;
@@ -9,7 +9,6 @@ use crate::dict::Dict;
 use crate::encoding::{
     read_list_prefix, read_value, write_list_prefix, write_value,
 };
-use crate::errors::VMError;
 use crate::int253::Int253;
 use crate::string::String;
 use crate::value::Value;
@@ -52,7 +51,21 @@ impl Address {
     /// [`ActorID::encode`] so the outer list-Dict reader sees a
     /// uniform value-typed payload. The same convention applies
     /// downstream when scripts build addresses by hand.
-    pub fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
+    /// Convenience: encode to a fresh `Vec<u8>`. Returns the
+    /// `WriteError` from `Encodable::encode` (a non-portable Dict in
+    /// `args` is encoded as `InsufficientCapacity` via `try_clone`).
+    pub fn to_bytes(&self) -> Result<Vec<u8>, WriteError> {
+        let mut out = Vec::new();
+        self.encode(&mut out)?;
+        Ok(out)
+    }
+}
+
+/// Canonical wire form: a list-Dict whose first entry is the tag
+/// byte (as `Int253`) and whose remaining entries are the variant
+/// payload. See `Address::TAG_*` constants.
+impl Encodable for Address {
+    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
         match self {
             Address::Predicate(p) => {
                 write_list_prefix(w, 2)?;
@@ -88,66 +101,62 @@ impl Address {
             }
         }
     }
+}
 
-    /// Reads the canonical wire form. Strict: rejects any deviation
-    /// from the expected per-variant shape.
-    pub fn decode(r: &mut impl Reader) -> Result<Self, VMError> {
-        let count = read_list_prefix(r).map_err(|_| VMError::MalformedAddress)?;
-        // First entry: tag byte as Int253.
-        let tag_val =
-            read_value(r).map_err(|_| VMError::MalformedAddress)?;
+/// Reads the canonical wire form. Pure parse; strict on shape
+/// (rejects unknown tag/arity, non-32-byte point, non-canonical
+/// scalar/string/dict, negative gas). VM-level callers that want
+/// `VMError::MalformedAddress` map the `ReadError` themselves.
+impl Decodable for Address {
+    fn decode(r: &mut impl Reader) -> Result<Self, ReadError> {
+        let count = read_list_prefix(r).map_err(|_| ReadError::InvalidFormat)?;
+        let tag_val = read_value(r).map_err(|_| ReadError::InvalidFormat)?;
         let tag = match tag_val {
             Some(Value::Int253(i)) => {
-                // We only accept tag values that fit in a single byte.
                 let bytes = i.to_bytes();
-                // Reject if anything beyond the low byte is set (so a
-                // future signed/large tag can't sneak past).
+                // Reject if anything beyond the low byte is set
+                // (so a future signed/large tag can't sneak past).
                 if bytes[1..].iter().any(|b| *b != 0) {
-                    return Err(VMError::MalformedAddress);
+                    return Err(ReadError::InvalidFormat);
                 }
                 bytes[0]
             }
-            _ => return Err(VMError::MalformedAddress),
+            _ => return Err(ReadError::InvalidFormat),
         };
         match (tag, count) {
             (Self::TAG_PREDICATE, 2) => {
                 let p = match read_value(r) {
                     Ok(Some(Value::Point(p))) => Predicate::opaque(p.to_compressed()),
-                    _ => return Err(VMError::MalformedAddress),
+                    _ => return Err(ReadError::InvalidFormat),
                 };
                 Ok(Address::Predicate(p))
             }
             (Self::TAG_MESSAGE_TARGET, 5) => {
-                // dst: String of ActorID bytes.
                 let dst_bytes = match read_value(r) {
                     Ok(Some(Value::String(s))) => s.to_bytes(),
-                    _ => return Err(VMError::MalformedAddress),
+                    _ => return Err(ReadError::InvalidFormat),
                 };
                 let mut dst_r = dst_bytes.as_slice();
-                let dst = ActorID::decode(&mut dst_r)
-                    .map_err(|_| VMError::MalformedAddress)?;
+                let dst = ActorID::decode(&mut dst_r)?;
                 if !dst_r.is_empty() {
-                    return Err(VMError::MalformedAddress);
+                    return Err(ReadError::InvalidFormat);
                 }
-                // method: Int253.
                 let method = match read_value(r) {
                     Ok(Some(Value::Int253(i))) => i,
-                    _ => return Err(VMError::MalformedAddress),
+                    _ => return Err(ReadError::InvalidFormat),
                 };
-                // args: Dict.
                 let args = match read_value(r) {
                     Ok(Some(Value::Dict(d))) => d,
-                    _ => return Err(VMError::MalformedAddress),
+                    _ => return Err(ReadError::InvalidFormat),
                 };
-                // gas: Int253 → u64 (must fit, must be non-negative).
                 let gas = match read_value(r) {
                     Ok(Some(Value::Int253(i))) => {
                         if i.is_negative() {
-                            return Err(VMError::MalformedAddress);
+                            return Err(ReadError::InvalidFormat);
                         }
-                        i.to_u64().ok_or(VMError::MalformedAddress)?
+                        i.to_u64().ok_or(ReadError::InvalidFormat)?
                     }
-                    _ => return Err(VMError::MalformedAddress),
+                    _ => return Err(ReadError::InvalidFormat),
                 };
                 Ok(Address::MessageTarget {
                     dst,
@@ -156,15 +165,8 @@ impl Address {
                     gas,
                 })
             }
-            _ => Err(VMError::MalformedAddress),
+            _ => Err(ReadError::InvalidFormat),
         }
-    }
-
-    /// Convenience: encode to a fresh `Vec<u8>`.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, WriteError> {
-        let mut out = Vec::new();
-        self.encode(&mut out)?;
-        Ok(out)
     }
 }
 
@@ -274,7 +276,7 @@ mod tests {
         .unwrap();
         let mut r = bytes.as_slice();
         let err = Address::decode(&mut r).expect_err("must error");
-        assert!(matches!(err, VMError::MalformedAddress));
+        assert!(matches!(err, ReadError::InvalidFormat));
     }
 
     #[test]
@@ -295,7 +297,7 @@ mod tests {
         write_value(&mut bytes, &Value::Int253(Int253::from(0u64))).unwrap();
         let mut r = bytes.as_slice();
         let err = Address::decode(&mut r).expect_err("must error");
-        assert!(matches!(err, VMError::MalformedAddress));
+        assert!(matches!(err, ReadError::InvalidFormat));
     }
 
     #[test]
@@ -319,7 +321,7 @@ mod tests {
         .unwrap();
         write_value(
             &mut bytes,
-            &Value::String(String::from(ActorID::Hash([0u8; 32]).to_bytes())),
+            &Value::String(String::from(ActorID::Hash([0u8; 32]).encode_to_vec())),
         )
         .unwrap();
         write_value(&mut bytes, &Value::Int253(Int253::from(0u64))).unwrap();
@@ -327,7 +329,7 @@ mod tests {
         write_value(&mut bytes, &Value::Int253(Int253::from(-1i64))).unwrap();
         let mut r = bytes.as_slice();
         let err = Address::decode(&mut r).expect_err("must error");
-        assert!(matches!(err, VMError::MalformedAddress));
+        assert!(matches!(err, ReadError::InvalidFormat));
     }
 
     #[test]
@@ -342,7 +344,7 @@ mod tests {
         )
         .unwrap();
         // dst string contains a valid Hash ActorID + 1 trailing byte.
-        let mut dst_payload = ActorID::Hash([1u8; 32]).to_bytes();
+        let mut dst_payload = ActorID::Hash([1u8; 32]).encode_to_vec();
         dst_payload.push(0xff);
         write_value(&mut bytes, &Value::String(String::from(dst_payload))).unwrap();
         write_value(&mut bytes, &Value::Int253(Int253::from(0u64))).unwrap();
@@ -350,6 +352,6 @@ mod tests {
         write_value(&mut bytes, &Value::Int253(Int253::from(0u64))).unwrap();
         let mut r = bytes.as_slice();
         let err = Address::decode(&mut r).expect_err("must error");
-        assert!(matches!(err, VMError::MalformedAddress));
+        assert!(matches!(err, ReadError::InvalidFormat));
     }
 }

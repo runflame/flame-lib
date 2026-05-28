@@ -1,10 +1,10 @@
 //! Actor data model: identity, state, lifecycle counters, registry.
 
 use merlin::Transcript;
-use readerwriter::{ReadError, Reader, WriteError, Writer};
+use readerwriter::{Decodable, Encodable, ReadError, Reader, WriteError, Writer};
 
 use crate::dict::Dict;
-use crate::encoding::{read_value, write_dict};
+use crate::encoding::write_dict;
 use crate::errors::VMError;
 use crate::int253::Int253;
 use crate::string::String;
@@ -94,9 +94,13 @@ impl ActorID {
     pub fn is_resolved(&self) -> bool {
         matches!(self, ActorID::Hash(_))
     }
+}
 
-    /// Writes the canonical wire form (tag byte + payload).
-    pub fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
+/// Canonical wire form (tag byte + payload). `Hash` writes a 32-byte
+/// payload; `Constructor` writes an 8-byte little-endian length then
+/// the script bytes.
+impl Encodable for ActorID {
+    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
         match self {
             ActorID::Hash(h) => {
                 w.write_u8(b"actorid.tag", Self::TAG_HASH)?;
@@ -110,9 +114,10 @@ impl ActorID {
             }
         }
     }
+}
 
-    /// Reads the canonical wire form.
-    pub fn decode(r: &mut impl Reader) -> Result<Self, ReadError> {
+impl Decodable for ActorID {
+    fn decode(r: &mut impl Reader) -> Result<Self, ReadError> {
         let tag = r.read_u8()?;
         match tag {
             Self::TAG_HASH => {
@@ -127,13 +132,6 @@ impl ActorID {
             }
             _ => Err(ReadError::InvalidFormat),
         }
-    }
-
-    /// Convenience: encode to a fresh `Vec<u8>`.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        self.encode(&mut out).expect("Vec<u8> writer never fails");
-        out
     }
 }
 

@@ -1,7 +1,7 @@
 //! Outbound message sends and SendID identity.
 
 use merlin::Transcript;
-use readerwriter::{WriteError, Writer};
+use readerwriter::{Encodable, WriteError, Writer};
 
 use crate::actor::ActorID;
 use crate::cell::Predicate;
@@ -81,27 +81,43 @@ pub struct Message {
 }
 
 impl Message {
-    /// Writes the Message's canonical wire form into `w`, in the
-    /// order used by `id()`. Field order:
-    ///
-    /// 1. `anchor` — 32 raw bytes.
-    /// 2. `target` — `ActorID::encode` of `to_canonical()` so Hash
-    ///    and Constructor forms of the same actor produce identical
-    ///    bytes.
-    /// 3. `caller` — `0x00` for None, `0x01 ‖ ActorID::encode(canonical)`
-    ///    for Some.
-    /// 4. `method` — `write_int253`.
-    /// 5. `refund_predicate` — 32-byte compressed Ristretto.
-    /// 6. `gas` — little-endian u64.
-    /// 7. `vbytes` — little-endian u64.
-    /// 8. `payload` — little-endian u64 count, then each value's
-    ///    canonical `write_value` encoding.
-    ///
-    /// Fails only if the underlying writer runs out of capacity —
-    /// payload portability is guaranteed by `op_send`, so
-    /// `write_value` never errors here in valid flow.
-    pub fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
-        w.write(b"send.anchor", &self.anchor.0)?;
+    /// Computes the canonical [`SendID`] for this message — the
+    /// 32-byte hash of `Encodable::encode_to_vec()` under a Merlin
+    /// transcript labelled `flamevm.send.id`. Analogous to
+    /// `Cell::id()` for cells: one wire encoding, one hash, one
+    /// identity.
+    pub fn id(&self) -> SendID {
+        let buf = self.encode_to_vec();
+        let mut t = Transcript::new(b"flamevm.send.id");
+        t.append_message(b"send", &buf);
+        let mut h = [0u8; 32];
+        t.challenge_bytes(b"id", &mut h);
+        SendID(h)
+    }
+}
+
+/// Canonical wire form. Field order:
+///
+/// 1. `anchor` — 32 raw bytes (via `Anchor: Encodable`).
+/// 2. `target` — canonical `ActorID::encode` of `to_canonical()` so
+///    Hash and Constructor forms of the same actor produce identical
+///    bytes.
+/// 3. `caller` — `0x00` for None, `0x01 ‖ ActorID::encode(canonical)`
+///    for Some.
+/// 4. `method` — `write_int253`.
+/// 5. `refund_predicate` — 32-byte compressed Ristretto (via
+///    `Predicate: Encodable`).
+/// 6. `gas` — little-endian u64.
+/// 7. `vbytes` — little-endian u64.
+/// 8. `payload` — little-endian u64 count, then each value's
+///    canonical `write_value` encoding.
+///
+/// Fails only if the underlying writer runs out of capacity —
+/// payload portability is guaranteed by `op_send`, so `write_value`
+/// never errors here in valid flow.
+impl Encodable for Message {
+    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
+        self.anchor.encode(w)?;
         self.target.to_canonical().encode(w)?;
         match &self.caller {
             None => w.write_u8(b"send.caller.tag", 0)?,
@@ -111,34 +127,14 @@ impl Message {
             }
         }
         write_int253(w, &self.method)?;
-        w.write(
-            b"send.refund_predicate",
-            self.refund_predicate.to_point().as_bytes(),
-        )?;
+        self.refund_predicate.encode(w)?;
         w.write_u64(b"send.gas", self.gas)?;
         w.write_u64(b"send.vbytes", self.vbytes)?;
         w.write_u64(b"send.payload.len", self.payload.len() as u64)?;
         for v in &self.payload {
-            // `Vec<u8>` writer never errors; payload portability
-            // (gated at op_send) guarantees each value encodes.
             write_value(w, v).map_err(|_| WriteError::InsufficientCapacity)?;
         }
         Ok(())
-    }
-
-    /// Computes the canonical [`SendID`] for this message — the
-    /// 32-byte hash of `encode()`'s output under a Merlin transcript
-    /// labelled `flamevm.send.id`. Analogous to `Cell::id()` for
-    /// cells: one wire encoding, one hash, one identity.
-    pub fn id(&self) -> SendID {
-        let mut buf = Vec::new();
-        self.encode(&mut buf)
-            .expect("Vec<u8> writer never fails and payload portability is gated at op_send");
-        let mut t = Transcript::new(b"flamevm.send.id");
-        t.append_message(b"send", &buf);
-        let mut h = [0u8; 32];
-        t.challenge_bytes(b"id", &mut h);
-        SendID(h)
     }
 }
 

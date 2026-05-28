@@ -1,6 +1,6 @@
 //! Tests for the actor data model + MemRegistry.
 
-use readerwriter::ReadError;
+use readerwriter::{Decodable, Encodable, ReadError};
 
 use crate::{
     empty_state, grace_window, resolve_method, state_with_public, vbyte_size,
@@ -13,7 +13,7 @@ use crate::{
 #[test]
 fn actorid_hash_encode_decode_roundtrip() {
     let id = ActorID::Hash([0x42; 32]);
-    let bytes = id.to_bytes();
+    let bytes = id.encode_to_vec();
     assert_eq!(bytes.len(), 1 + 32, "tag (1) + hash (32)");
     assert_eq!(bytes[0], ActorID::TAG_HASH);
     let mut r = bytes.as_slice();
@@ -25,7 +25,7 @@ fn actorid_hash_encode_decode_roundtrip() {
 #[test]
 fn actorid_constructor_encode_decode_roundtrip() {
     let id = ActorID::Constructor(vec![0xde, 0xad, 0xbe, 0xef]);
-    let bytes = id.to_bytes();
+    let bytes = id.encode_to_vec();
     assert_eq!(bytes.len(), 1 + 8 + 4, "tag (1) + u64 len (8) + script (4)");
     assert_eq!(bytes[0], ActorID::TAG_CONSTRUCTOR);
     let mut r = bytes.as_slice();
@@ -37,7 +37,7 @@ fn actorid_constructor_encode_decode_roundtrip() {
 #[test]
 fn actorid_constructor_empty_script_roundtrips() {
     let id = ActorID::Constructor(Vec::new());
-    let bytes = id.to_bytes();
+    let bytes = id.encode_to_vec();
     let mut r = bytes.as_slice();
     let decoded = ActorID::decode(&mut r).expect("decode");
     assert_eq!(decoded, id);

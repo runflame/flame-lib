@@ -2,7 +2,7 @@
 //! their codes and decoding/encoding utility functions.
 
 use curve25519_dalek::scalar::Scalar;
-use readerwriter::Reader;
+use readerwriter::{Encodable, Reader, WriteError, Writer};
 
 use crate::errors::VMError;
 use crate::int253::Int253;
@@ -264,135 +264,140 @@ pub enum Instruction {
     Ext(u8),               // unknown opcode byte; produced by the parser for any unassigned tag
 }
 
-impl Instruction {
-    /// Appends this instruction's canonical bytecode to `out`.
-    pub fn encode(&self, out: &mut Vec<u8>) {
+impl Encodable for Instruction {
+    /// Writes this instruction's canonical bytecode to `w`.
+    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
+        let op = |w: &mut dyn Writer, b: u8| w.write_u8(b"op", b);
         match self {
-            Instruction::PushInt(i) => encode_push_int(i, out),
+            Instruction::PushInt(i) => encode_push_int(i, w),
             Instruction::PushStr(s) => {
-                out.push(OP_PUSHSTR);
-                encode_sub_varint(s.len() as u64, out);
+                op(w, OP_PUSHSTR)?;
+                encode_sub_varint(s.len() as u64, w)?;
                 // Use `bytes_view` so witness-bearing variants
-                // (Commitment / Scalar / Predicate) serialize to their
-                // canonical opaque bytes. `as_bytes` would panic for
-                // those — the verifier's wire form must match
-                // regardless of which variant the prover used.
-                out.extend_from_slice(&s.bytes_view());
+                // (Commitment / Scalar / Predicate) serialize to
+                // their canonical opaque bytes. `as_bytes` would
+                // panic for those — the verifier's wire form must
+                // match regardless of which variant the prover
+                // used.
+                w.write(b"pushstr.bytes", &s.bytes_view())
             }
             Instruction::PushPoint(p) => {
-                out.push(OP_PUSHPOINT);
+                op(w, OP_PUSHPOINT)?;
                 // Always serializes the canonical 32-byte form;
                 // witness variants compute their compressed point.
-                out.extend_from_slice(&p.to_bytes());
+                w.write(b"pushpoint.bytes", &p.to_bytes())
             }
-            Instruction::PushToken => out.push(OP_PUSHTOKEN),
-            Instruction::Drop => out.push(OP_DROP),
-            Instruction::Nop => out.push(OP_NOP),
-            Instruction::Dup => out.push(OP_DUP),
-            Instruction::Roll => out.push(OP_ROLL),
+            Instruction::PushToken => op(w, OP_PUSHTOKEN),
+            Instruction::Drop => op(w, OP_DROP),
+            Instruction::Nop => op(w, OP_NOP),
+            Instruction::Dup => op(w, OP_DUP),
+            Instruction::Roll => op(w, OP_ROLL),
             Instruction::DupK(k) => {
                 debug_assert!(*k <= 0x0f, "DupK arg must fit in 4 bits");
-                out.push(OP_DUPK_BASE + (*k & 0x0f));
+                op(w, OP_DUPK_BASE + (*k & 0x0f))
             }
             Instruction::RollK(k) => {
                 debug_assert!(*k <= 0x0f, "RollK arg must fit in 4 bits");
-                out.push(OP_ROLLK_BASE + (*k & 0x0f));
+                op(w, OP_ROLLK_BASE + (*k & 0x0f))
             }
-            Instruction::ReadBits => out.push(OP_READBITS),
-            Instruction::ReadInt => out.push(OP_READINT),
-            Instruction::ReadStr => out.push(OP_READSTR),
-            Instruction::ReadPoint => out.push(OP_READPOINT),
-            Instruction::WriteBits => out.push(OP_WRITEBITS),
-            Instruction::WriteInt => out.push(OP_WRITEINT),
-            Instruction::Append => out.push(OP_APPEND),
-            Instruction::WriteZeros => out.push(OP_WRITEZEROS),
-            Instruction::BitNot => out.push(OP_BITNOT),
-            Instruction::BitOr => out.push(OP_BITOR),
-            Instruction::BitAnd => out.push(OP_BITAND),
-            Instruction::BitXor => out.push(OP_BITXOR),
-            Instruction::ShiftLeft => out.push(OP_SHIFTLEFT),
-            Instruction::ShiftRight => out.push(OP_SHIFTRIGHT),
-            Instruction::Keccak256 => out.push(OP_KECCAK256),
-            Instruction::Abs => out.push(OP_ABS),
-            Instruction::Eq => out.push(OP_EQ),
-            Instruction::Neg => out.push(OP_NEG),
-            Instruction::Add => out.push(OP_ADD),
-            Instruction::Mul => out.push(OP_MUL),
-            Instruction::DivMod => out.push(OP_DIVMOD),
-            Instruction::Mod252 => out.push(OP_MOD252),
-            Instruction::Not => out.push(OP_NOT),
-            Instruction::And => out.push(OP_AND),
-            Instruction::Or => out.push(OP_OR),
-            Instruction::Size => out.push(OP_SIZE),
-            Instruction::Scalar => out.push(OP_SCALAR),
-            Instruction::Commit => out.push(OP_COMMIT),
-            Instruction::Alloc(_) => out.push(OP_ALLOC),
-            Instruction::Expr => out.push(OP_EXPR),
-            Instruction::Range => out.push(OP_RANGE),
-            Instruction::Dict => out.push(OP_DICT),
-            Instruction::Put => out.push(OP_PUT),
-            Instruction::Replace => out.push(OP_REPLACE),
-            Instruction::Get => out.push(OP_GET),
-            Instruction::GetOpt => out.push(OP_GETOPT),
-            Instruction::GetDup => out.push(OP_GETDUP),
-            Instruction::First => out.push(OP_FIRST),
-            Instruction::Last => out.push(OP_LAST),
-            Instruction::Next => out.push(OP_NEXT),
-            Instruction::Transcript => out.push(OP_TRANSCRIPT),
-            Instruction::TWrite => out.push(OP_TWRITE),
-            Instruction::TRead => out.push(OP_TREAD),
-            Instruction::Sha256 => out.push(OP_SHA256),
-            Instruction::Sha512 => out.push(OP_SHA512),
-            Instruction::Sha3 => out.push(OP_SHA3),
-            Instruction::Log => out.push(OP_LOG),
-            Instruction::Amount => out.push(OP_AMOUNT),
-            Instruction::IssuePriv => out.push(OP_ISSUEPRIV),
-            Instruction::IssuePrivFlv => out.push(OP_ISSUEPRIVFLV),
-            Instruction::IssuePub => out.push(OP_ISSUEPUB),
-            Instruction::IssuePubFlv => out.push(OP_ISSUEPUBFLV),
-            Instruction::Retire => out.push(OP_RETIRE),
-            Instruction::Borrow => out.push(OP_BORROW),
-            Instruction::Merge => out.push(OP_MERGE),
-            Instruction::Split => out.push(OP_SPLIT),
-            Instruction::Mix => out.push(OP_MIX),
-            Instruction::Decrypt => out.push(OP_DECRYPT),
-            Instruction::Verify => out.push(OP_VERIFY),
-            Instruction::Fee => out.push(OP_FEE),
-            Instruction::Run => out.push(OP_RUN),
-            Instruction::Loop => out.push(OP_LOOP),
-            Instruction::Switch => out.push(OP_SWITCH),
-            Instruction::Return => out.push(OP_RETURN),
-            Instruction::Type => out.push(OP_TYPE),
+            Instruction::ReadBits => op(w, OP_READBITS),
+            Instruction::ReadInt => op(w, OP_READINT),
+            Instruction::ReadStr => op(w, OP_READSTR),
+            Instruction::ReadPoint => op(w, OP_READPOINT),
+            Instruction::WriteBits => op(w, OP_WRITEBITS),
+            Instruction::WriteInt => op(w, OP_WRITEINT),
+            Instruction::Append => op(w, OP_APPEND),
+            Instruction::WriteZeros => op(w, OP_WRITEZEROS),
+            Instruction::BitNot => op(w, OP_BITNOT),
+            Instruction::BitOr => op(w, OP_BITOR),
+            Instruction::BitAnd => op(w, OP_BITAND),
+            Instruction::BitXor => op(w, OP_BITXOR),
+            Instruction::ShiftLeft => op(w, OP_SHIFTLEFT),
+            Instruction::ShiftRight => op(w, OP_SHIFTRIGHT),
+            Instruction::Keccak256 => op(w, OP_KECCAK256),
+            Instruction::Abs => op(w, OP_ABS),
+            Instruction::Eq => op(w, OP_EQ),
+            Instruction::Neg => op(w, OP_NEG),
+            Instruction::Add => op(w, OP_ADD),
+            Instruction::Mul => op(w, OP_MUL),
+            Instruction::DivMod => op(w, OP_DIVMOD),
+            Instruction::Mod252 => op(w, OP_MOD252),
+            Instruction::Not => op(w, OP_NOT),
+            Instruction::And => op(w, OP_AND),
+            Instruction::Or => op(w, OP_OR),
+            Instruction::Size => op(w, OP_SIZE),
+            Instruction::Scalar => op(w, OP_SCALAR),
+            Instruction::Commit => op(w, OP_COMMIT),
+            Instruction::Alloc(_) => op(w, OP_ALLOC),
+            Instruction::Expr => op(w, OP_EXPR),
+            Instruction::Range => op(w, OP_RANGE),
+            Instruction::Dict => op(w, OP_DICT),
+            Instruction::Put => op(w, OP_PUT),
+            Instruction::Replace => op(w, OP_REPLACE),
+            Instruction::Get => op(w, OP_GET),
+            Instruction::GetOpt => op(w, OP_GETOPT),
+            Instruction::GetDup => op(w, OP_GETDUP),
+            Instruction::First => op(w, OP_FIRST),
+            Instruction::Last => op(w, OP_LAST),
+            Instruction::Next => op(w, OP_NEXT),
+            Instruction::Transcript => op(w, OP_TRANSCRIPT),
+            Instruction::TWrite => op(w, OP_TWRITE),
+            Instruction::TRead => op(w, OP_TREAD),
+            Instruction::Sha256 => op(w, OP_SHA256),
+            Instruction::Sha512 => op(w, OP_SHA512),
+            Instruction::Sha3 => op(w, OP_SHA3),
+            Instruction::Log => op(w, OP_LOG),
+            Instruction::Amount => op(w, OP_AMOUNT),
+            Instruction::IssuePriv => op(w, OP_ISSUEPRIV),
+            Instruction::IssuePrivFlv => op(w, OP_ISSUEPRIVFLV),
+            Instruction::IssuePub => op(w, OP_ISSUEPUB),
+            Instruction::IssuePubFlv => op(w, OP_ISSUEPUBFLV),
+            Instruction::Retire => op(w, OP_RETIRE),
+            Instruction::Borrow => op(w, OP_BORROW),
+            Instruction::Merge => op(w, OP_MERGE),
+            Instruction::Split => op(w, OP_SPLIT),
+            Instruction::Mix => op(w, OP_MIX),
+            Instruction::Decrypt => op(w, OP_DECRYPT),
+            Instruction::Verify => op(w, OP_VERIFY),
+            Instruction::Fee => op(w, OP_FEE),
+            Instruction::Run => op(w, OP_RUN),
+            Instruction::Loop => op(w, OP_LOOP),
+            Instruction::Switch => op(w, OP_SWITCH),
+            Instruction::Return => op(w, OP_RETURN),
+            Instruction::Type => op(w, OP_TYPE),
             Instruction::BreakK(k) => {
                 debug_assert!(*k <= 0x0f, "BreakK arg must fit in 4 bits");
-                out.push(OP_BREAKK_BASE + (*k & 0x0f));
+                op(w, OP_BREAKK_BASE + (*k & 0x0f))
             }
             // Witness (if any) never crosses the wire — prover-side
             // only. Encoded form is the bare opcode byte.
-            Instruction::Input => out.push(OP_INPUT),
-            Instruction::Cell => out.push(OP_CELL),
-            Instruction::Output => out.push(OP_OUTPUT),
-            Instruction::Open => out.push(OP_OPEN),
-            Instruction::Send => out.push(OP_SEND),
-            Instruction::Call => out.push(OP_CALL),
-            Instruction::Load => out.push(OP_LOAD),
-            Instruction::Save => out.push(OP_SAVE),
-            Instruction::Signtx => out.push(OP_SIGNTX),
-            Instruction::Signcall => out.push(OP_SIGNCALL),
-            Instruction::Timelock => out.push(OP_TIMELOCK),
-            Instruction::Version => out.push(OP_VERSION),
-            Instruction::Actorid => out.push(OP_ACTORID),
-            Instruction::Anchor => out.push(OP_ANCHOR),
-            Instruction::Gas => out.push(OP_GAS),
-            Instruction::Bytes => out.push(OP_BYTES),
-            Instruction::Callerid => out.push(OP_CALLERID),
-            Instruction::Method => out.push(OP_METHOD),
-            Instruction::Gaslimit => out.push(OP_GASLIMIT),
-            Instruction::Memlimit => out.push(OP_MEMLIMIT),
-            Instruction::Newbytes => out.push(OP_NEWBYTES),
-            Instruction::Ext(b) => out.push(*b),
+            Instruction::Input => op(w, OP_INPUT),
+            Instruction::Cell => op(w, OP_CELL),
+            Instruction::Output => op(w, OP_OUTPUT),
+            Instruction::Open => op(w, OP_OPEN),
+            Instruction::Send => op(w, OP_SEND),
+            Instruction::Call => op(w, OP_CALL),
+            Instruction::Load => op(w, OP_LOAD),
+            Instruction::Save => op(w, OP_SAVE),
+            Instruction::Signtx => op(w, OP_SIGNTX),
+            Instruction::Signcall => op(w, OP_SIGNCALL),
+            Instruction::Timelock => op(w, OP_TIMELOCK),
+            Instruction::Version => op(w, OP_VERSION),
+            Instruction::Actorid => op(w, OP_ACTORID),
+            Instruction::Anchor => op(w, OP_ANCHOR),
+            Instruction::Gas => op(w, OP_GAS),
+            Instruction::Bytes => op(w, OP_BYTES),
+            Instruction::Callerid => op(w, OP_CALLERID),
+            Instruction::Method => op(w, OP_METHOD),
+            Instruction::Gaslimit => op(w, OP_GASLIMIT),
+            Instruction::Memlimit => op(w, OP_MEMLIMIT),
+            Instruction::Newbytes => op(w, OP_NEWBYTES),
+            Instruction::Ext(b) => op(w, *b),
         }
     }
+}
+
+impl Instruction {
 
     /// Reads exactly one Instruction (opcode + inline parameter bytes)
     /// from `reader`. Errors:
@@ -554,7 +559,7 @@ impl Instruction {
 /// Encodes `i` using the narrowest opcode pair that fits. The
 /// resulting byte sequence matches what the VM's byte-dispatch handler
 /// expects to parse.
-fn encode_push_int(i: &Int253, out: &mut Vec<u8>) {
+fn encode_push_int(i: &Int253, w: &mut impl Writer) -> Result<(), WriteError> {
     let bytes = i.to_bytes();
     let neg = i.is_negative();
     let mag_scalar = i.abs_scalar();
@@ -562,49 +567,41 @@ fn encode_push_int(i: &Int253, out: &mut Vec<u8>) {
 
     // Try push:k (only for 0..=15 and non-negative).
     if !neg {
-        // Magnitude fits in u64 and ≤ 15?
         if mag_bytes[8..].iter().all(|&b| b == 0) {
             let mut lo = [0u8; 8];
             lo.copy_from_slice(&mag_bytes[..8]);
             let v = u64::from_le_bytes(lo);
             if v <= OP_PUSH_SMALL_MAX as u64 {
-                out.push(v as u8);
-                return;
+                return w.write_u8(b"pushsmall", v as u8);
             }
         }
     }
 
     // Try pushint8 / 16 / 64 / 128 if magnitude fits.
     if mag_bytes[16..].iter().all(|&b| b == 0) {
-        // Magnitude fits in u128.
         let mut buf = [0u8; 16];
         buf.copy_from_slice(&mag_bytes[..16]);
         let v = u128::from_le_bytes(buf);
-        // Pick smallest width that holds v.
         if v <= u8::MAX as u128 {
-            out.push(if neg { OP_PUSHINT8_NEG } else { OP_PUSHINT8_POS });
-            out.push(v as u8);
-            return;
+            w.write_u8(b"pushint.tag", if neg { OP_PUSHINT8_NEG } else { OP_PUSHINT8_POS })?;
+            return w.write_u8(b"pushint8", v as u8);
         }
         if v <= u16::MAX as u128 {
-            out.push(if neg { OP_PUSHINT16_NEG } else { OP_PUSHINT16_POS });
-            out.extend_from_slice(&(v as u16).to_le_bytes());
-            return;
+            w.write_u8(b"pushint.tag", if neg { OP_PUSHINT16_NEG } else { OP_PUSHINT16_POS })?;
+            return w.write(b"pushint16", &(v as u16).to_le_bytes());
         }
         if v <= u64::MAX as u128 {
-            out.push(if neg { OP_PUSHINT64_NEG } else { OP_PUSHINT64_POS });
-            out.extend_from_slice(&(v as u64).to_le_bytes());
-            return;
+            w.write_u8(b"pushint.tag", if neg { OP_PUSHINT64_NEG } else { OP_PUSHINT64_POS })?;
+            return w.write(b"pushint64", &(v as u64).to_le_bytes());
         }
         // 16-byte fits but not 8.
-        out.push(if neg { OP_PUSHINT128_NEG } else { OP_PUSHINT128_POS });
-        out.extend_from_slice(&v.to_le_bytes());
-        return;
+        w.write_u8(b"pushint.tag", if neg { OP_PUSHINT128_NEG } else { OP_PUSHINT128_POS })?;
+        return w.write(b"pushint128", &v.to_le_bytes());
     }
 
     // Else: pushint full (32-byte sign-magnitude form).
-    out.push(OP_PUSHINT_FULL);
-    out.extend_from_slice(&bytes);
+    w.write_u8(b"pushint.tag", OP_PUSHINT_FULL)?;
+    w.write(b"pushint.full", &bytes)
 }
 
 /// Reads `width_bytes` little-endian bytes from `reader` as the
@@ -641,22 +638,22 @@ fn parse_pushint_full(reader: &mut impl Reader) -> Result<Instruction, VMError> 
 }
 
 /// Sub-varint encoder matching the bytecode dispatcher's `read_sub_varint` semantics.
-fn encode_sub_varint(value: u64, out: &mut Vec<u8>) {
+fn encode_sub_varint(value: u64, w: &mut impl Writer) -> Result<(), WriteError> {
     const SUBVAR_U16_BASE: u64 = 256;
     const SUBVAR_U32_BASE: u64 = 65_792;
     const SUBVAR_U64_BASE: u64 = 4_295_033_088;
     if value <= 255 {
-        out.push(0); // tag
-        out.push(value as u8);
+        w.write_u8(b"subvar.tag", 0)?;
+        w.write_u8(b"subvar.u8", value as u8)
     } else if value < SUBVAR_U32_BASE {
-        out.push(1); // tag
-        out.extend_from_slice(&((value - SUBVAR_U16_BASE) as u16).to_le_bytes());
+        w.write_u8(b"subvar.tag", 1)?;
+        w.write(b"subvar.u16", &((value - SUBVAR_U16_BASE) as u16).to_le_bytes())
     } else if value < SUBVAR_U64_BASE {
-        out.push(2); // tag
-        out.extend_from_slice(&((value - SUBVAR_U32_BASE) as u32).to_le_bytes());
+        w.write_u8(b"subvar.tag", 2)?;
+        w.write(b"subvar.u32", &((value - SUBVAR_U32_BASE) as u32).to_le_bytes())
     } else {
-        out.push(3); // tag
-        out.extend_from_slice(&value.wrapping_sub(SUBVAR_U64_BASE).to_le_bytes());
+        w.write_u8(b"subvar.tag", 3)?;
+        w.write(b"subvar.u64", &value.wrapping_sub(SUBVAR_U64_BASE).to_le_bytes())
     }
 }
 
@@ -693,8 +690,7 @@ mod tests {
     use super::*;
 
     fn roundtrip(instr: Instruction) -> Instruction {
-        let mut buf = Vec::new();
-        instr.encode(&mut buf);
+        let buf = instr.encode_to_vec();
         let mut r: &[u8] = &buf;
         Instruction::parse(&mut r).expect("parses")
     }
@@ -726,23 +722,19 @@ mod tests {
     #[test]
     fn pushint_picks_smallest_width() {
         // 0..=15: 1 byte (push:k)
-        let mut buf = Vec::new();
-        Instruction::PushInt(Int253::from(7u64)).encode(&mut buf);
+        let buf = Instruction::PushInt(Int253::from(7u64)).encode_to_vec();
         assert_eq!(buf, vec![0x07]);
 
         // 16..=255: 2 bytes (pushint8)
-        let mut buf = Vec::new();
-        Instruction::PushInt(Int253::from(42u64)).encode(&mut buf);
+        let buf = Instruction::PushInt(Int253::from(42u64)).encode_to_vec();
         assert_eq!(buf, vec![0x10, 0x2a]);
 
         // Negative: pushint8 negative branch
-        let mut buf = Vec::new();
-        Instruction::PushInt(Int253::from(-42i64)).encode(&mut buf);
+        let buf = Instruction::PushInt(Int253::from(-42i64)).encode_to_vec();
         assert_eq!(buf, vec![0x11, 0x2a]);
 
         // u64 max: 9 bytes (pushint64)
-        let mut buf = Vec::new();
-        Instruction::PushInt(Int253::from(u64::MAX)).encode(&mut buf);
+        let buf = Instruction::PushInt(Int253::from(u64::MAX)).encode_to_vec();
         assert_eq!(buf.len(), 9);
         assert_eq!(buf[0], OP_PUSHINT64_POS);
     }
@@ -790,8 +782,7 @@ mod tests {
 
     #[test]
     fn alloc_witness_is_discarded_in_bytecode() {
-        let mut buf = Vec::new();
-        Instruction::Alloc(Some(Int253::from(42u64))).encode(&mut buf);
+        let buf = Instruction::Alloc(Some(Int253::from(42u64))).encode_to_vec();
         assert_eq!(buf, vec![OP_ALLOC]);
 
         let mut r: &[u8] = &buf;
@@ -842,8 +833,7 @@ mod tests {
             Instruction::Newbytes,
         ];
         for c in cases {
-            let mut buf = Vec::new();
-            c.encode(&mut buf);
+            let buf = c.encode_to_vec();
             assert_eq!(buf.len(), 1, "zero-param opcode must encode to 1 byte");
             let mut r: &[u8] = &buf;
             let parsed = Instruction::parse(&mut r).expect("parses");
