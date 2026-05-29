@@ -530,10 +530,9 @@ impl Cell {
     }
 
     /// Deep-clone preserving prover-side witnesses on Token payloads.
-    ///
-    /// Used by `String::to_cell` when the wrapping `Arc<Cell>` is
-    /// shared. `Commitment::Open` is preserved so downstream `op_mix`
-    /// finds the witness intact.
+    /// `Commitment::Open` is preserved so downstream `op_mix` finds the
+    /// witness intact. Used by `String`'s `Clone` (the `Cell` variant)
+    /// and by `clone_portable_value` for a cell-in-dict payload.
     ///
     /// Errors if any payload entry isn't a portable type (a contract
     /// violation — payload is filtered through `pop_n_portable` at

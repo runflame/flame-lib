@@ -112,11 +112,10 @@ fn input_string_cell_and_opaque_yield_same_cell_id() {
     assert_eq!(id_p, id_v, "cell id is wire-derived; same under both paths");
 }
 
-/// Cloning a `String::Cell` degrades to `Opaque(bytes)` so the
-/// underlying Cell (which contains non-Clonable Tokens) need not
-/// be cloned. The opaque bytes still decode to the same cell id.
+/// Cloning a `String::Cell` deep-copies the cell witness-preserving:
+/// the clone serializes to identical bytes and decodes to the same id.
 #[test]
-fn string_cell_clone_degrades_to_opaque() {
+fn string_cell_clone_preserves_cell() {
     let token = make_open_token(7, 11, 13, 17);
     let cell = Cell::new(
         Predicate::opaque(CompressedRistretto([0xaa; 32])),

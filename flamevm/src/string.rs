@@ -1,7 +1,6 @@
 //! Variable-length binary string; carries optional prover-side witness payloads.
 
 use std::borrow::Cow;
-use std::sync::Arc;
 
 use crate::constraints::Commitment;
 use crate::crypto::Point;
@@ -14,12 +13,10 @@ use crate::ops::Instruction;
 /// Variable-length binary string with optional witness-bearing
 /// variants. See module docs for the design.
 ///
-/// `Clone` and `Debug` are implemented manually so the `Cell` variant
-/// — whose inner `Cell` carries non-clonable, non-debuggable payload
-/// values — can share ownership via `Arc` on clone (cheap refcount
-/// bump, witnesses preserved) and print as the cell id on debug. The
-/// other variants clone in O(1) (cheap Box / inline) and keep their
-/// witnesses normally.
+/// `Clone` and `Debug` are implemented manually: the `Cell` variant's
+/// inner `Cell` is neither `Clone` nor `Debug` (its payload may hold
+/// linear values), so on clone it deep-copies witness-preserving and
+/// on debug prints the cell id. Other variants clone in O(1).
 pub enum String {
     /// Plain byte buffer — the verifier's view.
     Opaque(Vec<u8>),
@@ -39,14 +36,9 @@ pub enum String {
     /// quantities/flavors on its Token payloads. Encodes to the
     /// canonical cell bytes — verifier sees `Opaque(bytes)` and
     /// decodes via `Cell::decode` to closed commitments. Consumed
-    /// by `op_input` via [`String::to_cell`].
-    ///
-    /// Held behind `Arc` so cloning the wrapping `String` (e.g.
-    /// when `Run::next_instruction` clones the `PushStr` operand
-    /// on every step) is a cheap refcount bump that preserves
-    /// witnesses — `Cell` itself is non-Clonable because its
-    /// payload may hold linear types.
-    Cell(Arc<crate::cell::Cell>),
+    /// by `op_input` via [`String::to_cell`], which moves the cell
+    /// straight out of the box.
+    Cell(Box<crate::cell::Cell>),
 }
 
 impl String {
@@ -85,7 +77,7 @@ impl String {
     /// carry `Commitment::Open` quantities/flavors. The verifier-side
     /// equivalent is `String::Opaque(cell.to_bytes())`.
     pub fn cell(c: crate::cell::Cell) -> String {
-        String::Cell(Arc::new(c))
+        String::Cell(Box::new(c))
     }
 
     // ── Byte views ──────────────────────────────────────────────
@@ -252,22 +244,9 @@ impl String {
     /// malformed bytes, trailing data, or any non-decodable variant.
     ///
     /// Used by `op_input`.
-    ///
-    /// The witness-bearing cell is held in an `Arc`. On the sole
-    /// reference (common case) the owned cell unwraps directly,
-    /// witnesses intact; if shared (rare — `dup` on a pushed cell)
-    /// it is deep-cloned so witnesses survive into this consumer.
     pub fn to_cell(self) -> Result<crate::cell::Cell, VMError> {
         match self {
-            String::Cell(arc) => match Arc::try_unwrap(arc) {
-                Ok(cell) => Ok(cell),
-                // Shared Arc — happens in the common path because
-                // `Run::next_instruction` clones the `PushStr` operand
-                // (the original ref is pinned in `instructions[]` for
-                // potential `loop` rewinds). Deep-clone the cell so
-                // witnesses survive into op_input.
-                Err(shared) => shared.try_clone_with_witnesses(),
-            },
+            String::Cell(b) => Ok(*b),
             String::Opaque(data) => {
                 let mut reader: &[u8] = &data;
                 let cell = <crate::cell::Cell as readerwriter::Decodable>::decode(&mut reader)
@@ -427,11 +406,14 @@ impl Clone for String {
             String::Point(p) => String::Point(p.clone()),
             String::Scalar(s) => String::Scalar(s.clone()),
             String::Script(i) => String::Script(i.clone()),
-            // Arc bump — witnesses survive cloning (the underlying
-            // Cell is shared, not deep-copied). Needed so the VM's
-            // per-step instruction clone in `Run::next_instruction`
-            // doesn't degrade a witness-bearing pushed cell.
-            String::Cell(c) => String::Cell(Arc::clone(c)),
+            // `Cell` isn't `Clone`; deep-copy witness-preserving. Only
+            // hit when the instruction buffer retains a `PushStr(cell)`
+            // operand across a `loop` rewind. Payload is portable by
+            // construction, so this never fails.
+            String::Cell(c) => String::Cell(Box::new(
+                c.try_clone_with_witnesses()
+                    .expect("cell payload portable by construction"),
+            )),
         }
     }
 }
