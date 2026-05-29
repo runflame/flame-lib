@@ -23,6 +23,7 @@ use crate::Value;
 ///   value has ever been inserted. A non-empty dict whose only members
 ///   are `Variable` / `Constraint` / zero-qty `ClearToken` etc. is
 ///   still droppable even though it isn't copyable.
+#[derive(Clone)]
 pub struct Dict {
     entries: BTreeMap<Int253, Value>,
     copyable: bool,
@@ -145,10 +146,10 @@ impl Dict {
     /// (some non-copyable member entered at some point). Used by the
     /// `dup` family of stack opcodes.
     ///
-    /// Distinct from [`Self::deep_clone`], which is the Rust-level
-    /// data-duplication path used by registry snapshotting / txlog
-    /// entry construction. Linear-type values (Token, Cell, …) get
-    /// rejected here but accepted by `deep_clone`.
+    /// Distinct from the `Clone` impl, which is the Rust-level
+    /// data-duplication path (registry snapshotting / txlog entry
+    /// construction): linear-type values (Token, Cell, …) are rejected
+    /// here but cloned fine by `.clone()`.
     pub fn try_clone(&self) -> Result<Dict, VMError> {
         if !self.copyable {
             return Err(VMError::TypeNotCopyable);
@@ -160,27 +161,6 @@ impl Dict {
         }
         // Preserve the flags (try_clone of an all-copyable dict produces
         // another all-copyable dict).
-        new.copyable = self.copyable;
-        new.portable = self.portable;
-        new.droppable = self.droppable;
-        Ok(new)
-    }
-
-    /// Rust-level deep clone. Ignores VM stack-copyability rules and
-    /// produces a structurally identical Dict via each value's
-    /// `Clone` impl. Used for registry snapshotting, txlog entry
-    /// construction, and other serialization-shaped operations where
-    /// we need a separate copy without invoking VM linear-type
-    /// discipline.
-    ///
-    /// Errors only if a contained value cannot be Rust-cloned at all
-    /// (`Cell`, `Merlin` — both non-portable, so a portable dict
-    /// never holds them).
-    pub fn deep_clone(&self) -> Result<Dict, VMError> {
-        let mut new = Dict::new();
-        for (k, v) in self.entries() {
-            new.entries.insert(*k, v.deep_clone()?);
-        }
         new.copyable = self.copyable;
         new.portable = self.portable;
         new.droppable = self.droppable;

@@ -208,6 +208,7 @@ pub fn state_root(state: &Dict) -> [u8; 32] {
 /// mutable script-visible state Dict with the protocol-managed
 /// lifecycle counters (vbyte balance, activation tracking, freeze
 /// state). Per `flamevm/spec.md` §Storage and ADR 0005.
+#[derive(Clone)]
 pub struct Actor {
     /// Mutable script-visible state. The canonical shape is
     /// `{0x00 → public_dict, 0x01 → private_dict}`; helpers in this
@@ -569,25 +570,6 @@ struct MemRegistrySnapshot {
     marks: std::collections::BTreeSet<[u8; 32]>,
 }
 
-/// Deep-clones an `Actor` at the Rust level. Used by
-/// `push_checkpoint` for snapshotting and by `load_state` for the
-/// per-load copy that flows onto the VM stack. Uses `Dict::deep_clone`
-/// (which ignores VM linear-type discipline) rather than `try_clone`
-/// (which would reject portable-but-non-copyable values like `Token`).
-///
-/// Errors only for a value that can't be Rust-cloned at all — only
-/// `Cell` and `Merlin` qualify, and they're non-portable, so a
-/// portable state Dict never holds them.
-fn clone_actor(a: &Actor) -> Result<Actor, VMError> {
-    Ok(Actor {
-        state: a.state.deep_clone()?,
-        vbytes: a.vbytes,
-        active_blocks: a.active_blocks,
-        last_activation_height: a.last_activation_height,
-        frozen_since: a.frozen_since,
-    })
-}
-
 impl MemRegistry {
     /// Constructs an empty registry with an empty pool.
     pub fn new() -> Self {
@@ -636,7 +618,7 @@ impl ActorRegistry for MemRegistry {
         // The state may contain portable-but-non-copyable values like
         // `Token` — those are valid actor-state contents (balance
         // tracking, etc.) and must round-trip through load/save.
-        actor.state.deep_clone()
+        Ok(actor.state.clone())
     }
 
     fn save_state(
@@ -682,26 +664,12 @@ impl ActorRegistry for MemRegistry {
     }
 
     fn push_checkpoint(&mut self) {
-        // Deep-clone each actor via Rust-level cloning (ignoring VM
-        // linear-type rules — those gate stack `dup`, not storage).
-        // `clone_actor` returns Err only for `Cell` / `Merlin` in
-        // state, which are non-portable and op_save rejects on the
-        // way in; failure here would indicate registry corruption,
-        // so panic with a clear message rather than silently
-        // dropping the rollback.
-        let actors = self
-            .actors
-            .iter()
-            .map(|(k, a)| {
-                (
-                    *k,
-                    clone_actor(a)
-                        .expect("registry invariant: stored actor state is deep-cloneable"),
-                )
-            })
-            .collect();
-        let marks = self.marks.clone();
-        self.snapshots.push(MemRegistrySnapshot { actors, marks });
+        // Rust-level deep clone for rollback (ignores VM linear-type
+        // rules — those gate stack `dup`, not storage).
+        self.snapshots.push(MemRegistrySnapshot {
+            actors: self.actors.clone(),
+            marks: self.marks.clone(),
+        });
     }
 
     fn pop_checkpoint_commit(&mut self) {

@@ -140,7 +140,13 @@ impl Value {
     }
 }
 
-/// Possible values on the stack machine
+/// Possible values on the stack machine.
+///
+/// `Clone` is the Rust-level deep copy (used for snapshots, storage,
+/// witness-bearing pushes). It is *not* VM copyability — that gate is
+/// [`Value::try_clone`] / [`Value::is_copyable`], which reject linear
+/// types so a script can never duplicate a bearer asset on the stack.
+#[derive(Clone)]
 pub enum Value {
     Int253(Int253),
     String(String),
@@ -179,38 +185,6 @@ impl Value {
             | Value::Expression(_)
             | Value::Constraint(_)
             | Value::MultiscalarMul(_) => Err(VMError::TypeNotCopyable),
-        }
-    }
-
-    /// Rust-level deep clone for serialization / storage / snapshot
-    /// purposes. Distinct from [`Value::try_clone`]: ignores VM
-    /// linear-type discipline (which gates *stack* duplication
-    /// semantics) and just produces a structurally identical Rust
-    /// value via each variant's `Clone` impl.
-    ///
-    /// Used by the actor registry's checkpoint stack and by
-    /// `op_save`'s txlog-entry construction — both situations where
-    /// we need a separate copy of the data structure but never
-    /// "show" both copies to a script simultaneously.
-    ///
-    /// Errors only for variants that don't have a Rust `Clone`
-    /// (`Cell` is documented as non-cloneable; `Merlin` wraps a
-    /// transcript that isn't Clone). Both are non-portable, so a
-    /// portable Dict never contains them.
-    pub fn deep_clone(&self) -> Result<Value, VMError> {
-        match self {
-            Value::Int253(i) => Ok(Value::Int253(*i)),
-            Value::String(s) => Ok(Value::String(s.clone())),
-            Value::Point(p) => Ok(Value::Point(p.clone())),
-            Value::Dict(d) => Ok(Value::Dict(d.deep_clone()?)),
-            Value::Token(t) => Ok(Value::Token(t.clone())),
-            Value::ClearToken(t) => Ok(Value::ClearToken(*t)),
-            Value::WideToken(t) => Ok(Value::WideToken(*t)),
-            Value::Variable(v) => Ok(Value::Variable(v.clone())),
-            Value::Expression(e) => Ok(Value::Expression(e.clone())),
-            Value::Constraint(c) => Ok(Value::Constraint(c.clone())),
-            Value::MultiscalarMul(m) => Ok(Value::MultiscalarMul(m.clone())),
-            Value::Cell(_) | Value::Merlin(_) => Err(VMError::TypeNotCopyable),
         }
     }
 

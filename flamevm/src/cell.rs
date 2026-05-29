@@ -509,9 +509,10 @@ pub struct CallProof {
 
 /// A linear-typed cell carrying a payload under an unlock predicate.
 ///
-/// `Cell` is intentionally not `Clone` or `Debug`: `Value` is non-clonable
-/// (linear types in its variants), so a Cell containing Values can't be
-/// derived for these. Cells move; they don't copy.
+/// `Clone` is the Rust-level deep copy (witnesses on Token payloads
+/// survive). It is not VM copyability — cells are linear on the stack
+/// (`is_copyable` denies `dup`); they move, not copy, in script flow.
+#[derive(Clone)]
 pub struct Cell {
     /// Unlock predicate. Always opaque when the cell crosses the wire;
     /// may carry prover-witness when the cell is freshly built in-VM.
@@ -527,26 +528,6 @@ impl Cell {
     /// anchor uniqueness; this constructor doesn't re-check.
     pub fn new(predicate: Predicate, anchor: Anchor, payload: Vec<Value>) -> Self {
         Cell { predicate, anchor, payload }
-    }
-
-    /// Deep-clone preserving prover-side witnesses on Token payloads.
-    /// `Commitment::Open` is preserved so downstream `op_mix` finds the
-    /// witness intact. Used by `String`'s `Clone` (the `Cell` variant)
-    /// and by `clone_portable_value` for a cell-in-dict payload.
-    ///
-    /// Errors if any payload entry isn't a portable type (a contract
-    /// violation — payload is filtered through `pop_n_portable` at
-    /// construction).
-    pub fn try_clone_with_witnesses(&self) -> Result<Cell, VMError> {
-        let mut new_payload = Vec::with_capacity(self.payload.len());
-        for v in &self.payload {
-            new_payload.push(clone_portable_value(v)?);
-        }
-        Ok(Cell {
-            predicate: self.predicate.clone(),
-            anchor: self.anchor,
-            payload: new_payload,
-        })
     }
 
     /// Unique content identity of this cell — commits to its predicate,
@@ -734,31 +715,6 @@ fn merkle_walk_up(
         };
     }
     Ok(hash)
-}
-
-/// Clone a Value that's known to be portable. Non-portable variants
-/// (Merlin / Variable / Expression / Constraint / WideToken) are never
-/// present in `Cell::payload` (construction filters via `pop_n_portable`)
-/// and error here.
-///
-/// Distinct from `Value::try_clone`, which is the *stack-level*
-/// linearity gate that rejects Token/Cell to prevent implicit
-/// duplication of bearer values. Cell-payload cloning is below
-/// the stack level — these values are still inside a cell, not
-/// live on the stack — so the clone is allowed.
-fn clone_portable_value(v: &Value) -> Result<Value, VMError> {
-    use crate::Token;
-    match v {
-        Value::Int253(i) => Ok(Value::Int253(*i)),
-        Value::String(s) => Ok(Value::String(s.clone())),
-        Value::Dict(d) => Ok(Value::Dict(d.try_clone()?)),
-        Value::Point(p) => Ok(Value::Point(p.clone())),
-        Value::Token(t) => Ok(Value::Token(Token::new(t.qty.clone(), t.flv.clone()))),
-        Value::ClearToken(ct) => Ok(Value::ClearToken(*ct)),
-        Value::Cell(c) => Ok(Value::Cell(c.try_clone_with_witnesses()?)),
-        // Non-portable types should never appear in a cell payload.
-        _ => Err(VMError::NonPortableInOutput),
-    }
 }
 
 fn get_bit(bits: &[u8], i: usize) -> u8 {

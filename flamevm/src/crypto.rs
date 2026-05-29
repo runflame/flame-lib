@@ -88,6 +88,10 @@ impl Point {
 /// `Transcript` API. This relies on the `dynamic-labels` feature of
 /// the runflame fork of merlin (see workspace `[patch.crates-io]`),
 /// which relaxes the upstream `&'static [u8]` constraint to `&[u8]`.
+///
+/// Rust-`Clone` (duplicates the transcript state) — distinct from VM
+/// copyability, which `is_copyable` denies.
+#[derive(Clone)]
 pub struct Merlin {
     transcript: Transcript,
 }

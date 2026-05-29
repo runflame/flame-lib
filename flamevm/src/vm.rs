@@ -2604,10 +2604,10 @@ impl VM {
         }
         // Rust-level deep clone for the txlog entry. The registry
         // takes ownership of one copy; the txlog gets another.
-        // `deep_clone` ignores VM stack-copyability rules so portable
+        // `clone` ignores VM stack-copyability rules so portable
         // linear values (Token) survive — those are exactly what
         // actor state is for.
-        let state_for_log = state.deep_clone()?;
+        let state_for_log = state.clone();
         registry.save_state(&actor, state)?;
         registry.unmark_for_destruction(&actor);
         self.current_call.loaded = false;

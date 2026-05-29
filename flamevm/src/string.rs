@@ -406,14 +406,7 @@ impl Clone for String {
             String::Point(p) => String::Point(p.clone()),
             String::Scalar(s) => String::Scalar(s.clone()),
             String::Script(i) => String::Script(i.clone()),
-            // `Cell` isn't `Clone`; deep-copy witness-preserving. Only
-            // hit when the instruction buffer retains a `PushStr(cell)`
-            // operand across a `loop` rewind. Payload is portable by
-            // construction, so this never fails.
-            String::Cell(c) => String::Cell(Box::new(
-                c.try_clone_with_witnesses()
-                    .expect("cell payload portable by construction"),
-            )),
+            String::Cell(c) => String::Cell(c.clone()),
         }
     }
 }
