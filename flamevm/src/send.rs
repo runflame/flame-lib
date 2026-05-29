@@ -30,6 +30,7 @@ impl SendID {
 /// bounce cell produced when the delivered internal tx fails (Q3 —
 /// failure path emits an Output directly via consensus, not a fresh
 /// sub-VM).
+#[derive(Debug)]
 pub struct Message {
     /// Destination actor (either `Hash` for an already-deployed actor,
     /// or `Constructor` for transparent on-the-fly deployment per Q4).
@@ -127,24 +128,6 @@ impl Encodable for Message {
             write_value(w, v).map_err(|_| WriteError::InsufficientCapacity)?;
         }
         Ok(())
-    }
-}
-
-/// Manual `Debug` — `Predicate::Opaque` carries a 32-byte point;
-/// printing the full payload keeps the impl simple. Payload values
-/// are skipped (linear-type variants don't derive Debug uniformly).
-impl core::fmt::Debug for Message {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Message")
-            .field("target", &self.target)
-            .field("method", &self.method)
-            .field("caller", &self.caller)
-            .field("anchor", &self.anchor)
-            .field("payload.len", &self.payload.len())
-            .field("gas", &self.gas)
-            .field("vbytes", &self.vbytes)
-            .field("refund_predicate.point", self.refund_predicate.to_point().as_bytes())
-            .finish()
     }
 }
 

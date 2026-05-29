@@ -23,26 +23,12 @@ use crate::Value;
 ///   value has ever been inserted. A non-empty dict whose only members
 ///   are `Variable` / `Constraint` / zero-qty `ClearToken` etc. is
 ///   still droppable even though it isn't copyable.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Dict {
     entries: BTreeMap<Int253, Value>,
     copyable: bool,
     portable: bool,
     droppable: bool,
-}
-
-/// Manual `Debug` — `Value` payloads include linear types that don't
-/// derive `Debug`. Print just the entry count and the sticky flags;
-/// callers that need deeper inspection can iterate `entries()`.
-impl core::fmt::Debug for Dict {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Dict")
-            .field("len", &self.entries.len())
-            .field("copyable", &self.copyable)
-            .field("portable", &self.portable)
-            .field("droppable", &self.droppable)
-            .finish()
-    }
 }
 
 impl Dict {

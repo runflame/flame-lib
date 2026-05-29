@@ -96,6 +96,18 @@ pub struct Merlin {
     transcript: Transcript,
 }
 
+/// Opaque, state-dependent fingerprint: clones the transcript and
+/// squeezes 8 challenge bytes, so two transcripts in the same state
+/// print the same id without revealing or disturbing the real state.
+impl core::fmt::Debug for Merlin {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut probe = self.transcript.clone();
+        let mut id = [0u8; 8];
+        probe.challenge_bytes(b"flamevm.merlin.debug", &mut id);
+        write!(f, "Merlin{{0x{:016x}}}", u64::from_be_bytes(id))
+    }
+}
+
 impl Merlin {
     /// Creates a fresh transcript bound to `label`.
     pub fn new(label: &[u8]) -> Self {

@@ -14,6 +14,7 @@ use crate::string::String;
 use crate::value::Value;
 
 /// Routing target. See module docs for context.
+#[derive(Debug)]
 pub enum Address {
     /// Spend authority: the target is a [`Predicate`] gating a
     /// cell. Used by `op_output` (and helpers) that pay to a
@@ -162,28 +163,6 @@ impl Decodable for Address {
                 })
             }
             _ => Err(ReadError::InvalidFormat),
-        }
-    }
-}
-
-/// Manual `Debug` — `Dict` payloads and the `Predicate` inner
-/// variants don't compose with derive in all branches.
-impl core::fmt::Debug for Address {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Address::Predicate(p) => f
-                .debug_tuple("Address::Predicate")
-                .field(p.to_point().as_bytes())
-                .finish(),
-            Address::MessageTarget {
-                dst, method, args, gas,
-            } => f
-                .debug_struct("Address::MessageTarget")
-                .field("dst", dst)
-                .field("method", method)
-                .field("args.len", &args.len())
-                .field("gas", gas)
-                .finish(),
         }
     }
 }

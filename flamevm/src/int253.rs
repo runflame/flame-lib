@@ -9,7 +9,11 @@ use spacesuit::SignedInteger;
 /// Signed sign-magnitude integer; magnitude is a canonical Ristretto
 /// scalar (< ℓ ≈ 2²⁵²). See module docs for the representation,
 /// wraparound semantics, and the non-constant-time disclaimer.
-#[derive(Copy, Clone)]
+/// `PartialEq`/`Eq` are byte equality (derived) — sound because the
+/// magnitude is a canonical scalar and `-0` is rejected at
+/// construction, so each value has one byte pattern. `Ord`/`PartialOrd`
+/// are hand-written (numeric sign-magnitude, not byte order).
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Int253 {
     bytes: [u8; 32],
 }
@@ -312,14 +316,6 @@ impl Into<Scalar> for Int253 {
         self.to_scalar_mod_order()
     }
 }
-
-impl PartialEq for Int253 {
-    fn eq(&self, other: &Self) -> bool {
-        self.bytes == other.bytes
-    }
-}
-
-impl Eq for Int253 {}
 
 // ── Unsigned 256-bit divmod (private helpers for `div_rem`) ────────
 //

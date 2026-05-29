@@ -208,7 +208,7 @@ pub fn state_root(state: &Dict) -> [u8; 32] {
 /// mutable script-visible state Dict with the protocol-managed
 /// lifecycle counters (vbyte balance, activation tracking, freeze
 /// state). Per `flamevm/spec.md` §Storage and ADR 0005.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Actor {
     /// Mutable script-visible state. The canonical shape is
     /// `{0x00 → public_dict, 0x01 → private_dict}`; helpers in this
@@ -258,18 +258,6 @@ impl Actor {
 /// Manual `Debug` impl — `Dict` lacks `#[derive(Debug)]` (its `Value`
 /// payloads include linear types that can't derive `Debug`). Print
 /// just the lifecycle counters and the top-level state slot count.
-impl core::fmt::Debug for Actor {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Actor")
-            .field("state.len", &self.state.len())
-            .field("vbytes", &self.vbytes)
-            .field("active_blocks", &self.active_blocks)
-            .field("last_activation_height", &self.last_activation_height)
-            .field("frozen_since", &self.frozen_since)
-            .finish()
-    }
-}
-
 // ── Vbyte sizing ──────────────────────────────────────────────────
 
 /// Canonical vbyte size of an actor's state Dict (Q2): `wire_len(state) +

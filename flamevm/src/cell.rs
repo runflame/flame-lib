@@ -512,7 +512,7 @@ pub struct CallProof {
 /// `Clone` is the Rust-level deep copy (witnesses on Token payloads
 /// survive). It is not VM copyability — cells are linear on the stack
 /// (`is_copyable` denies `dup`); they move, not copy, in script flow.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Cell {
     /// Unlock predicate. Always opaque when the cell crosses the wire;
     /// may carry prover-witness when the cell is freshly built in-VM.

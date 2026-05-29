@@ -38,9 +38,10 @@ pub struct TxID(pub Hash);
 
 /// Entry in a transaction log. All entries are hashed into a [transaction ID](TxID).
 ///
-/// Linear-value variants (`Output` carries a `Cell`) prevent us from
-/// deriving `Clone`/`Debug`/`Serialize`/`Deserialize` here; downstream
-/// code wanting those should hash entries to bytes first or wrap.
+/// `Clone`/`Serialize`/`Deserialize` are still withheld (the linear
+/// `Cell`/`Token` payloads don't participate); downstream code wanting
+/// those should hash entries to bytes first.
+#[derive(Debug)]
 pub enum TxEntry {
     /// Tx header — bound at run start as the first txlog entry so
     /// `version` and `locktime` participate in `TxID::from_log`.
@@ -132,49 +133,6 @@ impl TxID {
     /// (header + effect list).
     pub fn from_log(txlog: &[TxEntry]) -> Self {
         TxID(MerkleTree::root(b"flamevm.txid", txlog))
-    }
-}
-
-/// Manual `Debug` impl — `TxEntry` cannot `#[derive(Debug)]` because
-/// the `Output(Cell)` variant carries a linear `Cell`. Prints just the
-/// variant tag (and, where cheap, an identifier) so `Result::unwrap_err`
-/// and friends compile against `Result<…, VMError>` returns that carry
-/// `Vec<TxEntry>` in their `Ok` arm.
-impl core::fmt::Debug for TxEntry {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            TxEntry::Header(h) => f
-                .debug_struct("TxEntry::Header")
-                .field("version", &h.version)
-                .field("locktime", &h.locktime)
-                .finish(),
-            TxEntry::Data(bytes) => f
-                .debug_struct("TxEntry::Data")
-                .field("len", &bytes.len())
-                .finish(),
-            TxEntry::Input(id) => {
-                f.debug_tuple("TxEntry::Input").field(id).finish()
-            }
-            TxEntry::Receive(send_id) => {
-                f.debug_tuple("TxEntry::Receive").field(send_id).finish()
-            }
-            TxEntry::Output(_) => f.write_str("TxEntry::Output(<cell>)"),
-            TxEntry::IssuePub(_, _) => f.write_str("TxEntry::IssuePub(<qty>, <flv>)"),
-            TxEntry::IssuePriv(_, _) => f.write_str("TxEntry::IssuePriv(<qty>, <flv>)"),
-            TxEntry::Retire(_, _) => {
-                f.write_str("TxEntry::Retire(<qty>, <flv>)")
-            }
-            TxEntry::Fee(q) => {
-                f.debug_tuple("TxEntry::Fee").field(q).finish()
-            }
-            TxEntry::ActorSave { actor, .. } => f
-                .debug_struct("TxEntry::ActorSave")
-                .field("actor", actor)
-                .finish(),
-            TxEntry::Send(msg) => {
-                f.debug_tuple("TxEntry::Send").field(msg).finish()
-            }
-        }
     }
 }
 

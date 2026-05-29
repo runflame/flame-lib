@@ -146,7 +146,7 @@ impl Value {
 /// witness-bearing pushes). It is *not* VM copyability — that gate is
 /// [`Value::try_clone`] / [`Value::is_copyable`], which reject linear
 /// types so a script can never duplicate a bearer asset on the stack.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Value {
     Int253(Int253),
     String(String),

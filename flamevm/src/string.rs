@@ -12,11 +12,7 @@ use crate::ops::Instruction;
 
 /// Variable-length binary string with optional witness-bearing
 /// variants. See module docs for the design.
-///
-/// `Clone` and `Debug` are implemented manually: the `Cell` variant's
-/// inner `Cell` is neither `Clone` nor `Debug` (its payload may hold
-/// linear values), so on clone it deep-copies witness-preserving and
-/// on debug prints the cell id. Other variants clone in O(1).
+#[derive(Clone, Debug)]
 pub enum String {
     /// Plain byte buffer — the verifier's view.
     Opaque(Vec<u8>),
@@ -396,40 +392,6 @@ impl String {
 impl From<Vec<u8>> for String {
     fn from(v: Vec<u8>) -> Self {
         String::Opaque(v)
-    }
-}
-
-impl Clone for String {
-    fn clone(&self) -> Self {
-        match self {
-            String::Opaque(d) => String::Opaque(d.clone()),
-            String::Point(p) => String::Point(p.clone()),
-            String::Scalar(s) => String::Scalar(s.clone()),
-            String::Script(i) => String::Script(i.clone()),
-            String::Cell(c) => String::Cell(c.clone()),
-        }
-    }
-}
-
-impl std::fmt::Debug for String {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            String::Opaque(d) => f.debug_tuple("Opaque").field(d).finish(),
-            String::Point(p) => f.debug_tuple("Point").field(p).finish(),
-            String::Scalar(s) => f.debug_tuple("Scalar").field(s).finish(),
-            String::Script(i) => f.debug_tuple("Script").field(i).finish(),
-            // Cell isn't Debug-derived; print its canonical id (in
-            // hex) as a surrogate so test output stays readable.
-            String::Cell(c) => {
-                let id = c.id();
-                let mut hex = std::string::String::with_capacity(64);
-                for b in id.iter() {
-                    use std::fmt::Write;
-                    let _ = write!(hex, "{:02x}", b);
-                }
-                f.debug_struct("Cell").field("id", &hex).finish()
-            }
-        }
     }
 }
 
