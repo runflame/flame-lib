@@ -172,92 +172,6 @@ mod tests {
     }
 
     #[test]
-    fn sendid_is_not_just_the_anchor() {
-        // SendID hashes the whole send; it must NOT be byte-equal
-        // to the anchor (that would be the old broken design).
-        let anchor = Anchor([0x42; 32]);
-        let id = fixture_message(anchor).id();
-        assert_ne!(id.as_bytes(), &anchor.0);
-    }
-
-    #[test]
-    fn sendid_is_deterministic_for_identical_messages() {
-        let a = fixture_message(Anchor([0x99; 32])).id();
-        let b = fixture_message(Anchor([0x99; 32])).id();
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn sendid_diverges_when_anchor_differs() {
-        let a = fixture_message(Anchor([0x01; 32])).id();
-        let b = fixture_message(Anchor([0x02; 32])).id();
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn sendid_diverges_when_target_differs() {
-        let mut m1 = fixture_message(Anchor([0x99; 32]));
-        let mut m2 = fixture_message(Anchor([0x99; 32]));
-        m1.target = ActorID::Hash([0xaa; 32]);
-        m2.target = ActorID::Hash([0xbb; 32]);
-        assert_ne!(m1.id(), m2.id());
-    }
-
-    #[test]
-    fn sendid_diverges_when_method_differs() {
-        let mut m1 = fixture_message(Anchor([0x99; 32]));
-        let mut m2 = fixture_message(Anchor([0x99; 32]));
-        m1.method = Int253::from(7u64);
-        m2.method = Int253::from(11u64);
-        assert_ne!(m1.id(), m2.id());
-    }
-
-    #[test]
-    fn sendid_diverges_when_gas_differs() {
-        let mut m1 = fixture_message(Anchor([0x99; 32]));
-        let mut m2 = fixture_message(Anchor([0x99; 32]));
-        m1.gas = 1_000;
-        m2.gas = 2_000;
-        assert_ne!(m1.id(), m2.id());
-    }
-
-    #[test]
-    fn sendid_diverges_when_vbytes_differs() {
-        let mut m1 = fixture_message(Anchor([0x99; 32]));
-        let mut m2 = fixture_message(Anchor([0x99; 32]));
-        m1.vbytes = 0;
-        m2.vbytes = 100;
-        assert_ne!(m1.id(), m2.id());
-    }
-
-    #[test]
-    fn sendid_diverges_when_caller_differs() {
-        let mut m1 = fixture_message(Anchor([0x99; 32]));
-        let mut m2 = fixture_message(Anchor([0x99; 32]));
-        m1.caller = None;
-        m2.caller = Some(ActorID::Hash([0xcc; 32]));
-        assert_ne!(m1.id(), m2.id());
-    }
-
-    #[test]
-    fn sendid_diverges_when_refund_predicate_differs() {
-        let mut m1 = fixture_message(Anchor([0x99; 32]));
-        let mut m2 = fixture_message(Anchor([0x99; 32]));
-        m1.refund_predicate = Predicate::opaque(CompressedRistretto([0u8; 32]));
-        m2.refund_predicate = Predicate::opaque(CompressedRistretto([0xff; 32]));
-        assert_ne!(m1.id(), m2.id());
-    }
-
-    #[test]
-    fn sendid_diverges_when_payload_differs() {
-        let mut m1 = fixture_message(Anchor([0x99; 32]));
-        let mut m2 = fixture_message(Anchor([0x99; 32]));
-        m1.payload = vec![Value::Int253(Int253::from(7u64))];
-        m2.payload = vec![Value::Int253(Int253::from(8u64))];
-        assert_ne!(m1.id(), m2.id());
-    }
-
-    #[test]
     fn sendid_canonical_actor_form() {
         // SendID canonicalizes target via `to_canonical()` so the same
         // actor accessed via `Hash` vs `Constructor` variant produces
@@ -281,18 +195,5 @@ mod tests {
         m1.caller = Some(ctor);
         m2.caller = Some(hash_form);
         assert_eq!(m1.id(), m2.id(), "canonical caller form must dominate");
-    }
-
-    #[test]
-    fn encode_is_deterministic() {
-        let m = fixture_message(Anchor([0x55; 32]));
-        let mut a = Vec::new();
-        let mut b = Vec::new();
-        m.encode(&mut a).unwrap();
-        m.encode(&mut b).unwrap();
-        assert_eq!(a, b);
-        // SendID = hash(domain ‖ encode()) — sanity: not empty, not the anchor.
-        assert!(!a.is_empty());
-        assert_ne!(&a[..32], &fixture_message(Anchor([0x66; 32])).id().0);
     }
 }

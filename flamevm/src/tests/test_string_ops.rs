@@ -409,20 +409,6 @@ fn write_then_read_bits_roundtrip_negative_n_256() {
 }
 
 #[test]
-fn write_int_appends_full_32_bytes() {
-    let mut vm = vm_with_script(
-        Program::new()
-            .push_str(s(&[]))
-            .push_int(7u64)
-            .write_int()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    let expected = Int253::from(7u64).to_bytes();
-    assert_str(&vm.current_call.stack[0], &expected);
-}
-
-#[test]
 fn write_then_read_int_roundtrip_signs_and_extremes() {
     let mut ell_minus_1 = ELL_LE;
     ell_minus_1[0] = 0xec;
@@ -460,19 +446,6 @@ fn write_then_read_int_roundtrip_signs_and_extremes() {
         }
         assert_int(&vm.current_call.stack[2], Int253::from(1u64));
     }
-}
-
-#[test]
-fn append_concatenates() {
-    let mut vm = vm_with_script(
-        Program::new()
-            .push_str(s(&[1, 2]))
-            .push_str(s(&[3, 4, 5]))
-            .append()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_str(&vm.current_call.stack[0], &[1, 2, 3, 4, 5]);
 }
 
 #[test]

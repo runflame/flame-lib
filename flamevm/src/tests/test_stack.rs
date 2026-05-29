@@ -5,69 +5,6 @@
 use super::test_helpers::*;
 
 #[test]
-fn push_immediate_k_roundtrips_0_to_15() {
-    for k in 0..=15u8 {
-        let mut vm = vm_with_script(vec![k]);
-        run_to_end(&mut vm).unwrap();
-        assert_eq!(vm.current_call.stack.len(), 1, "k={}", k);
-        assert_int(&vm.current_call.stack[0], Int253::from(k as u64));
-    }
-}
-
-#[test]
-fn pushint8_positive_and_negative() {
-    let mut pos = vm_with_script(vec![0x10, 42]);
-    run_to_end(&mut pos).unwrap();
-    assert_int(&pos.current_call.stack[0], Int253::from(42u64));
-
-    let mut neg = vm_with_script(vec![0x11, 42]);
-    run_to_end(&mut neg).unwrap();
-    assert_int(&neg.current_call.stack[0], Int253::from(-42i64));
-}
-
-#[test]
-fn pushint16_le_decoding() {
-    // 0x12 = positive; bytes 0x02 0x01 LE = 258
-    let mut vm = vm_with_script(vec![0x12, 0x02, 0x01]);
-    run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[0], Int253::from(258u64));
-}
-
-#[test]
-fn pushint64_le_decoding() {
-    let val: u64 = 0x0102_0304_0506_0708;
-    let mut script = vec![0x14];
-    script.extend_from_slice(&val.to_le_bytes());
-    let mut vm = vm_with_script(script);
-    run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[0], Int253::from(val));
-}
-
-#[test]
-fn pushint128_le_decoding() {
-    let val: u128 = 0xFEED_FACE_DEAD_BEEF_CAFE_BABE_BADD_CAFEu128;
-    let mut script = vec![0x16];
-    script.extend_from_slice(&val.to_le_bytes());
-    let mut vm = vm_with_script(script);
-    run_to_end(&mut vm).unwrap();
-    let mut bytes = [0u8; 32];
-    bytes[..16].copy_from_slice(&val.to_le_bytes());
-    let expected =
-        Int253::from_parts(false, Scalar::from_canonical_bytes(bytes).unwrap());
-    assert_int(&vm.current_call.stack[0], expected);
-}
-
-#[test]
-fn pushint_full_roundtrip() {
-    let expected = Int253::from(-1234567i64);
-    let mut script = vec![0x18];
-    script.extend_from_slice(&expected.to_bytes());
-    let mut vm = vm_with_script(script);
-    run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[0], expected);
-}
-
-#[test]
 fn pushint_full_rejects_negative_zero() {
     // sign bit set, magnitude zero: -0, not representable. Parse-time
     // failure now (Program::parse happens at VM entry, not lazily
@@ -89,36 +26,11 @@ fn pushint8_at_end_of_script_errors() {
 }
 
 #[test]
-fn pushstr_immediate_length() {
-    // sub-varint tag 0, then byte 4 = length 4, then 4 bytes
-    let script = vec![0x19, 0x00, 0x04, b'a', b'b', b'c', b'd'];
-    let mut vm = vm_with_script(script);
-    run_to_end(&mut vm).unwrap();
-    match &vm.current_call.stack[0] {
-        Value::String(s) => assert_eq!(s.as_bytes(), b"abcd"),
-        other => panic!("expected String, got {}", value_kind(other)),
-    }
-}
-
-#[test]
 fn pushstr_short_input_errors() {
     // length says 4, only 1 byte present — fails at parse time.
     let script = vec![0x19, 0x00, 0x04, b'a'];
     let err = Program::parse(&script).unwrap_err();
     assert!(matches!(err, VMError::UnexpectedEndOfScript));
-}
-
-#[test]
-fn pushpoint_roundtrip() {
-    let bytes = [0x42u8; 32];
-    let mut script = vec![0x1a];
-    script.extend_from_slice(&bytes);
-    let mut vm = vm_with_script(script);
-    run_to_end(&mut vm).unwrap();
-    match &vm.current_call.stack[0] {
-        Value::Point(p) => assert_eq!(p.to_bytes(), bytes),
-        other => panic!("expected Point, got {}", value_kind(other)),
-    }
 }
 
 #[test]

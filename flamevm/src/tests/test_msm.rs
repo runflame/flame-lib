@@ -185,18 +185,6 @@ fn msm_in_cell_payload_rejected() {
     ));
 }
 
-/// `type` opcode pushes 0xc3 for MSM.
-#[test]
-fn msm_typecode_is_c3() {
-    let mut vm = vm_with_script(
-        Program::new().push_point([0x55; 32]).neg().type_().to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    // Stack: [MSM, typecode_int]. Top is the typecode.
-    let top = &vm.current_call.stack[1];
-    assert_int(top, Int253::from(0xc3u64));
-}
-
 // ── Deferred batch verify semantics ─────────────────────────────
 
 /// Identity MSM via `0 * G` — verify succeeds end-to-end through

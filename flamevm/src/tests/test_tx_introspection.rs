@@ -131,33 +131,6 @@ fn newbytes_value_observable_inside_cell_open_frame() {
 
 // ── bytes (internal-only, requires registry + actor) ───────────
 
-/// Build an InternalRoot frame for actor `id` and run a script via
-/// the registry-aware stepper.
-fn run_internal_with_actor(
-    reg: &mut MemRegistry,
-    actor: ActorID,
-    script: Vec<u8>,
-) -> Result<VM, VMError> {
-    let kind = CallKind::InternalRoot {
-        actor,
-        method: Int253::from(0u64),
-        caller: None,
-        anchor: Anchor([0u8; 32]),
-    };
-    let mut vm = VM::new(
-        dummy_header(),
-        CallFrame::new(
-            Program::parse(&script).unwrap().into_instructions(),
-            kind,
-            1_000_000,
-            0,
-            0,
-        ),
-    );
-    while vm.step_internal_with_registry(reg)? {}
-    Ok(vm)
-}
-
 #[test]
 fn bytes_pushes_actor_vbyte_balance() {
     // Deploy an actor with 12_345 vbytes; run `bytes` inside its frame.

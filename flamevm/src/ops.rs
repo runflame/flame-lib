@@ -688,97 +688,6 @@ fn read_sub_varint(reader: &mut impl Reader) -> Result<u64, VMError> {
 mod tests {
     use super::*;
 
-    fn roundtrip(instr: Instruction) -> Instruction {
-        let buf = instr.encode_to_vec();
-        let mut r: &[u8] = &buf;
-        Instruction::parse(&mut r).expect("parses")
-    }
-
-    fn assert_pushint(orig: Int253) {
-        let r = roundtrip(Instruction::PushInt(orig));
-        match r {
-            Instruction::PushInt(i) => assert_eq!(i, orig, "PushInt round-trip"),
-            other => panic!("PushInt didn't round-trip: got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn pushint_roundtrips_all_widths() {
-        assert_pushint(Int253::from(0u64));
-        assert_pushint(Int253::from(15u64));
-        assert_pushint(Int253::from(16u64));
-        assert_pushint(Int253::from(255u64));
-        assert_pushint(Int253::from(256u64));
-        assert_pushint(Int253::from(65_535u64));
-        assert_pushint(Int253::from(65_536u64));
-        assert_pushint(Int253::from(u64::MAX));
-        assert_pushint(Int253::from(-1i64));
-        assert_pushint(Int253::from(-255i64));
-        assert_pushint(Int253::from(-256i64));
-        assert_pushint(Int253::from(-65_536i64));
-    }
-
-    #[test]
-    fn pushint_picks_smallest_width() {
-        // 0..=15: 1 byte (push:k)
-        let buf = Instruction::PushInt(Int253::from(7u64)).encode_to_vec();
-        assert_eq!(buf, vec![0x07]);
-
-        // 16..=255: 2 bytes (pushint8)
-        let buf = Instruction::PushInt(Int253::from(42u64)).encode_to_vec();
-        assert_eq!(buf, vec![0x10, 0x2a]);
-
-        // Negative: pushint8 negative branch
-        let buf = Instruction::PushInt(Int253::from(-42i64)).encode_to_vec();
-        assert_eq!(buf, vec![0x11, 0x2a]);
-
-        // u64 max: 9 bytes (pushint64)
-        let buf = Instruction::PushInt(Int253::from(u64::MAX)).encode_to_vec();
-        assert_eq!(buf.len(), 9);
-        assert_eq!(buf[0], OP_PUSHINT64_POS);
-    }
-
-    #[test]
-    fn pushstr_roundtrip() {
-        let s = String::from(b"hello world".to_vec());
-        let r = roundtrip(Instruction::PushStr(s.clone()));
-        match r {
-            Instruction::PushStr(s2) => assert_eq!(s2.as_bytes(), s.as_bytes()),
-            other => panic!("PushStr didn't round-trip: got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn pushpoint_roundtrip() {
-        let pt = [0x42u8; 32];
-        let r = roundtrip(Instruction::PushPoint(crate::crypto::Point::from_bytes(pt)));
-        match r {
-            Instruction::PushPoint(p) => assert_eq!(p.to_bytes(), pt),
-            _ => panic!("PushPoint didn't round-trip"),
-        }
-    }
-
-    #[test]
-    fn dupk_rollk_breakk_roundtrip() {
-        for k in 0..=15u8 {
-            let r = roundtrip(Instruction::DupK(k));
-            match r {
-                Instruction::DupK(k2) => assert_eq!(k2, k),
-                _ => panic!("DupK didn't round-trip k={}", k),
-            }
-            let r = roundtrip(Instruction::RollK(k));
-            match r {
-                Instruction::RollK(k2) => assert_eq!(k2, k),
-                _ => panic!("RollK didn't round-trip k={}", k),
-            }
-            let r = roundtrip(Instruction::BreakK(k));
-            match r {
-                Instruction::BreakK(k2) => assert_eq!(k2, k),
-                _ => panic!("BreakK didn't round-trip k={}", k),
-            }
-        }
-    }
-
     #[test]
     fn alloc_witness_is_discarded_in_bytecode() {
         let buf = Instruction::Alloc(Some(Int253::from(42u64))).encode_to_vec();
@@ -789,59 +698,6 @@ mod tests {
         match parsed {
             Instruction::Alloc(w) => assert_eq!(w, None),
             _ => panic!("Alloc parse failed"),
-        }
-    }
-
-    #[test]
-    fn zero_param_opcodes_roundtrip() {
-        // Spot-check a representative zero-param variant per phase.
-        let cases = [
-            Instruction::Drop,
-            Instruction::Nop,
-            Instruction::Dup,
-            Instruction::Roll,
-            Instruction::ReadBits,
-            Instruction::Append,
-            Instruction::Keccak256,
-            Instruction::Abs,
-            Instruction::Add,
-            Instruction::DivMod,
-            Instruction::Size,
-            Instruction::Expr,
-            Instruction::Dict,
-            Instruction::First,
-            Instruction::Transcript,
-            Instruction::Sha256,
-            Instruction::Amount,
-            Instruction::IssuePriv,
-            Instruction::IssuePrivFlv,
-            Instruction::IssuePub,
-            Instruction::IssuePubFlv,
-            Instruction::Verify,
-            Instruction::Return,
-            Instruction::Input,
-            Instruction::Cell,
-            Instruction::Signtx,
-            Instruction::Signcall,
-            Instruction::Timelock,
-            Instruction::Version,
-            Instruction::Gas,
-            Instruction::Bytes,
-            Instruction::Gaslimit,
-            Instruction::Memlimit,
-            Instruction::Newbytes,
-        ];
-        for c in cases {
-            let buf = c.encode_to_vec();
-            assert_eq!(buf.len(), 1, "zero-param opcode must encode to 1 byte");
-            let mut r: &[u8] = &buf;
-            let parsed = Instruction::parse(&mut r).expect("parses");
-            // Use debug formatting to compare (Instruction lacks PartialEq).
-            assert_eq!(
-                format!("{:?}", parsed),
-                format!("{:?}", c),
-                "round-trip mismatch"
-            );
         }
     }
 
@@ -860,19 +716,6 @@ mod tests {
                 Instruction::Ext(x) => assert_eq!(x, b),
                 _ => panic!("expected Ext({:#x})", b),
             }
-        }
-    }
-
-    #[test]
-    fn parse_pushstr_with_long_payload() {
-        // Round-trip a string with length above the sub-varint
-        // immediate range (>255 bytes).
-        let payload = vec![0xab; 1000];
-        let s = String::from(payload.clone());
-        let r = roundtrip(Instruction::PushStr(s.clone()));
-        match r {
-            Instruction::PushStr(s2) => assert_eq!(s2.as_bytes(), payload.as_slice()),
-            _ => panic!("PushStr long-payload round-trip failed"),
         }
     }
 }

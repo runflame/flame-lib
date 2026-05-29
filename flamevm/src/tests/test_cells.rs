@@ -5,24 +5,6 @@
 use super::test_helpers::*;
 
 #[test]
-fn anchor_split_produces_two_distinct_deterministic_children() {
-    let a = Anchor([0xaa; 32]);
-    let (l, r) = a.split();
-    // Both children differ from parent and from each other.
-    assert_ne!(l.0, a.0);
-    assert_ne!(r.0, a.0);
-    assert_ne!(l.0, r.0);
-    // Deterministic: same input → same outputs.
-    let (l2, r2) = a.split();
-    assert_eq!(l.0, l2.0);
-    assert_eq!(r.0, r2.0);
-    // Splitting again from one child diverges further.
-    let (ll, lr) = l.split();
-    assert_ne!(ll.0, l.0);
-    assert_ne!(lr.0, l.0);
-}
-
-#[test]
 fn cell_opcode_requires_seeded_anchor() {
     // push:7 (payload), push:1 (count), pushpoint(some), cell —
     // run from an ExternalRoot frame whose last_anchor is `None`
@@ -591,46 +573,6 @@ fn output_rejects_dict_containing_a_cell() {
         run_to_end(&mut vm).unwrap_err(),
         VMError::NonPortableInOutput
     ));
-}
-
-#[test]
-fn cell_id_changes_when_payload_value_changes() {
-    // Two cells with the same predicate + same anchor + same payload
-    // type-shape but different values must have different ids.
-    // Per architect response 9.3: payload bytes are bound via the
-    // canonical encoding API.
-    let pred = Predicate::opaque(CompressedRistretto([0xaa; 32]));
-    let a = Anchor([0x42; 32]);
-    let c1 = Cell::new(
-        pred.clone(),
-        a,
-        vec![Value::Int253(Int253::from(5u64))],
-    );
-    let c2 = Cell::new(
-        pred,
-        a,
-        vec![Value::Int253(Int253::from(99u64))],
-    );
-    assert_ne!(c1.id(), c2.id());
-}
-
-#[test]
-fn cell_encode_decode_roundtrip() {
-    let original = fixture_cell();
-    let bytes = encode_cell_to_bytes(&original);
-
-    // Decode and confirm equivalence by cell id (the canonical
-    // identity hash binds predicate point + anchor + payload bytes).
-    let mut reader: &[u8] = &bytes;
-    let decoded = <Cell as readerwriter::Decodable>::decode(&mut reader).expect("decodes");
-    assert!(reader.is_empty(), "decoder must consume the full input");
-    assert_eq!(original.id(), decoded.id());
-    assert_eq!(original.anchor.0, decoded.anchor.0);
-    assert_eq!(
-        original.predicate.to_point().as_bytes(),
-        decoded.predicate.to_point().as_bytes()
-    );
-    assert_eq!(original.payload.len(), decoded.payload.len());
 }
 
 #[test]

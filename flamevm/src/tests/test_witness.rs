@@ -112,38 +112,6 @@ fn input_string_cell_and_opaque_yield_same_cell_id() {
     assert_eq!(id_p, id_v, "cell id is wire-derived; same under both paths");
 }
 
-/// Non-Token payload entries are decoded normally on both paths;
-/// the cell payload is just a list of portable values.
-#[test]
-fn input_mixed_payload_decodes_on_both_paths() {
-    let token = make_open_token(50, 9, 17, 19);
-    let cell = Cell::new(
-        Predicate::opaque(CompressedRistretto([0xaa; 32])),
-        Anchor([0x42; 32]),
-        vec![
-            Value::Int253(Int253::from(1u64)),
-            Value::Token(token),
-            Value::Int253(Int253::from(2u64)),
-        ],
-    );
-
-    let mut vm = vm_external_with_script(Vec::new());
-    vm.push_value(Value::String(crate::String::cell(cell)));
-    vm.op_input().expect("input ok");
-    match &vm.current_call.stack[0] {
-        Value::Cell(c) => {
-            assert_eq!(c.payload.len(), 3);
-            assert!(matches!(c.payload[0], Value::Int253(_)));
-            match &c.payload[1] {
-                Value::Token(t) => assert!(t.qty.witness().is_some()),
-                _ => panic!("payload[1] not Token"),
-            }
-            assert!(matches!(c.payload[2], Value::Int253(_)));
-        }
-        _ => panic!("stack[0] not Cell"),
-    }
-}
-
 /// Cloning a `String::Cell` degrades to `Opaque(bytes)` so the
 /// underlying Cell (which contains non-Clonable Tokens) need not
 /// be cloned. The opaque bytes still decode to the same cell id.

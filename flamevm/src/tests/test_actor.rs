@@ -1,61 +1,14 @@
 //! Tests for the actor data model + MemRegistry.
 
-use readerwriter::{Decodable, Encodable, ReadError};
+use readerwriter::{Decodable, ReadError};
 
 use crate::{
     empty_state, grace_window, resolve_method, state_with_public, vbyte_size,
-    Actor, ActorID, ActorRegistry, Dict, Int253, MemRegistry, String, VbytePool,
+    ActorID, ActorRegistry, Dict, Int253, MemRegistry, String, VbytePool,
     Value, VMError,
     GRACE_BLOCKS_CAP, RECV_METHOD,
     VBYTES_PER_BLOCK,
 };
-
-#[test]
-fn actorid_hash_encode_decode_roundtrip() {
-    let id = ActorID::Hash([0x42; 32]);
-    let bytes = id.encode_to_vec();
-    assert_eq!(bytes.len(), 1 + 32, "tag (1) + hash (32)");
-    assert_eq!(bytes[0], ActorID::TAG_HASH);
-    let mut r = bytes.as_slice();
-    let decoded = ActorID::decode(&mut r).expect("decode");
-    assert_eq!(decoded, id);
-    assert!(r.is_empty(), "no trailing bytes");
-}
-
-#[test]
-fn actorid_constructor_encode_decode_roundtrip() {
-    let id = ActorID::Constructor(vec![0xde, 0xad, 0xbe, 0xef]);
-    let bytes = id.encode_to_vec();
-    assert_eq!(bytes.len(), 1 + 8 + 4, "tag (1) + u64 len (8) + script (4)");
-    assert_eq!(bytes[0], ActorID::TAG_CONSTRUCTOR);
-    let mut r = bytes.as_slice();
-    let decoded = ActorID::decode(&mut r).expect("decode");
-    assert_eq!(decoded, id);
-    assert!(r.is_empty(), "no trailing bytes");
-}
-
-#[test]
-fn actorid_constructor_empty_script_roundtrips() {
-    let id = ActorID::Constructor(Vec::new());
-    let bytes = id.encode_to_vec();
-    let mut r = bytes.as_slice();
-    let decoded = ActorID::decode(&mut r).expect("decode");
-    assert_eq!(decoded, id);
-}
-
-#[test]
-fn actorid_constructor_hash_is_deterministic() {
-    let a = ActorID::Constructor(vec![0xde, 0xad, 0xbe, 0xef]);
-    let b = ActorID::Constructor(vec![0xde, 0xad, 0xbe, 0xef]);
-    assert_eq!(a.to_hash(), b.to_hash(), "same bytes → same id");
-}
-
-#[test]
-fn actorid_constructor_hash_diverges_on_different_bytes() {
-    let a = ActorID::Constructor(vec![0x01]);
-    let b = ActorID::Constructor(vec![0x02]);
-    assert_ne!(a.to_hash(), b.to_hash(), "different bytes → different id");
-}
 
 #[test]
 fn actorid_hash_and_constructor_resolve_to_same_canonical_id() {

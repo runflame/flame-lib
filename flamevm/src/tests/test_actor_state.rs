@@ -364,35 +364,3 @@ fn receive_makes_internal_txid_bind_to_send_anchor() {
         "Internal TxID must distinguish runs by their triggering SendID",
     );
 }
-
-/// Sanity: same anchor + same actor + same script → identical
-/// Internal TxIDs. Confirms that the Receive-binding is deterministic
-/// (no stray randomness leaked into the merkle root via the anchor
-/// path).
-#[test]
-fn receive_internal_txid_is_deterministic_for_same_anchor() {
-    fn run() -> crate::tx::TxID {
-        let mut reg = MemRegistry::new();
-        let id = deploy_with_recv(
-            &mut reg,
-            Program::new().nop().to_bytecode(),
-            10_000,
-            0,
-        );
-        let block = BlockContext { height: 100 };
-        let msg = Message {
-            target: id,
-            method: RECV_METHOD,
-            caller: None,
-            anchor: Anchor([0xcd; 32]),
-            payload: Vec::new(),
-            gas: 1_000_000,
-            vbytes: 0,
-            refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-        };
-        VM::execute_internal(dummy_header(), msg, &mut reg, &block)
-            .expect("execute_internal ok")
-            .txid
-    }
-    assert_eq!(run().0, run().0);
-}

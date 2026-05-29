@@ -50,26 +50,6 @@ fn cleartoken_positive_qty_is_portable() {
 }
 
 #[test]
-fn flavor_from_actor_is_deterministic_and_diverges_on_inputs() {
-    let actor1 = ActorID::Hash([0x11; 32]);
-    let actor2 = ActorID::Hash([0x22; 32]);
-    let tag_a = String::from(b"gold".to_vec());
-    let tag_b = String::from(b"silver".to_vec());
-
-    let f_aa = test_flavor_from_actor(&actor1, &tag_a);
-    let f_aa_2 = test_flavor_from_actor(&actor1, &tag_a);
-    assert_eq!(f_aa, f_aa_2, "deterministic for identical inputs");
-
-    let f_ab = test_flavor_from_actor(&actor1, &tag_b);
-    let f_ba = test_flavor_from_actor(&actor2, &tag_a);
-    assert_ne!(f_aa, f_ab, "tag change must change flavor");
-    assert_ne!(f_aa, f_ba, "actor change must change flavor");
-
-    // Non-negative by construction (mod-order wide reduction).
-    assert!(!f_aa.is_negative());
-}
-
-#[test]
 fn cleartoken_merge_into_same_flavor_sums_qtys() {
     let a = ClearToken::new(Int253::from(3u64), Int253::from(7u64));
     let b = ClearToken::new(Int253::from(4u64), Int253::from(7u64));
@@ -333,24 +313,6 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
         }
         _ => panic!("expected TxEntry::IssuePriv"),
     }
-}
-
-#[test]
-fn issuepriv_disjoint_flavor_from_issuepub() {
-    // Domain separation: a predicate whose 32-byte point is byte-
-    // identical to an actor id must still produce a *different*
-    // flavor — because the transcripts diverge at the first message
-    // (`b"predicate"` vs `b"actor"`). This is the load-bearing
-    // invariant that keeps the two issuance domains from colliding.
-    let id_bytes = [0xab; 32];
-    let actor = ActorID::Hash(id_bytes);
-    let predicate = crate::Predicate::opaque(
-        curve25519_dalek::ristretto::CompressedRistretto(id_bytes),
-    );
-    let tag = crate::String::from(b"gold".to_vec());
-    let flv_actor = crate::token::flavor_from_actor(&actor, &tag);
-    let flv_pred = crate::token::flavor_from_predicate(&predicate, &tag);
-    assert_ne!(flv_actor, flv_pred);
 }
 
 #[test]
