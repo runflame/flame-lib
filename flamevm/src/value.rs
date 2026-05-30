@@ -26,8 +26,6 @@ impl Value {
     pub fn to_variable(self)    -> Result<Variable, VMError>   { match self { Value::Variable(x) => Ok(x),   _ => Err(VMError::TypeNotVariable) } }
     /// Downcast to ClearToken.
     pub fn to_clear_token(self) -> Result<ClearToken, VMError> { match self { Value::ClearToken(x) => Ok(x), _ => Err(VMError::TypeNotClearToken) } }
-    /// Downcast to MultiscalarMul.
-    pub fn to_msm(self)         -> Result<crate::MultiscalarMul, VMError> { match self { Value::MultiscalarMul(x) => Ok(x), _ => Err(VMError::TypeNotMsm) } }
 }
 
 impl Value {
