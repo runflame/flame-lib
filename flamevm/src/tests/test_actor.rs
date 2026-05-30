@@ -104,7 +104,7 @@ fn state_resolve_method_returns_script() {
     let s = state_with_public(public);
     let m = Int253::from(7u64);
     let script = resolve_method(&s, &m).expect("present");
-    assert_eq!(script.bytes_view().as_ref(), b"\x1d");
+    assert_eq!(script.as_opaque().unwrap(), b"\x1d");
 }
 
 #[test]

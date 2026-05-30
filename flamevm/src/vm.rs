@@ -1134,7 +1134,7 @@ impl VM {
     /// creates a fresh Merlin transcript bound to it.
     fn op_transcript(&mut self) -> Result<(), VMError> {
         let label = self.pop_value()?.to_string()?;
-        self.push_value(Value::Merlin(Merlin::new(label.as_bytes())));
+        self.push_value(Value::Merlin(Merlin::new(&label.to_bytes())));
         Ok(())
     }
 
@@ -1145,7 +1145,7 @@ impl VM {
         let data = self.pop_value()?.to_string()?;
         let label = self.pop_value()?.to_string()?;
         let mut m = self.pop_value()?.to_merlin()?;
-        m.write_bytes(label.as_bytes(), data.as_bytes());
+        m.write_bytes(&label.to_bytes(), &data.to_bytes());
         self.push_value(Value::Merlin(m));
         Ok(())
     }
@@ -1157,7 +1157,7 @@ impl VM {
         let n = self.pop_byte_count(usize::MAX)?;
         let label = self.pop_value()?.to_string()?;
         let mut m = self.pop_value()?.to_merlin()?;
-        let out = m.read_bytes(label.as_bytes(), n);
+        let out = m.read_bytes(&label.to_bytes(), n);
         self.push_value(Value::Merlin(m));
         self.push_value(Value::String(String::from(out)));
         Ok(())
@@ -1167,7 +1167,7 @@ impl VM {
     fn op_sha256(&mut self) -> Result<(), VMError> {
         use sha2::{Digest, Sha256};
         let s = self.pop_value()?.to_string()?;
-        let digest = Sha256::digest(s.as_bytes());
+        let digest = Sha256::digest(s.to_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
     }
@@ -1176,7 +1176,7 @@ impl VM {
     fn op_sha512(&mut self) -> Result<(), VMError> {
         use sha2::{Digest, Sha512};
         let s = self.pop_value()?.to_string()?;
-        let digest = Sha512::digest(s.as_bytes());
+        let digest = Sha512::digest(s.to_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
     }
@@ -1186,7 +1186,7 @@ impl VM {
     fn op_sha3(&mut self) -> Result<(), VMError> {
         use sha3::{Digest, Sha3_256};
         let s = self.pop_value()?.to_string()?;
-        let digest = Sha3_256::digest(s.as_bytes());
+        let digest = Sha3_256::digest(s.to_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
     }
@@ -1197,7 +1197,7 @@ impl VM {
     fn op_keccak256(&mut self) -> Result<(), VMError> {
         use sha3::{Digest, Keccak256};
         let s = self.pop_value()?.to_string()?;
-        let digest = Keccak256::digest(s.as_bytes());
+        let digest = Keccak256::digest(s.to_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
     }
@@ -1400,19 +1400,18 @@ impl VM {
         let s = self.pop_value()?.to_string()?;
         let n_bytes = (n + 7) / 8;
         if s.len() < n_bytes {
-            self.push_read_failure(s);
+            self.push_read_failure(s); // restore original (witness-preserving)
             return Ok(());
         }
-        let (remainder, consumed) = s.split_at(n_bytes).expect("length checked");
+        let bytes = s.to_bytes(); // canonical, owned
         let mut int_bytes = [0u8; 32];
         if n_bytes > 0 {
-            int_bytes[..n_bytes].copy_from_slice(consumed.as_bytes());
+            int_bytes[..n_bytes].copy_from_slice(&bytes[..n_bytes]);
             // Mask off bits above position n-1 within the final byte so
             // that bits `n..n_bytes*8` are forced to zero.
             let tail_bits = n % 8;
             if tail_bits != 0 {
-                let mask = (1u8 << tail_bits) - 1;
-                int_bytes[n_bytes - 1] &= mask;
+                int_bytes[n_bytes - 1] &= (1u8 << tail_bits) - 1;
             }
         }
         // `Int253::from_bytes` enforces both canonicality (magnitude < ℓ)
@@ -1420,15 +1419,11 @@ impl VM {
         let value = match Int253::from_bytes(int_bytes) {
             Some(v) => v,
             None => {
-                // Restore the original string (untouched) and push 0.
-                let mut v = Vec::with_capacity(consumed.len() + remainder.len());
-                v.extend_from_slice(consumed.as_bytes());
-                v.extend_from_slice(remainder.as_bytes());
-                self.push_read_failure(String::from(v));
+                self.push_read_failure(String::from(bytes)); // bytes untouched
                 return Ok(());
             }
         };
-        self.push_value(Value::String(remainder));
+        self.push_value(Value::String(String::from(bytes[n_bytes..].to_vec())));
         self.push_value(Value::Int253(value));
         self.push_value(Value::Int253(Int253::from(1u64)));
         Ok(())
@@ -1444,21 +1439,17 @@ impl VM {
             self.push_read_failure(s);
             return Ok(());
         }
-        let (remainder, consumed) = s.split_at(32).expect("length checked");
+        let bytes = s.to_bytes();
         let mut int_bytes = [0u8; 32];
-        int_bytes.copy_from_slice(consumed.as_bytes());
+        int_bytes.copy_from_slice(&bytes[..32]);
         let value = match Int253::from_bytes(int_bytes) {
             Some(v) => v,
             None => {
-                // Restore the original string and push 0.
-                let mut v = Vec::with_capacity(consumed.len() + remainder.len());
-                v.extend_from_slice(consumed.as_bytes());
-                v.extend_from_slice(remainder.as_bytes());
-                self.push_read_failure(String::from(v));
+                self.push_read_failure(String::from(bytes));
                 return Ok(());
             }
         };
-        self.push_value(Value::String(remainder));
+        self.push_value(Value::String(String::from(bytes[32..].to_vec())));
         self.push_value(Value::Int253(value));
         self.push_value(Value::Int253(Int253::from(1u64)));
         Ok(())
@@ -1489,11 +1480,11 @@ impl VM {
             self.push_read_failure(s);
             return Ok(());
         }
+        let bytes = s.to_bytes();
         let mut arr = [0u8; 32];
-        arr.copy_from_slice(&s.as_bytes()[..32]);
+        arr.copy_from_slice(&bytes[..32]);
         let point = Point::from_bytes(arr);
-        let (remainder, _consumed) = s.split_at(32).expect("length checked");
-        self.push_value(Value::String(remainder));
+        self.push_value(Value::String(String::from(bytes[32..].to_vec())));
         self.push_value(Value::Point(point));
         self.push_value(Value::Int253(Int253::from(1u64)));
         Ok(())
@@ -1535,7 +1526,7 @@ impl VM {
     fn op_append(&mut self) -> Result<(), VMError> {
         let s2 = self.pop_value()?.to_string()?;
         let s1 = self.pop_value()?.to_string()?;
-        self.push_value(Value::String(s1.append(&s2)));
+        self.push_value(Value::String(s1.append_bytes(&s2.to_bytes())));
         Ok(())
     }
 
@@ -1713,12 +1704,12 @@ impl VM {
     /// pushes the result as a non-negative `Int253`.
     fn op_mod252(&mut self) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
-        let bytes = s.as_bytes();
+        let bytes = s.to_bytes();
         if bytes.len() > 64 {
             return Err(VMError::StringTooLongForModReduction);
         }
         let mut buf = [0u8; 64];
-        buf[..bytes.len()].copy_from_slice(bytes);
+        buf[..bytes.len()].copy_from_slice(&bytes);
         let scalar = Scalar::from_bytes_mod_order_wide(&buf);
         self.push_value(Value::Int253(Int253::from(scalar)));
         Ok(())
@@ -1936,7 +1927,7 @@ impl VM {
             return Err(VMError::MalformedAddress);
         }
         let mut out = [0u8; 32];
-        out.copy_from_slice(&s.bytes_view());
+        out.copy_from_slice(&s.to_bytes());
         Ok(out)
     }
 
@@ -2163,7 +2154,7 @@ impl VM {
             return Err(VMError::IndexOutOfRange);
         }
         let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(cid.as_bytes());
+        bytes.copy_from_slice(&cid.to_bytes());
         let flv = flavor_from_actor(&ActorID::Hash(bytes), &tag);
         self.push_value(Value::Int253(flv));
         Ok(())
@@ -2185,7 +2176,7 @@ impl VM {
             return Err(VMError::IndexOutOfRange);
         }
         let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(pred.as_bytes());
+        bytes.copy_from_slice(&pred.to_bytes());
         let predicate = crate::Predicate::opaque(
             curve25519_dalek::ristretto::CompressedRistretto(bytes),
         );
@@ -2308,15 +2299,17 @@ impl VM {
         let m = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(m)?;
         let (gas, bytes) = self.pop_gas_bytes()?;
-        let sig_str = self.pop_value()?.to_string()?;
+        let sig_bytes = self.pop_value()?.to_string()?.to_bytes();
         let prog_str = self.pop_value()?.to_string()?;
         let cell = self.pop_value()?.to_cell()?;
-        if sig_str.as_bytes().len() != 64 {
+        if sig_bytes.len() != 64 {
             return Err(VMError::BadSignatureBytes);
         }
         let mut sig = [0u8; 64];
-        sig.copy_from_slice(sig_str.as_bytes());
-        let msg = Self::signcall_message(&prog_str.bytes_view().into_owned());
+        sig.copy_from_slice(&sig_bytes);
+        // Canonical bytecode for the signed message; `prog_str` is kept
+        // for `to_instructions()` (witness-preserving) just below.
+        let msg = Self::signcall_message(&prog_str.to_bytes_vec());
         self.deferred_sigs.push(DeferredSig::Explicit {
             verification_key: cell.predicate.verification_key(),
             message: msg,
@@ -2403,7 +2396,7 @@ impl VM {
                         return Err(VMError::MalformedCallProof);
                     }
                     let mut h = [0u8; 32];
-                    h.copy_from_slice(&s.bytes_view());
+                    h.copy_from_slice(&s.to_bytes_vec());
                     n_vec.push(h);
                 }
                 _ => return Err(VMError::MalformedCallProof),
@@ -2412,8 +2405,8 @@ impl VM {
         Ok(CallProof {
             internal_key: internal_key.to_compressed(),
             neighbors: n_vec,
-            position: position.bytes_view().into_owned(),
-            program: program.bytes_view().into_owned(),
+            position: position.to_bytes_vec(),
+            program: program.to_bytes_vec(),
         })
     }
 

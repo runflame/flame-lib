@@ -238,7 +238,7 @@ mod tests {
         d.insert(Int253::from(99u64), Value::String(String::from(b"hi".to_vec())));
         assert!(d.get(&Int253::from(50u64)).is_none());
         match d.get(&Int253::from(99u64)) {
-            Some(Value::String(s)) => assert_eq!(s.as_bytes(), b"hi"),
+            Some(Value::String(s)) => assert_eq!(s.as_opaque().unwrap(), b"hi"),
             _ => panic!("expected String"),
         }
     }

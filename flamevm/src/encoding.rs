@@ -315,7 +315,16 @@ fn read_negative_full(r: &mut impl Reader) -> Result<Int253, ReadError> {
 /// the prover ferries it via the in-memory Program (and pushes it
 /// onto the stack as a witness-bearing String when needed).
 pub fn write_string(w: &mut impl Writer, s: &String) -> Result<(), WriteError> {
-    let bytes = s.bytes_view();
+    // Borrow the bytes for the common `Opaque` case; only witness
+    // variants pay one allocation to canonicalize (no `Cow`).
+    let owned;
+    let bytes: &[u8] = match s.as_opaque() {
+        Some(b) => b,
+        None => {
+            owned = s.to_bytes_vec();
+            &owned
+        }
+    };
     let len = bytes.len() as u64;
     if len <= INT_IMM_MAX as u64 {
         w.write_u8(b"str.tag", STR_IMM_MIN + len as u8)?;
@@ -323,11 +332,20 @@ pub fn write_string(w: &mut impl Writer, s: &String) -> Result<(), WriteError> {
         w.write_u8(b"str.tag", STR_VAR)?;
         write_subvarint(w, len - CONTAINER_VAR_BASE)?;
     }
-    w.write(b"str.data", &bytes)
+    w.write(b"str.data", bytes)
 }
 
-/// Reads a compact-encoded `String`. Test-only — production code
-/// goes through `read_value` which dispatches on the type tag.
+/// Reads a length-prefixed byte string and returns its raw bytes,
+/// erroring if the next tag isn't a `String` or the length is
+/// malformed/out of bounds. Use this when a decoder expects a string
+/// and wants the bytes directly, without routing through `Value`.
+pub fn read_string(r: &mut impl Reader) -> Result<Vec<u8>, ReadError> {
+    let tag = r.read_u8()?;
+    Ok(read_string_with_tag(r, tag)?.to_bytes())
+}
+
+/// Reads a compact-encoded `String` given its already-read type tag.
+/// Used by `read_value` (and `read_string`).
 fn read_string_with_tag(r: &mut impl Reader, tag: u8) -> Result<String, ReadError> {
     let len: u64 = match tag {
         STR_IMM_MIN..=STR_IMM_MAX => (tag - STR_IMM_MIN) as u64,

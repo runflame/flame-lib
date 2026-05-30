@@ -202,7 +202,7 @@ pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
 
 pub(crate) fn assert_str(v: &Value, expected: &[u8]) {
     match v {
-        Value::String(s) => assert_eq!(s.as_bytes(), expected),
+        Value::String(s) => assert_eq!(s.as_opaque().unwrap(), expected),
         other => panic!("expected String, got {}", value_kind(other)),
     }
 }

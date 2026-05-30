@@ -126,7 +126,7 @@ fn string_cell_clone_preserves_cell() {
     let s = crate::String::cell(cell);
     let cloned = s.clone();
     // The clone serializes to identical canonical bytes.
-    assert_eq!(s.bytes_view().to_vec(), cloned.bytes_view().to_vec());
+    assert_eq!(s.to_bytes_vec(), cloned.to_bytes_vec());
     // The clone decodes to the same cell id.
     let decoded = cloned.to_cell().expect("decode ok");
     assert_eq!(decoded.id(), id);

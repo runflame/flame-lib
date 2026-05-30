@@ -1,7 +1,5 @@
 //! Variable-length binary string; carries optional prover-side witness payloads.
 
-use std::borrow::Cow;
-
 use crate::constraints::Commitment;
 use crate::crypto::Point;
 use crate::errors::VMError;
@@ -79,27 +77,10 @@ impl String {
     // ── Byte views ──────────────────────────────────────────────
 
     /// Returns a borrow of the inner bytes when this is `Opaque`.
-    /// Panics for witness-bearing variants — callers that may handle
-    /// either form should use [`String::to_bytes`] or
-    /// [`String::bytes_view`] instead.
-    pub fn as_bytes(&self) -> &[u8] {
+    pub fn as_opaque(&self) -> Option<&[u8]> {
         match self {
-            String::Opaque(d) => d,
-            _ => panic!(
-                "String::as_bytes called on witness-bearing variant; use to_bytes() or bytes_view()"
-            ),
-        }
-    }
-
-    /// Returns a byte view — borrowed for `Opaque`, owned for
-    /// witness-bearing variants. Safe to call on any variant.
-    pub fn bytes_view(&self) -> Cow<'_, [u8]> {
-        match self {
-            String::Opaque(d) => Cow::Borrowed(d),
-            String::Point(p) => Cow::Owned(p.to_bytes().to_vec()),
-            String::Scalar(s) => Cow::Owned(s.to_bytes().to_vec()),
-            String::Script(instrs) => Cow::Owned(compile_instructions(instrs)),
-            String::Cell(c) => Cow::Owned(c.to_bytes()),
+            String::Opaque(d) => Some(d),
+            _ => None,
         }
     }
 
@@ -109,17 +90,23 @@ impl String {
     pub fn to_bytes(self) -> Vec<u8> {
         match self {
             String::Opaque(d) => d,
-            String::Point(p) => p.to_bytes().to_vec(),
-            String::Scalar(s) => s.to_bytes().to_vec(),
-            String::Script(instrs) => compile_instructions(&instrs),
-            String::Cell(c) => c.to_bytes(),
+            // Witness variants serialize the same whether owned or borrowed.
+            other => other.to_bytes_vec(),
         }
     }
 
-    /// Non-consuming variant of [`String::to_bytes`]. Always
-    /// allocates, even for `Opaque`.
+    /// Borrowing variant of [`String::to_bytes`] — returns the
+    /// canonical bytes by value (always allocates, even for `Opaque`).
+    /// Prefer [`String::to_bytes`] when you own the `String`, or
+    /// [`String::as_opaque`] when you only need the `Opaque` case.
     pub fn to_bytes_vec(&self) -> Vec<u8> {
-        self.bytes_view().into_owned()
+        match self {
+            String::Opaque(d) => d.clone(),
+            String::Point(p) => p.to_bytes().to_vec(),
+            String::Scalar(s) => s.to_bytes().to_vec(),
+            String::Script(instrs) => compile_instructions(instrs),
+            String::Cell(c) => c.to_bytes(),
+        }
     }
 
     /// Length in canonical wire bytes. 32 bytes for Point/Scalar,
@@ -141,16 +128,6 @@ impl String {
             String::Script(instrs) => instrs.is_empty(),
             // Point / Scalar are 32 bytes; Cell has a non-empty header.
             _ => false,
-        }
-    }
-
-    /// Converts to an `Opaque` variant. No-op for `Opaque`; serializes
-    /// for witness-bearing variants. Useful before bit operations
-    /// that need a raw byte buffer.
-    pub fn into_opaque(self) -> String {
-        match self {
-            String::Opaque(_) => self,
-            other => String::Opaque(other.to_bytes()),
         }
     }
 
@@ -264,15 +241,8 @@ impl String {
     // variants the bytes are serialized first. The result is always
     // a new `Opaque(Vec<u8>)`.
 
-    /// Returns `self || other`. Used by `0x46 append`.
-    pub fn append(self, other: &String) -> String {
-        let mut out = self.to_bytes();
-        out.extend_from_slice(&other.bytes_view());
-        String::Opaque(out)
-    }
-
-    /// Returns `self || bytes`. Used by `0x44 writebits`, `0x45
-    /// writeint`, `0x47 writezeros`.
+    /// Returns `self || bytes`. Used by `0x46 append`, `0x44 writebits`,
+    /// `0x45 writeint`, `0x47 writezeros`.
     pub fn append_bytes(self, bytes: &[u8]) -> String {
         let mut out = self.to_bytes();
         out.extend_from_slice(bytes);
@@ -297,40 +267,31 @@ impl String {
         String::Opaque(bytes.iter().map(|b| !b).collect())
     }
 
-    /// Bitwise OR. Returns `None` if operand lengths differ.
+    /// Bytewise binary op; `None` if operand lengths differ.
+    fn zip_bytes(self, other: &String, op: impl Fn(u8, u8) -> u8) -> Option<String> {
+        let a = self.to_bytes();
+        let b = other.to_bytes_vec();
+        if a.len() != b.len() {
+            return None;
+        }
+        Some(String::Opaque(
+            a.iter().zip(b.iter()).map(|(x, y)| op(*x, *y)).collect(),
+        ))
+    }
+
+    /// Bitwise OR. `None` if operand lengths differ.
     pub fn bit_or(self, other: &String) -> Option<String> {
-        let a = self.to_bytes();
-        let b = other.bytes_view();
-        if a.len() != b.len() {
-            return None;
-        }
-        Some(String::Opaque(
-            a.iter().zip(b.iter()).map(|(x, y)| x | y).collect(),
-        ))
+        self.zip_bytes(other, |x, y| x | y)
     }
 
-    /// Bitwise AND. Returns `None` if operand lengths differ.
+    /// Bitwise AND. `None` if operand lengths differ.
     pub fn bit_and(self, other: &String) -> Option<String> {
-        let a = self.to_bytes();
-        let b = other.bytes_view();
-        if a.len() != b.len() {
-            return None;
-        }
-        Some(String::Opaque(
-            a.iter().zip(b.iter()).map(|(x, y)| x & y).collect(),
-        ))
+        self.zip_bytes(other, |x, y| x & y)
     }
 
-    /// Bitwise XOR. Returns `None` if operand lengths differ.
+    /// Bitwise XOR. `None` if operand lengths differ.
     pub fn bit_xor(self, other: &String) -> Option<String> {
-        let a = self.to_bytes();
-        let b = other.bytes_view();
-        if a.len() != b.len() {
-            return None;
-        }
-        Some(String::Opaque(
-            a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect(),
-        ))
+        self.zip_bytes(other, |x, y| x ^ y)
     }
 
     /// Shifts bits left by `n` (treating the string as a big-endian
@@ -397,7 +358,7 @@ impl From<Vec<u8>> for String {
 
 // ── Internal: compile a Script-string's instruction stream to its
 // canonical bytecode (the same bytes the verifier would see). Used
-// by `bytes_view`, `to_bytes`, `len` for `String::Script`. ───────
+// by `to_bytes_vec` and `len` for `String::Script`. ─────────────
 
 fn compile_instructions(instrs: &[Instruction]) -> Vec<u8> {
     let mut out = Vec::new();

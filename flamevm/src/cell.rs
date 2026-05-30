@@ -9,7 +9,7 @@ use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use readerwriter::{Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer};
 
-use crate::encoding::{read_list_prefix, read_value, write_list_prefix, write_value};
+use crate::encoding::{read_list_prefix, read_string, read_value, write_list_prefix, write_value};
 use crate::errors::VMError;
 use crate::vm::Anchor;
 use crate::{Point, String, Value};
@@ -619,17 +619,13 @@ impl Decodable for Cell {
             Ok(Some(Value::Point(p))) => Predicate::opaque(p.to_compressed()),
             _ => return Err(ReadError::InvalidFormat),
         };
-        let anchor = match read_value(r) {
-            Ok(Some(Value::String(s))) => {
-                if s.len() != 32 {
-                    return Err(ReadError::InvalidFormat);
-                }
-                let mut a = [0u8; 32];
-                a.copy_from_slice(s.as_bytes());
-                Anchor(a)
-            }
-            _ => return Err(ReadError::InvalidFormat),
-        };
+        let anchor_bytes = read_string(r)?;
+        if anchor_bytes.len() != 32 {
+            return Err(ReadError::InvalidFormat);
+        }
+        let mut a = [0u8; 32];
+        a.copy_from_slice(&anchor_bytes);
+        let anchor = Anchor(a);
         let payload_count =
             read_list_prefix(r).map_err(|_| ReadError::InvalidFormat)?;
         let mut payload = Vec::with_capacity(payload_count);

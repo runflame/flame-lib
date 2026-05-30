@@ -191,7 +191,7 @@ pub fn flavor_from_actor(actor: &ActorID, tag: &String) -> Int253 {
     // the Constructor variant it's the deterministic seed (per
     // `ActorID::to_hash` docstring).
     t.append_message(b"actor", &actor.to_hash());
-    t.append_message(b"tag", tag.as_bytes());
+    t.append_message(b"tag", &tag.to_bytes_vec());
     let mut buf = [0u8; 64];
     t.challenge_bytes(b"flavor", &mut buf);
     Int253::from(Scalar::from_bytes_mod_order_wide(&buf))
@@ -209,7 +209,7 @@ pub fn flavor_from_predicate(
     let mut t = Transcript::new(b"flamevm.issuepriv.flavor");
     let point_bytes = predicate.to_point().to_bytes();
     t.append_message(b"predicate", &point_bytes);
-    t.append_message(b"tag", tag.as_bytes());
+    t.append_message(b"tag", &tag.to_bytes_vec());
     let mut buf = [0u8; 64];
     t.challenge_bytes(b"flavor", &mut buf);
     Int253::from(Scalar::from_bytes_mod_order_wide(&buf))

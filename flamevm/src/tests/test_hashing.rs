@@ -57,7 +57,7 @@ fn keccak256_differs_from_sha3() {
     run_to_end(&mut b).unwrap();
     match (&a.current_call.stack[0], &b.current_call.stack[0]) {
         (Value::String(sa), Value::String(sb)) => {
-            assert_ne!(sa.as_bytes(), sb.as_bytes());
+            assert_ne!(sa.as_opaque().unwrap(), sb.as_opaque().unwrap());
         }
         _ => panic!(),
     }

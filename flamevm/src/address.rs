@@ -7,7 +7,7 @@ use crate::cell::Predicate;
 use crate::crypto::Point;
 use crate::dict::Dict;
 use crate::encoding::{
-    read_list_prefix, read_value, write_list_prefix, write_value,
+    read_list_prefix, read_string, read_value, write_list_prefix, write_value,
 };
 use crate::int253::Int253;
 use crate::string::String;
@@ -129,10 +129,7 @@ impl Decodable for Address {
                 Ok(Address::Predicate(p))
             }
             (Self::TAG_MESSAGE_TARGET, 5) => {
-                let dst_bytes = match read_value(r) {
-                    Ok(Some(Value::String(s))) => s.to_bytes(),
-                    _ => return Err(ReadError::InvalidFormat),
-                };
+                let dst_bytes = read_string(r)?;
                 let mut dst_r = dst_bytes.as_slice();
                 let dst = ActorID::decode(&mut dst_r)?;
                 if !dst_r.is_empty() {

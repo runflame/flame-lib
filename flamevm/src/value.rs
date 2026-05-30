@@ -269,12 +269,11 @@ impl Value {
     pub fn try_eq(&self, other: &Value) -> Result<bool, VMError> {
         match (self, other) {
             (Value::Int253(a), Value::Int253(b)) => Ok(a == b),
-            // Use `bytes_view` (Cow) so witness-bearing variants
-            // (Commitment / Scalar / Predicate / Script) are
-            // compared by their canonical wire form, the same way
-            // the verifier would see them.
+            // Compare by canonical wire bytes so witness-bearing
+            // variants (Point / Scalar / Script / Cell) match the
+            // verifier's view of the same string.
             (Value::String(a), Value::String(b)) => {
-                Ok(a.bytes_view().as_ref() == b.bytes_view().as_ref())
+                Ok(a.to_bytes_vec() == b.to_bytes_vec())
             }
             (Value::Point(a), Value::Point(b)) => Ok(a.to_bytes() == b.to_bytes()),
             // Cross-variant always unequal.

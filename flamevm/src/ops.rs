@@ -279,7 +279,7 @@ impl Encodable for Instruction {
                 // panic for those — the verifier's wire form must
                 // match regardless of which variant the prover
                 // used.
-                w.write(b"pushstr.bytes", &s.bytes_view())
+                w.write(b"pushstr.bytes", &s.to_bytes_vec())
             }
             Instruction::PushPoint(p) => {
                 op(w, OP_PUSHPOINT)?;

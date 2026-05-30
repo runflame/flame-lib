@@ -57,7 +57,7 @@ fn actorid_in_internal_root_pushes_hash_string() {
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
-        Value::String(s) => assert_eq!(s.bytes_view().as_ref(), &[0xab; 32]),
+        Value::String(s) => assert_eq!(s.as_opaque().unwrap(), &[0xab; 32]),
         _ => panic!("expected String"),
     }
 }
@@ -85,7 +85,7 @@ fn actorid_in_constructor_form_uses_canonical_hash_seed() {
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
-        Value::String(s) => assert_eq!(s.bytes_view().as_ref(), &expected[..]),
+        Value::String(s) => assert_eq!(s.as_opaque().unwrap(), &expected[..]),
         _ => panic!("expected String"),
     }
 }
@@ -103,7 +103,7 @@ fn anchor_in_internal_root_pushes_frame_anchor() {
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
-        Value::String(s) => assert_eq!(s.bytes_view().as_ref(), &[0xff; 32]),
+        Value::String(s) => assert_eq!(s.as_opaque().unwrap(), &[0xff; 32]),
         _ => panic!("expected String"),
     }
 }
@@ -131,7 +131,7 @@ fn callerid_with_some_caller_pushes_hash_string() {
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
-        Value::String(s) => assert_eq!(s.bytes_view().as_ref(), &[0x33; 32]),
+        Value::String(s) => assert_eq!(s.as_opaque().unwrap(), &[0x33; 32]),
         _ => panic!("expected String"),
     }
 }
@@ -148,7 +148,7 @@ fn callerid_with_none_caller_pushes_zero_string() {
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
-        Value::String(s) => assert_eq!(s.bytes_view().as_ref(), &[0u8; 32]),
+        Value::String(s) => assert_eq!(s.as_opaque().unwrap(), &[0u8; 32]),
         _ => panic!("expected String"),
     }
 }
