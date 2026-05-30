@@ -210,10 +210,13 @@ pub fn state_root(state: &Dict) -> [u8; 32] {
 /// state). Per `flamevm/spec.md` §Storage and ADR 0005.
 #[derive(Clone, Debug)]
 pub struct Actor {
-    /// Mutable script-visible state. The canonical shape is
-    /// `{0x00 → public_dict, 0x01 → private_dict}`; helpers in this
-    /// module navigate it (`resolve_method`, `state_root`).
-    pub state: Dict,
+    /// Mutable script-visible state, or `None` while **checked out**
+    /// — `op_load` moves the state onto a frame's stack (leaving
+    /// `None`), `op_save` moves it back. A checked-out actor has no
+    /// code or data, so calls/loads against it fail `ActorEmpty`: the
+    /// state's presence *is* the re-entrancy lock (ADR 0017). Canonical
+    /// shape when present is `{0x00 → public_dict, 0x01 → private_dict}`.
+    pub state: Option<Dict>,
 
     /// Persistent vbyte balance. Bled per block during `tick_block`
     /// (Unit 3). `0` puts the actor in the frozen state
@@ -241,7 +244,7 @@ impl Actor {
     /// vbyte funding, activated at `height`.
     pub fn new_active(state: Dict, vbytes: u64, height: u64) -> Self {
         Self {
-            state,
+            state: Some(state),
             vbytes,
             active_blocks: 0,
             last_activation_height: height,
@@ -253,11 +256,16 @@ impl Actor {
     pub fn is_frozen(&self) -> bool {
         self.frozen_since.is_some()
     }
+
+    /// True iff the state is checked out (a frame `load`ed it and
+    /// hasn't `save`d it back). Such an actor — left empty at tx end
+    /// because the frame dismantled its state instead of saving — is
+    /// reaped (self-destruct, Q6).
+    pub fn is_checked_out(&self) -> bool {
+        self.state.is_none()
+    }
 }
 
-/// Manual `Debug` impl — `Dict` lacks `#[derive(Debug)]` (its `Value`
-/// payloads include linear types that can't derive `Debug`). Print
-/// just the lifecycle counters and the top-level state slot count.
 // ── Vbyte sizing ──────────────────────────────────────────────────
 
 /// Canonical vbyte size of an actor's state Dict (Q2): `wire_len(state) +
@@ -288,14 +296,8 @@ pub const VBYTES_PER_BLOCK: u64 = 5000;
 /// 0005.
 pub const VBYTE_MATURITY_BLOCKS: u64 = 100;
 
-/// Cap on the grace window in blocks (≈ six months at one
-/// block per ~6s). Per ADR 0005:
-/// `grace = min(active_blocks / 4, blocks_per_6_months)`. The
-/// "six months" interpretation is consensus-fixed; the constant
-/// here picks 2,628,000 blocks (= 6 × 30 × 24 × 60 × 60 / 6),
-/// which is the working assumption. Validators will reconcile
-/// against the actual block cadence at protocol-launch time.
-pub const GRACE_BLOCKS_CAP: u64 = 2_628_000;
+/// Cap on the grace window in blocks (≈ six months)
+pub const GRACE_BLOCKS_CAP: u64 = 144*30*6;
 
 /// Grace-window formula. Returns the number of blocks an actor
 /// stays frozen before being cleared. Per ADR 0005:
@@ -401,16 +403,17 @@ impl VbytePool {
 pub trait ActorRegistry {
     // ── lookup ─────────────────────────────────────────────────
 
-    /// Returns a (Rust-)cloned snapshot of the actor's state Dict.
-    /// `op_load` pushes this onto the stack; `op_call` uses it to
-    /// resolve the callee's method bytes without retaining a borrow.
+    /// **Checks out** the actor's state — moves it out of the registry
+    /// (leaving the actor `None`/empty) and returns it for `op_load` to
+    /// push onto the stack. Errors `ActorEmpty` if it's already checked
+    /// out (the re-entrancy lock), `ActorFrozen` if frozen, or
+    /// `ActorNotFound`. The matching `save_state` moves it back.
     fn load_state(&mut self, id: &ActorID) -> Result<Dict, VMError>;
 
-    /// Persists `state` against `id`. Re-sizes the actor's vbyte
-    /// occupancy under the new state (the lifecycle ticker will
-    /// reconcile balance on the next block). The caller is
-    /// responsible for ensuring `state` is portable (op_save checks
-    /// this before calling).
+    /// Moves `state` back into a **checked-out** actor (`op_save`).
+    /// Errors `SaveWithoutLoad` if the actor isn't checked out (saving
+    /// would clobber live, possibly token-bearing, state). The caller
+    /// ensures `state` is portable (op_save checks first).
     fn save_state(&mut self, id: &ActorID, state: Dict) -> Result<(), VMError>;
 
     /// Resolves a method's script bytes. Equivalent to
@@ -437,47 +440,34 @@ pub trait ActorRegistry {
 
     // ── checkpoint / rollback (call-frame atomicity) ───────────
 
-    /// Snapshot current registry state (actors + marks) onto an
-    /// internal stack. Called by the VM at every call-frame entry
-    /// (and once per tx) so that a failed sub-call can roll back
-    /// any registry mutations made by the failed callee — including
-    /// any `op_save` writes and `op_load` marks that haven't been
-    /// matched by an `op_save` yet. Pairs LIFO with
+    /// Open an undo-log frame onto an internal stack. Called by the
+    /// VM at every call-frame entry (and once per tx) so a failed
+    /// sub-call can roll back any registry mutations the failed callee
+    /// made — `op_save`/`op_load` moves (a checked-out state is just a
+    /// `None` the undo restores to `Some`) and deploys. Pairs LIFO with
     /// [`Self::pop_checkpoint_commit`] / [`Self::pop_checkpoint_rollback`].
     fn push_checkpoint(&mut self);
 
-    /// Pop the topmost snapshot and discard it (keep current state).
-    /// Called on clean call-frame exit / clean tx end.
+    /// Pop the topmost undo frame and discard it (keep current state),
+    /// merging its entries into the parent. Clean call-frame / tx exit.
     fn pop_checkpoint_commit(&mut self);
 
-    /// Pop the topmost snapshot and restore registry state from it.
-    /// Called when a call frame fails (via `VM::fail_current_call`)
-    /// or when the outermost tx fails. Restores both actor states
-    /// and re-entrancy marks; the vbyte pool is not snapshotted
-    /// because it doesn't change within a tx (only via tx-end
-    /// `commit_tx_destructions` and per-block `tick_block`).
+    /// Pop the topmost undo frame and replay it, restoring registry
+    /// state. Called when a call frame fails (`VM::fail_current_call`)
+    /// or the outermost tx fails — so a failed `load` restores the
+    /// checked-out state (the actor isn't spuriously self-destructed).
+    /// The vbyte pool isn't tracked (only tx-end / per-block hooks
+    /// touch it).
     fn pop_checkpoint_rollback(&mut self);
 
-    // ── re-entrancy lock + self-destruct (Q6) ──────────────────
+    // ── self-destruct (Q6 / ADR 0017) ──────────────────────────
 
-    /// Marks the actor as currently loaded. Subsequent loads error
-    /// `LoadAlreadyMarked`. Called by `op_load`.
-    fn mark_for_destruction(&mut self, id: &ActorID);
-
-    /// Clears the mark set by [`Self::mark_for_destruction`].
-    /// Called by `op_save` after a successful save.
-    fn unmark_for_destruction(&mut self, id: &ActorID);
-
-    /// True iff the actor is currently marked. Used by the
-    /// re-entrancy check and the tx-end self-destruct sweep.
-    fn is_marked_for_destruction(&self, id: &ActorID) -> bool;
-
-    /// End-of-tx hook called by the VM driver after a successful
-    /// run. Walks marks; any still-marked actor is removed and its
-    /// vbytes recycled to the pool with [`VBYTE_MATURITY_BLOCKS`]
-    /// delay. Returns the number of actors cleared (useful for
-    /// telemetry/tests). `current_height` is the height of the
-    /// containing block.
+    /// End-of-tx hook called by the VM driver after a successful run.
+    /// Reaps any actor left **checked out** (`state == None` — a `load`
+    /// whose state the frame dismantled instead of saving), recycling
+    /// its vbytes to the pool with [`VBYTE_MATURITY_BLOCKS`] delay.
+    /// Returns the count cleared. `current_height` is the containing
+    /// block's height.
     fn commit_tx_destructions(&mut self, current_height: u64) -> usize;
 
     // ── deployment (Q4 — transparent on first delivery) ────────
@@ -541,21 +531,24 @@ pub trait ActorRegistry {
 /// actor and reach the same entry.
 pub struct MemRegistry {
     actors: std::collections::BTreeMap<[u8; 32], Actor>,
-    marks: std::collections::BTreeSet<[u8; 32]>,
     pool: VbytePool,
-    /// LIFO snapshot stack for call-frame / tx-level rollback.
+    /// LIFO undo-log stack for call-frame / tx-level rollback.
     /// Pushed by `push_checkpoint`; consumed by `pop_checkpoint_commit`
-    /// (discard) or `pop_checkpoint_rollback` (restore).
-    snapshots: Vec<MemRegistrySnapshot>,
+    /// (merge into parent) or `pop_checkpoint_rollback` (replay).
+    checkpoints: Vec<CheckpointFrame>,
 }
 
-/// One frame's-worth of (actor-state + marks) snapshot, used by
-/// `MemRegistry`'s checkpoint stack. Captures everything that can
-/// be mutated mid-tx; the vbyte pool isn't snapshotted because it's
-/// only touched by tx-end / per-block hooks.
-struct MemRegistrySnapshot {
-    actors: std::collections::BTreeMap<[u8; 32], Actor>,
-    marks: std::collections::BTreeSet<[u8; 32]>,
+/// One checkpoint frame's undo log. Rather than cloning the whole
+/// registry on every call/open/load/save, each frame records the prior
+/// value of every actor it mutates, on first touch — so a checkpoint
+/// costs O(touched), not O(all actors). A checked-out state is just an
+/// `Actor` whose `state` is `None`, so the single `actor_undo` map
+/// covers load/save moves, deploys, and re-entrancy lock state
+/// uniformly. The vbyte pool isn't tracked (only tx-end / per-block
+/// hooks touch it, never mid-call).
+struct CheckpointFrame {
+    /// actor id → prior record (`None` = absent before first touch).
+    actor_undo: std::collections::BTreeMap<[u8; 32], Option<Actor>>,
 }
 
 impl MemRegistry {
@@ -563,9 +556,18 @@ impl MemRegistry {
     pub fn new() -> Self {
         Self {
             actors: std::collections::BTreeMap::new(),
-            marks: std::collections::BTreeSet::new(),
             pool: VbytePool::new(),
-            snapshots: Vec::new(),
+            checkpoints: Vec::new(),
+        }
+    }
+
+    /// Records the prior value of actor `h` into the open checkpoint
+    /// (once per frame). No-op when no checkpoint is open. Split-borrow
+    /// so the closure can read `actors` while `checkpoints` is held.
+    fn record_actor(&mut self, h: [u8; 32]) {
+        let Self { checkpoints, actors, .. } = self;
+        if let Some(frame) = checkpoints.last_mut() {
+            frame.actor_undo.entry(h).or_insert_with(|| actors.get(&h).cloned());
         }
     }
 
@@ -595,18 +597,24 @@ impl Default for MemRegistry {
 
 impl ActorRegistry for MemRegistry {
     fn load_state(&mut self, id: &ActorID) -> Result<Dict, VMError> {
-        let actor = self
-            .actors
-            .get(&id.to_hash())
-            .ok_or(VMError::ActorNotFound)?;
-        if actor.is_frozen() {
-            return Err(VMError::ActorFrozen);
+        let h = id.to_hash();
+        // Pre-checks on an immutable borrow before recording undo +
+        // moving the state out.
+        {
+            let actor = self.actors.get(&h).ok_or(VMError::ActorNotFound)?;
+            if actor.is_frozen() {
+                return Err(VMError::ActorFrozen);
+            }
+            if actor.state.is_none() {
+                // Already loaded by some live frame (the lock), or
+                // destroyed — either way nothing to check out.
+                return Err(VMError::ActorEmpty);
+            }
         }
-        // Rust-level deep clone (ignores VM stack-copyability rules).
-        // The state may contain portable-but-non-copyable values like
-        // `Token` — those are valid actor-state contents (balance
-        // tracking, etc.) and must round-trip through load/save.
-        Ok(actor.state.clone())
+        self.record_actor(h);
+        // Move the state out (the actor goes empty) — no clone; the
+        // matching `save_state` moves it back.
+        Ok(self.actors.get_mut(&h).unwrap().state.take().unwrap())
     }
 
     fn save_state(
@@ -614,11 +622,16 @@ impl ActorRegistry for MemRegistry {
         id: &ActorID,
         state: Dict,
     ) -> Result<(), VMError> {
-        let actor = self
-            .actors
-            .get_mut(&id.to_hash())
-            .ok_or(VMError::ActorNotFound)?;
-        actor.state = state;
+        let h = id.to_hash();
+        // Only a checked-out actor can be saved to — otherwise we'd
+        // clobber (and silently drop the tokens of) live state.
+        match self.actors.get(&h) {
+            None => return Err(VMError::ActorNotFound),
+            Some(a) if !a.is_checked_out() => return Err(VMError::SaveWithoutLoad),
+            Some(_) => {}
+        }
+        self.record_actor(h);
+        self.actors.get_mut(&h).unwrap().state = Some(state);
         Ok(())
     }
 
@@ -634,7 +647,10 @@ impl ActorRegistry for MemRegistry {
         if a.is_frozen() {
             return Err(VMError::ActorFrozen);
         }
-        let script = resolve_method(&a.state, &method)
+        // Checked-out actor has no code/data → can't dispatch. This is
+        // the re-entrancy block for *calls* (ADR 0017).
+        let state = a.state.as_ref().ok_or(VMError::ActorEmpty)?;
+        let script = resolve_method(state, &method)
             .ok_or(VMError::MethodNotFound)?;
         Ok(script.to_bytes_vec())
     }
@@ -652,46 +668,48 @@ impl ActorRegistry for MemRegistry {
     }
 
     fn push_checkpoint(&mut self) {
-        // Rust-level deep clone for rollback (ignores VM linear-type
-        // rules — those gate stack `dup`, not storage).
-        self.snapshots.push(MemRegistrySnapshot {
-            actors: self.actors.clone(),
-            marks: self.marks.clone(),
+        self.checkpoints.push(CheckpointFrame {
+            actor_undo: std::collections::BTreeMap::new(),
         });
     }
 
     fn pop_checkpoint_commit(&mut self) {
-        let _ = self.snapshots.pop();
-    }
-
-    fn pop_checkpoint_rollback(&mut self) {
-        if let Some(snap) = self.snapshots.pop() {
-            self.actors = snap.actors;
-            self.marks = snap.marks;
+        // Merge this frame's undo entries into the parent so an outer
+        // rollback can still undo what this frame changed; `or_insert`
+        // keeps the parent's older prior where both touched the same
+        // key. Drop them outright if this was the outermost frame.
+        let Some(frame) = self.checkpoints.pop() else { return };
+        if let Some(parent) = self.checkpoints.last_mut() {
+            for (h, prior) in frame.actor_undo {
+                parent.actor_undo.entry(h).or_insert(prior);
+            }
         }
     }
 
-    fn mark_for_destruction(&mut self, id: &ActorID) {
-        self.marks.insert(id.to_hash());
-    }
-
-    fn unmark_for_destruction(&mut self, id: &ActorID) {
-        self.marks.remove(&id.to_hash());
-    }
-
-    fn is_marked_for_destruction(&self, id: &ActorID) -> bool {
-        self.marks.contains(&id.to_hash())
+    fn pop_checkpoint_rollback(&mut self) {
+        let Some(frame) = self.checkpoints.pop() else { return };
+        for (h, prior) in frame.actor_undo {
+            match prior {
+                Some(actor) => { self.actors.insert(h, actor); }
+                None => { self.actors.remove(&h); }
+            }
+        }
     }
 
     fn commit_tx_destructions(&mut self, current_height: u64) -> usize {
-        let to_clear: Vec<[u8; 32]> =
-            self.marks.iter().copied().collect();
+        // Reap actors left checked out at tx end — a `load` whose
+        // state the frame dismantled (recursively read out, tokens
+        // retired, droppable residue dropped) instead of saving. A
+        // failed `load` rolled its `None` back to `Some` already, so
+        // only an intentional full dismantle survives to here.
+        let to_clear: Vec<[u8; 32]> = self
+            .actors
+            .iter()
+            .filter(|(_, a)| a.is_checked_out())
+            .map(|(k, _)| *k)
+            .collect();
         let mut count = 0usize;
         for id in to_clear {
-            // Drain the mark regardless of whether the actor still
-            // exists (defensive: a re-entrancy mark on a vanished
-            // actor shouldn't linger).
-            self.marks.remove(&id);
             if let Some(actor) = self.actors.remove(&id) {
                 self.pool.queue_recycle(actor.vbytes, current_height);
                 count += 1;
@@ -718,6 +736,7 @@ impl ActorRegistry for MemRegistry {
         if !state.is_portable() {
             return Err(VMError::NonPortableInState);
         }
+        self.record_actor(key);
         self.actors
             .insert(key, Actor::new_active(state, vbytes, height));
         Ok(())
@@ -760,16 +779,22 @@ impl ActorRegistry for MemRegistry {
             match actor.frozen_since {
                 None => {
                     // ACTIVE: bleed by current vbyte_size.
-                    let occupied = match vbyte_size(&actor.state) {
-                        Ok(n) => n,
-                        Err(_) => {
-                            // Defensive: malformed state cleared on
-                            // tick — the registry only accepts
-                            // well-formed states at deploy/save, so
-                            // hitting this is an invariant break.
-                            cleared.push(ActorID::Hash(id));
-                            continue;
-                        }
+                    let occupied = match actor.state.as_ref() {
+                        // Checked out at a block boundary is an
+                        // invariant break (txs end with state restored
+                        // or the actor reaped); skip the bleed.
+                        None => continue,
+                        Some(state) => match vbyte_size(state) {
+                            Ok(n) => n,
+                            Err(_) => {
+                                // Defensive: malformed state cleared on
+                                // tick — the registry only accepts
+                                // well-formed states at deploy/save, so
+                                // hitting this is an invariant break.
+                                cleared.push(ActorID::Hash(id));
+                                continue;
+                            }
+                        },
                     };
                     if actor.vbytes >= occupied {
                         actor.vbytes -= occupied;

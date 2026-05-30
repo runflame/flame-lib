@@ -279,17 +279,6 @@ impl CallKind {
     }
 }
 
-/// Walks actor ids of every live frame — current first, then suspended
-/// innermost-out. Used by the re-entrancy guard inside `op_call`.
-fn iter_actor_ids_on_stack<'a>(
-    current: &'a CallFrame,
-    suspended: &'a [CallFrame],
-) -> impl Iterator<Item = &'a ActorID> {
-    core::iter::once(&current.kind)
-        .chain(suspended.iter().map(|f| &f.kind))
-        .filter_map(|k| k.actor())
-}
-
 /// An isolated execution scope. Holds its own stack, run, gas budget, and
 /// transient-memory cap. Created by `call`, `open`, or the outermost frame
 /// of a tx.
@@ -316,10 +305,6 @@ pub struct CallFrame {
 
     /// Vbytes delivered with this call (queryable by `newbytes` opcode).
     pub(crate) newbytes: u64,
-
-    /// Per-frame load/save pairing flag. Set by `op_load`, cleared by
-    /// `op_save`. Unmatched load self-destructs the actor at tx commit.
-    pub(crate) loaded: bool,
 
     /// Anchor that should replace `VM.last_anchor` when control
     /// returns to this frame from a child call. Populated at call
@@ -373,7 +358,6 @@ impl CallFrame {
             mem_limit,
             mem_used: 0,
             newbytes,
-            loaded: false,
             post_call_anchor: None,
             snap_txlog_len: 0,
             snap_deferred_sigs_len: 0,
@@ -798,9 +782,11 @@ impl VM {
                             parent.snap_cs = Some(cs_snap);
                         }
                     }
-                    // Snapshot the registry so a future failure of the
-                    // newly-pushed frame can roll back any `op_save`
-                    // writes (and lingering re-entrancy marks).
+                    // Open an undo frame so a future failure of the
+                    // newly-pushed frame can roll back any `op_save`/
+                    // `op_load` state moves (a failed `load` restores
+                    // the checked-out state, so the actor isn't
+                    // spuriously self-destructed).
                     registry.push_checkpoint();
                 } else if depth_after < depth_before {
                     // Clean exit: keep effects, drop the snapshot.
@@ -1013,9 +999,9 @@ impl VM {
     ///
     /// Actor-state rollback is wired via the registry's checkpoint
     /// stack (push on frame entry, restore here). Closes the F1 audit
-    /// finding — a failed callee's `op_save` writes (and any leftover
-    /// re-entrancy marks from unmatched `op_load`s) are restored, so
-    /// the registry stays consistent with the truncated txlog.
+    /// finding — a failed callee's `op_save`/`op_load` state moves are
+    /// undone (a checked-out state is restored to present), so the
+    /// registry stays consistent with the truncated txlog.
     fn fail_current_call<D: Delegate>(
         &mut self,
         delegate: &mut D,
@@ -2492,13 +2478,11 @@ impl VM {
 
         // Pre-frame setup. Any failure here ("cannot enter callee")
         // converts to a `0` failure marker on the caller's stack —
-        // the call simply "did not happen" from the caller's POV.
+        // the call simply "did not happen" from the caller's POV. A
+        // re-entrant call into an actor that's mid-update lands here
+        // too: its state is checked out, so `resolve_method` returns
+        // `ActorEmpty` (ADR 0017 — the state is the re-entrancy lock).
         let pre_frame: Result<(Vec<u8>, u64, ActorID), VMError> = (|| {
-            if iter_actor_ids_on_stack(&self.current_call, &self.call_stack)
-                .any(|id| id == &callee)
-            {
-                return Err(VMError::ReentrancyDetected);
-            }
             let script = registry.resolve_method(&callee, method)?;
             let mem_limit = registry.actor_vbytes(&callee)?.saturating_mul(4);
             let caller = self
@@ -2552,48 +2536,43 @@ impl VM {
 
     /// **load** → _dict_
     ///
-    /// Loads the current actor's state Dict, marks the actor for
-    /// destruction (re-entry blocked until `save`), and pushes the
-    /// Dict onto the stack. The Dict's conventional shape is
-    /// `{0x00 → public, 0x01 → private}` (see spec.md §Actors), but
-    /// the VM doesn't enforce the shape — scripts decide what's in
-    /// their state. An unmatched load destroys the actor at tx
-    /// commit (Q6).
+    /// **Checks out** the current actor's state: moves the Dict out of
+    /// the registry (the actor goes empty) and pushes it onto the
+    /// stack. While checked out, any call/load against this actor fails
+    /// `ActorEmpty` — the state's presence is the re-entrancy lock (ADR
+    /// 0017). A frame must `save` it back (or dismantle it) before
+    /// returning, per the frame-end clean-stack rule; a load left
+    /// unmatched at tx end self-destructs the actor (Q6). Conventional
+    /// shape `{0x00 → public, 0x01 → private}` (spec.md §Actors), not
+    /// VM-enforced. Re-loading an already-checked-out actor → `ActorEmpty`.
     fn op_load(
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<(), VMError> {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let actor = self.require_actor()?.clone();
-        if self.current_call.loaded || registry.is_marked_for_destruction(&actor) {
-            return Err(VMError::LoadAlreadyMarked);
-        }
         let state = registry.load_state(&actor)?;
-        registry.mark_for_destruction(&actor);
-        self.current_call.loaded = true;
         self.push_value(Value::Dict(state));
         Ok(())
     }
 
     /// _dict_ **save** → ø
     ///
-    /// Pops a Dict, validates portability, persists it as the
-    /// current actor's state, and clears the re-entrancy mark set
-    /// by `load`. Portability is the canonical storage gate — every
-    /// inserted value must be portable (`Int253`, `String`, `Point`,
-    /// `Dict` of portable, non-negative `ClearToken`, `Token`).
-    /// Non-portable values (`Cell`, `Merlin`, `Variable`,
-    /// `Expression`, `Constraint`, `MultiscalarMul`, `WideToken`,
-    /// negative `ClearToken`) hard-fail `NonPortableInState`.
+    /// Pops a Dict, validates portability, and **moves it back** into
+    /// the current actor (which must be checked out by a prior `load` —
+    /// else `SaveWithoutLoad`, since saving would clobber live state).
+    /// Portability is the canonical storage gate — every inserted value
+    /// must be portable (`Int253`, `String`, `Point`, `Dict` of
+    /// portable, non-negative `ClearToken`, `Token`). Non-portable
+    /// values (`Cell`, `Merlin`, `Variable`, `Expression`,
+    /// `Constraint`, `MultiscalarMul`, `WideToken`, negative
+    /// `ClearToken`) hard-fail `NonPortableInState`.
     fn op_save(
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<(), VMError> {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
-        if !self.current_call.loaded {
-            return Err(VMError::SaveWithoutLoad);
-        }
         let state = self.pop_value()?.to_dict()?;
         // Portability is the canonical storage gate — checked here
         // before any registry mutation so a bad state is rejected
@@ -2608,9 +2587,9 @@ impl VM {
         // linear values (Token) survive — those are exactly what
         // actor state is for.
         let state_for_log = state.clone();
+        // Moves the state back in; errors `SaveWithoutLoad` if the
+        // actor isn't checked out (no matching `load`).
         registry.save_state(&actor, state)?;
-        registry.unmark_for_destruction(&actor);
-        self.current_call.loaded = false;
         // Structural effect. State-machine replay applies these
         // last-write-wins per actor; the merkle leaf hashes
         // `state_root(state)`, while the entry carries the full

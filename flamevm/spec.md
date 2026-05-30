@@ -472,9 +472,9 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | c5 | [signcall](#signcall) | | cell script sig gas bytes args… m → results… k' | Run a script signed by the cell predicate in an isolated frame. |
 |    | **Actors** | | | |
 | d0 | [send](#send) | | args… k refund gas bytes method addr → ø | Queue an asynchronous message to an actor. |
-| d1 | [call](#call) | int. | args… k gas bytes method addr → results… k' | Synchronous actor-to-actor call (isolated frame, no re-entry). |
-| d2 | [load](#load) | int. | ø → dict | Load the current actor's state dict (locks against re-entry). |
-| d3 | [save](#save) | int. | dict → ø | Persist the actor's state dict (unlocks; required to survive). |
+| d1 | [call](#call) | int. | args… k gas bytes method addr → results… k' | Synchronous actor-to-actor call (isolated frame; re-entry gated by state presence). |
+| d2 | [load](#load) | int. | ø → dict | Check out the actor's state dict (moves it out; locks against re-entry). |
+| d3 | [save](#save) | int. | dict → ø | Move the state dict back in (requires checkout; unlocks). |
 |    | **Frame introspection** | | | |
 | e0 | [actorid](#actorid) | | ø → s | Push the current actor's id (32-byte string). |
 | e1 | [anchor](#anchor) | | ø → s | Push the current frame's anchor (32-byte string). |
@@ -1142,7 +1142,7 @@ _args… k gas bytes method addr_ → _results… k'_
 
 Synchronous actor-to-actor call. Same operand shape as [`send`](#send) minus `refund`.
 
-Verifies the **re-entrancy guard** — the target actor must not already appear on the current call stack ([ADR 0003](../decisions/0003-forbid-reentrancy.md); on failure, returns the `0` failure marker rather than aborting the tx). Resolves the callee's method bytes via the registry, then splits the parent's anchor (left to the child frame, right held in `post_call_anchor` for restoration on return).
+Resolves the callee's method bytes via the registry, then splits the parent's anchor (left to the child frame, right held in `post_call_anchor` for restoration on return). **Re-entrancy is governed by the actor's state, not a call-stack guard** ([ADR 0017](../decisions/0017-actor-state-linear-lock.md)): if the callee's state is currently **checked out** (a live frame `load`ed it and hasn't `save`d it back), `resolve_method` returns `ActorEmpty` and the call returns the `0` failure marker — the call "did not happen". A callee whose state is committed (or never loaded) is entered normally, so safe re-entry is permitted.
 
 **Emits no txlog entry.** Calls are intra-tx control flow; the structural effects produced inside the callee (`Output`, `Send`, `ActorSave`, `Issue`, `Retire`, `Fee`, `Data`) are what the state machine reads. The `(External TxID, Internal TxID)` of a tx is a merkle root over effects only — see `design.md` §"TxLog records effects, not control flow".
 
@@ -1154,25 +1154,27 @@ Returns via `return k'`. Hard-fails `RegistryUnavailable` outside an internal-tx
 
 ø → _dict_
 
-Loads the current actor's state Dict from the registry, marks the actor as locked (re-entry blocked until `save`), and pushes the Dict onto the stack. The Dict's conventional shape is `{0x00 → public, 0x01 → private}` (see [Actors](#actors)) but the VM doesn't enforce it.
+**Checks out** the current actor's state: moves the Dict out of the registry (the actor goes empty/`None`) and pushes it onto the stack. The Dict's conventional shape is `{0x00 → public, 0x01 → private}` (see [Actors](#actors)) but the VM doesn't enforce it.
 
-Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `LoadAlreadyMarked`, `ActorNotFound`, `ActorFrozen`.
+While checked out, the actor has no code or data, so any `call`/`send`/`load` against it fails `ActorEmpty` — the **state's presence is the re-entrancy lock** ([ADR 0017](../decisions/0017-actor-state-linear-lock.md)). The state is a linear resource: `load` *moves* it (no copy); the frame must discharge it before returning, per the frame-end clean-stack rule. Re-loading an already-checked-out actor → `ActorEmpty`.
 
-**Self-destruct.** A frame that returns without a matching `save` leaves the registry mark set; the tx-end commit hook removes the actor and recycles its vbytes through the maturity queue (100 blocks). See [ADR 0012](../decisions/0012-load-save-reentry-lock.md).
+Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorEmpty` (already checked out), `ActorNotFound`, `ActorFrozen`.
+
+**Self-destruct.** A frame discharges a loaded state by either `save`ing it back (the actor persists) or **explicitly dismantling it** — recursively reading every item out, retiring/spending tokens (they're non-droppable, so they *can't* be silently dropped; only a zero-qty `ClearToken` shell is droppable), and dropping the droppable residue. A fully-dismantled state leaves the actor empty, and the tx-end hook reaps it (removes the record, recycles vbytes through the maturity queue, 100 blocks). Forgetting to discharge is caught loudly — a Dict left on the stack hard-fails `StackNotClean` (rolled back), never a silent reap. A *failed* `load` is rolled back (state restored), so only an intentional dismantle self-destructs (Q6 / ADR 0017).
 
 ### save
 
 _dict_ → ø
 
-Pops a Dict, **validates portability** (every value must be portable per `Value::is_portable`), persists it against the current actor, and clears the mark. Emits `TxEntry::ActorSave { actor, state }` carrying the **full** post-save state — symmetric with `Output(Cell)` which carries the full Cell. The merkle leaf for this entry hashes `(actor.to_hash(), state_root(&state))`, so the TxID commits to the canonical state root while consumers reading the txlog directly get the bytes (no separate state-witness channel needed).
+Pops a Dict, **validates portability** (every value must be portable per `Value::is_portable`), and **moves it back** into the current actor — which must be **checked out** by a prior `load`, else `SaveWithoutLoad` (saving to a non-checked-out actor would clobber, and silently drop the tokens of, live state). Emits `TxEntry::ActorSave { actor, state }` carrying the **full** post-save state — symmetric with `Output(Cell)` which carries the full Cell. The merkle leaf for this entry hashes `(actor.to_hash(), state_root(&state))`, so the TxID commits to the canonical state root while consumers reading the txlog directly get the bytes (no separate state-witness channel needed).
 
 **State shape.** The VM does not enforce the conventional `{0x00 → public, 0x01 → private}` wrapper shape at save time; that's a script-side convention used by `op_call`'s method-dispatch lookup. Any portable Dict is accepted as state. Methods that never get called via `op_call` simply aren't reachable.
 
 **Portability is the canonical storage gate.** Portable values: `Int253`, `String`, `Point`, `Dict` of portable, non-negative `ClearToken`, `Token`. Non-portable values (`Cell`, `Merlin`, `Variable`, `Expression`, `Constraint`, `MultiscalarMul`, `WideToken`, negative `ClearToken`) hard-fail `NonPortableInState`. Portability is distinct from VM stack-copyability (Tokens are portable but not copyable — they survive the load/save round-trip via Rust-level deep clone, ignoring the linear-type discipline that gates `dup`).
 
-**Atomicity.** A `save` failure (`NonPortableInState`, `TypeNotDict`, `MalformedActorState` from an unencodable value, `ActorNotFound` if the registry record vanished) propagates as a frame failure. The frame's call boundary rolls back both the txlog (truncating any ActorSave entry the failed callee may have written earlier) and the actor registry (restoring pre-frame state + marks), so the actor stays consistent with the truncated txlog. At the outermost frame, `execute_internal` applies the same rollback at the tx level.
+**Atomicity.** A `save` failure (`SaveWithoutLoad`, `NonPortableInState`, `TypeNotDict`, `MalformedActorState`, `ActorNotFound`) propagates as a frame failure. The frame's call boundary rolls back both the txlog (truncating any ActorSave entry the failed callee may have written earlier) and the actor registry (restoring pre-frame state — a failed `load`'s checked-out state is restored to present, so the actor isn't spuriously self-destructed), keeping the actor consistent with the truncated txlog. At the outermost frame, `execute_internal` applies the same rollback at the tx level.
 
-Hard-fails: `SaveWithoutLoad`, `NonPortableInState`, `TypeNotDict`, `MalformedActorState`, `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorNotFound`.
+Hard-fails: `SaveWithoutLoad` (actor not checked out), `NonPortableInState`, `TypeNotDict`, `MalformedActorState`, `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorNotFound`.
 
 ### signtx
 

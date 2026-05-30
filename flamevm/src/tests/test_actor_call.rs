@@ -121,105 +121,85 @@ fn call_does_not_emit_txlog_entry_by_itself() {
 }
 
 #[test]
-fn direct_self_call_rejected_as_reentrancy() {
+fn call_to_checked_out_actor_blocked() {
+    // The re-entrancy lock (ADR 0017): calling an actor whose state is
+    // checked out — a live frame holds it mid-update — fails with the
+    // `0` marker (the call "did not happen"). The state's absence *is*
+    // the lock; `resolve_method` returns `ActorEmpty`.
     let mut reg = MemRegistry::new();
-    let mut public = Dict::new();
-    public.insert(
-        RECV_METHOD,
-        Value::String(String::from(nop_recv())),
-    );
-    let state = state_with_public(public);
     let id = ActorID::Hash([0xa1; 32]);
-    reg.deploy(id.clone(), state, 10_000, 0).expect("deploy");
+    reg.deploy(id.clone(), state_with_public({
+        let mut p = Dict::new();
+        p.insert(RECV_METHOD, Value::String(String::from(Program::new().nop().to_bytecode())));
+        p
+    }), 10_000, 0).expect("deploy");
+    // Check the state out, as a live frame mid-update would.
+    reg.actor_mut(&id).expect("present").state = None;
 
-    // Self-call from id's actor context: pre-frame reentrancy check
-    // rejects with marker `0` on the caller's stack. The call simply
-    // "did not happen" — no Call entry, no anchor split.
     let script = call_script(&id, 0, 10_000);
     let mut vm = vm_for_actor(id.clone(), script);
-
-    // Step through the call op. Marker `0` is left on top of the
-    // stack; subsequent steps may fail later (StackNotClean at root
-    // finish) but the call-time error is the marker.
     while vm.step_internal_with_registry(&mut reg).is_ok() {
-        if !vm.current_call.stack.is_empty()
-            && matches!(vm.current_call.stack.last(), Some(Value::Int253(_)))
-        {
-            // After call: stack should be exactly [0].
-            assert_eq!(vm.current_call.stack.len(), 1);
+        if vm.current_call.stack.len() == 1 {
             match &vm.current_call.stack[0] {
-                Value::Int253(i) => assert_eq!(*i, Int253::from(0u64), "marker"),
+                Value::Int253(i) => {
+                    assert_eq!(*i, Int253::from(0u64), "block marker");
+                    assert_eq!(vm.txlog.len(), 1, "blocked re-entry must not emit side effects");
+                    return;
+                }
                 _ => panic!("expected Int253 marker"),
             }
-            // Rejected reentry produces no side effects — txlog is
-            // just the Header. (Calls themselves emit no txlog entry;
-            // this assertion catches any accidental ActorSave / Send
-            // from a half-entered frame.)
-            assert_eq!(vm.txlog.len(), 1, "rejected reentry must not emit side effects");
-            return;
         }
     }
     panic!("call did not push a marker");
 }
 
 #[test]
-fn indirect_cycle_rejected_as_reentrancy() {
+fn reentrant_call_succeeds_when_state_not_held() {
+    // Re-entry is *permitted* when the target isn't holding its state
+    // (ADR 0017 — strictly more expressive than the old blanket ban).
+    // A.recv → B → A.method1: B re-enters A, and A.method1 actually
+    // runs (it logs) because A never checked out its state. Under the
+    // old call-stack guard this re-entry was rejected.
     let mut reg = MemRegistry::new();
-    // Build A and B. A → B; B re-calls A. The re-entrancy detection
-    // fires inside B's call attempt and converts to a `0` failure
-    // marker on B's stack (instead of a fatal error) per the new
-    // call-return contract. B drops it and returns cleanly to A.
     let a_id = ActorID::Hash([0xaa; 32]);
     let b_id = ActorID::Hash([0xbb; 32]);
 
+    // A.method1: emit a Data log entry, then return cleanly.
+    let a_method1 = Program::new()
+        .push_str(String::from(b"reentered".to_vec()))
+        .log()
+        .to_bytecode();
+    // A.recv (method 0): call B, drop B's [count, success].
+    let a_recv = {
+        let mut p = Program::parse(&call_script(&b_id, 0, 200_000)).expect("parse");
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.to_bytecode()
+    };
     let mut a_public = Dict::new();
-    a_public.insert(
-        RECV_METHOD,
-        Value::String(String::from(nop_recv())),
-    );
-    reg.deploy(a_id.clone(), state_with_public(a_public), 100_000, 0)
+    a_public.insert(RECV_METHOD, Value::String(String::from(a_recv.clone())));
+    a_public.insert(Int253::from(1u64), Value::String(String::from(a_method1)));
+    reg.deploy(a_id.clone(), state_with_public(a_public), 1_000_000, 0)
         .expect("deploy A");
 
+    // B.recv: call A.method1, drop A's [count, success].
+    let b_recv = {
+        let mut p = Program::parse(&call_script(&a_id, 1, 100_000)).expect("parse");
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.to_bytecode()
+    };
     let mut b_public = Dict::new();
-    b_public.insert(
-        RECV_METHOD,
-        Value::String(String::from(nop_recv())),
-    );
-    reg.deploy(b_id.clone(), state_with_public(b_public), 100_000, 0)
+    b_public.insert(RECV_METHOD, Value::String(String::from(b_recv)));
+    reg.deploy(b_id.clone(), state_with_public(b_public), 1_000_000, 0)
         .expect("deploy B");
 
-    // B's recv: call A (re-entry — fails with marker 0), drop the
-    // marker, return cleanly.
-    let b_recv = {
-        let mut p = Program::parse(&call_script(&a_id, 0, 1_000)).expect("parse");
-        p.push_instr(crate::ops::Instruction::Drop);
-        p.to_bytecode()
-    };
-    let mut new_b_public = Dict::new();
-    new_b_public.insert(
-        RECV_METHOD,
-        Value::String(String::from(b_recv)),
-    );
-    reg.save_state(&b_id, state_with_public(new_b_public))
-        .expect("update B");
-
-    // A's recv: call B (B returns 0 results successfully), drop the
-    // [count, success] markers.
-    let a_script = {
-        let mut p = Program::parse(&call_script(&b_id, 0, 50_000)).expect("parse");
-        p.push_instr(crate::ops::Instruction::Drop);
-        p.push_instr(crate::ops::Instruction::Drop);
-        p.to_bytecode()
-    };
-    let mut vm = vm_for_actor(a_id, a_script);
-
-    // Tx must complete without fatal error.
+    let mut vm = vm_for_actor(a_id, a_recv);
     while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
 
-    // Reentrancy is silently rejected with a `0` marker. Neither side
-    // wrote actor state (no load/save), so txlog has only the Header.
-    assert_eq!(vm.txlog.len(), 1,
-        "no actor state mutations → only Header in txlog");
+    // A.method1 ran via the re-entry → its Data entry is in the txlog.
+    let logged = vm.txlog.iter().any(|e| matches!(e, crate::tx::TxEntry::Data(_)));
+    assert!(logged, "re-entrant A.method1 must have run (and logged)");
 }
 
 #[test]
@@ -331,7 +311,7 @@ fn f1_failed_subcall_load_does_not_destroy_actor() {
     // tx-end `commit_tx_destructions` would have destroyed X.
     assert!(reg.exists(&x_id), "X must still exist after the failed sub-call");
     assert!(
-        !reg.is_marked_for_destruction(&x_id),
+        !reg.actor(&x_id).map_or(false, |a| a.is_checked_out()),
         "X's load-mark must be cleared by the call-frame rollback",
     );
 }
@@ -364,7 +344,7 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
         .verify()
         .to_bytecode();
     let x_id = deploy_recv(&mut reg, evil_recv, 10_000);
-    let root_before = crate::state_root(&reg.actor(&x_id).expect("X exists").state);
+    let root_before = crate::state_root(reg.actor(&x_id).expect("X exists").state.as_ref().expect("present"));
 
     let a_recv = Program::new()
         .push_int(0u64)
@@ -394,11 +374,11 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
     // F1 invariants:
     let x = reg.actor(&x_id).expect("X must still exist after rollback");
     assert_eq!(
-        crate::state_root(&x.state),
+        crate::state_root(x.state.as_ref().expect("present")),
         root_before,
         "X's state must be the rolled-back pre-call root",
     );
-    assert!(!reg.is_marked_for_destruction(&x_id));
+    assert!(!reg.actor(&x_id).map_or(false, |a| a.is_checked_out()));
 
     // F2 / Phase-36 invariant: no ActorSave entry for X in the
     // txlog. The failed sub-call's ActorSave was truncated by
@@ -439,7 +419,7 @@ fn f3_save_failure_rolls_back_and_preserves_actor() {
         .save()       // save sees Int253(0), errors TypeNotDict
         .to_bytecode();
     let x_id = deploy_recv(&mut reg, evil_recv, 10_000);
-    let root_before = crate::state_root(&reg.actor(&x_id).expect("X exists").state);
+    let root_before = crate::state_root(reg.actor(&x_id).expect("X exists").state.as_ref().expect("present"));
 
     let a_recv = Program::new()
         .push_int(0u64)
@@ -469,8 +449,8 @@ fn f3_save_failure_rolls_back_and_preserves_actor() {
     let x = reg
         .actor(&x_id)
         .expect("X must survive — save failure no longer destroys");
-    assert_eq!(crate::state_root(&x.state), root_before);
-    assert!(!reg.is_marked_for_destruction(&x_id));
+    assert_eq!(crate::state_root(x.state.as_ref().expect("present")), root_before);
+    assert!(!reg.actor(&x_id).map_or(false, |a| a.is_checked_out()));
 }
 
 #[test]

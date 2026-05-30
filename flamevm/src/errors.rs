@@ -193,17 +193,16 @@ pub enum VMError {
     #[error("ActorRegistry unavailable in this context")]
     RegistryUnavailable,
 
-    /// This error occurs when `op_load` is called against an actor already marked.
-    #[error("Actor already marked for destruction (re-entrancy lock)")]
-    LoadAlreadyMarked,
+    /// Load/call against an actor whose state is currently checked out
+    /// (a frame `load`ed it and hasn't `save`d it back). The state
+    /// itself is the re-entrancy lock — see ADR 0017.
+    #[error("Actor state is checked out (empty)")]
+    ActorEmpty,
 
-    /// This error occurs when `op_save` is called without a matching `op_load`.
-    #[error("op_save without matching op_load on this frame")]
+    /// `op_save` against an actor that isn't checked out — the script
+    /// never `load`ed it, so saving would clobber live state.
+    #[error("op_save without a matching op_load (actor not checked out)")]
     SaveWithoutLoad,
-
-    /// This error occurs when `op_call` targets an actor already on the call stack.
-    #[error("Re-entrancy detected: target actor already on call stack")]
-    ReentrancyDetected,
 
     /// This error occurs when a send payload value has no canonical encoder.
     #[error("Non-portable value in send payload")]

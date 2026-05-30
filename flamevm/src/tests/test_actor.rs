@@ -3,12 +3,54 @@
 use readerwriter::{Decodable, ReadError};
 
 use crate::{
-    empty_state, grace_window, resolve_method, state_with_public, vbyte_size,
+    empty_state, grace_window, resolve_method, state_root, state_with_public, vbyte_size,
     ActorID, ActorRegistry, Dict, Int253, MemRegistry, String, VbytePool,
     Value, VMError,
     GRACE_BLOCKS_CAP, RECV_METHOD,
     VBYTES_PER_BLOCK,
 };
+
+/// Undo-log checkpoint: an inner frame that *commits* a save, then an
+/// outer rollback, must still undo the inner-committed mutation (the
+/// merge-on-commit path that hands the inner undo entry up to the
+/// parent). Exercises the nested-checkpoint branch directly.
+#[test]
+fn checkpoint_inner_commit_then_outer_rollback_undoes_save() {
+    let mut reg = MemRegistry::new();
+    let id = ActorID::Hash([0x33; 32]);
+    reg.deploy(id.clone(), empty_state(), 1_000, 0).expect("deploy");
+    // Capture the committed state's root via a checkout/checkin that
+    // leaves the actor available and no checkpoint open.
+    let s0 = reg.load_state(&id).expect("checkout");
+    let root_before = state_root(&s0);
+    reg.save_state(&id, s0).expect("checkin");
+
+    reg.push_checkpoint(); // outer
+    reg.push_checkpoint(); // inner
+    // inner: check out, then save a different state back.
+    drop(reg.load_state(&id).expect("checkout"));
+    let mut pubd = Dict::new();
+    pubd.insert(Int253::from(9u64), Value::Int253(Int253::from(1u64)));
+    reg.save_state(&id, state_with_public(pubd)).expect("save");
+    reg.pop_checkpoint_commit(); // inner commits → undo merges into outer
+    reg.pop_checkpoint_rollback(); // outer rolls back → must restore original
+
+    let s_after = reg.load_state(&id).expect("checkout");
+    assert_eq!(state_root(&s_after), root_before, "outer rollback must undo inner-committed save");
+}
+
+/// An actor deployed inside a checkpoint is removed on rollback (undo
+/// of a `None` prior).
+#[test]
+fn checkpoint_rollback_removes_actor_deployed_in_frame() {
+    let mut reg = MemRegistry::new();
+    let id = ActorID::Hash([0x44; 32]);
+    reg.push_checkpoint();
+    reg.deploy(id.clone(), empty_state(), 1_000, 0).expect("deploy");
+    assert!(reg.exists(&id));
+    reg.pop_checkpoint_rollback();
+    assert!(!reg.exists(&id), "rollback must remove the in-frame deploy");
+}
 
 #[test]
 fn actorid_hash_and_constructor_resolve_to_same_canonical_id() {
@@ -199,6 +241,8 @@ fn memregistry_save_persists_state() {
     let mut updated = Dict::new();
     updated.insert(Int253::from(0u64), Value::Dict(Dict::new()));
     updated.insert(Int253::from(1u64), Value::Dict(updated_private));
+    // Check the state out first (save only accepts a checked-out actor).
+    let _ = r.load_state(&id).expect("checkout");
     r.save_state(&id, updated).expect("save");
     let loaded = r.load_state(&id).expect("load");
     // Private dict (key 1) has 1 entry; public dict (key 0) is empty.
@@ -230,23 +274,25 @@ fn memregistry_resolve_method_missing_errors() {
 }
 
 #[test]
-fn memregistry_mark_unmark_round_trip() {
+fn memregistry_checkout_checkin_round_trip() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([4u8; 32]);
     r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
-    assert!(!r.is_marked_for_destruction(&id));
-    r.mark_for_destruction(&id);
-    assert!(r.is_marked_for_destruction(&id));
-    r.unmark_for_destruction(&id);
-    assert!(!r.is_marked_for_destruction(&id));
+    assert!(!r.actor(&id).unwrap().is_checked_out());
+    let state = r.load_state(&id).expect("checkout");
+    assert!(r.actor(&id).unwrap().is_checked_out());
+    r.save_state(&id, state).expect("checkin");
+    assert!(!r.actor(&id).unwrap().is_checked_out());
 }
 
 #[test]
-fn memregistry_commit_tx_clears_marked_actors_and_queues_vbytes() {
+fn memregistry_commit_tx_reaps_checked_out_actors_and_queues_vbytes() {
+    // Self-destruct: an actor left checked out at tx end (its state
+    // dismantled instead of saved) is reaped and its vbytes queued.
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([5u8; 32]);
     r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
-    r.mark_for_destruction(&id);
+    let _state = r.load_state(&id).expect("checkout"); // never saved back
     let cleared = r.commit_tx_destructions(10);
     assert_eq!(cleared, 1);
     assert!(!r.exists(&id));
@@ -254,7 +300,7 @@ fn memregistry_commit_tx_clears_marked_actors_and_queues_vbytes() {
 }
 
 #[test]
-fn memregistry_commit_tx_leaves_unmarked_actors_alone() {
+fn memregistry_commit_tx_leaves_present_actors_alone() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([6u8; 32]);
     r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");

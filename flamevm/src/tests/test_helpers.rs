@@ -68,15 +68,6 @@ impl ActorRegistry for StubRegistry {
     fn pop_checkpoint_commit(&mut self) {}
     fn pop_checkpoint_rollback(&mut self) {}
 
-    fn mark_for_destruction(&mut self, _id: &ActorID) {
-        unimplemented!("StubRegistry::mark_for_destruction — use MemRegistry")
-    }
-    fn unmark_for_destruction(&mut self, _id: &ActorID) {
-        unimplemented!("StubRegistry::unmark_for_destruction — use MemRegistry")
-    }
-    fn is_marked_for_destruction(&self, _id: &ActorID) -> bool {
-        false
-    }
     fn commit_tx_destructions(&mut self, _current_height: u64) -> usize {
         0
     }

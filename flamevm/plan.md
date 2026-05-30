@@ -55,13 +55,20 @@ what's left to build.
 
 | #  | Phase                                                              |
 |----|--------------------------------------------------------------------|
-| 40 | Gas-cost estimation (incl. block resource pool consideration)      |
+| 40 | Gas-cost estimation (incl. block resource pool consideration) — analysis landed in `docs/gas-analysis.md`; awaiting Architect sign-off on the 3-lane schedule (`feedback/2026-05-30-vm-engineer-on-design.md`) |
 | 41 | Memory cap (allocator hooks + enforcement)                         |
 | 42 | Integration tests (incl. fuzzing & canonicality sweeps)            |
 
-**39 of 42 complete (~93 %).** Total test count: 579 passing; build
-clean. Remaining compiler warnings target Phase 40 (gas charging) and
-Phase 41 (mem-cap allocator).
+**39 of 42 complete (~93 %).** Total test count: 490 passing. Build clean.
+Remaining compiler warnings target Phase 40 (gas charging) and Phase 41
+(mem-cap allocator).
+
+**Pending Architect decision:** actor state reframed as a linear re-entrancy
+lock (`Actor.state: Option<Dict>`; `load` checks out / `save` checks in; a
+checked-out actor fails `ActorEmpty`). Removes the mark set, the `op_call`
+re-entrancy guard, the `loaded` flag, and `mark_undo`. **Reverses ADR 0003 +
+0012** → proposed ADR 0017 + full lifecycle/re-entrancy invariant audit in
+`feedback/2026-05-30-vm-engineer-on-reentrancy-model.md`.
 
 ### Actor build (Phases 24–29, 31) — landed in 8 units
 
@@ -213,7 +220,7 @@ unified the witness model, added a lazy MSM type, retired
 
 | Opcode / feature | Source | Phase |
 |---|---|---|
-| Gas charging per opcode | design.md §Resources / Gas | 40 |
+| Gas charging per opcode | design.md §Resources / Gas; cost analysis + draft schedule in `docs/gas-analysis.md` | 40 |
 | Block resource pools (`B_par : B_ser = 4:1`) | design.md §Block resource pools | 40 (consideration) |
 | Memory cap `4× vbytes` enforcement (allocator hooks) | design.md ADR 0002 | 41 |
 | Chain-state introspection opcodes (`height`, `blockhash`, `blockburn`, `blockweight`, `blockrate`, `chainstate`) | design.md §Chain-state introspection (forward-looking) | deferred |

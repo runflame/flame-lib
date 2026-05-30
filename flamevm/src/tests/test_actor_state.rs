@@ -49,7 +49,7 @@ fn vm_for(actor: ActorID, script: Vec<u8>) -> VM {
 }
 
 #[test]
-fn load_pushes_wrapper_dict_and_marks_actor() {
+fn load_checks_out_state() {
     let mut reg = MemRegistry::new();
     let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
 
@@ -60,21 +60,20 @@ fn load_pushes_wrapper_dict_and_marks_actor() {
     let mut vm = vm_for(id.clone(), script);
     vm.step_internal_with_registry(&mut reg).expect("load step");
 
-    // Top of stack should be the wrapper Dict.
+    // Top of stack should be the wrapper Dict (moved out of the actor).
     match vm.current_call.stack.last().expect("stack not empty") {
         Value::Dict(d) => {
             assert_eq!(d.len(), 2, "wrapper has public + private");
         }
         _ => panic!("expected Dict"),
     }
-    // Registry mark is set.
-    assert!(reg.is_marked_for_destruction(&id));
-    // Frame flag set.
-    assert!(vm.current_call.loaded);
+    // The actor is now checked out (state moved to the stack) — its
+    // presence is the re-entrancy lock.
+    assert!(reg.actor(&id).expect("present").is_checked_out());
 }
 
 #[test]
-fn load_then_save_round_trips_and_clears_mark() {
+fn load_then_save_round_trips() {
     let mut reg = MemRegistry::new();
     let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
 
@@ -85,10 +84,8 @@ fn load_then_save_round_trips_and_clears_mark() {
 
     // Stack drained by save.
     assert!(vm.current_call.stack.is_empty());
-    // Mark cleared.
-    assert!(!reg.is_marked_for_destruction(&id));
-    // Frame flag cleared.
-    assert!(!vm.current_call.loaded);
+    // State checked back in.
+    assert!(!reg.actor(&id).expect("present").is_checked_out());
 }
 
 #[test]
@@ -122,30 +119,29 @@ fn load_without_registry_errors_registry_unavailable() {
 }
 
 #[test]
-fn second_load_on_same_frame_errors_already_marked() {
+fn second_load_errors_actor_empty() {
     let mut reg = MemRegistry::new();
     let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
 
-    // Script: `load; load`.
+    // Script: `load; load`. The second load finds the actor empty
+    // (state already checked out) → ActorEmpty.
     let script = Program::new().load().load().to_bytecode();
     let mut vm = vm_for(id, script);
-    // First step: `load` succeeds.
     assert!(vm.step_internal_with_registry(&mut reg).expect("first"));
-    // Second step: second `load` errors.
     let err = vm.step_internal_with_registry(&mut reg).expect_err("must error");
-    assert!(matches!(err, VMError::LoadAlreadyMarked));
+    assert!(matches!(err, VMError::ActorEmpty));
 }
 
 #[test]
-fn load_against_marked_actor_from_outside_frame_errors() {
+fn load_against_checked_out_actor_errors() {
     let mut reg = MemRegistry::new();
     let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
-    // Pre-mark the actor (as if a sibling frame loaded it).
-    reg.mark_for_destruction(&id);
+    // Simulate a sibling frame having checked out the state.
+    reg.actor_mut(&id).expect("present").state = None;
 
     let mut vm = vm_for(id, Program::new().load().to_bytecode());
     let err = vm.step_internal_with_registry(&mut reg).expect_err("must error");
-    assert!(matches!(err, VMError::LoadAlreadyMarked));
+    assert!(matches!(err, VMError::ActorEmpty));
 }
 
 #[test]
@@ -194,12 +190,13 @@ fn save_accepts_arbitrary_portable_dict_shape() {
     // dispatchable, but that's their choice.)
     let mut reg = MemRegistry::new();
     let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
-    reg.mark_for_destruction(&id); // simulate prior load
+    // Check the state out (as a prior op_load would) so save can move
+    // a fresh Dict back in.
+    reg.actor_mut(&id).expect("present").state = None;
 
     // Script: push:0; dict; save. Empty Dict, no wrapper shape.
     let script = Program::new().push_int(0u64).dict().save().to_bytecode();
     let mut vm = vm_for(id, script);
-    vm.current_call.loaded = true; // simulate prior op_load on this frame
     for _ in 0..3 {
         vm.step_internal_with_registry(&mut reg).expect("step ok");
     }
@@ -211,36 +208,98 @@ fn save_accepts_arbitrary_portable_dict_shape() {
 }
 
 #[test]
-fn load_without_save_then_commit_tx_destroys_actor_and_queues_vbytes() {
-    // Combined unit test: after `op_load` succeeds the registry
-    // mark is set; then `commit_tx_destructions` (the tx-end hook
-    // wired into VM::execute_internal) clears the actor and queues
-    // its vbytes for release at height + maturity.
+fn load_then_dismantle_self_destructs_and_queues_vbytes() {
+    // Self-destruct end-to-end: recv `load`s its (droppable) state and
+    // `drop`s it — explicitly destroying the state recursively leaves
+    // the actor empty, which execute_internal's tx-end hook reaps,
+    // queuing its vbytes for release at height + maturity.
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, vec![0x1d], 10_000, 0);
+    let id = deploy_with_recv(
+        &mut reg,
+        Program::new().load().drop_().to_bytecode(),
+        10_000,
+        0,
+    );
     assert!(reg.exists(&id));
 
-    // Step a single `load`. We don't run to end-of-frame (that'd
-    // hit StackNotClean) — we're testing the registry mutation,
-    // not the script's clean exit.
-    let mut vm = vm_for(id.clone(), Program::new().load().to_bytecode());
-    vm.step_internal_with_registry(&mut reg).expect("load ok");
-    assert!(reg.is_marked_for_destruction(&id));
+    let block = BlockContext { height: 100 };
+    let msg = Message {
+        target: id.clone(),
+        method: RECV_METHOD,
+        caller: None,
+        anchor: Anchor([0x07; 32]),
+        payload: Vec::new(),
+        gas: 1_000_000,
+        vbytes: 0,
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+    };
+    VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("ok");
 
-    // Tx-end commit hook (what `execute_internal` runs after a
-    // clean script exit; here we invoke it directly to test the
-    // Q6 path in isolation).
-    let cleared = reg.commit_tx_destructions(100);
-    assert_eq!(cleared, 1);
-    assert!(!reg.exists(&id));
+    assert!(!reg.exists(&id), "dismantled state self-destructs the actor");
     let release_at = 100 + crate::VBYTE_MATURITY_BLOCKS;
-    let queued = reg
-        .vbyte_pool()
-        .maturing
-        .get(&release_at)
-        .copied()
-        .unwrap_or(0);
-    assert_eq!(queued, 10_000);
+    assert_eq!(reg.vbyte_pool().maturing.get(&release_at).copied().unwrap_or(0), 10_000);
+}
+
+#[test]
+fn dismantle_token_bearing_state_requires_retire() {
+    // Tokens must be explicitly retired/spent, never dropped: a state
+    // holding a live (non-zero) ClearToken can't be `drop`ped —
+    // `TypeNotDroppable` (a zero-qty ClearToken shell would be
+    // droppable). recv = `load; drop`.
+    let mut reg = MemRegistry::new();
+    let recv = Program::new().load().drop_().to_bytecode();
+    let mut public = Dict::new();
+    public.insert(RECV_METHOD, Value::String(String::from(recv)));
+    let mut private = Dict::new();
+    private.insert(
+        Int253::from(0u64),
+        Value::ClearToken(crate::ClearToken::new(Int253::from(5u64), Int253::from(9u64))),
+    );
+    let mut state = Dict::new();
+    state.insert(Int253::from(0u64), Value::Dict(public));
+    state.insert(Int253::from(1u64), Value::Dict(private));
+    let id = ActorID::Hash([0x09; 32]);
+    reg.deploy(id.clone(), state, 10_000, 0).expect("deploy");
+
+    let block = BlockContext { height: 100 };
+    let msg = Message {
+        target: id.clone(),
+        method: RECV_METHOD,
+        caller: None,
+        anchor: Anchor([0x09; 32]),
+        payload: Vec::new(),
+        gas: 1_000_000,
+        vbytes: 0,
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+    };
+    let err = VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect_err("must error");
+    assert!(matches!(err, VMError::TypeNotDroppable));
+    assert!(reg.exists(&id), "rolled back — balance intact");
+}
+
+#[test]
+fn load_without_discharge_errors_stack_not_clean() {
+    // Forgetting to discharge a loaded state is caught loudly: the
+    // Dict is left on the stack at frame end → StackNotClean (rolled
+    // back). A missing `save` is never a silent self-destruct.
+    let mut reg = MemRegistry::new();
+    let id = deploy_with_recv(&mut reg, Program::new().load().to_bytecode(), 10_000, 0);
+    let block = BlockContext { height: 100 };
+    let msg = Message {
+        target: id.clone(),
+        method: RECV_METHOD,
+        caller: None,
+        anchor: Anchor([0x08; 32]),
+        payload: Vec::new(),
+        gas: 1_000_000,
+        vbytes: 0,
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+    };
+    let err = VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect_err("must error");
+    assert!(matches!(err, VMError::StackNotClean));
+    // Rolled back — the actor is intact and available.
+    assert!(reg.exists(&id));
+    assert!(!reg.actor(&id).expect("present").is_checked_out());
 }
 
 #[test]
@@ -268,9 +327,9 @@ fn load_followed_by_save_preserves_actor() {
     };
     VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("ok");
 
-    // Actor still present; mark cleared.
+    // Actor still present; state checked back in (not self-destructed).
     assert!(reg.exists(&id));
-    assert!(!reg.is_marked_for_destruction(&id));
+    assert!(!reg.actor(&id).expect("present").is_checked_out());
 }
 
 // ── Receive (SendID committed into Internal TxID) ───────────────────
