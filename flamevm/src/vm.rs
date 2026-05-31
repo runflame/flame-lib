@@ -114,10 +114,8 @@ pub trait Delegate {
     /// the caller's proof.
     type BatchVerifier: musig::BatchVerification + musig::BatchCheckpoint;
 
-    /// Returns the delegate's underlying constraint system.
     fn cs(&mut self) -> &mut Self::CS;
 
-    /// Returns the delegate's batch verifier.
     fn batch_verifier(&mut self) -> &mut Self::BatchVerifier;
 
     /// Adds a Commitment to the CS, producing a high-level variable.
@@ -191,12 +189,10 @@ impl Run {
         self.cursor >= self.instructions.len()
     }
 
-    /// Resets the cursor to the start of the Run. Used by `loop`.
     fn rewind(&mut self) {
         self.cursor = 0;
     }
 
-    /// Jumps past the end of the Run. Used by `break:k`.
     fn jump_to_end(&mut self) {
         self.cursor = self.instructions.len();
     }
@@ -1863,16 +1859,9 @@ impl VM {
         Ok(())
     }
 
-    /// Pops a 32-byte String and returns it as a fixed array. Used by
-    /// opcodes that consume canonical-hash payloads (`send`, `call`).
     fn pop_string_32(&mut self) -> Result<[u8; 32], VMError> {
         let s = self.pop_value()?.to_string()?;
-        if s.len() != 32 {
-            return Err(VMError::MalformedAddress);
-        }
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&s.to_bytes());
-        Ok(out)
+        crate::string::array32(&s.to_bytes()).ok_or(VMError::MalformedAddress)
     }
 
     /// Pushes the current Run onto the run-stack, switches to a

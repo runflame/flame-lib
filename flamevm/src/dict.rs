@@ -176,7 +176,6 @@ impl Dict {
         d
     }
 
-    /// Updates the sticky flags based on `v`. Internal use only.
     fn absorb_flags(&mut self, v: &Value) {
         if !v.is_copyable() {
             self.copyable = false;

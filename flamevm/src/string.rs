@@ -255,7 +255,6 @@ impl String {
         String::Opaque(bytes.iter().map(|b| !b).collect())
     }
 
-    /// Bytewise binary op; `None` if operand lengths differ.
     fn zip_bytes(self, other: &String, op: impl Fn(u8, u8) -> u8) -> Option<String> {
         let a = self.to_bytes();
         let b = other.to_bytes_vec();

@@ -344,8 +344,7 @@ pub fn read_string(r: &mut impl Reader) -> Result<Vec<u8>, ReadError> {
     Ok(read_string_with_tag(r, tag)?.to_bytes())
 }
 
-/// Reads a compact-encoded `String` given its already-read type tag.
-/// Used by `read_value` (and `read_string`).
+/// Reads a `String` body whose type tag was already read.
 fn read_string_with_tag(r: &mut impl Reader, tag: u8) -> Result<String, ReadError> {
     let len: u64 = match tag {
         STR_IMM_MIN..=STR_IMM_MAX => (tag - STR_IMM_MIN) as u64,

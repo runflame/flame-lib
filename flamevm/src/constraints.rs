@@ -354,8 +354,7 @@ impl Expression {
         }
     }
 
-    /// Evaluates the expression using its optional scalar witness data.
-    /// Returns None if there is no witness.
+    /// `None` if there is no witness data.
     fn eval(&self) -> Option<Int253> {
         match self {
             Expression::Constant(a) => Some(*a),

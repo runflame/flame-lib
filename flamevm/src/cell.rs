@@ -54,7 +54,6 @@ pub trait PredicateWitness: Any + Send + Sync + fmt::Debug {
     /// by `<Predicate as Clone>::clone`.
     fn clone_witness(&self) -> Box<dyn PredicateWitness>;
 
-    /// Bridge to `Any` so callers can downcast.
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -679,7 +678,6 @@ fn blinding_leaf_hash(bytes: &[u8; 32]) -> [u8; 32] {
     h
 }
 
-/// Merkle node hash combining two child hashes.
 fn merkle_node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut t = Transcript::new(b"flamevm.merkle.node");
     t.append_message(b"left", left);
