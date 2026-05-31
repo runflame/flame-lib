@@ -735,15 +735,8 @@ impl VM {
         match result {
             Ok(cont) => {
                 let depth_after = self.call_stack.len();
-                if depth_after > depth_before && self.is_external() {
-                    use musig::BatchCheckpoint;
-                    use r1cs::CheckpointableConstraintSystem;
-                    let batch_snap = delegate.batch_verifier().snapshot();
-                    let cs_snap = delegate.cs().checkpoint();
-                    if let Some(parent) = self.call_stack.last_mut() {
-                        parent.snap_batch = Some(batch_snap);
-                        parent.snap_cs = Some(cs_snap);
-                    }
+                if depth_after > depth_before {
+                    self.snapshot_parent_on_push(delegate);
                 }
                 Ok(cont)
             }
@@ -772,16 +765,7 @@ impl VM {
             Ok(cont) => {
                 let depth_after = self.call_stack.len();
                 if depth_after > depth_before {
-                    if self.is_external() {
-                        use musig::BatchCheckpoint;
-                        use r1cs::CheckpointableConstraintSystem;
-                        let batch_snap = delegate.batch_verifier().snapshot();
-                        let cs_snap = delegate.cs().checkpoint();
-                        if let Some(parent) = self.call_stack.last_mut() {
-                            parent.snap_batch = Some(batch_snap);
-                            parent.snap_cs = Some(cs_snap);
-                        }
-                    }
+                    self.snapshot_parent_on_push(delegate);
                     // Open an undo frame so a future failure of the
                     // newly-pushed frame can roll back any `op_save`/
                     // `op_load` state moves (a failed `load` restores
@@ -801,6 +785,23 @@ impl VM {
                 self.fail_current_call(delegate, Some(registry));
                 Ok(true)
             }
+        }
+    }
+
+    /// On call entry (depth grew), snapshot the delegate's batch + CS
+    /// onto the parent frame so a callee failure can roll them back.
+    /// No-op outside external context (internal delegates have no batch).
+    fn snapshot_parent_on_push<D: Delegate>(&mut self, delegate: &mut D) {
+        if !self.is_external() {
+            return;
+        }
+        use musig::BatchCheckpoint;
+        use r1cs::CheckpointableConstraintSystem;
+        let batch_snap = delegate.batch_verifier().snapshot();
+        let cs_snap = delegate.cs().checkpoint();
+        if let Some(parent) = self.call_stack.last_mut() {
+            parent.snap_batch = Some(batch_snap);
+            parent.snap_cs = Some(cs_snap);
         }
     }
 
@@ -853,7 +854,7 @@ impl VM {
             I::BitXor => self.op_bit_xor(),
             I::ShiftLeft => self.op_shift_left(),
             I::ShiftRight => self.op_shift_right(),
-            I::Keccak256 => self.op_keccak256(),
+            I::Keccak256 => self.op_hash::<sha3::Keccak256>(),
 
             I::Abs => self.op_abs(),
             I::Eq => self.op_eq(delegate),
@@ -880,9 +881,9 @@ impl VM {
             I::Transcript => self.op_transcript(),
             I::TWrite => self.op_twrite(),
             I::TRead => self.op_tread(),
-            I::Sha256 => self.op_sha256(),
-            I::Sha512 => self.op_sha512(),
-            I::Sha3 => self.op_sha3(),
+            I::Sha256 => self.op_hash::<sha2::Sha256>(),
+            I::Sha512 => self.op_hash::<sha2::Sha512>(),
+            I::Sha3 => self.op_hash::<sha3::Sha3_256>(),
             I::Log => self.op_log(),
 
             I::Amount => self.op_amount(),
@@ -1163,41 +1164,13 @@ impl VM {
         Ok(())
     }
 
-    /// `0x83` `sha256` — pops a String, pushes the 32-byte SHA-256 digest.
-    fn op_sha256(&mut self) -> Result<(), VMError> {
-        use sha2::{Digest, Sha256};
+    /// Pops a String, pushes its hash digest. Generic over the digest
+    /// `H`; dispatch fixes the concrete hash per opcode: `sha256` (`0x83`),
+    /// `sha512` (`0x6d`), `sha3` (`0x6e`, FIPS-202), `keccak256` (`0x4e`,
+    /// pre-FIPS Keccak, Ethereum-compatible).
+    fn op_hash<H: sha2::Digest>(&mut self) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
-        let digest = Sha256::digest(s.to_bytes());
-        self.push_value(Value::String(String::from(digest.to_vec())));
-        Ok(())
-    }
-
-    /// `0x6d` `sha512` — pops a String, pushes the 64-byte SHA-512 digest.
-    fn op_sha512(&mut self) -> Result<(), VMError> {
-        use sha2::{Digest, Sha512};
-        let s = self.pop_value()?.to_string()?;
-        let digest = Sha512::digest(s.to_bytes());
-        self.push_value(Value::String(String::from(digest.to_vec())));
-        Ok(())
-    }
-
-    /// `0x6e` `sha3` — pops a String, pushes the 32-byte SHA3-256 digest
-    /// (FIPS-202; padding `0x06`).
-    fn op_sha3(&mut self) -> Result<(), VMError> {
-        use sha3::{Digest, Sha3_256};
-        let s = self.pop_value()?.to_string()?;
-        let digest = Sha3_256::digest(s.to_bytes());
-        self.push_value(Value::String(String::from(digest.to_vec())));
-        Ok(())
-    }
-
-    /// `0x4e` `keccak256` — pops a String, pushes the 32-byte Keccak-256
-    /// digest (pre-FIPS Keccak; padding `0x01`). Distinct from `sha3` for
-    /// Ethereum compatibility.
-    fn op_keccak256(&mut self) -> Result<(), VMError> {
-        use sha3::{Digest, Keccak256};
-        let s = self.pop_value()?.to_string()?;
-        let digest = Keccak256::digest(s.to_bytes());
+        let digest = H::digest(s.to_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
     }
@@ -1281,15 +1254,7 @@ impl VM {
         let mut dict = self.pop_value()?.to_dict()?;
         let v = dict.remove(&k);
         self.push_value(Value::Dict(dict));
-        match v {
-            Some(v) => {
-                self.push_value(v);
-                self.push_value(Value::Int253(Int253::from(1u64)));
-            }
-            None => {
-                self.push_value(Value::Int253(Int253::zero()));
-            }
-        }
+        self.push_optional_value(v);
         Ok(())
     }
 
@@ -1304,16 +1269,19 @@ impl VM {
             None => None,
         };
         self.push_value(Value::Dict(dict));
-        match copied {
+        self.push_optional_value(copied);
+        Ok(())
+    }
+
+    /// Dict-lookup epilogue: pushes `Some(v)` as `v, 1`; `None` as `0`.
+    fn push_optional_value(&mut self, v: Option<Value>) {
+        match v {
             Some(v) => {
                 self.push_value(v);
                 self.push_value(Value::Int253(Int253::from(1u64)));
             }
-            None => {
-                self.push_value(Value::Int253(Int253::zero()));
-            }
+            None => self.push_value(Value::Int253(Int253::zero())),
         }
-        Ok(())
     }
 
     /// `0x66` `first` — `dict → dict {k 1 | 0}`. Pushes the smallest key
@@ -1322,15 +1290,7 @@ impl VM {
         let dict = self.pop_value()?.to_dict()?;
         let k = dict.first_key();
         self.push_value(Value::Dict(dict));
-        match k {
-            Some(k) => {
-                self.push_value(Value::Int253(k));
-                self.push_value(Value::Int253(Int253::from(1u64)));
-            }
-            None => {
-                self.push_value(Value::Int253(Int253::zero()));
-            }
-        }
+        self.push_optional_value(k.map(Value::Int253));
         Ok(())
     }
 
@@ -1339,15 +1299,7 @@ impl VM {
         let dict = self.pop_value()?.to_dict()?;
         let k = dict.last_key();
         self.push_value(Value::Dict(dict));
-        match k {
-            Some(k) => {
-                self.push_value(Value::Int253(k));
-                self.push_value(Value::Int253(Int253::from(1u64)));
-            }
-            None => {
-                self.push_value(Value::Int253(Int253::zero()));
-            }
-        }
+        self.push_optional_value(k.map(Value::Int253));
         Ok(())
     }
 
@@ -1358,15 +1310,7 @@ impl VM {
         let dict = self.pop_value()?.to_dict()?;
         let next_k = dict.next_key_after(&k);
         self.push_value(Value::Dict(dict));
-        match next_k {
-            Some(k) => {
-                self.push_value(Value::Int253(k));
-                self.push_value(Value::Int253(Int253::from(1u64)));
-            }
-            None => {
-                self.push_value(Value::Int253(Int253::zero()));
-            }
-        }
+        self.push_optional_value(next_k.map(Value::Int253));
         Ok(())
     }
 
@@ -2150,11 +2094,7 @@ impl VM {
     fn op_issuepubflv(&mut self) -> Result<(), VMError> {
         let tag = self.pop_value()?.to_string()?;
         let cid = self.pop_value()?.to_string()?;
-        if cid.len() != 32 {
-            return Err(VMError::IndexOutOfRange);
-        }
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&cid.to_bytes());
+        let bytes = crate::string::array32(&cid.to_bytes()).ok_or(VMError::IndexOutOfRange)?;
         let flv = flavor_from_actor(&ActorID::Hash(bytes), &tag);
         self.push_value(Value::Int253(flv));
         Ok(())
@@ -2172,11 +2112,7 @@ impl VM {
     fn op_issueprivflv(&mut self) -> Result<(), VMError> {
         let tag = self.pop_value()?.to_string()?;
         let pred = self.pop_value()?.to_string()?;
-        if pred.len() != 32 {
-            return Err(VMError::IndexOutOfRange);
-        }
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&pred.to_bytes());
+        let bytes = crate::string::array32(&pred.to_bytes()).ok_or(VMError::IndexOutOfRange)?;
         let predicate = crate::Predicate::opaque(
             curve25519_dalek::ristretto::CompressedRistretto(bytes),
         );

@@ -118,7 +118,7 @@ const SUBVAR_U64_BASE: u64 = 4_295_033_088; // SUBVAR_U32_BASE + 2^32
 
 // ── Sub-varint ────────────────────────────────────────────────────
 
-fn write_subvarint(w: &mut impl Writer, n: u64) -> Result<(), WriteError> {
+pub(crate) fn write_subvarint(w: &mut impl Writer, n: u64) -> Result<(), WriteError> {
     if n <= u8::MAX as u64 {
         w.write_u8(b"subvarint.tag", SUBVARINT_U8)?;
         w.write_u8(b"subvarint.u8", n as u8)
@@ -137,7 +137,7 @@ fn write_subvarint(w: &mut impl Writer, n: u64) -> Result<(), WriteError> {
     }
 }
 
-fn read_subvarint(r: &mut impl Reader) -> Result<u64, ReadError> {
+pub(crate) fn read_subvarint(r: &mut impl Reader) -> Result<u64, ReadError> {
     let tag = r.read_u8()?;
     match tag {
         SUBVARINT_U8 => Ok(r.read_u8()? as u64),

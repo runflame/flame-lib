@@ -272,7 +272,7 @@ impl Encodable for Instruction {
             Instruction::PushInt(i) => encode_push_int(i, w),
             Instruction::PushStr(s) => {
                 op(w, OP_PUSHSTR)?;
-                encode_sub_varint(s.len() as u64, w)?;
+                crate::encoding::write_subvarint(w, s.len() as u64)?;
                 // Use `bytes_view` so witness-bearing variants
                 // (Commitment / Scalar / Predicate) serialize to
                 // their canonical opaque bytes. `as_bytes` would
@@ -428,7 +428,8 @@ impl Instruction {
             OP_PUSHINT128_NEG => parse_pushint_n(reader, 16, true),
             OP_PUSHINT_FULL => parse_pushint_full(reader),
             OP_PUSHSTR => {
-                let len = read_sub_varint(reader)? as usize;
+                let len = crate::encoding::read_subvarint(reader)
+                    .map_err(|_| VMError::UnexpectedEndOfScript)? as usize;
                 let mut buf = vec![0u8; len];
                 reader
                     .read(&mut buf)
@@ -634,54 +635,6 @@ fn parse_pushint_full(reader: &mut impl Reader) -> Result<Instruction, VMError> 
         .map_err(|_| VMError::UnexpectedEndOfScript)?;
     let int = Int253::from_bytes(buf).ok_or(VMError::InvalidInt253Encoding)?;
     Ok(Instruction::PushInt(int))
-}
-
-/// Sub-varint encoder matching the bytecode dispatcher's `read_sub_varint` semantics.
-fn encode_sub_varint(value: u64, w: &mut impl Writer) -> Result<(), WriteError> {
-    const SUBVAR_U16_BASE: u64 = 256;
-    const SUBVAR_U32_BASE: u64 = 65_792;
-    const SUBVAR_U64_BASE: u64 = 4_295_033_088;
-    if value <= 255 {
-        w.write_u8(b"subvar.tag", 0)?;
-        w.write_u8(b"subvar.u8", value as u8)
-    } else if value < SUBVAR_U32_BASE {
-        w.write_u8(b"subvar.tag", 1)?;
-        w.write(b"subvar.u16", &((value - SUBVAR_U16_BASE) as u16).to_le_bytes())
-    } else if value < SUBVAR_U64_BASE {
-        w.write_u8(b"subvar.tag", 2)?;
-        w.write(b"subvar.u32", &((value - SUBVAR_U32_BASE) as u32).to_le_bytes())
-    } else {
-        w.write_u8(b"subvar.tag", 3)?;
-        w.write(b"subvar.u64", &value.wrapping_sub(SUBVAR_U64_BASE).to_le_bytes())
-    }
-}
-
-/// Sub-varint decoder matching the bytecode dispatcher's `read_sub_varint`
-/// semantics.
-fn read_sub_varint(reader: &mut impl Reader) -> Result<u64, VMError> {
-    const SUBVAR_U16_BASE: u64 = 256;
-    const SUBVAR_U32_BASE: u64 = 65_792;
-    const SUBVAR_U64_BASE: u64 = 4_295_033_088;
-    let tag = reader.read_u8().map_err(|_| VMError::UnexpectedEndOfScript)?;
-    match tag {
-        0 => Ok(reader.read_u8().map_err(|_| VMError::UnexpectedEndOfScript)? as u64),
-        1 => {
-            let mut buf = [0u8; 2];
-            reader.read(&mut buf).map_err(|_| VMError::UnexpectedEndOfScript)?;
-            Ok(SUBVAR_U16_BASE + u16::from_le_bytes(buf) as u64)
-        }
-        2 => {
-            let mut buf = [0u8; 4];
-            reader.read(&mut buf).map_err(|_| VMError::UnexpectedEndOfScript)?;
-            Ok(SUBVAR_U32_BASE + u32::from_le_bytes(buf) as u64)
-        }
-        3 => {
-            let mut buf = [0u8; 8];
-            reader.read(&mut buf).map_err(|_| VMError::UnexpectedEndOfScript)?;
-            Ok(SUBVAR_U64_BASE.wrapping_add(u64::from_le_bytes(buf)))
-        }
-        _ => Err(VMError::UnexpectedEndOfScript),
-    }
 }
 
 #[cfg(test)]

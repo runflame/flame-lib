@@ -18,6 +18,11 @@ pub struct Int253 {
     bytes: [u8; 32],
 }
 
+fn clear_high_bit(mut bytes: [u8; 32]) -> [u8; 32] {
+    bytes[31] &= 0x7f;
+    bytes
+}
+
 impl Int253 {
     /// Returns the raw 32-byte representation (sign bit included).
     pub fn to_bytes(self) -> [u8; 32] {
@@ -55,10 +60,8 @@ impl Int253 {
 
     /// Returns the absolute value as a `Scalar`.
     pub fn abs_scalar(&self) -> Scalar {
-        let mut abs_bytes = self.bytes;
-        abs_bytes[31] &= 0x7f;
-        // The lower 255 bits are canonical by the `Int253` invariant
-        // (established in `from_bytes` and preserved everywhere else).
+        let abs_bytes = clear_high_bit(self.bytes);
+        // Lower 255 bits are canonical by the `Int253` invariant.
         Scalar::from_canonical_bytes(abs_bytes)
             .expect("Int253 invariant: lower 255 bits are a canonical scalar")
     }
@@ -84,8 +87,7 @@ impl Int253 {
     /// or if negative zero is encountered.
     pub fn from_bytes(bytes: [u8; 32]) -> Option<Int253> {
         let negative = bytes[31] & 0x80 != 0;
-        let mut scalar_bytes = bytes;
-        scalar_bytes[31] &= 0x7f;
+        let scalar_bytes = clear_high_bit(bytes);
         // Verify canonical encoding. dalek v4: returns CtOption, convert via Option::from.
         Option::<Scalar>::from(Scalar::from_canonical_bytes(scalar_bytes))?;
         if negative && scalar_bytes == [0u8; 32] {
@@ -106,9 +108,7 @@ impl Int253 {
 
     /// Returns the absolute value as an `Int253` (always non-negative).
     pub fn abs(&self) -> Int253 {
-        let mut abs_bytes = self.bytes;
-        abs_bytes[31] &= 0x7f;
-        Int253 { bytes: abs_bytes }
+        Int253 { bytes: clear_high_bit(self.bytes) }
     }
 
     /// The additive identity. `const`-usable counterpart of [`Self::zero`].
@@ -135,9 +135,7 @@ impl Int253 {
 
     /// Returns `true` if the value is zero.
     pub fn is_zero(&self) -> bool {
-        let mut bytes = self.bytes;
-        bytes[31] &= 0x7f;
-        bytes == [0u8; 32]
+        clear_high_bit(self.bytes) == [0u8; 32]
     }
 
     /// Truncated division and remainder.

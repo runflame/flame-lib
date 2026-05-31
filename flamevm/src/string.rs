@@ -140,11 +140,7 @@ impl String {
         match self {
             String::Point(p) => p.to_commitment(),
             String::Opaque(data) => {
-                if data.len() != 32 {
-                    return Err(VMError::TypeNotString);
-                }
-                let mut bytes = [0u8; 32];
-                bytes.copy_from_slice(&data);
+                let bytes = array32(&data).ok_or(VMError::TypeNotString)?;
                 Ok(Commitment::Closed(
                     curve25519_dalek::ristretto::CompressedRistretto(bytes),
                 ))
@@ -160,11 +156,7 @@ impl String {
         match self {
             String::Scalar(i) => Ok(*i),
             String::Opaque(data) => {
-                if data.len() != 32 {
-                    return Err(VMError::InvalidInt253Encoding);
-                }
-                let mut bytes = [0u8; 32];
-                bytes.copy_from_slice(&data);
+                let bytes = array32(&data).ok_or(VMError::InvalidInt253Encoding)?;
                 Int253::from_bytes(bytes).ok_or(VMError::InvalidInt253Encoding)
             }
             _ => Err(VMError::InvalidInt253Encoding),
@@ -196,11 +188,7 @@ impl String {
         match self {
             String::Point(p) => p.to_predicate(),
             String::Opaque(data) => {
-                if data.len() != 32 {
-                    return Err(VMError::InvalidPoint);
-                }
-                let mut bytes = [0u8; 32];
-                bytes.copy_from_slice(&data);
+                let bytes = array32(&data).ok_or(VMError::InvalidPoint)?;
                 Ok(crate::cell::Predicate::opaque(
                     curve25519_dalek::ristretto::CompressedRistretto(bytes),
                 ))
@@ -366,6 +354,15 @@ fn compile_instructions(instrs: &[Instruction]) -> Vec<u8> {
         instr.encode(&mut out).expect("Vec writer never fails");
     }
     out
+}
+
+pub(crate) fn array32(data: &[u8]) -> Option<[u8; 32]> {
+    if data.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(data);
+    Some(bytes)
 }
 
 // ── Internal bit helpers (MSB-first numbering) ───────────────────
