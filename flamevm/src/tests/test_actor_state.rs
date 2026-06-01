@@ -4,7 +4,7 @@
 
 use super::test_helpers::*;
 
-use crate::{state_with_public, ActorID, Dict, MemRegistry, Int253, RECV_METHOD};
+use crate::{state_with_public, ActorID, Dict, Env, MemRegistry, Int253, RECV_METHOD};
 
 /// Builds an empty state with a single `recv` method that runs the
 /// caller-supplied bytes. Returns (state, id).
@@ -46,6 +46,34 @@ fn vm_for(actor: ActorID, script: Vec<u8>) -> VM {
             0,
         ),
     )
+}
+
+/// Facade roundtrip (internal): deploy an actor with a `recv`, run a
+/// Message through `Message::execute_tx` against a read-only `MemEnv`,
+/// then `apply_changes`. Exercises lifecycle step 4.
+#[test]
+fn facade_internal_execute_tx_roundtrip() {
+    let mut reg = MemRegistry::new();
+    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
+    let mut env = crate::MemEnv { registry: reg, height: 0 };
+    let msg = crate::Message {
+        target: id,
+        method: RECV_METHOD,
+        caller: None,
+        anchor: Anchor([1u8; 32]),
+        payload: Vec::new(),
+        gas: 1_000,
+        vbytes: 0,
+        refund_predicate: crate::Predicate::opaque(crate::Predicate::unspendable_key()),
+    };
+    let itx = msg
+        .execute_tx(crate::Limits { gas: 1_000_000, mem: 0 }, &env)
+        .expect("execute_tx");
+    // Header + Receive are emitted before the recv body runs.
+    assert!(itx.log().entries().len() >= 2, "header + receive at minimum");
+    // env was read-only during execution; apply effects afterwards (the
+    // nop recv saves no state, so this replays nothing).
+    env.apply_changes(itx.log());
 }
 
 #[test]

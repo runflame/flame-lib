@@ -47,7 +47,10 @@ pub use token::{flavor_from_actor, ClearToken, Token, WideToken};
 pub use value::Value;
 pub use verifier::Verifier;
 
-pub use tx::{ExternalTx, InternalTx};
+pub use tx::{
+    Env, ExternalTx, InternalTx, Limits, MemEnv, SigningInstructions, TxEntry, TxHeader, TxID,
+    TxLog, TxMetrics, UnsignedTx,
+};
 
 // Re-export the wire-format traits so downstream crates don't need
 // a direct `readerwriter` dep. Most flamevm types implement these

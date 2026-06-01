@@ -435,7 +435,7 @@ If `txlog` contains "send" entries, those are processed by minters during block 
 Each "send" entry produces `InternalTx` via validation process.
 
 ```
-let tx = send.execute_tx(limits, &env)?; // InternalTx
+let tx = message.execute_tx(limits, &env)?; // InternalTx
 env.apply_changes(tx.log.iter());
 ```
 
@@ -446,10 +446,12 @@ Any two transactions may be executed concurrently: if their txlog effects do not
 
 #### Integration notes
 
-All the high-level APIs (`Program::build_tx`, `UnsignedTx::sign`, `SignedTx::verify` and `Send::execute_tx`)
+All the high-level APIs (`Program::build_tx`, `UnsignedTx::sign`, `ExternalTx::verify` and `Message::execute_tx`)
 internally allocate VM instance with necessary parameters and keep track of the state that's distilled into TxLog entries.
 
 Given every txlog (external or internal), the node applies txlog changes to its state before processing the next transaction or the next block.
+
+> **Open design note — vbytes flow.** Actor *reaping* is end-of-block cleanup (`tick_block`), not a per-transaction effect, so it is not part of `TxLog`. Deploy and vbyte-credit ride on `Send`/`Call` effects. The precise accounting of intra-call vbyte allocation under successful vs. failed calls — and whether any of it must surface in `TxLog` for `apply_changes` — is **deferred** and needs a dedicated design pass before internal-tx settlement is wired in the node. The internal transaction's header source (version/locktime) is likewise TBD; `execute_tx` currently uses a fixed default.
 
 
 ## Examples

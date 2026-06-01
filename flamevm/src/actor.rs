@@ -315,7 +315,7 @@ pub fn grace_window(active_blocks: u64) -> u64 {
 /// delay. Available vbytes are consumed by external transactions
 /// purchasing storage via fees (the consensus layer brokers that
 /// transfer; this module just tracks the pool).
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct VbytePool {
     /// Vbytes currently available for purchase.
     pub available: u64,
@@ -529,6 +529,7 @@ pub trait ActorRegistry {
 /// [`ActorID::to_hash`] before looking up, so callers can pass
 /// either the `Hash` or the `Constructor` variant for the same
 /// actor and reach the same entry.
+#[derive(Clone)]
 pub struct MemRegistry {
     actors: std::collections::BTreeMap<[u8; 32], Actor>,
     pool: VbytePool,
@@ -546,6 +547,7 @@ pub struct MemRegistry {
 /// covers load/save moves, deploys, and re-entrancy lock state
 /// uniformly. The vbyte pool isn't tracked (only tx-end / per-block
 /// hooks touch it, never mid-call).
+#[derive(Clone)]
 struct CheckpointFrame {
     /// actor id → prior record (`None` = absent before first touch).
     actor_undo: std::collections::BTreeMap<[u8; 32], Option<Actor>>,

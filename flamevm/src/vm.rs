@@ -449,8 +449,9 @@ pub(crate) struct VM {
 
 impl VM {
     /// Executes an external transaction script with the given delegate,
-    /// then calls `delegate.finalize`.
-    pub fn execute_external<D: Delegate>(
+    /// then calls `delegate.finalize`. Crate-internal: the public path
+    /// is `Program::build_tx` / `ExternalTx::verify`.
+    pub(crate) fn execute_external<D: Delegate>(
         header: TxHeader,
         script: Vec<u8>,
         gas_limit: u64,

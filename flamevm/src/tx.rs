@@ -1,9 +1,18 @@
 use bulletproofs::r1cs::R1CSProof;
+use bulletproofs::PedersenGens;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use merkle::{Hash, MerkleItem, MerkleTree};
 use merlin::Transcript;
 use musig::Signature;
 use serde::{Deserialize, Serialize};
+
+use crate::actor::{ActorRegistry, MemRegistry};
+use crate::errors::VMError;
+use crate::program::Program;
+use crate::prover::Prover;
+use crate::send::Message;
+use crate::verifier::Verifier;
+use crate::vm::{BlockContext, DeferredSig, VM};
 
 /// Header metadata for the transaction
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -29,7 +38,224 @@ pub struct ExternalTx {
     pub proof: R1CSProof,
 }
 
-pub struct InternalTx {}
+impl ExternalTx {
+    /// Lifecycle step 3: verify the signed transaction — run the opaque
+    /// program, check the proof and the aggregate signature — and return
+    /// its effects. Bulletproof generators are managed inside the crate.
+    pub fn verify(&self, limits: Limits) -> Result<TxLog, VMError> {
+        let pc_gens = PedersenGens::default();
+        let result = Verifier::verify(
+            &pc_gens,
+            self.script.clone(),
+            &self.proof,
+            self.header,
+            limits.gas,
+            limits.mem,
+            Some(self.signature.clone()),
+        )?;
+        Ok(TxLog(result.txlog))
+    }
+}
+
+/// Resource limits for one transaction's execution.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Compute (gas) budget.
+    pub gas: u64,
+    /// Transient-memory cap (vbytes) for the outermost call.
+    pub mem: u64,
+}
+
+/// Ordered transaction effects — the canonical change set a node
+/// applies to its state. The [`TxID`] is the merkle root over these.
+pub struct TxLog(Vec<TxEntry>);
+
+impl TxLog {
+    /// Canonical transaction id (merkle root over the effect list).
+    pub fn txid(&self) -> TxID {
+        TxID::from_log(&self.0)
+    }
+    /// The effect entries in canonical order.
+    pub fn entries(&self) -> &[TxEntry] {
+        &self.0
+    }
+    /// Iterates the effect entries.
+    pub fn iter(&self) -> std::slice::Iter<'_, TxEntry> {
+        self.0.iter()
+    }
+}
+
+/// Resource counters surfaced for measurement/debugging. Not part of
+/// the [`TxID`].
+#[derive(Clone, Copy, Debug)]
+pub struct TxMetrics {
+    pub gas_used: u64,
+    pub total_fee: u64,
+    pub vbytes_used: u64,
+}
+
+/// What the sender must aggregate-sign before broadcast. Build the
+/// signature with `musig::Signature::sign_multi(keys, items, t)` where
+/// `t` is a `b"flamevm.signtx"` transcript with `txid` appended under
+/// `b"txid"`; pass the result to [`UnsignedTx::sign`].
+pub struct SigningInstructions {
+    pub txid: TxID,
+    /// The tx-bound `(verification_key, cell_id)` authorizations, in
+    /// `signtx` order — the multi-message context to sign.
+    pub items: Vec<(CompressedRistretto, crate::cell::CellID)>,
+}
+
+/// A built-but-unsigned external transaction (lifecycle step 1→2).
+pub struct UnsignedTx {
+    header: TxHeader,
+    script: Vec<u8>,
+    proof: R1CSProof,
+    log: TxLog,
+    metrics: TxMetrics,
+    txbound_items: Vec<(CompressedRistretto, crate::cell::CellID)>,
+}
+
+impl UnsignedTx {
+    /// The transaction effects.
+    pub fn log(&self) -> &TxLog {
+        &self.log
+    }
+    /// Resource counters (measurement only).
+    pub fn metrics(&self) -> TxMetrics {
+        self.metrics
+    }
+    /// The keys + txid the sender signs over (lifecycle step 2 input).
+    pub fn signing_instructions(&self) -> SigningInstructions {
+        SigningInstructions {
+            txid: self.log.txid(),
+            items: self.txbound_items.clone(),
+        }
+    }
+    /// Attaches the aggregate signature → broadcastable [`ExternalTx`].
+    pub fn sign(self, signature: Signature) -> ExternalTx {
+        ExternalTx {
+            header: self.header,
+            script: self.script,
+            signature,
+            proof: self.proof,
+        }
+    }
+}
+
+impl Program {
+    /// Lifecycle step 1: build an unsigned external transaction by
+    /// running the witness-bearing program through the prover.
+    /// Bulletproof generators are managed inside the crate.
+    pub fn build_tx(self, header: TxHeader, limits: Limits) -> Result<UnsignedTx, VMError> {
+        let pc_gens = PedersenGens::default();
+        let result = Prover::prove(&pc_gens, self, header, limits.gas, limits.mem)?;
+        let txbound_items = result
+            .deferred_sigs
+            .iter()
+            .filter_map(|s| match s {
+                DeferredSig::TxBound { verification_key, cell_id } => {
+                    Some((*verification_key, *cell_id))
+                }
+                DeferredSig::Explicit { .. } => None,
+            })
+            .collect();
+        Ok(UnsignedTx {
+            header,
+            script: result.bytecode,
+            proof: result.proof.expect("prover always sets the proof"),
+            metrics: TxMetrics {
+                gas_used: result.gas_used,
+                total_fee: result.total_fee,
+                vbytes_used: result.vbytes_used,
+            },
+            txbound_items,
+            log: TxLog(result.txlog),
+        })
+    }
+}
+
+/// An internal transaction's outcome (lifecycle step 4): the effects
+/// to apply + resource counters. Produced by [`Message::execute_tx`].
+pub struct InternalTx {
+    log: TxLog,
+    metrics: TxMetrics,
+}
+
+impl InternalTx {
+    /// The effects to apply to chain state.
+    pub fn log(&self) -> &TxLog {
+        &self.log
+    }
+    /// Resource counters (measurement only).
+    pub fn metrics(&self) -> TxMetrics {
+        self.metrics
+    }
+}
+
+/// Read-only handle to the chain's actor state for running one internal
+/// transaction. [`Message::execute_tx`] runs against a fresh
+/// [`Env::working_copy`]; the env itself is untouched until
+/// [`Env::apply_changes`] replays the resulting effects.
+pub trait Env {
+    /// A fresh mutable working copy of the actor registry for one tx.
+    fn working_copy(&self) -> Box<dyn ActorRegistry>;
+    /// Current block height (block context for the internal tx).
+    fn height(&self) -> u64;
+    /// Applies an internal transaction's effects to this state.
+    fn apply_changes(&mut self, log: &TxLog);
+}
+
+impl Message {
+    /// Lifecycle step 4: run this send as an internal transaction
+    /// against a read-only [`Env`]. Returns the effects to apply; the
+    /// env is untouched until [`Env::apply_changes`]. Internal gas/mem
+    /// derive from the Send and the target's size, so `limits` is
+    /// currently advisory.
+    pub fn execute_tx(self, _limits: Limits, env: &dyn Env) -> Result<InternalTx, VMError> {
+        let mut registry = env.working_copy();
+        let block = BlockContext { height: env.height() };
+        // Internal-tx header: fixed default for now — its source is part
+        // of the deferred vbytes/lifecycle design.
+        let header = TxHeader { version: 1, locktime: 0 };
+        let result = VM::execute_internal(header, self, registry.as_mut(), &block)?;
+        Ok(InternalTx {
+            log: TxLog(result.txlog),
+            metrics: TxMetrics {
+                gas_used: result.gas_used,
+                total_fee: result.total_fee,
+                vbytes_used: result.vbytes_used,
+            },
+        })
+    }
+}
+
+/// Reference [`Env`] backed by an in-memory [`MemRegistry`] at a fixed
+/// block height. For tests and pre-storage node use.
+pub struct MemEnv {
+    pub registry: MemRegistry,
+    pub height: u64,
+}
+
+impl Env for MemEnv {
+    fn working_copy(&self) -> Box<dyn ActorRegistry> {
+        Box::new(self.registry.clone())
+    }
+    fn height(&self) -> u64 {
+        self.height
+    }
+    fn apply_changes(&mut self, log: &TxLog) {
+        // First cut: replay actor-state saves onto existing actors.
+        // Deploy / vbyte-credit / reaping flow is deferred — see
+        // design.md §Transaction lifecycle & API (vbytes flow note).
+        for entry in log.iter() {
+            if let TxEntry::ActorSave { actor, state } = entry {
+                if let Some(a) = self.registry.actor_mut(actor) {
+                    a.state = Some(state.clone());
+                }
+            }
+        }
+    }
+}
 
 /// Transaction ID is a unique 32-byte identifier of a transaction effects represented by `TxLog`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

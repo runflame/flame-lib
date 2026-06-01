@@ -253,6 +253,37 @@ fn phase20_single_txbound_verifies_with_multisig() {
     .expect("verify ok");
 }
 
+/// Facade roundtrip: `Program::build_tx → signing_instructions →
+/// sign_multi → UnsignedTx::sign → ExternalTx::verify`. Exercises the
+/// public lifecycle API end-to-end (steps 1–3) over the same single-
+/// signtx scenario as `phase20_*`.
+#[test]
+fn facade_build_sign_verify_roundtrip() {
+    use musig::Multisignature;
+    let (vk, sk) = signing_keypair(101);
+    let (script, _cid) = make_signtx_script_with_cell(vk);
+    let program = crate::Program::parse(&script).expect("decode");
+    let limits = crate::Limits { gas: 1_000_000, mem: 0 };
+
+    let unsigned = program.build_tx(dummy_header(), limits).expect("build_tx");
+    let si = unsigned.signing_instructions();
+    assert_eq!(si.items.len(), 1, "one signtx authorization");
+
+    // Produce the aggregate signature exactly per the instructions.
+    let mut t = merlin::Transcript::new(b"flamevm.signtx");
+    t.append_message(b"txid", &si.txid.0);
+    let items: Vec<_> = si
+        .items
+        .iter()
+        .map(|(vk, cid)| (musig::VerificationKey::from_compressed(*vk), *cid))
+        .collect();
+    let sig = musig::Signature::sign_multi(vec![sk], items, &mut t).expect("sign_multi");
+
+    let tx = unsigned.sign(sig);
+    let txlog = tx.verify(limits).expect("verify ok");
+    assert_eq!(txlog.txid(), si.txid, "verified txlog matches the built tx");
+}
+
 /// Two-key multi-sig: build a tx that consumes TWO cells via
 /// signtx, each under its own key. The aggregate `sign_multi`
 /// over `[(vk1, cell1_id), (vk2, cell2_id)]` produces a single
