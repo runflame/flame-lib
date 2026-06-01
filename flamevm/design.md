@@ -395,6 +395,63 @@ In addition to its persistent state, an [actor](#actor) may use *transient memor
 
 An actor occupying N vbytes can use up to 4N vbytes of working memory: enough headroom to `load` its state, mutate it in place, and `save` a new version without exceeding the cap. Allocations that would push live memory past the cap fail the call.
 
+## Transaction lifecycle & API
+
+#### Step 1: building an external transaction.
+
+User prepares a program. Program is a `Vec<Instruction>` bearing witness data, including cells to be spent via `input`, blinding factors for the encrypted tokens, taproot branches etc.
+
+```
+let prog = Program::build().input().mix().output()...;
+let bp_gens = BulletproofGens::new(256, 1);
+let unsigned_tx = prog.build_tx(header, limits, &bp_gens)?; // UnsignedTx
+```
+
+#### Step 2: signing transaction
+
+Unsigned transaction provides `signing_instructions` for each key that was triggering the transaction-scoped signature.
+User produces the necessary signature and transforms the unsigned transaction into a signed one of type `ExternalTx`.
+
+```
+let signing_instructions = unsigned_tx.signing_instructions();
+...
+let sig = ...;
+let signed_tx = unsigned_tx.sign(sig); // ExternalTx
+```
+
+#### Step 3: transaction broadcast
+
+User broadcasts transaction to the network, Flame nodes verify it before inclusion in the mempool:
+
+```
+let bp_gens = BulletproofGens::new(256, 1);
+let txlog = signed_tx.verify(limits, &bp_gens)?; // TxLog
+```
+
+
+#### Step 4: internal transaction processing
+
+If `txlog` contains "send" entries, those are processed by minters during block creation and verified by the nodes receiving a block from the minters.
+Each "send" entry produces `InternalTx` via validation process.
+
+```
+let tx = send.execute_tx(limits, &env)?; // InternalTx
+env.apply_changes(tx.log.iter());
+```
+
+`execute_tx` takes read-only access to the current blockchain state, keeps track of modifications internally and emits the net changes in the form of TxLog.
+Before the next internal transaction is executed, txlog must be applied to the state.
+
+Any two transactions may be executed concurrently: if their txlog effects do not overlap, the effects could be applied in any order.
+
+#### Integration notes
+
+All the high-level APIs (`Program::build_tx`, `UnsignedTx::sign`, `SignedTx::verify` and `Send::execute_tx`)
+internally allocate VM instance with necessary parameters and keep track of the state that's distilled into TxLog entries.
+
+Given every txlog (external or internal), the node applies txlog changes to its state before processing the next transaction or the next block.
+
+
 ## Examples
 
 The two sketches below are illustrative pseudocode, not literal scripts. They show the conceptual flow of values and effects; consult the FlameVM specification for exact opcode signatures and stack effects.
