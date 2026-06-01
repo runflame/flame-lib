@@ -517,12 +517,16 @@ fn read_value_with_depth(
             let flv = crate::Commitment::Closed(CompressedRistretto(flv_bytes));
             Ok(Some(Value::Token(crate::Token::new(qty, flv))))
         }
-        // ClearToken and WideToken are **non-portable**: they never
-        // cross the wire. A canonical-form cleartoken first promotes
-        // itself to a cleartext `Token` (unblinded commitments) via
-        // `Token::cleartext`; raw cleartoken tags on the wire are a
-        // protocol error.
-        CLEAR_TOKEN_TAG | WIDE_TOKEN_TAG => Err(ReadError::InvalidFormat),
+        // ClearToken (portable when non-negative): tag + cleartext qty
+        // + flv as compact `Int253`s.
+        CLEAR_TOKEN_TAG => {
+            let qty = read_int253(r)?;
+            let flv = read_int253(r)?;
+            Ok(Some(Value::ClearToken(crate::ClearToken::new(qty, flv))))
+        }
+        // WideToken is non-portable (confidential, may be negative) and
+        // never crosses the wire.
+        WIDE_TOKEN_TAG => Err(ReadError::InvalidFormat),
         // Unimplemented portable types — payload size unknown, signal
         // to caller (kept for Phase-17 / future encodings).
         OBJECT_TAG | MERLIN_TAG => Ok(None),
@@ -549,12 +553,11 @@ pub fn write_dict(w: &mut impl Writer, dict: &Dict) -> Result<(), WriteError> {
     Ok(())
 }
 
-/// Writes a `Value`. Portable types serialize canonically; non-portable
-/// variants (`ClearToken`, `WideToken`, `Cell`, `Merlin`, and the
-/// stack-only constraint-system types) return `WriteError::InsufficientCapacity`
-/// — a "refuse to encode" signal. Callers that need to know the
-/// non-portable reason should consult `Value::is_portable` before
-/// encoding.
+/// Writes a `Value`. Portable types (incl. non-negative `ClearToken`)
+/// serialize canonically; non-portable variants (`WideToken`, `Cell`,
+/// `Merlin`, and the stack-only constraint-system types) return
+/// `WriteError::InsufficientCapacity` — a "refuse to encode" signal.
+/// Callers consult `Value::is_portable` before encoding.
 pub fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), WriteError> {
     match val {
         Value::Int253(i) => write_int253(w, i),
@@ -570,14 +573,19 @@ pub fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), WriteError> {
             w.write(b"token.qty", t.qty.to_point().as_bytes())?;
             w.write(b"token.flv", t.flv.to_point().as_bytes())
         }
-        // Non-portable: cells / cleartokens / widetokens / merlins /
-        // CS-only types. By design, these never cross the wire.
-        // Returning `InsufficientCapacity` is the existing sentinel;
-        // higher-level callers (cell-construction opcodes, `output`,
-        // dict-payload guards) reject these before encoding via
-        // `Value::is_portable`.
-        Value::ClearToken(_)
-        | Value::WideToken(_)
+        // ClearToken (portable when non-negative — the `is_portable`
+        // gate upstream ensures only those reach here): tag + cleartext
+        // qty + flv as compact `Int253`s.
+        Value::ClearToken(t) => {
+            w.write_u8(b"cleartoken.tag", CLEAR_TOKEN_TAG)?;
+            write_int253(w, &t.qty)?;
+            write_int253(w, &t.flv)
+        }
+        // Non-portable: widetokens / cells / merlins / CS-only types.
+        // By design these never cross the wire. `InsufficientCapacity`
+        // is the existing "refuse to encode" sentinel; higher-level
+        // callers reject them before encoding via `Value::is_portable`.
+        Value::WideToken(_)
         | Value::Cell(_)
         | Value::Merlin(_)
         | Value::Variable(_)
@@ -724,14 +732,6 @@ mod tests {
     }
 
     #[test]
-    fn read_value_cleartoken_tag_rejects() {
-        // ClearToken is non-portable: tag 0xfa is always a wire error.
-        let buf = vec![CLEAR_TOKEN_TAG];
-        let mut r = buf.as_slice();
-        assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
-    }
-
-    #[test]
     fn read_value_widetoken_tag_rejects() {
         // WideToken is non-portable: tag 0xfb is always a wire error.
         let buf = vec![WIDE_TOKEN_TAG];
@@ -789,19 +789,30 @@ mod tests {
     }
 
     #[test]
-    fn cleartoken_encode_errors() {
-        // `write_value` refuses to encode a non-portable value.
-        let v = Value::ClearToken(crate::ClearToken::new(
+    fn cleartoken_encode_decode_roundtrip() {
+        let original = Value::ClearToken(crate::ClearToken::new(
             Int253::from(5u64),
             Int253::from(7u64),
         ));
         let mut buf = Vec::new();
-        assert!(matches!(
-            write_value(&mut buf, &v),
-            Err(WriteError::InsufficientCapacity)
-        ));
-        // No bytes written.
-        assert!(buf.is_empty());
+        write_value(&mut buf, &original).expect("encodes");
+        assert_eq!(buf[0], CLEAR_TOKEN_TAG);
+
+        let mut r = buf.as_slice();
+        let decoded = read_value(&mut r).expect("decodes").expect("cleartoken tag");
+        match &decoded {
+            Value::ClearToken(t) => {
+                assert_eq!(t.qty(), Int253::from(5u64));
+                assert_eq!(t.flv(), Int253::from(7u64));
+            }
+            _ => panic!("decoded value must be ClearToken"),
+        }
+        assert!(r.is_empty(), "decoder consumed full input");
+
+        // Re-encode → byte-identical (canonicality).
+        let mut buf2 = Vec::new();
+        write_value(&mut buf2, &decoded).expect("re-encodes");
+        assert_eq!(buf, buf2);
     }
 
     #[test]

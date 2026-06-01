@@ -188,9 +188,9 @@ pub fn resolve_method<'a>(state: &'a Dict, method: &Int253) -> Option<&'a String
 /// Canonical 32-byte commitment to an actor's state Dict — the
 /// `TxEntry::ActorSave` merkle leaf.
 ///
-/// Infallible in valid registry context (op_save gates stored states on
-/// portability). Panics on a portable-but-unencodable value — see the
-/// architect's queue item on the `ClearToken`-vs-encoder gap.
+/// Infallible in valid registry context: op_save gates stored states on
+/// portability, and all portable values — including non-negative
+/// `ClearToken` — are wire-encodable.
 pub fn state_root(state: &Dict) -> [u8; 32] {
     let mut buf = Vec::new();
     write_dict(&mut buf, state)

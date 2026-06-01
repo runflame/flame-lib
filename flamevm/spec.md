@@ -111,7 +111,7 @@ Encodable types (have a wire-format tag range):
 | Dict | 128..=247 | Map from Int253 keys to values. List-style encoding (sequential keys 0..n-1) uses 128..=187; explicit-key form uses 188..=247. Non-portable item poisons the dict with a “non-portable” flag. |
 | Point | 248 | Element of the Ristretto255 group. |
 | Token | 249 | Linear type (qty, flavor) representing an asset value, possibly encrypted. |
-| ClearToken | 250 | Linear type (qty, flavor) with cleartext values; may be negative and therefore non-portable. |
+| ClearToken | 250 | Linear type (qty, flavor) with cleartext values. Portable (and wire-encoded) when non-negative; a negative `ClearToken` is a non-portable intermediate. |
 | WideToken | 251 | Linear type representing a possibly-negative encrypted Token. |
 | Object | 252 | Linear handle to a cell or external commitment. |
 | Merlin | 253 | Instance of a Merlin transcript. |
@@ -150,10 +150,10 @@ Tag namespace (one byte, 256 values total):
 187        List-style Dict VAR (sub-varint v; count = 59 + v)
 188..=246  Dict explicit-keys immediate count (count = tag - 188; range 0..=58)
 247        Dict explicit-keys VAR (sub-varint v; count = 59 + v)
-248        Point   (32-byte compressed Ristretto)
-249        Token
-250        ClearToken
-251        WideToken
+248        Point      (32-byte compressed Ristretto)
+249        Token      (32-byte qty commitment point + 32-byte flv commitment point)
+250        ClearToken (cleartext qty Int253 + flv Int253)
+251        WideToken  (non-portable; never encoded on the wire)
 252        Object
 253        Merlin
 254        reserved
