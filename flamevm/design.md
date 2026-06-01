@@ -102,8 +102,8 @@ Cell is encoded as a list (sequential Dict) where first element is a predicate, 
 Cell = Dict {
   0: Point,  // predicate
   1: String, // anchor
-  1: Value,  // list of values
-  2: ...
+  2: Value,  // list of values
+  3: ...
 }
 ```
 
@@ -153,7 +153,7 @@ An address routes a payment or message to a recipient. Addresses are a tagged en
 ```text
 Address = enum {
   0: Predicate                       // unlock path for a cell
-  1: MessageTarget = struct {
+  1: MessageTarget = dict {
        dst:    ActorID
        method: MethodKey
        args:   Tuple
