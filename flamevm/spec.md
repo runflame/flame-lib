@@ -1039,7 +1039,17 @@ At the outermost call frame, `return` always errors regardless of `k`. Use [`bre
 
 _x_ → _x typecode_
 
-Pushes the type code of the top value as `Int253`, leaving the value on the stack. Type codes match the wire-tag column in [Types](#types).
+Pushes the type code of the top value as `Int253`, leaving the value on the stack. Type codes are a stable sequential enumeration of the value types — **independent of the wire-encoding tags** in [Types](#types), which keep their own compact scheme (so the `type` opcode also covers non-serializable stack-only types):
+
+| Code | Type | Code | Type |
+| --- | --- | --- | --- |
+| 0 | Int253 | 7 | Cell |
+| 1 | String | 8 | Merlin |
+| 2 | Dict | 9 | Variable |
+| 3 | Point | 10 | Expression |
+| 4 | Token | 11 | Constraint |
+| 5 | WideToken | 12 | MultiscalarMul |
+| 6 | ClearToken | | |
 
 ### break:k
 

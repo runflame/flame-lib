@@ -414,7 +414,7 @@ fn type_pushes_string_code() {
     script.push(0xa5); // type
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[1], Int253::from(68u64));
+    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
 }
 
 #[test]

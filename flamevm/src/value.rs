@@ -283,25 +283,25 @@ impl Value {
         }
     }
 
-    /// Returns the type code used by the `type` opcode.
+    /// Stable type code for the `type` opcode — a sequential
+    /// enumeration of the variants (enum-declaration order), independent
+    /// of the wire-encoding tags in `encoding.rs` (which keep their own
+    /// compact scheme).
     pub fn type_code(&self) -> u8 {
         match self {
             Value::Int253(_) => 0,
-            Value::String(_) => 68,
-            Value::Dict(_) => 128,
-            Value::Point(_) => 248,
-            Value::Token(_) => 249,
-            Value::ClearToken(_) => 250,
-            Value::WideToken(_) => 251,
-            // `Cell` carries the wire tag previously assigned to
-            // `Object` (renamed to `Cell` per ADR 0001).
-            Value::Cell(_) => 252,
-            Value::Merlin(_) => 253,
-            // Stack-only — code TBC by Architect.
-            Value::Variable(_) => 0xc0,
-            Value::Expression(_) => 0xc1,
-            Value::Constraint(_) => 0xc2,
-            Value::MultiscalarMul(_) => 0xc3,
+            Value::String(_) => 1,
+            Value::Dict(_) => 2,
+            Value::Point(_) => 3,
+            Value::Token(_) => 4,
+            Value::WideToken(_) => 5,
+            Value::ClearToken(_) => 6,
+            Value::Cell(_) => 7,
+            Value::Merlin(_) => 8,
+            Value::Variable(_) => 9,
+            Value::Expression(_) => 10,
+            Value::Constraint(_) => 11,
+            Value::MultiscalarMul(_) => 12,
         }
     }
 }
