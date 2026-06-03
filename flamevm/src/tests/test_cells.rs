@@ -1070,14 +1070,14 @@ fn external_tx_two_inputs_two_outputs_via_open() {
 // ── ADR 0013 isolation invariants ──────────────────────────────────
 
 /// `op_open` creates an isolated CallFrame with no actor identity;
-/// `op_actorid` inside the leaf errors `OpcodeRequiresActorContext`,
+/// `op_selfid` inside the leaf errors `OpcodeRequiresActorContext`,
 /// which the step wrapper catches as a `0` failure marker on the
 /// parent's stack (the call simply "failed").
 #[test]
-fn op_open_actorid_errors_no_actor_context() {
-    // `actorid` errors before reaching a return — that's fine, the
+fn op_open_selfid_errors_no_actor_context() {
+    // `selfid` errors before reaching a return — that's fine, the
     // child-frame error is caught and converted to a marker.
-    let inner = Program::new().actorid().to_bytecode();
+    let inner = Program::new().selfid().to_bytecode();
     let (tree, cp) = build_predicate_with_program(&inner, 5);
     let pred_point = tree.compute_point();
     let mut p = Program::new()

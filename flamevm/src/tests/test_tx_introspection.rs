@@ -1,6 +1,6 @@
 //! Tests for tx-level / frame introspection opcodes:
 //! `timelock`, `version`, `gas`, `bytes`, `gaslimit`, `memlimit`,
-//! `newbytes`. (`actorid` / `anchor` / `callerid` / `method` are
+//! `newbytes`. (`selfid` / `anchor` / `callerid` / `method` are
 //! covered in `test_actor_introspection.rs`.)
 
 #![allow(unused_imports)]

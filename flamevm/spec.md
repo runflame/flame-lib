@@ -476,7 +476,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | d2 | [load](#load) | int. | ø → dict | Check out the actor's state dict (moves it out; locks against re-entry). |
 | d3 | [save](#save) | int. | dict → ø | Move the state dict back in (requires checkout; unlocks). |
 |    | **Frame introspection** | | | |
-| e0 | [actorid](#actorid) | | ø → s | Push the current actor's id (32-byte string). |
+| e0 | [selfid](#selfid) | | ø → s | Push the current actor's id (32-byte string). |
 | e1 | [anchor](#anchor) | | ø → s | Push the current frame's anchor (32-byte string). |
 | e2 | [callerid](#callerid) | | ø → s | Push the caller actor's id (zero string if invoked externally). |
 | e3 | [method](#method) | | ø → int | Push the method key the current call is dispatched under. |
@@ -1222,7 +1222,7 @@ Pushes the transaction's `locktime` (as `Int253`) and a unit flag: `0` for block
 
 Pushes `TxHeader::version` as a non-negative `Int253`. Available in either context.
 
-### actorid
+### selfid
 
 ø → _s_
 

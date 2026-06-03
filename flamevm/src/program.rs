@@ -357,7 +357,7 @@ impl Program {
 
     pub fn timelock(mut self) -> Self { self.instructions.push(Instruction::Timelock); self }
     pub fn version(mut self) -> Self { self.instructions.push(Instruction::Version); self }
-    pub fn actorid(mut self) -> Self { self.instructions.push(Instruction::Actorid); self }
+    pub fn selfid(mut self) -> Self { self.instructions.push(Instruction::Selfid); self }
     pub fn anchor(mut self) -> Self { self.instructions.push(Instruction::Anchor); self }
     pub fn gas(mut self) -> Self { self.instructions.push(Instruction::Gas); self }
     pub fn bytes(mut self) -> Self { self.instructions.push(Instruction::Bytes); self }

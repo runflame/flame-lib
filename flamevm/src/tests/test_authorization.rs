@@ -532,12 +532,12 @@ fn phase20_signature_over_wrong_txid_rejected() {
 }
 
 /// `op_signcall` creates an isolated CallFrame with no actor identity,
-/// same as `op_open` (ADR 0013). Inside the signed leaf, `op_actorid`
+/// same as `op_open` (ADR 0013). Inside the signed leaf, `op_selfid`
 /// errors `OpcodeRequiresActorContext` — caught by step as a `0`
 /// failure marker on the parent's stack.
 #[test]
-fn signcall_actorid_errors_no_actor_context() {
-    let prog = Program::new().actorid().to_bytecode();
+fn signcall_selfid_errors_no_actor_context() {
+    let prog = Program::new().selfid().to_bytecode();
     let sig_bytes = [0u8; 64];
     let script = Program::new()
         .push_int(5u64)

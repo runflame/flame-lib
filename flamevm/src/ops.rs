@@ -143,7 +143,7 @@ const OP_LOAD: u8 = 0xd2;
 const OP_SAVE: u8 = 0xd3;
 
 // 0xeX — Frame introspection
-const OP_ACTORID: u8 = 0xe0;
+const OP_SELFID: u8 = 0xe0;
 const OP_ANCHOR: u8 = 0xe1;
 const OP_CALLERID: u8 = 0xe2;
 const OP_METHOD: u8 = 0xe3;
@@ -252,7 +252,7 @@ pub enum Instruction {
     Signcall,               // cell script sig gas bytes args… m signcall → results… k'
     Timelock,              // ø timelock → n {0|1}
     Version,               // ø version → n
-    Actorid,               // ø actorid → s
+    Selfid,                // ø selfid → s
     Anchor,                // ø anchor → s
     Gas,                   // ø gas → n
     Bytes,                 // ø bytes → n
@@ -383,7 +383,7 @@ impl Encodable for Instruction {
             Instruction::Signcall => op(w, OP_SIGNCALL),
             Instruction::Timelock => op(w, OP_TIMELOCK),
             Instruction::Version => op(w, OP_VERSION),
-            Instruction::Actorid => op(w, OP_ACTORID),
+            Instruction::Selfid => op(w, OP_SELFID),
             Instruction::Anchor => op(w, OP_ANCHOR),
             Instruction::Gas => op(w, OP_GAS),
             Instruction::Bytes => op(w, OP_BYTES),
@@ -530,7 +530,7 @@ impl Instruction {
             OP_SIGNCALL => Ok(Instruction::Signcall),
             OP_TIMELOCK => Ok(Instruction::Timelock),
             OP_VERSION => Ok(Instruction::Version),
-            OP_ACTORID => Ok(Instruction::Actorid),
+            OP_SELFID => Ok(Instruction::Selfid),
             OP_ANCHOR => Ok(Instruction::Anchor),
             OP_GAS => Ok(Instruction::Gas),
             OP_BYTES => Ok(Instruction::Bytes),

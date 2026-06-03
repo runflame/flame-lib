@@ -923,7 +923,7 @@ impl VM {
 
             I::Timelock => self.op_timelock(),
             I::Version => self.op_version(),
-            I::Actorid => self.op_actorid(),
+            I::Selfid => self.op_selfid(),
             I::Anchor => self.op_anchor(),
             I::Gas => self.op_gas(),
             I::Bytes => self.op_bytes(registry),
@@ -2538,8 +2538,8 @@ impl VM {
         Ok(())
     }
 
-    /// **actorid** → _string_
-    fn op_actorid(&mut self) -> Result<(), VMError> {
+    /// **selfid** → _string_
+    fn op_selfid(&mut self) -> Result<(), VMError> {
         let actor = self.require_actor()?.clone();
         self.push_value(Value::String(String::from(actor.to_hash().to_vec())));
         Ok(())

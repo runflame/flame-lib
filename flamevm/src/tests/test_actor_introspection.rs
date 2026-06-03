@@ -1,4 +1,4 @@
-//! Tests for actorid / anchor / callerid / method.
+//! Tests for selfid / anchor / callerid / method.
 
 #![allow(unused_imports)]
 
@@ -46,14 +46,14 @@ fn vm_external(script: Vec<u8>) -> VM {
 }
 
 #[test]
-fn actorid_in_internal_root_pushes_hash_string() {
+fn selfid_in_internal_root_pushes_hash_string() {
     let id = ActorID::Hash([0xab; 32]);
     let mut vm = vm_internal_with(
         id.clone(),
         Int253::from(0u64),
         None,
         Anchor([0u8; 32]),
-        Program::new().actorid().to_bytecode(),
+        Program::new().selfid().to_bytecode(),
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
@@ -63,14 +63,14 @@ fn actorid_in_internal_root_pushes_hash_string() {
 }
 
 #[test]
-fn actorid_in_external_root_errors_actor_context() {
-    let mut vm = vm_external(Program::new().actorid().to_bytecode());
+fn selfid_in_external_root_errors_actor_context() {
+    let mut vm = vm_external(Program::new().selfid().to_bytecode());
     let err = vm.step_internal().expect_err("must error");
     assert!(matches!(err, VMError::OpcodeRequiresActorContext));
 }
 
 #[test]
-fn actorid_in_constructor_form_uses_canonical_hash_seed() {
+fn selfid_in_constructor_form_uses_canonical_hash_seed() {
     // Constructor-form id surfaces as its deterministic hash seed
     // (per ActorID::to_hash) — the same byte sequence the
     // Hash-form variant would carry.
@@ -81,7 +81,7 @@ fn actorid_in_constructor_form_uses_canonical_hash_seed() {
         Int253::from(0u64),
         None,
         Anchor([0u8; 32]),
-        Program::new().actorid().to_bytecode(),
+        Program::new().selfid().to_bytecode(),
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
