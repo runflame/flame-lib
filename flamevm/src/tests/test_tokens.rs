@@ -272,7 +272,7 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
     vm.call_stack.push(p);
 
     let mut prover = Prover::new(&pc_gens);
-    while !vm.current_call.current_run.is_finished() {
+    while !vm.current_call.is_finished() {
         vm.step_external(&mut prover).expect("step ok");
     }
 

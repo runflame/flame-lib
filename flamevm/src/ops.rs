@@ -12,8 +12,8 @@ use crate::string::String;
 
 // Byte map: see `flamevm/spec.md` §"Instruction table" for the
 // canonical view. The high nibble is the block; low nibble is either
-// the slot or, for k-class ops (`push:k`, `dup:k`, `roll:k`,
-// `break:k`), the inline operand.
+// the slot or, for k-class ops (`push:k`, `dup:k`, `roll:k`), the
+// inline operand. `label`/`jump`/`jumpif` carry a sub-varint operand.
 
 // 0x0X — push:k (inline small int)
 const OP_PUSH_SMALL_MAX: u8 = 0x0f;
@@ -116,17 +116,14 @@ const OP_MIX: u8 = 0x99;
 const OP_DECRYPT: u8 = 0x9a;
 const OP_FEE: u8 = 0x9b;
 
-// 0xaX — Control flow
+// 0xaX — Control flow. label/jump/jumpif carry a label-number operand
+// (sub-varint); see ADR 0015.
 const OP_VERIFY: u8 = 0xa0;
-const OP_RUN: u8 = 0xa1;
-const OP_LOOP: u8 = 0xa2;
-const OP_SWITCH: u8 = 0xa3;
+const OP_LABEL: u8 = 0xa1;
+const OP_JUMP: u8 = 0xa2;
+const OP_JUMPIF: u8 = 0xa3;
 const OP_RETURN: u8 = 0xa4;
 const OP_TYPE: u8 = 0xa5;
-
-// 0xbX — break:k
-const OP_BREAKK_BASE: u8 = 0xb0;
-const OP_BREAKK_MAX: u8 = 0xbf;
 
 // 0xcX — Cells & predicates
 const OP_INPUT: u8 = 0xc0;
@@ -234,12 +231,11 @@ pub enum Instruction {
     Decrypt,               // T f' f q' q decrypt → CT
     Verify,                // x verify → ø
     Fee,                   // qty flv fee → -WT
-    Run,                   // s run → …
-    Loop,                  // ø loop → ø
-    Switch,                // x a b switch → …
+    Label(u32),            // ø label:n → ø  (operand: label number)
+    Jump(u32),             // ø jump:n → ø   (unconditional)
+    JumpIf(u32),           // x jumpif:n → ø (jump iff x ≠ 0)
     Return,                // a(k-1) … a(0) k return → ø
     Type,                  // x type → x code
-    BreakK(u8),            // ø break:k → ø
     Input,                 // s input → cell
     Cell,                  // items… k pred cell → cell
     Output,                // items… k pred output → ø
@@ -360,15 +356,20 @@ impl Encodable for Instruction {
             Instruction::Decrypt => op(w, OP_DECRYPT),
             Instruction::Verify => op(w, OP_VERIFY),
             Instruction::Fee => op(w, OP_FEE),
-            Instruction::Run => op(w, OP_RUN),
-            Instruction::Loop => op(w, OP_LOOP),
-            Instruction::Switch => op(w, OP_SWITCH),
+            Instruction::Label(n) => {
+                op(w, OP_LABEL)?;
+                crate::encoding::write_subvarint(w, *n as u64)
+            }
+            Instruction::Jump(n) => {
+                op(w, OP_JUMP)?;
+                crate::encoding::write_subvarint(w, *n as u64)
+            }
+            Instruction::JumpIf(n) => {
+                op(w, OP_JUMPIF)?;
+                crate::encoding::write_subvarint(w, *n as u64)
+            }
             Instruction::Return => op(w, OP_RETURN),
             Instruction::Type => op(w, OP_TYPE),
-            Instruction::BreakK(k) => {
-                debug_assert!(*k <= 0x0f, "BreakK arg must fit in 4 bits");
-                op(w, OP_BREAKK_BASE + (*k & 0x0f))
-            }
             // Witness (if any) never crosses the wire — prover-side
             // only. Encoded form is the bare opcode byte.
             Instruction::Input => op(w, OP_INPUT),
@@ -510,14 +511,11 @@ impl Instruction {
             OP_DECRYPT => Ok(Instruction::Decrypt),
             OP_VERIFY => Ok(Instruction::Verify),
             OP_FEE => Ok(Instruction::Fee),
-            OP_RUN => Ok(Instruction::Run),
-            OP_LOOP => Ok(Instruction::Loop),
-            OP_SWITCH => Ok(Instruction::Switch),
+            OP_LABEL => parse_label_op(reader, Instruction::Label),
+            OP_JUMP => parse_label_op(reader, Instruction::Jump),
+            OP_JUMPIF => parse_label_op(reader, Instruction::JumpIf),
             OP_RETURN => Ok(Instruction::Return),
             OP_TYPE => Ok(Instruction::Type),
-            OP_BREAKK_BASE..=OP_BREAKK_MAX => {
-                Ok(Instruction::BreakK(byte - OP_BREAKK_BASE))
-            }
             OP_INPUT => Ok(Instruction::Input),
             OP_CELL => Ok(Instruction::Cell),
             OP_OUTPUT => Ok(Instruction::Output),
@@ -555,6 +553,20 @@ impl Instruction {
 }
 
 // ── Internal encode helpers ──────────────────────────────────────────
+
+/// Reads a `label`/`jump`/`jumpif` operand: a sub-varint label number,
+/// narrowed to `u32` (a label number that large is malformed bytecode).
+fn parse_label_op(
+    reader: &mut impl Reader,
+    build: fn(u32) -> Instruction,
+) -> Result<Instruction, VMError> {
+    let n = crate::encoding::read_subvarint(reader)
+        .map_err(|_| VMError::UnexpectedEndOfScript)?;
+    if n > u32::MAX as u64 {
+        return Err(VMError::LabelOutOfOrder);
+    }
+    Ok(build(n as u32))
+}
 
 /// Encodes `i` using the narrowest opcode pair that fits. The
 /// resulting byte sequence matches what the VM's byte-dispatch handler

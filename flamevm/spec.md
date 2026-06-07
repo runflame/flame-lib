@@ -194,11 +194,11 @@ Strings are used to represent arbitrary-length binary data, programs and cryptog
 
 Each string acts as a builder and a reader.
 
-**Prover-side witness variants.** On the prover side a String may carry a typed witness payload that encodes to the same canonical wire bytes the verifier sees but preserves the underlying witness data through `dup` / `run` / payload-pour boundaries:
+**Prover-side witness variants.** On the prover side a String may carry a typed witness payload that encodes to the same canonical wire bytes the verifier sees but preserves the underlying witness data through `dup` / `open` / `signcall` / `call` / payload-pour boundaries:
 
 - `String::Point(Point)` — point-shaped witness; the inner [`Point`](#point) is `Opaque`, `Commitment(Open(value, blinding))` (used before `commit`, `scalar`, `expr`), or `Predicate(p)` (used before `signtx`, `signcall`, `cell`, `output`).
 - `String::Scalar(int)` — used before `scalar`.
-- `String::Script(instructions)` — used before `run`, `switch`, `signcall`.
+- `String::Script(instructions)` — used before `open` / `signcall` / `call`.
 - `String::Cell(c)` — used before `input`, carrying open commitments on Token payloads.
 
 The verifier always sees `String::Opaque(bytes)`; the downcasts (`to_commitment`, `to_scalar`, `to_predicate`, `to_instructions`, `to_cell`) handle both shapes uniformly. There is no separate witness queue or per-opcode witness operand — witnesses ride on the pushed value itself.
@@ -457,12 +457,11 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 9b | [fee](#fee) | ext. | qty flv → −WT | Pay tx fee; push the balancing WideToken debt to net out via `mix`. |
 |    | **Control flow** | | | |
 | a0 | [verify](#verify) | | x → ø | Assert: hard-fail if int is zero, enforce a Constraint, or batch an MSM. |
-| a1 | [run](#run) | | s → … | Execute a sub-program in the *same* call frame. |
-| a2 | [loop](#loop) | | ø → ø | Rewind current Run to its start (loop body needs `break` to exit). |
-| a3 | [switch](#switch) | | x a b → … | Pick the truthy branch: run `a` if `x ≠ 0`, else `b`. |
+| a1 | [label](#label) | | ø → ø | Mark a jump target (operand: label number); labels number 0,1,2… in order. |
+| a2 | [jump](#jump) | | ø → ø | Unconditional jump to a label (operand: label number). |
+| a3 | [jumpif](#jumpif) | | x → ø | Pop an int; jump to a label iff non-zero (operand: label number). |
 | a4 | [return](#return) | | a\_{k-1} … a\_0 k → ø | Exit current call frame, returning `k` items to the parent. |
 | a5 | [type](#type) | | x → x code | Push the type code of the top value (peek). |
-| bk | [break:k](#breakk) | | ø → ø | Exit current Run and `k` more enclosing Runs. |
 |    | **Cells & predicates** | | | |
 | c0 | [input](#input) | ext. | s → cell | Materialize a cell from a Utreexo-validated input encoding. |
 | c1 | [cell](#cell) | | items… k pred → cell | Build a new cell from `k` portable items under predicate `pred`. |
@@ -499,7 +498,7 @@ Opcodes marked *planned* are reserved in the byte map; their handlers are not ye
 
 ## Failure modes
 
-A **hard fail** aborts the current call (and unwinds outwards on `op_break` boundaries).
+A **hard fail** aborts the current call.
 
 A **soft fail** is an in-band signal: the opcode pushes an optional shape `{value 1 | 0}` and leaves the consumed value(s) on the stack untouched so the script can branch. The two kinds are noted per opcode.
 
@@ -983,6 +982,16 @@ Pops the cleartext blinding/value pairs (`q' q` for quantity, `f' f` for flavor)
 
 ## Control-flow instructions
 
+Control flow is structured-by-convention over a flat instruction stream:
+`label`/`jump`/`jumpif` carry a **label number**, not an offset, so bytecode
+is written without computing positions and the prover and a future streaming
+verifier resolve labels in their own cursor space (instruction index vs byte
+offset — see ADR 0015). The high-level builder (`build_if` / `build_while` /
+`build_loop` / `build_switch` / `build_break` / `build_continue`) emits these
+with a running label counter and forward-jump backpatching. Code only ever
+executes by becoming a CallFrame — there is no inline `run`; see
+[`open`](#open) / [`signcall`](#signcall) / [`call`](#call).
+
 ### verify
 
 _x_ → ø
@@ -1000,25 +1009,43 @@ Pops `qty: Int253` (non-negative, must fit `u64` and be `≤ MAX_FEE = 2²⁴`) 
 
 Hard-fails: `FeeQtyNegative`, `FeeTooHigh` (per-arg or aggregate overflow), `TypeNotInt253`, `ExternalOnly`. The blinded-fee branch is reserved for a future phase.
 
-### run
+### label
 
-_prog_ → _…_
+ø → ø — operand: label number (sub-varint)
 
-Pops a String, decodes it as bytecode (or extracts instructions directly from `String::Script(instrs)` on the prover side), suspends the current Run onto the run-stack, and switches to a fresh Run over the new instructions.
+Marks a jump target. Each CallFrame keeps a `labels` array of positions
+(instruction index on the prover; byte offset on a streaming verifier), built
+lazily as labels are reached. Labels must appear in strictly sequential order
+— 0, 1, 2, … — so the array is indexed directly by label number. On reaching
+`label N`:
 
-**Same call frame** — see [`open`](#open) / [`signcall`](#signcall) for predicate-bound execution that creates a new frame.
+- `N == labels.len()` → record the position after the label (first sight).
+- `N < labels.len()` → a re-visit (a loop back-edge re-traversing a label in
+  its own body): allowed iff the recorded position matches; otherwise
+  hard-fails `LabelOutOfOrder`.
+- `N > labels.len()` → hard-fails `LabelOutOfOrder` (gap / out of order).
 
-### loop
+Labels are frame-local: an opened/called sub-program numbers from 0 in its
+own frame.
 
-ø → ø
+### jump
 
-Rewinds the current Run's cursor to the start. Without a `break` or `return` reachable from inside, this is an unbounded loop; gas metering is the long-term cap.
+ø → ø — operand: label number (sub-varint)
 
-### switch
+Sets the cursor to label `N`. If `N` is already recorded (`N < labels.len()`),
+jumps immediately — backward, or forward to an already-seen label. Otherwise
+enters *skipping mode*: scans forward **without executing**, recording each
+`label` passed (each must be the next sequential number), until `label N` is
+reached, then resumes execution after it. Reaching end-of-program while
+skipping hard-fails `LabelNotFound`.
 
-_x a b_ → _…_
+### jumpif
 
-Pops three values; if `x` is non-zero, enters `a` as the new Run, otherwise `b`. Same Run-level semantics as [`run`](#run).
+_x_ → ø — operand: label number (sub-varint)
+
+Pops `x: Int253`. If non-zero, behaves as [`jump`](#jump) to label `N`; if
+zero, falls through to the next instruction. Hard-fails `TypeNotInt253` if
+the top value is not an int.
 
 ### return
 
@@ -1033,7 +1060,7 @@ Atomic cross-frame return:
 5. Refunds leftover gas to the parent.
 6. Pushes the `k` items onto the parent's stack.
 
-At the outermost call frame, `return` always errors regardless of `k`. Use [`break:0`](#breakk) for early termination at root.
+At the outermost call frame, `return` always errors regardless of `k`; a script terminates cleanly by running off the end of its instructions with an empty stack (jump to a trailing label to short-circuit).
 
 ### type
 
@@ -1050,14 +1077,6 @@ Pushes the type code of the top value as `Int253`, leaving the value on the stac
 | 4 | Token | 11 | Constraint |
 | 5 | WideToken | 12 | MultiscalarMul |
 | 6 | ClearToken | | |
-
-### break:k
-
-ø → ø
-
-Stops execution of the current program and `k` more enclosing Runs. `break:0` stops only the current Run. Hard-fails `BreakOutOfCall` if `k` exceeds the run-stack depth.
-
-When the cascade ends the entire call (e.g. `break:0` at the outermost Run of a frame), normal call-exit applies: the stack must be empty (`StackNotClean` otherwise); at root that ends the transaction cleanly. Unlike `return`, `break:0` is the safe way to short-circuit at the outermost frame — no recipient semantics, relies on the clean-stack invariant.
 
 ## Cell, actor, and send instructions
 

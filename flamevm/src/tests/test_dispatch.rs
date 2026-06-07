@@ -35,24 +35,24 @@ fn internal_unknown_opcode_errors() {
 }
 
 #[test]
-fn run_advances_through_instructions() {
+fn callframe_advances_through_instructions() {
     // Bytecode: push:5, drop, nop. Three Instructions, then end.
     let instrs = Program::parse(&[0x05, 0x1c, 0x1d]).unwrap().into_instructions();
-    let mut run = Run::new(instrs);
+    let mut frame = CallFrame::new(instrs, CallKind::ExternalRoot, 0, 0, 0);
     use crate::ops::Instruction;
     assert!(matches!(
-        run.next_instruction().unwrap(),
+        frame.next_instruction().unwrap(),
         Some(Instruction::PushInt(_))
     ));
     assert!(matches!(
-        run.next_instruction().unwrap(),
+        frame.next_instruction().unwrap(),
         Some(Instruction::Drop)
     ));
     assert!(matches!(
-        run.next_instruction().unwrap(),
+        frame.next_instruction().unwrap(),
         Some(Instruction::Nop)
     ));
-    assert!(run.next_instruction().unwrap().is_none());
+    assert!(frame.next_instruction().unwrap().is_none());
 }
 
 #[test]
@@ -75,7 +75,7 @@ fn dirty_stack_at_call_exit_is_an_error() {
         CallFrame::new(Vec::new(), kind, 1000, 0, 0),
     );
     vm.current_call.stack.push(Value::Int253(Int253::from(7u64)));
-    // First step: empty script → finish_run → finish_call → dirty stack.
+    // First step: empty script → finish_call → dirty stack.
     let err = vm.step_internal().unwrap_err();
     assert!(matches!(err, VMError::StackNotClean));
     // Caller's perspective: nothing leaks. (Sanity — there's no parent

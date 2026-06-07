@@ -133,7 +133,7 @@ pub(crate) fn vm_with_script(script: Vec<u8>) -> VM {
 /// Runs steps until the current Run is exhausted, *without* invoking
 /// finish_call (so the test can inspect the leftover stack).
 pub(crate) fn run_to_end(vm: &mut VM) -> Result<(), VMError> {
-    while !vm.current_call.current_run.is_finished() {
+    while !vm.current_call.is_finished() {
         vm.step_internal()?;
     }
     Ok(())
@@ -165,8 +165,7 @@ pub(crate) fn value_kind(v: &Value) -> &'static str {
 }
 
 /// Runs `step_internal` until it reports the tx is done (Ok(false)).
-/// Used to exercise full programs including post-`run`/`switch`
-/// resumption and call-frame exit.
+/// Used to exercise full programs including call-frame exit.
 pub(crate) fn run_until_tx_done(vm: &mut VM) -> Result<(), VMError> {
     while vm.step_internal()? {}
     Ok(())

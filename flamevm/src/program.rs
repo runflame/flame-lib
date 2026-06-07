@@ -15,12 +15,25 @@ use crate::string::String;
 #[derive(Clone, Debug, Default)]
 pub struct Program {
     instructions: Vec<Instruction>,
+    /// Build-time only: active loop scopes for `build_break` /
+    /// `build_continue`. Balanced (pushed/popped) by `build_loop` /
+    /// `build_while`, so any finished program leaves this empty.
+    loop_scopes: Vec<LoopScope>,
+}
+
+/// One enclosing loop during `build_*` construction: the back-edge
+/// target and the forward exit-jumps (structural exit + `build_break`s)
+/// awaiting backpatch to the loop's end label. See ADR 0015.
+#[derive(Clone, Debug)]
+struct LoopScope {
+    top: u32,
+    end_jumps: Vec<usize>,
 }
 
 impl Program {
     /// Constructs an empty program.
     pub fn new() -> Self {
-        Self { instructions: Vec::new() }
+        Self { instructions: Vec::new(), loop_scopes: Vec::new() }
     }
 
     /// Parses a bytecode slice into a Program. Witness-bearing
@@ -103,7 +116,7 @@ impl Program {
     /// `pushstr` (0x19) carrying a witness-bearing sub-script. The
     /// prover pushes the inner Program's instructions (witness
     /// slots intact) wrapped in `String::Script`; downstream
-    /// `op_run` / `op_switch` / `op_signcall` walk those
+    /// `op_open` / `op_signcall` walk those
     /// instructions directly. Verifier-side bytecode encodes to
     /// the compiled bytes of `inner.to_bytecode()`, so both sides
     /// see the same wire form.
@@ -312,22 +325,154 @@ impl Program {
     /// `fee` (0x9b) — external-only.
     pub fn fee(mut self) -> Self { self.instructions.push(Instruction::Fee); self }
 
-    pub fn run(mut self) -> Self { self.instructions.push(Instruction::Run); self }
+    /// `label:n` (0xa1) — low-level marker. Prefer the `build_*`
+    /// combinators, which number labels in appearance order for you.
+    pub fn label(mut self, n: u32) -> Self {
+        self.instructions.push(Instruction::Label(n));
+        self
+    }
 
-    /// `loop` (0xa2). Method named `loop_` because `loop` is a Rust keyword.
-    pub fn loop_(mut self) -> Self { self.instructions.push(Instruction::Loop); self }
+    /// `jump:n` (0xa2) — unconditional jump to label `n`. Low-level.
+    pub fn jump(mut self, n: u32) -> Self {
+        self.instructions.push(Instruction::Jump(n));
+        self
+    }
 
-    pub fn switch(mut self) -> Self { self.instructions.push(Instruction::Switch); self }
+    /// `jumpif:n` (0xa3) — pop an Int253; jump to label `n` iff non-zero.
+    pub fn jumpif(mut self, n: u32) -> Self {
+        self.instructions.push(Instruction::JumpIf(n));
+        self
+    }
 
     /// `return` (0xa4). Method named `return_` because `return` is a Rust keyword.
     pub fn return_(mut self) -> Self { self.instructions.push(Instruction::Return); self }
 
     pub fn type_(mut self) -> Self { self.instructions.push(Instruction::Type); self }
 
-    /// `break:k` (0x80..=0x8f) — `k ≤ 15`.
-    pub fn break_k(mut self, k: u8) -> Self {
-        self.instructions.push(Instruction::BreakK(k));
+    // ── structured control-flow combinators (ADR 0015) ──────
+    // Emit `label`/`jump`/`jumpif` with appearance-order label numbers
+    // and forward-jump backpatching, so callers never compute label
+    // numbers by hand.
+
+    /// Next label number = count of labels already emitted (labels are
+    /// numbered in appearance order).
+    fn next_label(&self) -> u32 {
+        self.instructions
+            .iter()
+            .filter(|i| matches!(i, Instruction::Label(_)))
+            .count() as u32
+    }
+
+    /// Emits `label` with the next sequential number; returns it.
+    fn emit_label(&mut self) -> u32 {
+        let n = self.next_label();
+        self.instructions.push(Instruction::Label(n));
+        n
+    }
+
+    /// Pushes a placeholder forward jump; returns its index for backpatch.
+    fn push_jump_placeholder(&mut self, conditional: bool) -> usize {
+        let idx = self.instructions.len();
+        self.instructions.push(if conditional {
+            Instruction::JumpIf(0)
+        } else {
+            Instruction::Jump(0)
+        });
+        idx
+    }
+
+    /// Fills a placeholder jump (at `idx`) with its resolved label number,
+    /// preserving conditional-vs-unconditional.
+    fn backpatch(&mut self, idx: usize, target: u32) {
+        self.instructions[idx] = match self.instructions[idx] {
+            Instruction::JumpIf(_) => Instruction::JumpIf(target),
+            _ => Instruction::Jump(target),
+        };
+    }
+
+    /// Emits `label END` and backpatches every recorded exit-jump
+    /// (structural exit + breaks) to it. Pops the loop scope.
+    fn close_loop_scope(&mut self) {
+        let scope = self.loop_scopes.pop().expect("close_loop_scope: no scope");
+        let n_end = self.emit_label();
+        for idx in scope.end_jumps {
+            self.backpatch(idx, n_end);
+        }
+    }
+
+    /// `if (cond) { then }` — `cond` is whatever the preceding builder
+    /// calls left on the stack (Int253; non-zero = true).
+    pub fn build_if(self, then: impl FnOnce(Self) -> Self) -> Self {
+        self.build_if_else(then, |p| p)
+    }
+
+    /// `if (cond) { then } else { els }`. Compiles to
+    /// `jumpif THEN; <els>; jump END; label THEN; <then>; label END`.
+    pub fn build_if_else(
+        mut self,
+        then: impl FnOnce(Self) -> Self,
+        els: impl FnOnce(Self) -> Self,
+    ) -> Self {
+        let j_then = self.push_jump_placeholder(true);
+        self = els(self);
+        let j_end = self.push_jump_placeholder(false);
+        let n_then = self.emit_label();
+        self.backpatch(j_then, n_then);
+        self = then(self);
+        let n_end = self.emit_label();
+        self.backpatch(j_end, n_end);
         self
+    }
+
+    /// `while (cond) { body }`. `cond` re-emits the condition each
+    /// iteration. Supports `build_break` / `build_continue`. Compiles to
+    /// `label TOP; <cond>; jumpif BODY; jump END; label BODY; <body>;
+    ///  jump TOP; label END`.
+    pub fn build_while(
+        mut self,
+        cond: impl FnOnce(Self) -> Self,
+        body: impl FnOnce(Self) -> Self,
+    ) -> Self {
+        let top = self.emit_label();
+        self.loop_scopes.push(LoopScope { top, end_jumps: Vec::new() });
+        self = cond(self);
+        let j_body = self.push_jump_placeholder(true);
+        let j_end = self.push_jump_placeholder(false);
+        self.loop_scopes.last_mut().expect("while scope").end_jumps.push(j_end);
+        let n_body = self.emit_label();
+        self.backpatch(j_body, n_body);
+        self = body(self);
+        self = self.jump(top);
+        self.close_loop_scope();
+        self
+    }
+
+    /// `loop { body }` — infinite; exit via `build_break`. Compiles to
+    /// `label TOP; <body>; jump TOP; label END`.
+    pub fn build_loop(mut self, body: impl FnOnce(Self) -> Self) -> Self {
+        let top = self.emit_label();
+        self.loop_scopes.push(LoopScope { top, end_jumps: Vec::new() });
+        self = body(self);
+        self = self.jump(top);
+        self.close_loop_scope();
+        self
+    }
+
+    /// `break` — jump to the innermost enclosing loop's end.
+    pub fn build_break(mut self) -> Self {
+        let idx = self.push_jump_placeholder(false);
+        self.loop_scopes
+            .last_mut()
+            .expect("build_break outside a loop")
+            .end_jumps
+            .push(idx);
+        self
+    }
+
+    /// `continue` — jump to the innermost enclosing loop's top.
+    pub fn build_continue(self) -> Self {
+        let top = self.loop_scopes.last().expect("build_continue outside a loop").top;
+        self.jump(top)
     }
 
     // ── Cell + I/O ───────────────────────────────────

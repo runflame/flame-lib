@@ -54,16 +54,21 @@ pub enum VMError {
     #[error("verify failed: zero value")]
     VerifyFailed,
 
-    /// This error occurs when `break:k` attempts to skip more nesting levels than available.
-    #[error("break exceeds call depth")]
-    BreakOutOfCall,
+    /// A `label` appeared out of sequence: its number is past the next
+    /// expected index, or a re-visited label's position doesn't match.
+    #[error("label out of order")]
+    LabelOutOfOrder,
+
+    /// A `jump`/`jumpif` target label was never found before end-of-program.
+    #[error("jump target label not found")]
+    LabelNotFound,
 
     /// This error occurs when `return k` is invoked with a bad k.
     #[error("Bad return arity")]
     BadReturnArity,
 
     /// This error occurs when `return` is invoked at the outermost call frame.
-    #[error("`return` at outermost frame — use `break` for early exit")]
+    #[error("`return` at outermost frame — run off the end for a clean exit")]
     ReturnAtRoot,
 
     /// This error occurs when `divmod` sees a zero divisor.

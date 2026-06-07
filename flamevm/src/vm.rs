@@ -1,4 +1,4 @@
-//! FlameVM execution engine: Tx → CallFrame → Run nesting + dispatch loop.
+//! FlameVM execution engine: Tx → CallFrame + dispatch loop.
 
 use bulletproofs::r1cs;
 use bulletproofs::r1cs::R1CSProof;
@@ -154,47 +154,103 @@ impl Delegate for InternalDelegate {
     }
 }
 
-/// One executable script slice: a decoded instruction stream plus a
-/// cursor. Multiple Runs nest within one CallFrame (`run` / `loop` /
-/// `switch`); each new Run pushes the old one onto `run_stack`.
-pub struct Run {
-    instructions: Vec<crate::ops::Instruction>,
-    cursor: usize,
+/// A frame's executable code. The prover holds decoded, witness-bearing
+/// instructions; the verifier and internal actor execution hold raw
+/// bytecode and decode one instruction at a time — never materializing a
+/// `Vec<Instruction>`. See ADR 0015.
+pub(crate) enum Code {
+    /// Pre-decoded instructions (prover witnesses inline; `String::Script`).
+    Instrs(Vec<crate::ops::Instruction>),
+    /// Raw bytecode, decoded on demand (verifier; `String::Opaque`).
+    Bytes(Vec<u8>),
 }
 
-impl Run {
-    /// Constructs a Run from a pre-decoded instruction stream. The
-    /// verifier calls `Program::parse(&bytecode)` to produce this;
-    /// the prover passes its witness-bearing `Program` directly.
-    pub fn new(instructions: Vec<crate::ops::Instruction>) -> Self {
-        Run { instructions, cursor: 0 }
-    }
+impl CallFrame {
+    // The frame's code + cursor + lazy label table (fields `code` /
+    // `cursor` / `labels`) are walked directly by these methods — exactly
+    // one stream per frame, no Run nesting. `Code::Bytes` decodes on
+    // demand and never builds a `Vec<Instruction>`. See ADR 0015.
 
-    /// Returns the next instruction; `Ok(None)` at end of program.
+    /// Returns the next instruction; `Ok(None)` at end of program. For
+    /// `Code::Bytes` this decodes one instruction at the cursor and
+    /// advances by its encoded length.
     pub(crate) fn next_instruction(
         &mut self,
     ) -> Result<Option<crate::ops::Instruction>, VMError> {
-        if self.cursor >= self.instructions.len() {
-            return Ok(None);
+        let cursor = self.cursor;
+        match &self.code {
+            Code::Instrs(instrs) => {
+                if cursor >= instrs.len() {
+                    return Ok(None);
+                }
+                let instr = instrs[cursor].clone();
+                self.cursor = cursor + 1;
+                Ok(Some(instr))
+            }
+            Code::Bytes(bytes) => {
+                if cursor >= bytes.len() {
+                    return Ok(None);
+                }
+                let mut reader: &[u8] = &bytes[cursor..];
+                let before = reader.len();
+                let instr = crate::ops::Instruction::parse(&mut reader)?;
+                let consumed = before - reader.len();
+                self.cursor = cursor + consumed;
+                Ok(Some(instr))
+            }
         }
-        let instr = self.instructions[self.cursor].clone();
-        self.cursor += 1;
-        Ok(Some(instr))
     }
 
-    /// True iff the Run has reached its end. Test-only — production
-    /// code drives the run to completion via the dispatch loop.
+    /// True iff the frame has reached its end. Test-only — production
+    /// code drives to completion via the dispatch loop.
     #[cfg(test)]
     pub(crate) fn is_finished(&self) -> bool {
-        self.cursor >= self.instructions.len()
+        match &self.code {
+            Code::Instrs(instrs) => self.cursor >= instrs.len(),
+            Code::Bytes(bytes) => self.cursor >= bytes.len(),
+        }
     }
 
-    fn rewind(&mut self) {
-        self.cursor = 0;
+    /// Records `label n` at the current cursor (the position just after
+    /// the label). `n` must be the next sequential index, except a
+    /// re-visit (`n < len`, a loop back-edge) which must match the
+    /// stored position. See ADR 0015.
+    fn record_label(&mut self, n: usize) -> Result<(), VMError> {
+        use core::cmp::Ordering;
+        match n.cmp(&self.labels.len()) {
+            Ordering::Equal => {
+                self.labels.push(self.cursor);
+                Ok(())
+            }
+            Ordering::Less if self.labels[n] == self.cursor => Ok(()),
+            _ => Err(VMError::LabelOutOfOrder),
+        }
     }
 
-    fn jump_to_end(&mut self) {
-        self.cursor = self.instructions.len();
+    /// Moves the cursor to `label n`: immediate if already recorded,
+    /// else scans forward (recording labels, not executing) until it is
+    /// reached. `LabelNotFound` if the scan hits end-of-program. See
+    /// ADR 0015.
+    fn jump_to_label(&mut self, n: usize) -> Result<(), VMError> {
+        if n < self.labels.len() {
+            self.cursor = self.labels[n];
+            return Ok(());
+        }
+        // Scan forward via `next_instruction` (representation-agnostic:
+        // decoded Vec or byte stream), recording labels, until `n`.
+        loop {
+            match self.next_instruction()? {
+                None => return Err(VMError::LabelNotFound),
+                Some(crate::ops::Instruction::Label(m)) => {
+                    let m = m as usize;
+                    self.record_label(m)?;
+                    if m == n {
+                        return Ok(());
+                    }
+                }
+                Some(_) => {}
+            }
+        }
     }
 }
 
@@ -282,11 +338,14 @@ pub struct CallFrame {
     /// Isolated stack visible to scripts in this scope.
     pub(crate) stack: Vec<Value>,
 
-    /// Currently executing script.
-    pub(crate) current_run: Run,
-
-    /// Suspended scripts at this same call level (from `run`/`loop`/`switch`).
-    pub(crate) run_stack: Vec<Run>,
+    /// The frame's executable code (decoded instructions or raw bytecode).
+    code: Code,
+    /// Cursor into `code`: instruction index for `Instrs`, byte offset for
+    /// `Bytes`.
+    cursor: usize,
+    /// `labels[n]` = cursor position just after `label n`; filled lazily
+    /// in appearance order. See ADR 0015.
+    labels: Vec<usize>,
 
     /// Identity / dispatch context for this frame.
     pub(crate) kind: CallKind,
@@ -336,7 +395,9 @@ pub struct CallFrame {
 }
 
 impl CallFrame {
-    /// Builds a fresh CallFrame whose Run walks `instructions`.
+    /// Builds a fresh CallFrame over pre-decoded `instructions` (prover
+    /// and pre-parsed paths). The verifier / internal execution uses
+    /// [`CallFrame::from_bytecode`] to stream raw bytecode instead.
     pub fn new(
         instructions: Vec<crate::ops::Instruction>,
         kind: CallKind,
@@ -344,10 +405,33 @@ impl CallFrame {
         mem_limit: u64,
         newbytes: u64,
     ) -> Self {
+        Self::from_code(Code::Instrs(instructions), kind, gas_limit, mem_limit, newbytes)
+    }
+
+    /// Builds a CallFrame that decodes raw `bytecode` on demand — no
+    /// `Vec<Instruction>` is materialized. See ADR 0015.
+    pub(crate) fn from_bytecode(
+        bytecode: Vec<u8>,
+        kind: CallKind,
+        gas_limit: u64,
+        mem_limit: u64,
+        newbytes: u64,
+    ) -> Self {
+        Self::from_code(Code::Bytes(bytecode), kind, gas_limit, mem_limit, newbytes)
+    }
+
+    pub(crate) fn from_code(
+        code: Code,
+        kind: CallKind,
+        gas_limit: u64,
+        mem_limit: u64,
+        newbytes: u64,
+    ) -> Self {
         Self {
             stack: Vec::new(),
-            current_run: Run::new(instructions),
-            run_stack: Vec::new(),
+            code,
+            cursor: 0,
+            labels: Vec::new(),
             kind,
             gas_limit,
             gas_used: 0,
@@ -458,12 +542,10 @@ impl VM {
         mem_limit: u64,
         mut delegate: D,
     ) -> Result<TxResult, VMError> {
-        let bytecode = script.clone();
-        let program = crate::program::Program::parse(&script)?;
         let mut vm = Self::new(
             header,
-            CallFrame::new(
-                program.into_instructions(),
+            CallFrame::from_bytecode(
+                script.clone(),
                 CallKind::ExternalRoot,
                 gas_limit,
                 mem_limit,
@@ -474,7 +556,7 @@ impl VM {
         let sigs = mem::take(&mut vm.deferred_sigs);
         delegate.finalize(sigs.clone())?;
         vm.deferred_sigs = sigs;
-        Ok(vm.into_result(bytecode, None))
+        Ok(vm.into_result(script, None))
     }
 
     /// Runs an external-root program through the VM without finalizing
@@ -492,6 +574,30 @@ impl VM {
             header,
             CallFrame::new(
                 program.into_instructions(),
+                CallKind::ExternalRoot,
+                gas_limit,
+                mem_limit,
+                0,
+            ),
+        );
+        while vm.step_external(delegate)? {}
+        Ok(vm.into_result(bytecode, None))
+    }
+
+    /// Verifier entry: runs external-root **bytecode**, decoding on demand
+    /// without materializing a `Vec<Instruction>`. The witness-free
+    /// counterpart of [`run`]. See ADR 0015.
+    pub(crate) fn run_bytecode<D: Delegate>(
+        header: TxHeader,
+        bytecode: Vec<u8>,
+        gas_limit: u64,
+        mem_limit: u64,
+        delegate: &mut D,
+    ) -> Result<TxResult, VMError> {
+        let mut vm = Self::new(
+            header,
+            CallFrame::from_bytecode(
+                bytecode.clone(),
                 CallKind::ExternalRoot,
                 gas_limit,
                 mem_limit,
@@ -523,11 +629,10 @@ impl VM {
             caller: message.caller,
             anchor: message.anchor,
         };
-        let program = crate::program::Program::parse(&script)?;
         let mut vm = Self::new(
             header,
-            CallFrame::new(
-                program.into_instructions(),
+            CallFrame::from_bytecode(
+                script,
                 kind,
                 message.gas,
                 mem_limit,
@@ -809,8 +914,8 @@ impl VM {
         delegate: &mut D,
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<bool, VMError> {
-        let Some(instr) = self.current_call.current_run.next_instruction()? else {
-            return self.finish_run();
+        let Some(instr) = self.current_call.next_instruction()? else {
+            return self.finish_call();
         };
         use crate::ops::Instruction as I;
         match instr {
@@ -903,12 +1008,11 @@ impl VM {
             I::Fee => self.op_fee(delegate),
             I::Verify => self.op_verify(delegate),
 
-            I::Run => self.op_run(),
-            I::Loop => self.op_loop(),
-            I::Switch => self.op_switch(),
+            I::Label(n) => self.op_label(n),
+            I::Jump(n) => self.op_jump(n),
+            I::JumpIf(n) => self.op_jumpif(n),
             I::Return => self.op_return(),
             I::Type => self.op_type(),
-            I::BreakK(k) => self.op_break_k(k as usize),
 
             I::Input => self.op_input(),
             I::Cell => self.op_cell(),
@@ -936,15 +1040,6 @@ impl VM {
             I::Ext(b) => Err(VMError::UnknownOpcode(b)),
         }?;
         Ok(true)
-    }
-
-    /// End-of-script: pop the run stack, or finish the current call.
-    fn finish_run(&mut self) -> Result<bool, VMError> {
-        if let Some(run) = self.current_call.run_stack.pop() {
-            self.current_call.current_run = run;
-            return Ok(true);
-        }
-        self.finish_call()
     }
 
     /// Pops the current frame back to its caller on clean exit. Stack
@@ -1752,26 +1847,24 @@ impl VM {
     }
 
     /// _prog_ **run** → _results…_
-    fn op_run(&mut self) -> Result<(), VMError> {
-        let s = self.pop_value()?.to_string()?;
-        let instrs = s.to_instructions()?;
-        self.enter_run(instrs)
+    /// **label:n** → ø — record a jump target. See ADR 0015.
+    fn op_label(&mut self, n: u32) -> Result<(), VMError> {
+        self.current_call.record_label(n as usize)
     }
 
-    /// **loop** → ø — rewinds the current Run to the start.
-    fn op_loop(&mut self) -> Result<(), VMError> {
-        self.current_call.current_run.rewind();
-        Ok(())
+    /// **jump:n** → ø — unconditional jump to label `n`.
+    fn op_jump(&mut self, n: u32) -> Result<(), VMError> {
+        self.current_call.jump_to_label(n as usize)
     }
 
-    /// _x a b_ **switch** → enters `a` if `x != 0`, else `b`.
-    fn op_switch(&mut self) -> Result<(), VMError> {
-        let b = self.pop_value()?.to_string()?;
-        let a = self.pop_value()?.to_string()?;
+    /// _x_ **jumpif:n** → ø — pop an Int253; jump to label `n` iff `x ≠ 0`.
+    fn op_jumpif(&mut self, n: u32) -> Result<(), VMError> {
         let x = self.pop_value()?.to_int253()?;
-        let chosen = if x.is_zero() { b } else { a };
-        let instrs = chosen.to_instructions()?;
-        self.enter_run(instrs)
+        if x.is_zero() {
+            Ok(())
+        } else {
+            self.current_call.jump_to_label(n as usize)
+        }
     }
 
     /// _x(k-1) … x(0) k_ **return** → ø
@@ -1841,37 +1934,9 @@ impl VM {
         Ok(())
     }
 
-    /// `0x80..=0x8f` `break:k` — stops the current Run and, if `k > 0`,
-    /// also discards the `k` Runs that would have resumed next. If `k`
-    /// exceeds the number of suspended Runs in this call, the script
-    /// tried to break past the call boundary — fail (`BreakOutOfCall`).
-    fn op_break_k(&mut self, k: usize) -> Result<(), VMError> {
-        if k > self.current_call.run_stack.len() {
-            return Err(VMError::BreakOutOfCall);
-        }
-        // Discard `k` to-be-resumed Runs.
-        for _ in 0..k {
-            self.current_call.run_stack.pop();
-        }
-        // End the current Run by jumping its cursor to the end. The
-        // dispatch loop's `finish_run` will pop the next saved Run (or
-        // call `finish_call` if none).
-        self.current_call.current_run.jump_to_end();
-        Ok(())
-    }
-
     fn pop_string_32(&mut self) -> Result<[u8; 32], VMError> {
         let s = self.pop_value()?.to_string()?;
         crate::string::array32(&s.to_bytes()).ok_or(VMError::MalformedAddress)
-    }
-
-    /// Pushes the current Run onto the run-stack, switches to a
-    /// fresh Run over `instructions`.
-    fn enter_run(&mut self, instructions: Vec<crate::ops::Instruction>) -> Result<(), VMError> {
-        let new_run = Run::new(instructions);
-        let old_run = mem::replace(&mut self.current_call.current_run, new_run);
-        self.current_call.run_stack.push(old_run);
-        Ok(())
     }
 
     fn op_nop(&mut self) -> Result<(), VMError> {
@@ -2210,10 +2275,12 @@ impl VM {
             &prog,
         )?;
         let _ = cell.predicate.verify_callproof(&cp)?;
-        let instrs = prog.to_instructions()?;
+        // `Script` keeps prover witnesses inline; `Opaque` streams bytes
+        // (no parse) on the verifier. See ADR 0015.
+        let code = prog.into_code()?;
         // Split parent's anchor for the callee + stash post-call.
         let child_anchor = self.split_anchor_for_call()?;
-        self.enter_cell_open_frame(cell, instrs, gas, bytes, args, child_anchor);
+        self.enter_cell_open_frame(cell, code, gas, bytes, args, child_anchor);
         Ok(())
     }
 
@@ -2242,9 +2309,9 @@ impl VM {
             signature: sig,
         });
 
-        let instrs = prog_str.to_instructions()?;
+        let code = prog_str.into_code()?;
         let child_anchor = self.split_anchor_for_call()?;
-        self.enter_cell_open_frame(cell, instrs, gas, bytes, args, child_anchor);
+        self.enter_cell_open_frame(cell, code, gas, bytes, args, child_anchor);
         Ok(())
     }
 
@@ -2257,15 +2324,15 @@ impl VM {
     fn enter_cell_open_frame(
         &mut self,
         cell: Cell,
-        instrs: Vec<crate::ops::Instruction>,
+        code: Code,
         gas: u64,
         bytes: u64,
         args: Vec<Value>,
         child_anchor: Anchor,
     ) {
         let external_context = self.is_external();
-        let mut frame = CallFrame::new(
-            instrs,
+        let mut frame = CallFrame::from_code(
+            code,
             CallKind::CellOpen {
                 anchor: child_anchor,
                 predicate: cell.predicate.clone(),
@@ -2429,9 +2496,8 @@ impl VM {
         // cursors so we can roll back if the child errors out.
         let callee_anchor = self.split_anchor_for_call()?;
 
-        let program = crate::program::Program::parse(&script)?;
-        let mut frame = CallFrame::new(
-            program.into_instructions(),
+        let mut frame = CallFrame::from_bytecode(
+            script,
             CallKind::ActorCall {
                 actor: callee,
                 method,

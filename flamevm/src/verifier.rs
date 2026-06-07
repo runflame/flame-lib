@@ -78,13 +78,11 @@ impl Verifier {
         txbound_signature: Option<musig::Signature>,
     ) -> Result<TxResult, VMError> {
         let mut verifier = Verifier::new();
-        // Verifier-side: parse the wire bytecode into the canonical
-        // witness-free Program. Both sides feed `VM::run` through
-        // the same shape.
-        let program = crate::program::Program::parse(&bytecode)?;
-        let result = VM::run(
+        // Verifier-side: stream the wire bytecode directly — decode one
+        // instruction at a time, no `Vec<Instruction>`. See ADR 0015.
+        let result = VM::run_bytecode(
             header,
-            program,
+            bytecode,
             gas_limit,
             mem_limit,
             &mut verifier,

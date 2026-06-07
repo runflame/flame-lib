@@ -22,7 +22,7 @@ pub enum String {
     Scalar(Box<Int253>),
     /// Prover-side sub-script: a decoded instruction stream with
     /// witness slots intact. Encodes to the compiled bytecode.
-    /// Consumed by `op_run`, `op_switch`, `op_signcall` via
+    /// Consumed by `op_open` / `op_signcall` via
     /// [`String::to_instructions`] — verifier sees `Opaque(bytes)`
     /// and parses, prover keeps witnesses inline.
     Script(Vec<Instruction>),
@@ -168,15 +168,26 @@ impl String {
     /// `Opaque` parses via `Program::parse` (verifier side); 32-byte
     /// point/scalar variants are not executable bytecode and error.
     ///
-    /// Used by `op_run`, `op_switch`, `op_signcall` to enter a
+    /// Used by `op_open` / `op_signcall` to enter a predicate
     /// sub-script — letting the prover keep witnesses inline
-    /// across nested programs.
+    /// across the isolated call frame.
     pub fn to_instructions(self) -> Result<Vec<Instruction>, VMError> {
         match self {
             String::Script(instrs) => Ok(instrs),
             String::Opaque(data) => Ok(
                 crate::program::Program::parse(&data)?.into_instructions(),
             ),
+            _ => Err(VMError::TypeNotString),
+        }
+    }
+
+    /// Like [`to_instructions`], but returns the executable [`Code`]:
+    /// `Script` keeps prover witnesses inline; `Opaque` becomes raw
+    /// bytecode the verifier decodes on demand (no parse). See ADR 0015.
+    pub(crate) fn into_code(self) -> Result<crate::vm::Code, VMError> {
+        match self {
+            String::Script(instrs) => Ok(crate::vm::Code::Instrs(instrs)),
+            String::Opaque(data) => Ok(crate::vm::Code::Bytes(data)),
             _ => Err(VMError::TypeNotString),
         }
     }
