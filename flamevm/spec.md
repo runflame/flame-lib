@@ -1199,6 +1199,8 @@ Pops the state `Value`, **validates portability** (every value must be portable 
 
 **Portability is the canonical storage gate.** Portable values: `Int253`, `String`, `Point`, `Dict` of portable, non-negative `ClearToken`, `Token`. Non-portable values (`Cell`, `Merlin`, `Variable`, `Expression`, `Constraint`, `MultiscalarMul`, `WideToken`, negative `ClearToken`) hard-fail `NonPortableInState`. Portability is distinct from VM stack-copyability (Tokens are portable but not copyable — they survive the load/save round-trip via Rust-level deep clone, ignoring the linear-type discipline that gates `dup`).
 
+**Token portability invariant.** An encrypted `Token` is unconditionally portable; its non-negative-quantity obligation is discharged once at the **construction site** (`issuepriv` / `mix` / `borrow` range-proof CS gates), not re-checked at `save` / `output` / `send`. Any future Token constructor must preserve this — minting a Token without the range proof would let a negative/forged token be sealed into storage, breaking conservation. Linearity (non-copyability) is what guarantees the stored token can't be duplicated back out; the storage deep-clone is the single sanctioned move, and the registry holds the sole surviving copy after the tx applies.
+
 ### setcode
 
 _code_ → ø

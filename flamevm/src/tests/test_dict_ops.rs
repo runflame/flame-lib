@@ -206,6 +206,31 @@ fn getdup_noncopyable_errors() {
     ));
 }
 
+/// Conservation: `getdup` of a key whose value is a *nested* Dict
+/// containing a token must also fail `TypeNotCopyable` — the recursive
+/// `Dict::try_clone` copyability check blocks duplicating tokens buried
+/// inside sub-dicts, not just top-level ones (audit p9).
+#[test]
+fn getdup_nested_token_dict_errors() {
+    // outer = { 9: inner } where inner = { 5: ClearToken(0, 7) }.
+    let script = Program::new()
+        // build inner dict { 5: ClearToken(0,7) }
+        .push_int(7u64).pushtoken()
+        .push_int(5u64)
+        .push_int(1u64).dict()
+        // build outer { 9: inner }
+        .push_int(9u64)
+        .push_int(1u64).dict()
+        // getdup key 9 → would copy the token-bearing inner dict
+        .push_int(9u64).get_dup()
+        .to_bytecode();
+    let mut vm = vm_with_script(script);
+    assert!(matches!(
+        run_to_end(&mut vm).unwrap_err(),
+        VMError::TypeNotCopyable
+    ));
+}
+
 #[test]
 fn first_of_empty_pushes_zero() {
     let script = Program::new().push_int(0u64).dict().first().to_bytecode();

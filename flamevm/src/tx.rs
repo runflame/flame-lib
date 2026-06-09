@@ -259,7 +259,20 @@ impl Env for MemEnv {
                         a.code = code.clone();
                     }
                 }
-                _ => {}
+                // Exhaustive on purpose: a newly-added effect variant must
+                // force a decision here rather than be silently dropped.
+                // The following are no-ops for this first-cut applier
+                // (deploy/vbyte-credit/reaping deferred — vbytes-flow note).
+                TxEntry::Header(_)
+                | TxEntry::Data(_)
+                | TxEntry::Input(_)
+                | TxEntry::Receive(_)
+                | TxEntry::Output(_)
+                | TxEntry::IssuePub(_, _)
+                | TxEntry::IssuePriv(_, _)
+                | TxEntry::Retire(_, _)
+                | TxEntry::Fee(_)
+                | TxEntry::Send(_) => {}
             }
         }
     }

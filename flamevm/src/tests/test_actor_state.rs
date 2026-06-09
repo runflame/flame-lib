@@ -261,6 +261,52 @@ fn load_then_dismantle_self_destructs_and_queues_vbytes() {
     assert_eq!(reg.vbyte_pool().maturing.get(&release_at).copied().unwrap_or(0), 10_000);
 }
 
+/// Conservation: a non-zero token in actor state survives a
+/// `load; save` round-trip **exactly once** — the registry's post-state
+/// holds the same single token, neither dropped nor duplicated, despite
+/// op_save's Rust-level deep clone into the txlog (audit p9).
+#[test]
+fn token_survives_load_save_roundtrip_exactly_once() {
+    let mut reg = MemRegistry::new();
+    let mut d = Dict::new();
+    d.insert(
+        Int253::from(0u64),
+        Value::ClearToken(crate::ClearToken::new(Int253::from(5u64), Int253::from(9u64))),
+    );
+    let state = Value::Dict(d);
+    let recv = Program::new().load().save().to_bytecode();
+    let id = ActorID::Hash(ActorID::Constructor(recv.clone()).to_hash());
+    reg.deploy(id.clone(), recv, state, 10_000, 0).expect("deploy");
+
+    let msg = Message {
+        target: id.clone(),
+        method: RECV_METHOD,
+        caller: None,
+        anchor: Anchor([0x11; 32]),
+        payload: Vec::new(),
+        gas: 100_000,
+        vbytes: 0,
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+    };
+    let block = BlockContext { height: 0 };
+    VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("run");
+
+    // Exactly one token of the same qty/flavor remains in the registry.
+    match reg.actor(&id).unwrap().state.as_ref().unwrap() {
+        Value::Dict(d) => {
+            assert_eq!(d.len(), 1, "no extra entry");
+            match d.get(&Int253::from(0u64)) {
+                Some(Value::ClearToken(t)) => {
+                    assert_eq!(t.qty, Int253::from(5u64));
+                    assert_eq!(t.flv, Int253::from(9u64));
+                }
+                other => panic!("token vanished or mutated: {other:?}"),
+            }
+        }
+        other => panic!("unexpected state shape: {other:?}"),
+    }
+}
+
 /// Deploy-on-first-delivery: a message addressed to a Constructor-form
 /// id instantiates the actor (code = constructor bytes, empty state,
 /// funded by the message's vbytes), then dispatches into it.
