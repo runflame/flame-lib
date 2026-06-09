@@ -46,6 +46,11 @@ pub enum VMError {
     #[error("Index out of range")]
     IndexOutOfRange,
 
+    /// A stack-controlled allocation (`writezeros`, `tread`) exceeds the
+    /// frame's transient-memory cap.
+    #[error("transient allocation exceeds memory limit")]
+    MemLimitExceeded,
+
     /// This error occurs when an instruction requires a String.
     #[error("Item is not a String")]
     TypeNotString,

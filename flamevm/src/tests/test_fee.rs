@@ -63,12 +63,11 @@ fn phase19_op_fee_rejects_negative_qty() {
     let pc_gens = PedersenGens::default();
     // Build script directly so we can push a negative Int253.
     let mut script = Vec::new();
-    // pushint8 neg 50 (qty = -50)
+    // pushint8 neg 50 (qty = -50) — minimal (negative, no narrower form)
     script.push(0x11);
     script.push(50);
-    // pushint8 pos 0 (flv = 0)
-    script.push(0x10);
-    script.push(0);
+    // push:0 (flv = 0) — canonical zero (pushint8 pos 0 is non-minimal)
+    script.push(0x00);
     // fee
     script.push(0x9b);
     let program = crate::Program::parse(&script).expect("decode");

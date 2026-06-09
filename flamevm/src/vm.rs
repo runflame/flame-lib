@@ -1249,6 +1249,9 @@ impl VM {
     /// merlin back, then the new String.
     fn op_tread(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
+        if n > self.transient_alloc_cap() {
+            return Err(VMError::MemLimitExceeded);
+        }
         let label = self.pop_value()?.to_string()?;
         let mut m = self.pop_value()?.to_merlin()?;
         let out = m.read_bytes(&label.to_bytes(), n);
@@ -1568,8 +1571,22 @@ impl VM {
     }
 
     /// `0x47` `writezeros` — `s n → s'`. Appends `n` zero bytes.
+    /// Interim per-allocation ceiling for stack-controlled byte counts
+    /// (`writezeros`, `tread`): the frame's `mem_limit`, or a fixed 16 MiB
+    /// when unset (0), until per-instruction memory metering lands.
+    fn transient_alloc_cap(&self) -> usize {
+        const MAX_TRANSIENT_ALLOC: usize = 1 << 24;
+        match self.current_call.mem_limit {
+            0 => MAX_TRANSIENT_ALLOC,
+            lim => lim as usize,
+        }
+    }
+
     fn op_write_zeros(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
+        if n > self.transient_alloc_cap() {
+            return Err(VMError::MemLimitExceeded);
+        }
         let s = self.pop_value()?.to_string()?;
         let appended = s.append_bytes(&vec![0u8; n]);
         self.push_value(Value::String(appended));
@@ -1651,9 +1668,13 @@ impl VM {
         if n < 2 {
             return Err(VMError::StackUnderflow);
         }
-        let two_have_non_int = !matches!(self.current_call.stack[n - 1], Value::Int253(_))
-            || !matches!(self.current_call.stack[n - 2], Value::Int253(_));
-        if self.is_external() && two_have_non_int {
+        // CS-lift only when an operand is actually a CS type (Variable /
+        // Expression). A "non-Int253" test would wrongly route String /
+        // Point comparisons (e.g. the `anchor … eq verify` binding idiom)
+        // into `to_expression()` and hard-fail in external context.
+        let cs_involved = matches!(self.current_call.stack[n - 1], Value::Variable(_) | Value::Expression(_))
+            || matches!(self.current_call.stack[n - 2], Value::Variable(_) | Value::Expression(_));
+        if self.is_external() && cs_involved {
             let b = self.pop_value()?.to_expression()?;
             let a = self.pop_value()?.to_expression()?;
             self.push_value(Value::Constraint(crate::Constraint::eq(a, b)));

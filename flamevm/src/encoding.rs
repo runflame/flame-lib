@@ -147,7 +147,11 @@ pub(crate) fn read_subvarint(r: &mut impl Reader) -> Result<u64, ReadError> {
             Ok(SUBVAR_U16_BASE + (u16::from_le_bytes(buf) as u64))
         }
         SUBVARINT_U32 => Ok(SUBVAR_U32_BASE + (r.read_u32()? as u64)),
-        SUBVARINT_U64 => Ok(SUBVAR_U64_BASE + r.read_u64()?),
+        // Reject overflow: a payload near u64::MAX would wrap past the
+        // base and alias a smaller value (non-canonical).
+        SUBVARINT_U64 => SUBVAR_U64_BASE
+            .checked_add(r.read_u64()?)
+            .ok_or(ReadError::InvalidFormat),
         _ => Err(ReadError::InvalidFormat),
     }
 }

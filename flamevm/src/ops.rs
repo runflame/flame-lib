@@ -434,9 +434,14 @@ impl Instruction {
             OP_PUSHSTR => {
                 let len = crate::encoding::read_subvarint(reader)
                     .map_err(|_| VMError::UnexpectedEndOfScript)? as usize;
-                let mut buf = vec![0u8; len];
-                reader
-                    .read(&mut buf)
+                // Bound the claimed length against remaining input BEFORE
+                // allocating — a tiny length prefix must not force a giant
+                // allocation on adversarial bytecode.
+                if len > reader.remaining_bytes() {
+                    return Err(VMError::UnexpectedEndOfScript);
+                }
+                let buf = reader
+                    .read_bytes(len)
                     .map_err(|_| VMError::UnexpectedEndOfScript)?;
                 Ok(Instruction::PushStr(String::from(buf)))
             }
@@ -637,6 +642,19 @@ fn parse_pushint_n(
         .read(&mut buf[..width_bytes])
         .map_err(|_| VMError::UnexpectedEndOfScript)?;
     let mag = u128::from_le_bytes(buf);
+    // Canonical minimal width: reject a value representable by a narrower
+    // class (push:k for non-neg 0..15, push:0 for zero, the next-smaller
+    // pushint for wider forms). The encoder always picks the narrowest.
+    let minimal = match width_bytes {
+        1 => mag != 0 && (negative || mag > OP_PUSH_SMALL_MAX as u128),
+        2 => mag > u8::MAX as u128,
+        8 => mag > u16::MAX as u128,
+        16 => mag > u64::MAX as u128,
+        _ => true,
+    };
+    if !minimal {
+        return Err(VMError::InvalidInt253Encoding);
+    }
     let mut scalar_bytes = [0u8; 32];
     scalar_bytes[..16].copy_from_slice(&mag.to_le_bytes());
     let scalar = Option::<Scalar>::from(Scalar::from_canonical_bytes(scalar_bytes))
@@ -650,6 +668,11 @@ fn parse_pushint_full(reader: &mut impl Reader) -> Result<Instruction, VMError> 
         .read(&mut buf)
         .map_err(|_| VMError::UnexpectedEndOfScript)?;
     let int = Int253::from_bytes(buf).ok_or(VMError::InvalidInt253Encoding)?;
+    // Canonical: the 32-byte full form is only for magnitudes exceeding
+    // 128 bits; anything that fits pushint128 (or narrower) must use it.
+    if int.abs_scalar().to_bytes()[16..].iter().all(|&b| b == 0) {
+        return Err(VMError::InvalidInt253Encoding);
+    }
     Ok(Instruction::PushInt(int))
 }
 

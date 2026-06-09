@@ -4,6 +4,29 @@
 
 use super::test_helpers::*;
 
+/// Regression: in external context, `eq` of two Strings (or Points) must
+/// cleartext peek-compare, not route into the CS branch and hard-fail
+/// `to_expression()`. Guards the spec's `anchor … eq verify` binding idiom.
+#[test]
+fn eq_external_strings_peek_compare_not_cs_lift() {
+    let pc_gens = PedersenGens::default();
+    let prog = Program::new()
+        .push_str(String::from(b"abcd".to_vec()))
+        .push_str(String::from(b"abcd".to_vec()))
+        .eq();
+    let mut vm = VM::new(
+        dummy_header(),
+        CallFrame::new(prog.into_instructions(), CallKind::ExternalRoot, 1_000_000, 0, 0),
+    );
+    let mut prover = Prover::new(&pc_gens);
+    vm.step_external(&mut prover).expect("push a");
+    vm.step_external(&mut prover).expect("push b");
+    vm.step_external(&mut prover).expect("eq must not error in external context");
+    // Non-consuming cleartext eq leaves [a, b, 1].
+    assert_eq!(vm.current_call.stack.len(), 3);
+    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+}
+
 #[test]
 fn range_proof_accepts_in_range_value() {
     // alloc(42) push:64 range — 42 fits in 64 bits.

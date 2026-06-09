@@ -4,6 +4,31 @@
 
 use super::test_helpers::*;
 
+/// Canonicality: a push-int value representable by a narrower width class
+/// must use it (the encoder always picks narrowest). Decoder rejects the
+/// non-minimal forms. See ADR/audit (decode canonicality).
+#[test]
+fn pushint_non_minimal_width_rejected() {
+    // pushint8 pos 5 → should be push:5
+    assert!(matches!(Program::parse(&[0x10, 0x05]).unwrap_err(), VMError::InvalidInt253Encoding));
+    // pushint8 pos 0 → should be push:0
+    assert!(matches!(Program::parse(&[0x10, 0x00]).unwrap_err(), VMError::InvalidInt253Encoding));
+    // pushint16 pos 5 → fits push:k
+    assert!(matches!(Program::parse(&[0x12, 0x05, 0x00]).unwrap_err(), VMError::InvalidInt253Encoding));
+    // Minimal forms accepted: pushint8 neg 5 (no narrower negative), push:5.
+    assert!(Program::parse(&[0x11, 0x05]).is_ok());
+    assert!(Program::parse(&[0x05]).is_ok());
+}
+
+/// pushstr with a huge claimed length but no payload must fail-bounded,
+/// not force a giant allocation (OOM-on-adversarial-input guard).
+#[test]
+fn pushstr_overlong_length_is_bounded_not_oom() {
+    // pushstr, sub-varint U32 ≈ 4.3 GB, zero payload bytes.
+    let script = vec![0x19, 0x02, 0xff, 0xff, 0xff, 0xff];
+    assert!(matches!(Program::parse(&script).unwrap_err(), VMError::UnexpectedEndOfScript));
+}
+
 #[test]
 fn pushint_full_rejects_negative_zero() {
     // sign bit set, magnitude zero: -0, not representable. Parse-time

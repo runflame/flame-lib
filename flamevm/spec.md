@@ -37,7 +37,7 @@ Internal transactions do not have a pre-determined effect and therefore do not s
 
 Like external, internal transactions produce effects:
 
-1. Receive — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating `SendID` (canonical 32-byte hash of the whole Send: anchor, target, caller, method, payload, gas, vbytes, refund predicate — analogous to `CellID` for cells) into the Internal TxID merkle root. Symmetric with `Input` for external transactions.
+1. `Receive(SendID)` (txlog variant `TxEntry::Receive`) — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating `SendID` (canonical 32-byte hash of the whole Send: anchor, target, caller, method, payload, gas, vbytes, refund predicate — analogous to `CellID` for cells) into the Internal TxID merkle root. Symmetric with `Input` for external transactions.
 2. Outputs — creation of new entries in the Utreexo.
 3. Sends — messages sent to actors that produce other internal transactions.
 4. Issuance and retirement — creation and removal of tokens to/from circulation.
@@ -272,22 +272,13 @@ Token: encrypted token with a proven non-negative qty,
 
 # Actors
 
-Actors are entities stored in the common storage area defined by a dict:
+An actor is **`(code, state)`** ([ADR 0018](../decisions/0018-actor-code-state-split.md)):
 
-```rust
-ActorState = dict {
-    public#0x00:  dict { ... };
-    private#0x01: dict { ... };
-}
-```
+- **code** — a single bytecode blob, set at deploy and replaced by [`setcode`](#setcode). Dispatch is method-agnostic: the registry returns the blob (`load_code`); the blob itself dispatches on the [`method`](#method) opcode (a prologue that compares the selector against author-chosen values and jumps to the matching handler). The VM imposes **no method layout** and reserves no method key — entirely author-defined.
 
-`public` - a dict containing methods that can be called, each method identified by its key. Key 0 (`recv`) is reserved to process incoming messages.
+- **state** — **any portable `Value`** (Int253, String, Point, Token, Dict, …), with no mandated shape and no methods-in-state. [`load`](#load) checks it out, [`save`](#save) moves it back; the author structures it however they like.
 
-`private` - a dict with private methods and data defined by the actor.
-
-Each actor is identified by a unique Actor ID defined by its *constructor script* or its hash. Therefore, each unique constructor defines a unique actor.
-
-Actor ID is either `enum{ 0x00: hash }` or `enum { 0x01: constructor }`.
+Each actor is identified by a unique Actor ID — `enum { 0x00: hash, 0x01: constructor }` — derived from its *constructor script*: `Hash(h)` and `Constructor(bytes)` denote the same actor when `h = H(bytes)`, so the **id commits to the code**. Each unique constructor defines a unique actor.
 
 Actors pay for their storage in vbytes each block (see Storage below). When an actor's vbyte balance reaches zero, it enters a frozen state with a grace period proportional to its prior activity (one block per four blocks of activity, capped at six months of blocks). A top-up restores it; without one the state is cleared and the vbytes are recycled (subject to 100-block maturity).
 
@@ -370,7 +361,7 @@ The `left` half is embedded in the new entity (cell anchor / SendID); the `right
 Each instruction is a one-byte **opcode** optionally followed by **immediate data** encoded inline in the bytecode. Stack effects are written in left-to-right bottom-to-top order: in `a b → c`, `b` is the top of the stack on entry, `c` is the top on exit.
 
 **Context column.** The **Ctx** column in the instruction table marks opcodes that fail outside their supported context:
-- **ext.** — external-only. Hard-fails `ExternalOnly` from internal context. Covers `input`, the constraint-system opcodes (`scalar`, `commit`, `alloc`, `expr`, `range`, the CS branches of `borrow`), and the CS-consuming opcodes (`mix`, `decrypt`, `fee`).
+- **ext.** — external-only. Hard-fails `ExternalOnly` from internal context. Covers `input`, the constraint-system opcodes (`scalar`, `commit`, `alloc`, `expr`, `range`), and the CS-consuming opcodes (`mix`, `decrypt`, `fee`). Branch-polymorphic opcodes (`borrow`, `eq`, `add`, `and`, `or`) keep a blank Ctx marker; their CS-branch restriction is in the per-opcode prose.
 - **int.** — internal-only. Needs a registry handle. Covers `call`, `load`, `save`, and the chain-info family.
 - *(blank)* — works in either context. Most opcodes, including `send` (which emits messages from external txs too).
 
@@ -683,8 +674,8 @@ _a b_ **eq** → _a b {0|1}_ (cleartext) | → _constraint_ (CS branch)
 
 Two stack diagrams depending on operand types and context:
 
-1. **Cleartext branch.** When both operands are `Int253` (or both are non-CS types), peeks at the top two values and pushes `1` if equal or `0` otherwise. Operands stay on the stack. Equality is type-aware via `Value::try_eq`.
-2. **Lifted branch.** When at least one operand is `Expression` or `Variable` in external context, both operands are popped, lifted to `Expression` (Int253 → `Expression::Constant`), and the result is `Constraint::eq(a, b)`.
+1. **Cleartext branch.** When neither operand is a CS type (`Variable` / `Expression`), or in internal context, peeks at the top two values and pushes `1` if equal or `0` otherwise. Operands stay on the stack. Equality is type-aware via `Value::try_eq`: `Int253` / `String` / `Point` compare by value; **same-variant `Dict` and all linear types (`Token`, `ClearToken`, `Cell`, …) hard-fail `TypeNotComparable`** (linear values have no equality; Dicts would cost unbounded recursion).
+2. **Lifted branch.** When at least one operand is `Expression` or `Variable` *and* the context is external, both operands are popped, lifted to `Expression` (Int253 → `Expression::Constant`), and the result is `Constraint::eq(a, b)`.
 
 ### neg
 
@@ -1006,7 +997,7 @@ _x_ → ø
 
 _qty flv_ → _−WT_
 
-Pops `qty: Int253` (non-negative, must fit `u64` and be `≤ MAX_FEE = 2²⁴`) and `flv: Int253`. Emits `TxEntry::Fee(qty as u64)` and bumps the per-tx [`CheckedFee`](#fees) accumulator (also capped at `MAX_FEE`). Allocates a fresh `WideToken` debt with `q = −qty`, `f = flv` (both cleartext-constrained) and pushes it. The script must balance the debt against real tokens, typically via [`mix`](#mix).
+Pops `qty: Int253` (non-negative, `≤ MAX_FEE = 2²⁴`) and `flv: Int253`. The `2²⁴` cap is chosen so fee-rate arithmetic stays within `u64`: even a `2⁴⁰`-byte (~1 TB) transaction leaves 24 bits of headroom. Emits `TxEntry::Fee(qty as u64)` and bumps the per-tx [`CheckedFee`](#fees) accumulator (also capped at `MAX_FEE`). Allocates a fresh `WideToken` debt with `q = −qty`, `f = flv` (both cleartext-constrained) and pushes it. The script must balance the debt against real tokens, typically via [`mix`](#mix).
 
 Hard-fails: `FeeQtyNegative`, `FeeTooHigh` (per-arg or aggregate overflow), `TypeNotInt253`, `ExternalOnly`. The blinded-fee branch is reserved for a future phase.
 
@@ -1059,7 +1050,7 @@ Atomic cross-frame return:
 3. Asserts the callee stack has exactly `k` items left (otherwise `BadReturnArity` or `StackNotClean`).
 4. Pops the call frame.
 5. Refunds leftover gas to the parent.
-6. Pushes the `k` items onto the parent's stack.
+6. Pushes the `k` items onto the parent's stack, then the count `k`, then a **success marker `1`** — the parent observes `results… k 1`. (A clean run-off-the-end exit pushes `0 1`.) A **failed** call instead pushes a single `0` — the call "did not happen". Callers branch on this trailing `1`/`0` flag; the same convention applies to [`call`](#call), [`open`](#open), and [`signcall`](#signcall).
 
 At the outermost call frame, `return` always errors regardless of `k`; a script terminates cleanly by running off the end of its instructions with an empty stack (jump to a trailing label to short-circuit).
 
@@ -1212,9 +1203,9 @@ Pops a String and replaces the current actor's **code blob** with its bytes, the
 
 Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `TypeNotString`, `ActorNotFound`, `ActorFrozen`.
 
-**Atomicity.** A `save` failure (`SaveWithoutLoad`, `NonPortableInState`, `TypeNotDict`, `MalformedActorState`, `ActorNotFound`) propagates as a frame failure. The frame's call boundary rolls back both the txlog (truncating any ActorSave entry the failed callee may have written earlier) and the actor registry (restoring pre-frame state — a failed `load`'s checked-out state is restored to present, so the actor isn't spuriously self-destructed), keeping the actor consistent with the truncated txlog. At the outermost frame, `execute_internal` applies the same rollback at the tx level.
+**Atomicity.** A `save` failure (`SaveWithoutLoad`, `NonPortableInState`, `ActorNotFound`) propagates as a frame failure. The frame's call boundary rolls back both the txlog (truncating any ActorSave entry the failed callee may have written earlier) and the actor registry (restoring pre-frame state — a failed `load`'s checked-out state is restored to present, so the actor isn't spuriously self-destructed), keeping the actor consistent with the truncated txlog. At the outermost frame, `execute_internal` applies the same rollback at the tx level.
 
-Hard-fails: `SaveWithoutLoad` (actor not checked out), `NonPortableInState`, `TypeNotDict`, `MalformedActorState`, `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorNotFound`.
+Hard-fails: `SaveWithoutLoad` (actor not checked out), `NonPortableInState`, `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorNotFound`.
 
 ### signtx
 
@@ -1348,265 +1339,9 @@ Pushes a Dict of block stats at height `n`.
 
 ---
 
-# Discussion
 
-**Bit-oriented vs byte-oriented strings:** we choose byte-oriented strings as simpler and less error-prone.
+## Isolation & binding notes
 
-**Varlength encoding:** using the same CompactSize format as in Bitcoin.
+**Cell-open trust model.** `open`, `signcall`, and `call` all create isolated call frames: the unlocked / signed / called script runs in its own stack, gas budget, memory cap, and identity scope, with no implicit access to the host's actor state, gas pool, or identity. This eliminates the confused-deputy class of bugs — an actor accepting an untrusted-source cell need not audit the predicate as a global authorization filter, because the script cannot reach the actor's state regardless of what the predicate authorizes ([ADR 0013](../decisions/0013-predicate-call-isolation.md)).
 
-**Cell-open trust model.** `open`, `signcall`, and `call` all create
-isolated call frames. The unlocked / signed / called script runs in
-its own stack, gas budget, memory cap, and identity scope. No
-implicit access to the host's actor state, gas pool, or identity.
-This eliminates the confused-deputy class of bugs for both
-external- and internal-context cell-opens: an actor accepting an
-untrusted-source cell does not need to audit the predicate as a
-global authorization filter, because the script can't reach the
-actor's state regardless of what the predicate authorizes. See
-design.md §Calls and isolation.
-
-**`signcall` binding policy.** The deferred signature for `signcall`
-commits to the script bytes only. The script is expected to bind
-itself to further context (anchor, actor identity, tx-level data)
-by including explicit checks such as `anchor <expected> eq verify`
-inside the script. This shifts the binding policy into the script
-author's hands — flexibility at the price of footgun.
-
-### Actor structure
-
-Actor is a dict:
-
-```rust
-ActorState = Dict {
-  public#0x00: Dict;
-  private#0x01: Dict;
-}
-```
-
-`public` - a Dict of methods that can be called, each method identified by its key. The “recv” key is reserved to process incoming messages; other keys are for custom callable methods by other actors.
-
-`private` - a Dict with private methods and data defined by the actor.
-
-The actor has full access to all its data, can redefine methods, change state etc.
-
-Actor is stored in the following structure:
-
-```rust
-// All actors are stored as (ActorID, Actor) pairs.
-// ActorID = Hash(initial ActorState);
-
-struct Actor {
-  state: ActorState;
-  bytes_remaining: u64; // vbytes remaining
-}
-```
-
-### Async messages vs Sync calls
-
-Should the ctVM work as a sync stop-the-world machine like in Ethereum, or an async actor network like in TON?
-
-Pros of sync:
-
-- Simpler programming model - easier for developer adoption, less error prone.
-- Contracts can easily return data to each other.
-- Full picture at once, no delays to be exploited by traders and validators.
-
-Pros of async:
-
-- Isolated concurrently verifiable transactions - better scalability options.
-
-Cons of both models: 
-
-- Need to store most of the state in memory to execute transactions.
-
-Additional considerations:
-
-- Well-designed massive multiplayer contracts operate at constant cost (variable cost works only for limited amount of data and/or users).
-
-Flame architecture offloads most of the accounts and payments to UTXO model that keeps the state compressed. Most of the computation costs are concentrated in zkVM and are easily parallelizable.
-
-zkVM communicates with ctVM via async messages: instead of an *output*, a zkVM transaction may create a message that’s added to the ctVM message queue. When ctVM is invoked to process the message, the entire state of all deployed contracts is available for the execution — ctVM contracts can call each other in a synchronous manner.
-
-### **Interface**
-
-zkVM emits messages - this allows parallelizable verification of zkVM transactions & allows committing payment for gas (because zkvm tx by itself does not pay fees when it fails).
-
-ctVM asynchronously executes messages, processing queue in FIFO order. All messages emitted during the block of zkvm txs are processed within that block.
-
-ctVM may emit both outputs (utxos) and messages (async calls) — for returning values to the users and scheduling messages for other contracts. 
-
-ctVM asymmetric crypto operations (based on point-scalar multiplications) are for verification only: all such operations are assumed to be valid during computation and batched in the end of it. These include verification of signatures and encrypted values.
-
-### **Messages**
-
-- zkVM transaction pre-pays fee for a portion of gas for each emitted message.
-- All prepaid gas is consumed regardless of execution result, gas is never refunded upon failure.
-- ctVM contract has two results: failure or success. In case of failure, the message payload is returned to the predicate specified in the message, ctVM state is unchanged.
-- ctVM may fail for (1) exceeding gas limit, (2) exceeding space limit, (3) triggering failure explicitly during execution.
-
-Missing public method - call to private fn missing().
-Destination = Either(Address, InitialState).
-Empty bounce predicate = no bounce, value is burned on error.
-Can port zero qty token of any flavor for InitialState.
-
-Bounce: only makes sense for predicates since we cannot know who pays the gas to process the bounce and if it succeeds. Bounces only make sense for offchain invocations, since cross-contract calls are all atomic.
-
-Idea: no need to have context-free program execution only to call a method on a deployed contract. Simply call on a contract (empty string - no call). 
-
-Bytes transfer: contract has balance of storage limit and can transfer it to any other contract.
-
-```rust
-Call {
-	destination: Enum {
-		a: Address,
-		i: Constructor
-	},
-	method: String, // name of the code to be called
-	payload: (T…),   // tuple of items 
-	gas: Int,        // prepurchased amount of gas
-	bytes: Int,      // amount of storage that can be allocated to the contract
-	bounce: Optional<Predicate>,
-	anchor:          // unique anchor generated by the transaction
-}
-```
-
-Call arguments:
-
-- **k** items as payload, all portable.
-- gas limit, 0 if inherits all parent’s limit.
-- blockbytes, 0 if none to add to the balance.
-- method name
-- address (ctor or hash)
-
-Send:
-
-- in addition: bounce
-- anchor.
-
-Note: if calls failure can be handled, then sigchecks must be batched per call. This also means that sometimes sigchecks can fail and that is allowed behavior. Meaning, when we transfer the block of txs to another node we may signal the status and reason for execution of each call, so failed sigchecks are verified
-
-```rust
-send:
-args... k method gas bbytes addr -> {results... m 1 | args... k 0}
-
-call:
-args... k method gas bbytes addr -> {results... m 1 | args... k 0}
-
-```
-
-**Questions:**
-
-- Reentrancy? How the stored state mutates?
-- What is address? Is the address really a constructor code, but it can be compressed into a hash? What if user provides hash, but the contract is not even deployed yet? What if we don’t have a hash, but have a short name instead? Meaning, we send to another id which is DNS contract and it routes the call to the destination contract.
-- Call failures w.r.t. linear types:
-
-- When deployed, ctVM contracts allocate power-of-two space and pre-pay for N blocks.
-    - Note: we cannot give out prepayment all at once to current minters - then the rest of the minters are not getting the rent. It should be parked
-- Operations that exceed prepaid bounds fail. When prepayment expires, contract state is frozen and compressed (id→state hash pair), and can be resurrected by anyone paying for its deployment. Network therefore guarantees that the state is not lost when the rent expires for the extra N blocks into the future.
-    - TODO: we can try to use utxos to offload state perpetually, but then we cannot protect against fresh state re-deployment. What do we do to permanently erase the state?
-- each ctVM contract is allowed to consume transiently as much space as it has rented for its storage. E.g. if rented 128 bytes, then only up to extra 128 bytes can be used by a contract during calls and re-entrant calls.
-
-### Execution
-
-Layers:
-
-1/ VM run: process message, memlimit, gas limit, verify point ops, emit outputs.
-
-2/ Contract call: isolated storage access. Call must end with empty stack. Pass in and returns are explicit. Call is mem-bounded and gas-bounded. In-place contracts provide isolation and inherit remaining mem/gas limits and affect the parent’s limit.
-
-3/ Program run: executing a specific string of instructions.
-
-### Design questions
-
-- how do we name two VMs, do we name them as one VM? How we name each context: outside the deployed contract and inside?
-    - “FlameVM”, external transaction and internal transactions.
-- How to claim new flames?
-    - (a) insert utxo with out-of-vm rules upon maturity; (b) explicit “claim” opcode - more complicated.
-- how does anchor work in all contracts?
-    - Provided in context. Cannot be user-affected.
-- how does issuance work?
-    - both zk and ctvm can issue. Flavor tied to contract identity, anchor is optionally used by the user to make issuance
-- how do contracts with preds and with methods work?
-    - “open:k” shows merkle path to a program that executes within scope of the contract with arguments passed in.
-- how opening of taproot works?
-    - open:k is like call:k, but without selector.
-    - predicate signature simply returns root item in the contract.
-- how deployment works?
-    - we need on-the-fly deploy
-- how rent payment is subtracted / spread out?
-- how isolated program runs work?
-- how encrypted vs unencrypted values work and their ops?
-    - Token - possibly encrypted supertype of ClearToken.
-    - Can typecast up, must prove typecast down.
-- how to pay fee in any asset (softly enforced by the network elsewhere)?
-
-idea: stateinit = constructor code - then we can verify zero token init w/o scanning data structs
-
-idea: message is a in-vacuum call. also: after wrap contract runs in vacuum.
-
-idea: issue from utxo to prevent replays - if deployed contract offloads, then it can reissue tokens. And tokens are permeating other contracts - making this ecosystem risk.
-
-Issuance should be possible to tie to an anchor if it’s programmable and tied to global state.
-
-**Example: DEX AMM**
-
-```jsx
-type Message: Dict {
-
-}
-
-contract AMM {
-  var X: Token
-  var Y: Token
-  
-  fn liquidity(msg: ) {
-     // determine which token is in excess and add it as a swap.
-  }
-  
-  fn receive(message: Message) {
-     if message.code {
-     }
-  }
-  
-  // sells x for y, returns y
-  fn sell(x: Token, price_slippage: f64) -> Token {
-     // X*Y = k
-     // (X+x)*(Y-y) = k
-     // ~~XY~~ + xY - y *(X+x) = ~~k~~
-     // y = xY / (X+x)
-     verify(x.flv == self.X.flv);
-     let y = x*self.Y.qty / (self.X.qty + x);
-     self.X = self.X + x;
-     self.Y = self.Y - y;
-     return y;
-  }
-  
-  fn buy(y: Token) {
-     
-  }
-}
-```
-
-**Example: Bitcoin Resurrection**
-
-```rust
-contract Prime {
-  var btc_issued: u64;
-  var flames_deposited: Token;
-  
-  pub fn resurrect(f: Token) -> Token {
-    verify(f.flv == FlameFlavor);
-    let circulation = Flame.flames_issued - self.flames_deposited
-    let q = f.qty * Flame.btc_burned / circulation
-    self.btc_issued += q
-    self.flames_deposited = merge(self.flames_deposited, f)
-    return issuepub(“btc”, q)
-  }
-  
-  pub fn revert(btc: Token) -> Token {
-    verify(btc.flv == issuance_flavor("btc"))
-    // TBD: burn btc, return flames at current price
-    ...
-  }
-}
-```
+**`signcall` binding policy.** The deferred `signcall` signature commits to the script bytes only; the script binds itself to further context (anchor, actor identity, tx-level data) via explicit checks such as `anchor <expected> eq verify`. Binding policy lives in the author's hands — flexibility at the price of footgun.

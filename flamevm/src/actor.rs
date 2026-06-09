@@ -116,8 +116,11 @@ impl Decodable for ActorID {
             }
             Self::TAG_CONSTRUCTOR => {
                 let len = r.read_u64()? as usize;
-                let mut bytes = vec![0u8; len];
-                r.read(&mut bytes)?;
+                // Bound the attacker-controlled length before allocating.
+                if len > r.remaining_bytes() {
+                    return Err(ReadError::InvalidFormat);
+                }
+                let bytes = r.read_bytes(len)?;
                 Ok(ActorID::Constructor(bytes))
             }
             _ => Err(ReadError::InvalidFormat),
