@@ -261,6 +261,47 @@ fn load_then_dismantle_self_destructs_and_queues_vbytes() {
     assert_eq!(reg.vbyte_pool().maturing.get(&release_at).copied().unwrap_or(0), 10_000);
 }
 
+/// Deploy-on-first-delivery: a message addressed to a Constructor-form
+/// id instantiates the actor (code = constructor bytes, empty state,
+/// funded by the message's vbytes), then dispatches into it.
+#[test]
+fn constructor_send_deploys_then_runs() {
+    let mut reg = MemRegistry::new();
+    let code = Program::new().nop().to_bytecode();
+    let target = ActorID::Constructor(code.clone());
+    let canonical = ActorID::Hash(target.to_hash());
+    assert!(!reg.exists(&target));
+
+    let msg = Message {
+        target: target.clone(),
+        method: RECV_METHOD,
+        caller: None,
+        anchor: Anchor([0x07; 32]),
+        payload: Vec::new(),
+        gas: 10_000,
+        vbytes: 777,
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+    };
+    let block = BlockContext { height: 42 };
+    VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("deploy+run");
+
+    let a = reg.actor(&canonical).expect("actor deployed");
+    assert_eq!(a.code, code);
+    assert_eq!(a.vbytes, 777);
+    assert_eq!(a.last_activation_height, 42);
+}
+
+/// A Hash-form target that doesn't exist still fails — only the
+/// Constructor form carries deployable code.
+#[test]
+fn hash_send_to_unknown_actor_errors() {
+    let mut reg = MemRegistry::new();
+    let block = BlockContext { height: 0 };
+    let err = VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block)
+        .expect_err("unknown hash target must fail");
+    assert!(matches!(err, VMError::ActorNotFound));
+}
+
 #[test]
 fn dismantle_token_bearing_state_requires_retire() {
     // Tokens must be explicitly retired/spent, never dropped: a state

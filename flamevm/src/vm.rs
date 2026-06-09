@@ -643,6 +643,22 @@ impl VM {
         registry: &mut dyn ActorRegistry,
         block: &BlockContext,
     ) -> Result<TxResult, VMError> {
+        // Deploy-on-first-delivery (spec §Actors): a Constructor-form
+        // target carries the actor's code on the wire and the id
+        // commits to it (`id = H(bytes)`), so the first message to a
+        // not-yet-deployed actor instantiates it — code = constructor
+        // bytes, empty state, funded by the message's vbytes.
+        if !registry.exists(&message.target) {
+            if let ActorID::Constructor(bytes) = &message.target {
+                registry.deploy(
+                    message.target.clone(),
+                    bytes.clone(),
+                    crate::actor::empty_state(),
+                    message.vbytes,
+                    block.height,
+                )?;
+            }
+        }
         let script = registry.load_code(&message.target)?;
         let mem_limit = registry.actor_vbytes(&message.target)?.saturating_mul(4);
         // SendID is the canonical hash of the whole send (anchor,

@@ -280,6 +280,8 @@ An actor is **`(code, state)`** ([ADR 0018](../decisions/0018-actor-code-state-s
 
 Each actor is identified by a unique Actor ID — `enum { 0x00: hash, 0x01: constructor }` — derived from its *constructor script*: `Hash(h)` and `Constructor(bytes)` denote the same actor when `h = H(bytes)`, so the **id commits to the code**. Each unique constructor defines a unique actor.
 
+**Deploy-on-first-delivery.** The first message delivered to a not-yet-deployed `Constructor`-form target instantiates the actor: code = the constructor bytes (self-authorized — the id commits to them), state = empty, vbyte balance = the message's `vbytes` grant, activated at the delivering block's height. A `Hash`-form target that doesn't exist fails `ActorNotFound` (the hash alone carries no code). The consensus layer must not double-credit the deploying message's vbytes via the ordinary top-up path.
+
 Actors pay for their storage in vbytes each block (see Storage below). When an actor's vbyte balance reaches zero, it enters a frozen state with a grace period proportional to its prior activity (one block per four blocks of activity, capped at six months of blocks). A top-up restores it; without one the state is cleared and the vbytes are recycled (subject to 100-block maturity).
 
 # Messages
