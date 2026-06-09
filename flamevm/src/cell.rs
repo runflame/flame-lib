@@ -627,6 +627,12 @@ impl Decodable for Cell {
         let anchor = Anchor(a);
         let payload_count =
             read_list_prefix(r).map_err(|_| ReadError::InvalidFormat)?;
+        // Every payload value is ≥1 byte, so a count exceeding remaining
+        // input is unsatisfiable — bound before allocating so a tiny
+        // hostile length prefix can't force a multi-GB allocation.
+        if payload_count > r.remaining_bytes() {
+            return Err(ReadError::InvalidFormat);
+        }
         let mut payload = Vec::with_capacity(payload_count);
         for _ in 0..payload_count {
             match read_value(r) {

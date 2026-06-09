@@ -131,6 +131,8 @@ Stack-only types (non-portable, never encoded on the wire):
 
 Every value has exactly one canonical wire byte sequence. The first byte is a type+width tag; within each type, width classes carve the value range into disjoint, offset-based sub-ranges so the encoder has no choice about which tag to use.
 
+**Group-element validation is lazy.** `Point` (`POINT_TAG`) and `Token` (`TOKEN_TAG`) bytes are accepted at decode **without** Ristretto decompression — they land as `Point::Opaque` / `Commitment::Closed` and are validated only at first cryptographic use (signature batch, `verify_callproof`, CS decompression), where an invalid element fails the proof. A structurally-invalid group element may therefore sit inside a committed Cell / actor-state / Send until used; this is deliberate (it preserves byte-identical prover/verifier round-tripping and keeps decode allocation-free), not a malleability hole — the 32 bytes are canonical, and any non-decompressable element is unusable. **Length-prefixed counts (list/dict/string payloads) are always bounded against remaining input before allocation** (`Cell::decode` payload count, `pushstr`/`ActorID` lengths), so a small hostile prefix cannot force a large allocation.
+
 Tag namespace (one byte, 256 values total):
 
 ```

@@ -4,6 +4,31 @@
 
 use super::test_helpers::*;
 
+/// `Cell::decode` must reject an oversized payload-count prefix before
+/// allocating — a tiny hostile input claiming billions of payload items
+/// is unsatisfiable and must error, not OOM (audit p7 critical).
+#[test]
+fn cell_decode_rejects_payload_count_bomb() {
+    use readerwriter::Decodable;
+    // A valid empty-payload cell ends with the payload list prefix
+    // (LIST_IMM 0 = 128). Swap it for LIST_VAR + a ~4.3 GB sub-varint
+    // count (U32 form, below the U64-overflow guard so we exercise the
+    // remaining-bytes bound itself).
+    let cell = Cell::new(
+        Predicate::opaque(CompressedRistretto([2u8; 32])),
+        Anchor([0u8; 32]),
+        Vec::new(),
+    );
+    let mut bytes = cell.to_bytes();
+    assert_eq!(*bytes.last().unwrap(), 128, "empty-payload list prefix");
+    bytes.pop();
+    bytes.push(187); // LIST_VAR
+    bytes.push(2); // SUBVARINT_U32
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+    let mut r: &[u8] = &bytes;
+    assert!(Cell::decode(&mut r).is_err());
+}
+
 #[test]
 fn cell_opcode_requires_seeded_anchor() {
     // push:7 (payload), push:1 (count), pushpoint(some), cell —
