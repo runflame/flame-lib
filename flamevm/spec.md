@@ -46,6 +46,8 @@ Like external, internal transactions produce effects:
 
 Note: calls themselves (the act of one actor invoking another) are intra-transaction control flow, not effects. Anything a callee does that the outer world cares about shows up via one of the effects above. See `../design.md` §"TxLog records effects, not control flow".
 
+**TxLog transport.** The TxLog (`Vec<TxEntry>`) is **re-derived by re-executing** the bytecode under the proof + signature binding — it is never trusted from the wire. `ExternalTx::verify` re-runs the script and rebuilds the log from scratch, so full-node consensus needs no canonical TxLog wire form and a forged TxLog cannot be injected. `TxEntry` is therefore intentionally **not** `Encodable`/`Decodable` in this crate; each variant only `commit`s a 32-byte merkle leaf (`ActorSave` → `(actor, state_root)`, `SetCode` → `(actor, code_root)`, `Output` → `cell.id()`, `Send` → `Message::id()`), while the full payload rides in the struct for replay (the Bitcoin txid/witness split). A future light-client payload-transport format is a **node-layer** concern; any such serializer must recompute leaf digests by reusing this crate's own hashing (`write_value`/`state_root`/`code_root`, `Cell::id`, `Message::encode`/`Message::id`) — never a reimplementation — or it forks the chain. Golden vectors pinning these digests live in `test_golden.rs`.
+
 Internal transactions do not support fee payment: they operate within gas- and memory limits set by the external transaction. They also do not support inputs, as those can be consumed only by external transactions with a Utreexo proof and (most of the time), a transaction signature.
 
 # Limits

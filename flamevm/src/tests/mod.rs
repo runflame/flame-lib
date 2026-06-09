@@ -20,6 +20,7 @@ mod test_dict_ops;
 mod test_differential;
 mod test_dispatch;
 mod test_fee;
+mod test_golden;
 mod test_hashing;
 mod test_int253_ops;
 mod test_msm;
