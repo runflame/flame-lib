@@ -223,6 +223,68 @@ fn sibling_calls_to_same_actor_allowed_after_return() {
     while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
 }
 
+/// Call-entry debit: granting more gas than the caller has remaining
+/// hard-fails OutOfGas at the call site (no frame is created).
+#[test]
+fn call_grant_exceeding_caller_budget_is_out_of_gas() {
+    let mut reg = MemRegistry::new();
+    let b = deploy_recv(&mut reg, nop_recv(), 1_000);
+    // Caller budget 100; grant 5_000 to the callee.
+    let a_script = call_script(&b, 0, 5_000);
+    let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
+    let kind = CallKind::InternalRoot {
+        actor: a,
+        method: Int253::from(0u64),
+        caller: None,
+        anchor: Anchor([0u8; 32]),
+    };
+    let mut vm = VM::new(
+        dummy_header(),
+        CallFrame::new(
+            Program::parse(&a_script).unwrap().into_instructions(),
+            kind,
+            100,
+            0,
+            0,
+        ),
+    );
+    let err = loop {
+        match vm.step_internal_with_registry(&mut reg) {
+            Ok(true) => continue,
+            Ok(false) => panic!("must error before completing"),
+            Err(e) => break e,
+        }
+    };
+    assert!(matches!(err, VMError::OutOfGas));
+}
+
+/// Leftover-gas refund: after a child call returns cleanly, the parent's
+/// spent gas equals (grant − child leftover) + parent's own instructions
+/// — not the full grant.
+#[test]
+fn call_refunds_leftover_gas_to_caller() {
+    let mut reg = MemRegistry::new();
+    // Child: push:0 return — 2 instructions ≈ 2 gas of a 5_000 grant.
+    let b_recv = Program::new().push_int(0u64).return_().to_bytecode();
+    let b = deploy_recv(&mut reg, b_recv, 1_000);
+    let a_script = {
+        let mut p = Program::parse(&call_script(&b, 0, 5_000)).expect("parse");
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.to_bytecode()
+    };
+    let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
+    let mut vm = vm_for_actor(a, a_script);
+    while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
+    // Parent budget 1_000_000: a handful of own instructions plus ~2 gas
+    // consumed by the child. Far below the 5_000 grant.
+    let remaining = vm.current_call.gas_limit - vm.current_call.gas_used;
+    assert!(
+        remaining > 1_000_000 - 100,
+        "leftover grant must be refunded; remaining = {remaining}"
+    );
+}
+
 #[test]
 fn call_without_registry_errors() {
     let mut reg = MemRegistry::new();

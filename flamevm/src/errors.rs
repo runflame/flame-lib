@@ -51,6 +51,12 @@ pub enum VMError {
     #[error("transient allocation exceeds memory limit")]
     MemLimitExceeded,
 
+    /// The frame's gas budget is exhausted (per-instruction metering,
+    /// including instructions scanned while skipping to a label), or a
+    /// call grants more gas than the caller has remaining.
+    #[error("out of gas")]
+    OutOfGas,
+
     /// This error occurs when an instruction requires a String.
     #[error("Item is not a String")]
     TypeNotString,

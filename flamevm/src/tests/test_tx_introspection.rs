@@ -69,10 +69,11 @@ fn version_pushes_tx_header_version() {
 
 #[test]
 fn gas_pushes_remaining_budget() {
-    // No opcode in this script charges gas yet, so remaining == limit.
+    // Per-instruction metering: the `gas` opcode itself costs 1, so the
+    // pushed remaining budget is limit − 1.
     let mut vm = vm_with_header_and_budgets(dummy_header(), Program::new().gas().to_bytecode(), 12_345, 0);
     run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[0], Int253::from(12_345u64));
+    assert_int(&vm.current_call.stack[0], Int253::from(12_344u64));
 }
 
 #[test]

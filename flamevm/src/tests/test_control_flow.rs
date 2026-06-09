@@ -197,6 +197,55 @@ fn build_continue_skips_rest_of_body() {
     run_until_tx_done(&mut vm).unwrap();
 }
 
+// ── gas metering (per-instruction; ADR 0009 mechanism) ──────
+
+/// An unbounded loop terminates with OutOfGas instead of hanging — the
+/// safety property that replaces "no loops" (ADR 0015).
+#[test]
+fn infinite_loop_exhausts_gas() {
+    let script = Program::new().build_loop(|p| p.nop()).to_bytecode();
+    let kind = CallKind::InternalRoot {
+        actor: ActorID::Hash([0u8; 32]),
+        method: Int253::from(0u64),
+        caller: None,
+        anchor: Anchor([0u8; 32]),
+    };
+    let mut vm = VM::new(
+        dummy_header(),
+        CallFrame::new(Program::parse(&script).unwrap().into_instructions(), kind, 1_000, 0, 0),
+    );
+    assert!(matches!(
+        run_until_tx_done(&mut vm).unwrap_err(),
+        VMError::OutOfGas
+    ));
+}
+
+/// A forward jump's skip-scan charges per scanned instruction, so a long
+/// dead region can't be skipped for free.
+#[test]
+fn skip_scan_charges_gas() {
+    // jump L0, then 50 nops, label L0. Budget of 10 < 1 (jump) + 51 scans.
+    let mut p = Program::new().jump(0);
+    for _ in 0..50 {
+        p = p.nop();
+    }
+    let script = p.label(0).to_bytecode();
+    let kind = CallKind::InternalRoot {
+        actor: ActorID::Hash([0u8; 32]),
+        method: Int253::from(0u64),
+        caller: None,
+        anchor: Anchor([0u8; 32]),
+    };
+    let mut vm = VM::new(
+        dummy_header(),
+        CallFrame::new(Program::parse(&script).unwrap().into_instructions(), kind, 10, 0, 0),
+    );
+    assert!(matches!(
+        run_until_tx_done(&mut vm).unwrap_err(),
+        VMError::OutOfGas
+    ));
+}
+
 // ── return ──────────────────────────────────────────────────
 
 #[test]

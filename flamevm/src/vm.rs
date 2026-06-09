@@ -154,6 +154,11 @@ impl Delegate for InternalDelegate {
     }
 }
 
+/// Flat per-instruction gas cost — placeholder until per-opcode
+/// calibration lands (ADR 0009). Charged for every fetched instruction,
+/// executed or skip-scanned.
+const GAS_PER_INSTRUCTION: u64 = 1;
+
 /// A frame's executable code. The prover holds decoded, witness-bearing
 /// instructions; the verifier and internal actor execution hold raw
 /// bytecode and decode one instruction at a time — never materializing a
@@ -211,6 +216,18 @@ impl CallFrame {
         }
     }
 
+    /// Debits `n` gas from this frame's budget; `OutOfGas` when the
+    /// budget is exhausted. Charged per fetched instruction (executed
+    /// or skip-scanned), so prover (`Instrs`) and verifier (`Bytes`)
+    /// meter identically — they walk the same instruction sequence.
+    fn charge_gas(&mut self, n: u64) -> Result<(), VMError> {
+        self.gas_used = self.gas_used.saturating_add(n);
+        if self.gas_used > self.gas_limit {
+            return Err(VMError::OutOfGas);
+        }
+        Ok(())
+    }
+
     /// Records `label n` at the current cursor (the position just after
     /// the label). `n` must be the next sequential index, except a
     /// re-visit (`n < len`, a loop back-edge) which must match the
@@ -238,7 +255,10 @@ impl CallFrame {
         }
         // Scan forward via `next_instruction` (representation-agnostic:
         // decoded Vec or byte stream), recording labels, until `n`.
+        // Each scanned instruction is charged like an executed one, so
+        // long skips can't be free (ADR 0015 gas-on-scan).
         loop {
+            self.charge_gas(GAS_PER_INSTRUCTION)?;
             match self.next_instruction()? {
                 None => return Err(VMError::LabelNotFound),
                 Some(crate::ops::Instruction::Label(m)) => {
@@ -914,6 +934,7 @@ impl VM {
         delegate: &mut D,
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<bool, VMError> {
+        self.current_call.charge_gas(GAS_PER_INSTRUCTION)?;
         let Some(instr) = self.current_call.next_instruction()? else {
             return self.finish_call();
         };
@@ -2284,6 +2305,10 @@ impl VM {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
         let (gas, bytes) = self.pop_gas_bytes()?;
+        // The callee's budget comes out of the caller's: debit the full
+        // grant now; leftover is refunded on clean return, burned on
+        // failure.
+        self.current_call.charge_gas(gas)?;
         let prog = self.pop_value()?.to_string()?;
         let position = self.pop_value()?.to_string()?;
         let neighbors = self.pop_value()?.to_dict()?;
@@ -2314,6 +2339,8 @@ impl VM {
         let m = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(m)?;
         let (gas, bytes) = self.pop_gas_bytes()?;
+        // Debit the grant from the caller (see op_open).
+        self.current_call.charge_gas(gas)?;
         let sig_bytes = self.pop_value()?.to_string()?.to_bytes();
         let prog_str = self.pop_value()?.to_string()?;
         let cell = self.pop_value()?.to_cell()?;
@@ -2481,6 +2508,10 @@ impl VM {
         let callee = ActorID::Hash(self.pop_string_32()?);
         let method = Int253::from(self.pop_value()?.to_int253()?);
         let (gas, vbytes) = self.pop_gas_bytes()?;
+        // Debit the grant from the caller (see op_open). A caller that
+        // can't afford the grant hard-fails OutOfGas — its own budget
+        // is exhausted, not a soft "callee unavailable" marker.
+        self.current_call.charge_gas(gas)?;
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
 
@@ -2506,6 +2537,9 @@ impl VM {
             Err(_) => {
                 // Pre-frame failure (reentrancy, missing actor, etc.):
                 // push marker `0`, no frame created, no rollback needed.
+                // The call "did not happen" — refund the debited grant.
+                self.current_call.gas_used =
+                    self.current_call.gas_used.saturating_sub(gas);
                 self.push_value(Value::Int253(Int253::from(0u64)));
                 return Ok(());
             }
