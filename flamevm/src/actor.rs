@@ -4,21 +4,15 @@ use merlin::Transcript;
 use readerwriter::{Decodable, Encodable, ReadError, Reader, WriteError, Writer};
 
 use crate::dict::Dict;
-use crate::encoding::write_dict;
+use crate::encoding::write_value;
 use crate::errors::VMError;
 use crate::int253::Int253;
-use crate::string::String;
 use crate::value::Value;
 
-/// Reserved method key in the actor-state `public` sub-Dict.
-/// Dispatched for every inbound message send (`recv`); other keys
-/// are reachable only via `op_call` between actors.
+/// Conventional method selector for a plain inbound `send` (`recv`).
+/// The actor's code dispatches on the `method` opcode; this is just the
+/// default selector a send with no explicit method targets.
 pub const RECV_METHOD: Int253 = Int253::ZERO;
-
-/// Reserved top-level Dict keys for an actor's state. `public#0x00`
-/// holds the method table; `private#0x01` holds the actor's data.
-pub const ACTOR_STATE_PUBLIC_KEY_RAW: u64 = 0x00;
-pub const ACTOR_STATE_PRIVATE_KEY_RAW: u64 = 0x01;
 
 // ── ActorID ──────────────────────────────────────────────────────
 
@@ -131,72 +125,40 @@ impl Decodable for ActorID {
     }
 }
 
-// ── Actor state helpers (state IS a Dict) ────────────────────────
+// ── Actor state + code helpers ───────────────────────────────────
 //
-// The actor's state is a plain `Dict` with the conventional shape
-// `{ 0x00 → public_dict, 0x01 → private_dict }` (see spec.md §Actors).
-// Scripts construct it on the stack via `dict` / `put`, push it back
-// via `op_save`, and observe it via `op_load`. No wrapper struct —
-// the convention is encoded directly in the Dict's contents.
-//
-// The two helpers below navigate the convention from registry-side
-// code (`resolve_method` for method dispatch) and provide a canonical
-// commitment hash (`state_root` for `TxEntry::ActorSave`'s merkle leaf).
+// An actor is `(code, state)`: a single bytecode blob (set by `setcode`,
+// dispatched on the `method` opcode) plus an opaque state `Value` the
+// author structures however they like. `op_load` / `op_save` move the
+// state; `state_root` / `code_root` are the canonical commitments for
+// `TxEntry::ActorSave` / `TxEntry::SetCode`. See ADR 0018.
 
-/// Constructs an empty actor state: a Dict with `{0x00 → empty_dict,
-/// 0x01 → empty_dict}`. Used by tests and the bootstrap deploy path.
-pub fn empty_state() -> Dict {
-    let mut s = Dict::new();
-    s.insert(
-        Int253::from(ACTOR_STATE_PUBLIC_KEY_RAW),
-        Value::Dict(Dict::new()),
-    );
-    s.insert(
-        Int253::from(ACTOR_STATE_PRIVATE_KEY_RAW),
-        Value::Dict(Dict::new()),
-    );
-    s
+/// A neutral empty state — an empty Dict. State may be **any** portable
+/// `Value`; this is just a convenient default for deploy / tests.
+pub fn empty_state() -> Value {
+    Value::Dict(Dict::new())
 }
 
-/// Constructs an actor state with a pre-populated public Dict and an
-/// empty private Dict. Convenience for tests that only care about
-/// the method table.
-pub fn state_with_public(public: Dict) -> Dict {
-    let mut s = Dict::new();
-    s.insert(Int253::from(ACTOR_STATE_PUBLIC_KEY_RAW), Value::Dict(public));
-    s.insert(
-        Int253::from(ACTOR_STATE_PRIVATE_KEY_RAW),
-        Value::Dict(Dict::new()),
-    );
-    s
-}
-
-/// Looks up a method script in the canonical state shape:
-/// `state[0x00 = public][method]`. Returns `None` if the state isn't
-/// in canonical shape, the method key is absent, or the value at the
-/// method key isn't a `String`.
-pub fn resolve_method<'a>(state: &'a Dict, method: &Int253) -> Option<&'a String> {
-    match state.get(&Int253::from(ACTOR_STATE_PUBLIC_KEY_RAW))? {
-        Value::Dict(public) => match public.get(method)? {
-            Value::String(s) => Some(s),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// Canonical 32-byte commitment to an actor's state Dict — the
-/// `TxEntry::ActorSave` merkle leaf.
-///
-/// Infallible in valid registry context: op_save gates stored states on
-/// portability, and all portable values — including non-negative
-/// `ClearToken` — are wire-encodable.
-pub fn state_root(state: &Dict) -> [u8; 32] {
+/// Canonical 32-byte commitment to an actor's state `Value` — the
+/// `TxEntry::ActorSave` merkle leaf. Infallible in valid registry
+/// context: op_save gates stored states on portability, and all
+/// portable values are wire-encodable.
+pub fn state_root(state: &Value) -> [u8; 32] {
     let mut buf = Vec::new();
-    write_dict(&mut buf, state)
+    write_value(&mut buf, state)
         .expect("actor state in valid registry context is wire-encodable");
     let mut t = Transcript::new(b"flamevm.actor.state.root");
     t.append_message(b"state", &buf);
+    let mut h = [0u8; 32];
+    t.challenge_bytes(b"root", &mut h);
+    h
+}
+
+/// Canonical 32-byte commitment to an actor's code blob — the
+/// `TxEntry::SetCode` merkle leaf.
+pub fn code_root(code: &[u8]) -> [u8; 32] {
+    let mut t = Transcript::new(b"flamevm.actor.code.root");
+    t.append_message(b"code", code);
     let mut h = [0u8; 32];
     t.challenge_bytes(b"root", &mut h);
     h
@@ -210,13 +172,16 @@ pub fn state_root(state: &Dict) -> [u8; 32] {
 /// state). Per `flamevm/spec.md` §Storage and ADR 0005.
 #[derive(Clone, Debug)]
 pub struct Actor {
-    /// Mutable script-visible state, or `None` while **checked out**
-    /// — `op_load` moves the state onto a frame's stack (leaving
-    /// `None`), `op_save` moves it back. A checked-out actor has no
-    /// code or data, so calls/loads against it fail `ActorEmpty`: the
-    /// state's presence *is* the re-entrancy lock (ADR 0017). Canonical
-    /// shape when present is `{0x00 → public_dict, 0x01 → private_dict}`.
-    pub state: Option<Dict>,
+    /// The actor's code blob — a single bytecode string, dispatched on
+    /// the `method` opcode. Set at deploy, replaced by `setcode`.
+    pub code: Vec<u8>,
+
+    /// Mutable script-visible state — **any** portable `Value` — or
+    /// `None` while **checked out**: `op_load` moves the state onto a
+    /// frame's stack (leaving `None`), `op_save` moves it back. A
+    /// checked-out actor can't be called/loaded (`ActorEmpty`): the
+    /// state's presence *is* the re-entrancy lock (ADR 0017).
+    pub state: Option<Value>,
 
     /// Persistent vbyte balance. Bled per block during `tick_block`
     /// (Unit 3). `0` puts the actor in the frozen state
@@ -240,10 +205,11 @@ pub struct Actor {
 }
 
 impl Actor {
-    /// Constructs a fresh actor with the given initial state and
+    /// Constructs a fresh actor with the given code, initial state, and
     /// vbyte funding, activated at `height`.
-    pub fn new_active(state: Dict, vbytes: u64, height: u64) -> Self {
+    pub fn new_active(code: Vec<u8>, state: Value, vbytes: u64, height: u64) -> Self {
         Self {
+            code,
             state: Some(state),
             vbytes,
             active_blocks: 0,
@@ -276,11 +242,11 @@ impl Actor {
 /// encodability ≠ portability — op_save's `is_portable` check is the
 /// authoritative storage gate; this reports the rare case of a portable
 /// value that lacks an encoder.
-pub fn vbyte_size(state: &Dict) -> Result<u64, VMError> {
+pub fn vbyte_size(code: &[u8], state: &Value) -> Result<u64, VMError> {
     const STORAGE_OVERHEAD: u64 = 32;
     let mut buf = Vec::new();
-    write_dict(&mut buf, state).map_err(|_| VMError::MalformedActorState)?;
-    Ok(buf.len() as u64 + STORAGE_OVERHEAD)
+    write_value(&mut buf, state).map_err(|_| VMError::MalformedActorState)?;
+    Ok(code.len() as u64 + buf.len() as u64 + STORAGE_OVERHEAD)
 }
 
 // ── Lifecycle constants ───────────────────────────────────────────
@@ -408,24 +374,22 @@ pub trait ActorRegistry {
     /// push onto the stack. Errors `ActorEmpty` if it's already checked
     /// out (the re-entrancy lock), `ActorFrozen` if frozen, or
     /// `ActorNotFound`. The matching `save_state` moves it back.
-    fn load_state(&mut self, id: &ActorID) -> Result<Dict, VMError>;
+    fn load_state(&mut self, id: &ActorID) -> Result<Value, VMError>;
 
     /// Moves `state` back into a **checked-out** actor (`op_save`).
     /// Errors `SaveWithoutLoad` if the actor isn't checked out (saving
     /// would clobber live, possibly token-bearing, state). The caller
     /// ensures `state` is portable (op_save checks first).
-    fn save_state(&mut self, id: &ActorID, state: Dict) -> Result<(), VMError>;
+    fn save_state(&mut self, id: &ActorID, state: Value) -> Result<(), VMError>;
 
-    /// Resolves a method's script bytes. Equivalent to
-    /// `load_state(id)?.resolve_method(method)?` but exists as a
-    /// distinct call so dispatch can skip the per-call state clone
-    /// for the common case where the callee only runs its method
-    /// (no `load`/`save`).
-    fn resolve_method(
-        &self,
-        actor: &ActorID,
-        method: Int253,
-    ) -> Result<Vec<u8>, VMError>;
+    /// Returns the actor's code blob, method-agnostic — the code itself
+    /// dispatches on the `method` opcode. Errors `ActorNotFound` /
+    /// `ActorFrozen` / `ActorEmpty` (checked out → re-entrancy block).
+    fn load_code(&self, actor: &ActorID) -> Result<Vec<u8>, VMError>;
+
+    /// Replaces the actor's code blob (`setcode`). Errors
+    /// `ActorNotFound` / `ActorFrozen`. Independent of the state lock.
+    fn set_code(&mut self, actor: &ActorID, code: Vec<u8>) -> Result<(), VMError>;
 
     /// Returns the actor's persistent vbyte balance. Used by the
     /// VM driver to size the transient-memory cap (`4× persistent`
@@ -472,13 +436,14 @@ pub trait ActorRegistry {
 
     // ── deployment (Q4 — transparent on first delivery) ────────
 
-    /// Installs a freshly-deployed actor under `id`, funded with
-    /// `vbytes`, activated at `height`. Errors `ActorAlreadyExists`
-    /// if the id is already taken.
+    /// Installs a freshly-deployed actor under `id` with `code` and
+    /// initial `state`, funded with `vbytes`, activated at `height`.
+    /// Errors `ActorAlreadyExists` if the id is already taken.
     fn deploy(
         &mut self,
         id: ActorID,
-        state: Dict,
+        code: Vec<u8>,
+        state: Value,
         vbytes: u64,
         height: u64,
     ) -> Result<(), VMError>;
@@ -598,7 +563,7 @@ impl Default for MemRegistry {
 }
 
 impl ActorRegistry for MemRegistry {
-    fn load_state(&mut self, id: &ActorID) -> Result<Dict, VMError> {
+    fn load_state(&mut self, id: &ActorID) -> Result<Value, VMError> {
         let h = id.to_hash();
         // Pre-checks on an immutable borrow before recording undo +
         // moving the state out.
@@ -622,7 +587,7 @@ impl ActorRegistry for MemRegistry {
     fn save_state(
         &mut self,
         id: &ActorID,
-        state: Dict,
+        state: Value,
     ) -> Result<(), VMError> {
         let h = id.to_hash();
         // Only a checked-out actor can be saved to — otherwise we'd
@@ -637,11 +602,7 @@ impl ActorRegistry for MemRegistry {
         Ok(())
     }
 
-    fn resolve_method(
-        &self,
-        actor: &ActorID,
-        method: Int253,
-    ) -> Result<Vec<u8>, VMError> {
+    fn load_code(&self, actor: &ActorID) -> Result<Vec<u8>, VMError> {
         let a = self
             .actors
             .get(&actor.to_hash())
@@ -649,12 +610,25 @@ impl ActorRegistry for MemRegistry {
         if a.is_frozen() {
             return Err(VMError::ActorFrozen);
         }
-        // Checked-out actor has no code/data → can't dispatch. This is
-        // the re-entrancy block for *calls* (ADR 0017).
-        let state = a.state.as_ref().ok_or(VMError::ActorEmpty)?;
-        let script = resolve_method(state, &method)
-            .ok_or(VMError::MethodNotFound)?;
-        Ok(script.to_bytes_vec())
+        // Checked-out (state == None) → re-entrancy block for calls
+        // (ADR 0017). Code is always present, so this is now an
+        // explicit gate rather than a side effect of method lookup.
+        if a.state.is_none() {
+            return Err(VMError::ActorEmpty);
+        }
+        Ok(a.code.clone())
+    }
+
+    fn set_code(&mut self, actor: &ActorID, code: Vec<u8>) -> Result<(), VMError> {
+        let h = actor.to_hash();
+        match self.actors.get(&h) {
+            None => return Err(VMError::ActorNotFound),
+            Some(a) if a.is_frozen() => return Err(VMError::ActorFrozen),
+            Some(_) => {}
+        }
+        self.record_actor(h);
+        self.actors.get_mut(&h).unwrap().code = code;
+        Ok(())
     }
 
     fn actor_vbytes(&self, actor: &ActorID) -> Result<u64, VMError> {
@@ -723,7 +697,8 @@ impl ActorRegistry for MemRegistry {
     fn deploy(
         &mut self,
         id: ActorID,
-        state: Dict,
+        code: Vec<u8>,
+        state: Value,
         vbytes: u64,
         height: u64,
     ) -> Result<(), VMError> {
@@ -740,7 +715,7 @@ impl ActorRegistry for MemRegistry {
         }
         self.record_actor(key);
         self.actors
-            .insert(key, Actor::new_active(state, vbytes, height));
+            .insert(key, Actor::new_active(code, state, vbytes, height));
         Ok(())
     }
 
@@ -786,7 +761,7 @@ impl ActorRegistry for MemRegistry {
                         // invariant break (txs end with state restored
                         // or the actor reaped); skip the bleed.
                         None => continue,
-                        Some(state) => match vbyte_size(state) {
+                        Some(state) => match vbyte_size(&actor.code, state) {
                             Ok(n) => n,
                             Err(_) => {
                                 // Defensive: malformed state cleared on

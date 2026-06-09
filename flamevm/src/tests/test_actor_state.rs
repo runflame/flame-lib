@@ -4,23 +4,17 @@
 
 use super::test_helpers::*;
 
-use crate::{state_with_public, ActorID, Dict, Env, MemRegistry, Int253, RECV_METHOD};
+use crate::{empty_state, ActorID, Dict, Env, MemRegistry, Int253, RECV_METHOD};
 
 /// Builds an empty state with a single `recv` method that runs the
 /// caller-supplied bytes. Returns (state, id).
 fn deploy_with_recv(reg: &mut MemRegistry, recv: Vec<u8>, vbytes: u64, height: u64)
     -> ActorID
 {
-    let mut public = Dict::new();
-    public.insert(
-        RECV_METHOD,
-        Value::String(String::from(recv.clone())),
-    );
-    let state = state_with_public(public);
-    // Derive the id from the recv bytes (stand-in for the
-    // real constructor that would deploy this state).
-    let id = ActorID::Hash(ActorID::Constructor(recv).to_hash());
-    reg.deploy(id.clone(), state, vbytes, height).expect("deploy");
+    // The recv bytes ARE the actor's code; state starts empty. Id is
+    // derived from the code (stand-in for the real constructor).
+    let id = ActorID::Hash(ActorID::Constructor(recv.clone()).to_hash());
+    reg.deploy(id.clone(), recv, empty_state(), vbytes, height).expect("deploy");
     id
 }
 
@@ -88,11 +82,10 @@ fn load_checks_out_state() {
     let mut vm = vm_for(id.clone(), script);
     vm.step_internal_with_registry(&mut reg).expect("load step");
 
-    // Top of stack should be the wrapper Dict (moved out of the actor).
+    // Top of stack should be the state Value (here the empty initial
+    // Dict), moved out of the actor.
     match vm.current_call.stack.last().expect("stack not empty") {
-        Value::Dict(d) => {
-            assert_eq!(d.len(), 2, "wrapper has public + private");
-        }
+        Value::Dict(d) => assert!(d.is_empty(), "empty initial state"),
         _ => panic!("expected Dict"),
     }
     // The actor is now checked out (state moved to the stack) — its
@@ -276,18 +269,15 @@ fn dismantle_token_bearing_state_requires_retire() {
     // droppable). recv = `load; drop`.
     let mut reg = MemRegistry::new();
     let recv = Program::new().load().drop_().to_bytecode();
-    let mut public = Dict::new();
-    public.insert(RECV_METHOD, Value::String(String::from(recv)));
-    let mut private = Dict::new();
-    private.insert(
+    // Token-bearing state: any Value — here a Dict holding a live ClearToken.
+    let mut state_dict = Dict::new();
+    state_dict.insert(
         Int253::from(0u64),
         Value::ClearToken(crate::ClearToken::new(Int253::from(5u64), Int253::from(9u64))),
     );
-    let mut state = Dict::new();
-    state.insert(Int253::from(0u64), Value::Dict(public));
-    state.insert(Int253::from(1u64), Value::Dict(private));
+    let state = Value::Dict(state_dict);
     let id = ActorID::Hash([0x09; 32]);
-    reg.deploy(id.clone(), state, 10_000, 0).expect("deploy");
+    reg.deploy(id.clone(), recv, state, 10_000, 0).expect("deploy");
 
     let block = BlockContext { height: 100 };
     let msg = Message {

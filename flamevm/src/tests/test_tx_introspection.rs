@@ -7,7 +7,7 @@
 
 use super::test_helpers::*;
 use crate::vm::LOCKTIME_TIMESTAMP_THRESHOLD;
-use crate::{state_with_public, ActorID, Dict, MemRegistry, Int253, RECV_METHOD};
+use crate::{empty_state, ActorID, MemRegistry, Int253, RECV_METHOD};
 
 /// Build an ExternalRoot VM with caller-controlled TxHeader and gas/mem
 /// budgets. Used by every test in this file that doesn't need a
@@ -135,11 +135,9 @@ fn newbytes_value_observable_inside_cell_open_frame() {
 fn bytes_pushes_actor_vbyte_balance() {
     // Deploy an actor with 12_345 vbytes; run `bytes` inside its frame.
     let mut reg = MemRegistry::new();
-    let mut public = Dict::new();
-    public.insert(RECV_METHOD, Value::String(String::from(Program::new().bytes().to_bytecode())));
-    let state = state_with_public(public);
+    let code = Program::new().bytes().to_bytecode();
     let id = ActorID::Hash([0xab; 32]);
-    reg.deploy(id.clone(), state, 12_345, 0).expect("deploy");
+    reg.deploy(id.clone(), code, empty_state(), 12_345, 0).expect("deploy");
     let kind = CallKind::InternalRoot {
         actor: id.clone(),
         method: Int253::from(0u64),

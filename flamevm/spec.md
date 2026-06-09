@@ -472,8 +472,9 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 |    | **Actors** | | | |
 | d0 | [send](#send) | | args… k refund gas bytes method addr → ø | Queue an asynchronous message to an actor. |
 | d1 | [call](#call) | int. | args… k gas bytes method addr → results… k' | Synchronous actor-to-actor call (isolated frame; re-entry gated by state presence). |
-| d2 | [load](#load) | int. | ø → dict | Check out the actor's state dict (moves it out; locks against re-entry). |
-| d3 | [save](#save) | int. | dict → ø | Move the state dict back in (requires checkout; unlocks). |
+| d2 | [load](#load) | int. | ø → value | Check out the actor's state (any portable Value; moves it out, locks re-entry). |
+| d3 | [save](#save) | int. | value → ø | Move the state value back in (requires checkout; unlocks). |
+| d4 | [setcode](#setcode) | int. | code → ø | Replace the actor's code blob (author-gated upgrade). |
 |    | **Frame introspection** | | | |
 | e0 | [selfid](#selfid) | | ø → s | Push the current actor's id (32-byte string). |
 | e1 | [anchor](#anchor) | | ø → s | Push the current frame's anchor (32-byte string). |
@@ -1171,7 +1172,7 @@ _args… k gas bytes method addr_ → _results… k'_
 
 Synchronous actor-to-actor call. Same operand shape as [`send`](#send) minus `refund`.
 
-Resolves the callee's method bytes via the registry, then splits the parent's anchor (left to the child frame, right held in `post_call_anchor` for restoration on return). **Re-entrancy is governed by the actor's state, not a call-stack guard** ([ADR 0017](../decisions/0017-actor-state-linear-lock.md)): if the callee's state is currently **checked out** (a live frame `load`ed it and hasn't `save`d it back), `resolve_method` returns `ActorEmpty` and the call returns the `0` failure marker — the call "did not happen". A callee whose state is committed (or never loaded) is entered normally, so safe re-entry is permitted.
+Loads the callee's **code** via the registry — method-agnostic; the code blob itself dispatches on the [`method`](#method) opcode ([ADR 0018](../decisions/0018-actor-code-state-split.md)) — then splits the parent's anchor (left to the child frame, right held in `post_call_anchor` for restoration on return). **Re-entrancy is governed by the actor's state, not a call-stack guard** ([ADR 0017](../decisions/0017-actor-state-linear-lock.md)): if the callee's state is currently **checked out** (a live frame `load`ed it and hasn't `save`d it back), `load_code` returns `ActorEmpty` and the call returns the `0` failure marker — the call "did not happen". A callee whose state is committed (or never loaded) is entered normally, so safe re-entry is permitted.
 
 **Emits no txlog entry.** Calls are intra-tx control flow; the structural effects produced inside the callee (`Output`, `Send`, `ActorSave`, `Issue`, `Retire`, `Fee`, `Data`) are what the state machine reads. The `(External TxID, Internal TxID)` of a tx is a merkle root over effects only — see `design.md` §"TxLog records effects, not control flow".
 
@@ -1181,11 +1182,11 @@ Returns via `return k'`. Hard-fails `RegistryUnavailable` outside an internal-tx
 
 ### load
 
-ø → _dict_
+ø → _value_
 
-**Checks out** the current actor's state: moves the Dict out of the registry (the actor goes empty/`None`) and pushes it onto the stack. The Dict's conventional shape is `{0x00 → public, 0x01 → private}` (see [Actors](#actors)) but the VM doesn't enforce it.
+**Checks out** the current actor's state: moves the state `Value` out of the registry (the actor goes empty/`None`) and pushes it onto the stack. State is **any portable `Value`** — the author chooses its structure; the VM imposes no shape ([ADR 0018](../decisions/0018-actor-code-state-split.md)). Code is separate (`setcode`) and stays put during the call.
 
-While checked out, the actor has no code or data, so any `call`/`send`/`load` against it fails `ActorEmpty` — the **state's presence is the re-entrancy lock** ([ADR 0017](../decisions/0017-actor-state-linear-lock.md)). The state is a linear resource: `load` *moves* it (no copy); the frame must discharge it before returning, per the frame-end clean-stack rule. Re-loading an already-checked-out actor → `ActorEmpty`.
+While checked out, the actor has no data, so any `call`/`send`/`load` against it fails `ActorEmpty` — the **state's presence is the re-entrancy lock** ([ADR 0017](../decisions/0017-actor-state-linear-lock.md)). The state is a linear resource: `load` *moves* it (no copy); the frame must discharge it before returning, per the frame-end clean-stack rule. Re-loading an already-checked-out actor → `ActorEmpty`.
 
 Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorEmpty` (already checked out), `ActorNotFound`, `ActorFrozen`.
 
@@ -1193,13 +1194,23 @@ Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorEmpty` (a
 
 ### save
 
-_dict_ → ø
+_value_ → ø
 
-Pops a Dict, **validates portability** (every value must be portable per `Value::is_portable`), and **moves it back** into the current actor — which must be **checked out** by a prior `load`, else `SaveWithoutLoad` (saving to a non-checked-out actor would clobber, and silently drop the tokens of, live state). Emits `TxEntry::ActorSave { actor, state }` carrying the **full** post-save state — symmetric with `Output(Cell)` which carries the full Cell. The merkle leaf for this entry hashes `(actor.to_hash(), state_root(&state))`, so the TxID commits to the canonical state root while consumers reading the txlog directly get the bytes (no separate state-witness channel needed).
+Pops the state `Value`, **validates portability** (every value must be portable per `Value::is_portable`), and **moves it back** into the current actor — which must be **checked out** by a prior `load`, else `SaveWithoutLoad` (saving to a non-checked-out actor would clobber, and silently drop the tokens of, live state). Emits `TxEntry::ActorSave { actor, state }` carrying the **full** post-save state — symmetric with `Output(Cell)` which carries the full Cell. The merkle leaf for this entry hashes `(actor.to_hash(), state_root(&state))`, so the TxID commits to the canonical state root while consumers reading the txlog directly get the bytes (no separate state-witness channel needed).
 
-**State shape.** The VM does not enforce the conventional `{0x00 → public, 0x01 → private}` wrapper shape at save time; that's a script-side convention used by `op_call`'s method-dispatch lookup. Any portable Dict is accepted as state. Methods that never get called via `op_call` simply aren't reachable.
+**State is any portable Value.** There is no mandated `{public, private}` shape and no methods-in-state — methods live in the actor's code blob (`setcode`), dispatched on the `method` opcode ([ADR 0018](../decisions/0018-actor-code-state-split.md)). The author structures state however they like (a Dict, an Int, a Token, …).
 
 **Portability is the canonical storage gate.** Portable values: `Int253`, `String`, `Point`, `Dict` of portable, non-negative `ClearToken`, `Token`. Non-portable values (`Cell`, `Merlin`, `Variable`, `Expression`, `Constraint`, `MultiscalarMul`, `WideToken`, negative `ClearToken`) hard-fail `NonPortableInState`. Portability is distinct from VM stack-copyability (Tokens are portable but not copyable — they survive the load/save round-trip via Rust-level deep clone, ignoring the linear-type discipline that gates `dup`).
+
+### setcode
+
+_code_ → ø
+
+Pops a String and replaces the current actor's **code blob** with its bytes, then records `TxEntry::SetCode { actor, code }` (merkle leaf `(actor.to_hash(), code_root(&code))`, symmetric with [`save`](#save)). Method-agnostic; independent of the state checkout lock (touches only code). Requires actor context.
+
+**Upgrade is author policy over a VM mechanism.** The VM provides `setcode`; *who* may call it is gated in the actor's own code. Actors authenticate by **caller identity** — `require(callerid() == GOV)` — not signatures: internal context has no constraint system or signature batch, so signature checks live at the external cell/predicate boundary. A naked `setcode` with no caller gate is an unconditionally-upgradeable (i.e. rug-able) actor — deliberately the author's call. See [ADR 0018](../decisions/0018-actor-code-state-split.md).
+
+Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `TypeNotString`, `ActorNotFound`, `ActorFrozen`.
 
 **Atomicity.** A `save` failure (`SaveWithoutLoad`, `NonPortableInState`, `TypeNotDict`, `MalformedActorState`, `ActorNotFound`) propagates as a frame failure. The frame's call boundary rolls back both the txlog (truncating any ActorSave entry the failed callee may have written earlier) and the actor registry (restoring pre-frame state — a failed `load`'s checked-out state is restored to present, so the actor isn't spuriously self-destructed), keeping the actor consistent with the truncated txlog. At the outermost frame, `execute_internal` applies the same rollback at the tx level.
 

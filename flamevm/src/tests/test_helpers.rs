@@ -32,12 +32,12 @@ pub(crate) struct StubRegistry {
 }
 
 impl ActorRegistry for StubRegistry {
-    fn resolve_method(
-        &self,
-        _actor: &ActorID,
-        _method: Int253,
-    ) -> Result<Vec<u8>, VMError> {
+    fn load_code(&self, _actor: &ActorID) -> Result<Vec<u8>, VMError> {
         Ok(self.script.clone())
+    }
+
+    fn set_code(&mut self, _actor: &ActorID, _code: Vec<u8>) -> Result<(), VMError> {
+        unimplemented!("StubRegistry::set_code — use MemRegistry")
     }
 
     fn actor_vbytes(&self, _actor: &ActorID) -> Result<u64, VMError> {
@@ -52,13 +52,13 @@ impl ActorRegistry for StubRegistry {
     // pin this stub — once Units 5–8 land the affected tests
     // construct a `MemRegistry` instead. Surface a clear panic
     // so a future test that strays here gets an obvious error.
-    fn load_state(&mut self, _id: &ActorID) -> Result<crate::Dict, VMError> {
+    fn load_state(&mut self, _id: &ActorID) -> Result<crate::Value, VMError> {
         unimplemented!("StubRegistry::load_state — use MemRegistry for state-touching tests")
     }
     fn save_state(
         &mut self,
         _id: &ActorID,
-        _state: crate::Dict,
+        _state: crate::Value,
     ) -> Result<(), VMError> {
         unimplemented!("StubRegistry::save_state — use MemRegistry for state-touching tests")
     }
@@ -74,7 +74,8 @@ impl ActorRegistry for StubRegistry {
     fn deploy(
         &mut self,
         _id: ActorID,
-        _state: crate::Dict,
+        _code: Vec<u8>,
+        _state: crate::Value,
         _vbytes: u64,
         _height: u64,
     ) -> Result<(), VMError> {
@@ -178,6 +179,34 @@ pub(crate) fn pushstr_bytes(payload: &[u8]) -> Vec<u8> {
     let mut s = vec![0x19, 0x00, payload.len() as u8];
     s.extend_from_slice(payload);
     s
+}
+
+/// Builds an actor code blob that dispatches on the `method` opcode to
+/// one of `arms` (selector → handler bytecode). Handlers must be
+/// label-free (the dispatch owns labels `0..=arms.len()`). See ADR 0018.
+pub(crate) fn dispatch_code(arms: &[(u64, Vec<u8>)]) -> Vec<u8> {
+    // `eq` is non-consuming in the cleartext branch (`a b → a b {0|1}`,
+    // spec §eq), so each compare leaves the selector `S` and the arm
+    // value `sel`; we drop them explicitly. A matched `jumpif` lands at
+    // `label i` with `[S sel]` on the stack → the handler drops both.
+    let n = arms.len() as u32;
+    let mut p = Program::new().method(); // [S]
+    for (i, (sel, _)) in arms.iter().enumerate() {
+        // [S] → push sel [S sel] → eq [S sel b] → jumpif (pops b);
+        // no-match falls through to drop the arm value → [S].
+        p = p.push_int(*sel).eq().jumpif(i as u32).drop_();
+    }
+    p = p.drop_().push_int(0u64).verify(); // no match: drop S, revert
+    for (i, (_, handler)) in arms.iter().enumerate() {
+        p = p
+            .label(i as u32)
+            .drop_()
+            .drop_() // drop arm value + selector
+            .raw_bytes(handler)
+            .expect("handler parses")
+            .jump(n);
+    }
+    p.label(n).to_bytecode()
 }
 
 /// Helper: builds a VM with a child CellOpen frame as `current_call`

@@ -616,7 +616,7 @@ impl VM {
         registry: &mut dyn ActorRegistry,
         block: &BlockContext,
     ) -> Result<TxResult, VMError> {
-        let script = registry.resolve_method(&message.target, message.method)?;
+        let script = registry.load_code(&message.target)?;
         let mem_limit = registry.actor_vbytes(&message.target)?.saturating_mul(4);
         // SendID is the canonical hash of the whole send (anchor,
         // target, caller, method, payload, gas, vbytes, refund
@@ -1022,6 +1022,7 @@ impl VM {
             I::Call => self.op_call(registry),
             I::Load => self.op_load(registry),
             I::Save => self.op_save(registry),
+            I::Setcode => self.op_setcode(registry),
             I::Signtx => self.op_signtx(),
             I::Signcall => self.op_signcall(),
 
@@ -2469,7 +2470,7 @@ impl VM {
         // too: its state is checked out, so `resolve_method` returns
         // `ActorEmpty` (ADR 0017 — the state is the re-entrancy lock).
         let pre_frame: Result<(Vec<u8>, u64, ActorID), VMError> = (|| {
-            let script = registry.resolve_method(&callee, method)?;
+            let script = registry.load_code(&callee)?;
             let mem_limit = registry.actor_vbytes(&callee)?.saturating_mul(4);
             let caller = self
                 .current_call
@@ -2537,13 +2538,14 @@ impl VM {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let actor = self.require_actor()?.clone();
         let state = registry.load_state(&actor)?;
-        self.push_value(Value::Dict(state));
+        self.push_value(state);
         Ok(())
     }
 
-    /// _dict_ **save** → ø
+    /// _value_ **save** → ø
     ///
-    /// Pops a Dict, validates portability, and **moves it back** into
+    /// Pops the state value (any portable `Value`), validates
+    /// portability, and **moves it back** into
     /// the current actor (which must be checked out by a prior `load` —
     /// else `SaveWithoutLoad`, since saving would clobber live state).
     /// Portability is the canonical storage gate — every inserted value
@@ -2558,7 +2560,7 @@ impl VM {
     ) -> Result<(), VMError> {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
-        let state = self.pop_value()?.to_dict()?;
+        let state = self.pop_value()?;
         // Portability is the canonical storage gate — checked here
         // before any registry mutation so a bad state is rejected
         // cleanly. Distinct from encodability (which the encoder may
@@ -2583,6 +2585,25 @@ impl VM {
             actor,
             state: state_for_log,
         });
+        Ok(())
+    }
+
+    /// _code_ **setcode** → ø
+    ///
+    /// Replaces the current actor's code blob with the popped String's
+    /// bytes and records `TxEntry::SetCode`. Upgrade *policy* (who may
+    /// call this) is the author's, gated in the actor's own code via
+    /// `callerid` — actors authenticate by identity, not signatures.
+    /// See ADR 0018.
+    fn op_setcode(
+        &mut self,
+        registry: Option<&mut dyn ActorRegistry>,
+    ) -> Result<(), VMError> {
+        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
+        let actor = ActorID::Hash(self.require_actor()?.to_hash());
+        let code = self.pop_value()?.to_string()?.to_bytes_vec();
+        registry.set_code(&actor, code.clone())?;
+        self.txlog.push(crate::tx::TxEntry::SetCode { actor, code });
         Ok(())
     }
 

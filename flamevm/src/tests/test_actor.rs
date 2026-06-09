@@ -3,35 +3,49 @@
 use readerwriter::{Decodable, ReadError};
 
 use crate::{
-    empty_state, grace_window, resolve_method, state_root, state_with_public, vbyte_size,
+    empty_state, grace_window, state_root, vbyte_size,
     ActorID, ActorRegistry, Dict, Int253, MemRegistry, String, VbytePool,
     Value, VMError,
-    GRACE_BLOCKS_CAP, RECV_METHOD,
+    GRACE_BLOCKS_CAP,
     VBYTES_PER_BLOCK,
 };
 
+/// An actor's code blob (a single bytecode string dispatched on `method`).
+/// Tests use a trivial `nop` (0x1d) where the exact bytes don't matter.
+fn fixture_code() -> Vec<u8> {
+    vec![0x1d]
+}
+
+/// Test helper: arbitrary canonical id (real deployments derive it
+/// from the constructor; tests hand-pick the bytes).
+fn fixture_id(seed: u8) -> ActorID {
+    ActorID::Hash([seed; 32])
+}
+
+/// A small state `Value` with `n` entries — state may be any portable Value.
+fn state_with(entries: &[(u64, u64)]) -> Value {
+    let mut d = Dict::new();
+    for (k, v) in entries {
+        d.insert(Int253::from(*k), Value::Int253(Int253::from(*v)));
+    }
+    Value::Dict(d)
+}
+
 /// Undo-log checkpoint: an inner frame that *commits* a save, then an
-/// outer rollback, must still undo the inner-committed mutation (the
-/// merge-on-commit path that hands the inner undo entry up to the
-/// parent). Exercises the nested-checkpoint branch directly.
+/// outer rollback, must still undo the inner-committed mutation.
 #[test]
 fn checkpoint_inner_commit_then_outer_rollback_undoes_save() {
     let mut reg = MemRegistry::new();
     let id = ActorID::Hash([0x33; 32]);
-    reg.deploy(id.clone(), empty_state(), 1_000, 0).expect("deploy");
-    // Capture the committed state's root via a checkout/checkin that
-    // leaves the actor available and no checkpoint open.
+    reg.deploy(id.clone(), fixture_code(), empty_state(), 1_000, 0).expect("deploy");
     let s0 = reg.load_state(&id).expect("checkout");
     let root_before = state_root(&s0);
     reg.save_state(&id, s0).expect("checkin");
 
     reg.push_checkpoint(); // outer
     reg.push_checkpoint(); // inner
-    // inner: check out, then save a different state back.
     drop(reg.load_state(&id).expect("checkout"));
-    let mut pubd = Dict::new();
-    pubd.insert(Int253::from(9u64), Value::Int253(Int253::from(1u64)));
-    reg.save_state(&id, state_with_public(pubd)).expect("save");
+    reg.save_state(&id, state_with(&[(9, 1)])).expect("save");
     reg.pop_checkpoint_commit(); // inner commits → undo merges into outer
     reg.pop_checkpoint_rollback(); // outer rolls back → must restore original
 
@@ -39,14 +53,13 @@ fn checkpoint_inner_commit_then_outer_rollback_undoes_save() {
     assert_eq!(state_root(&s_after), root_before, "outer rollback must undo inner-committed save");
 }
 
-/// An actor deployed inside a checkpoint is removed on rollback (undo
-/// of a `None` prior).
+/// An actor deployed inside a checkpoint is removed on rollback.
 #[test]
 fn checkpoint_rollback_removes_actor_deployed_in_frame() {
     let mut reg = MemRegistry::new();
     let id = ActorID::Hash([0x44; 32]);
     reg.push_checkpoint();
-    reg.deploy(id.clone(), empty_state(), 1_000, 0).expect("deploy");
+    reg.deploy(id.clone(), fixture_code(), empty_state(), 1_000, 0).expect("deploy");
     assert!(reg.exists(&id));
     reg.pop_checkpoint_rollback();
     assert!(!reg.exists(&id), "rollback must remove the in-frame deploy");
@@ -66,16 +79,15 @@ fn actorid_hash_and_constructor_resolve_to_same_canonical_id() {
 #[test]
 fn actorid_registry_treats_both_forms_as_same_actor() {
     let mut r = MemRegistry::new();
-    let ctor_bytes = vec![0x11, 0x22, 0x33];
-    let ctor = ActorID::Constructor(ctor_bytes.clone());
+    let ctor = ActorID::Constructor(vec![0x11, 0x22, 0x33]);
     let hash_form = ActorID::Hash(ctor.to_hash());
 
-    r.deploy(ctor.clone(), empty_state(), 1_000, 0)
+    r.deploy(ctor.clone(), fixture_code(), empty_state(), 1_000, 0)
         .expect("deploy via Constructor");
     assert!(r.exists(&ctor));
     assert!(r.exists(&hash_form));
     let err = r
-        .deploy(hash_form, empty_state(), 1_000, 0)
+        .deploy(hash_form, fixture_code(), empty_state(), 1_000, 0)
         .expect_err("collide");
     assert!(matches!(err, VMError::ActorAlreadyExists));
 }
@@ -94,51 +106,65 @@ fn actorid_unresolved_for_constructor_form() {
     assert!(ActorID::Hash([0u8; 32]).is_resolved());
 }
 
+// ── code blob: load_code / set_code ─────────────────────────
+
 #[test]
-fn state_resolve_method_returns_script() {
-    let mut public = Dict::new();
-    public.insert(
-        Int253::from(7u64),
-        Value::String(String::from(b"\x1d".to_vec())),
-    );
-    let s = state_with_public(public);
-    let m = Int253::from(7u64);
-    let script = resolve_method(&s, &m).expect("present");
-    assert_eq!(script.as_opaque().unwrap(), b"\x1d");
+fn memregistry_load_code_returns_code() {
+    let mut r = MemRegistry::new();
+    let id = fixture_id(0x2a);
+    r.deploy(id.clone(), vec![0xde, 0xad], empty_state(), 100, 0).expect("deploy");
+    assert_eq!(r.load_code(&id).expect("load_code"), vec![0xde, 0xad]);
 }
 
 #[test]
-fn state_resolve_method_missing_returns_none() {
-    let s = empty_state();
-    assert!(resolve_method(&s, &Int253::from(42u64)).is_none());
+fn memregistry_set_code_replaces_code() {
+    let mut r = MemRegistry::new();
+    let id = fixture_id(0x2b);
+    r.deploy(id.clone(), vec![0x01], empty_state(), 100, 0).expect("deploy");
+    r.set_code(&id, vec![0x02, 0x03]).expect("set_code");
+    assert_eq!(r.load_code(&id).expect("load_code"), vec![0x02, 0x03]);
 }
 
 #[test]
-fn state_resolve_method_wrong_type_returns_none() {
-    let mut public = Dict::new();
-    public.insert(Int253::from(0u64), Value::Int253(Int253::from(99u64)));
-    let s = state_with_public(public);
-    assert!(resolve_method(&s, &RECV_METHOD).is_none());
+fn memregistry_load_code_on_checked_out_errors() {
+    // State checked out → re-entrancy block: dispatch (load_code) fails.
+    let mut r = MemRegistry::new();
+    let id = fixture_id(0x2c);
+    r.deploy(id.clone(), fixture_code(), empty_state(), 100, 0).expect("deploy");
+    let _s = r.load_state(&id).expect("checkout");
+    assert!(matches!(r.load_code(&id).unwrap_err(), VMError::ActorEmpty));
 }
+
+#[test]
+fn memregistry_load_code_unknown_errors() {
+    let r = MemRegistry::new();
+    assert!(matches!(
+        r.load_code(&fixture_id(0x2d)).unwrap_err(),
+        VMError::ActorNotFound
+    ));
+}
+
+// ── vbyte sizing ────────────────────────────────────────────
 
 #[test]
 fn vbyte_size_grows_with_state() {
+    let code = fixture_code();
     let small = empty_state();
-    let mut big_private = Dict::new();
-    big_private.insert(
-        Int253::from(0u64),
-        Value::String(String::from(vec![0u8; 100])),
-    );
     let mut big = Dict::new();
-    big.insert(Int253::from(0u64), Value::Dict(Dict::new()));
-    big.insert(Int253::from(1u64), Value::Dict(big_private));
-    let n_small = vbyte_size(&small).expect("vbyte_size");
-    let n_big = vbyte_size(&big).expect("vbyte_size");
+    big.insert(Int253::from(0u64), Value::String(String::from(vec![0u8; 100])));
+    let big = Value::Dict(big);
+    let n_small = vbyte_size(&code, &small).expect("vbyte_size");
+    let n_big = vbyte_size(&code, &big).expect("vbyte_size");
     assert!(n_big > n_small, "bigger state → bigger vbytes");
-    assert!(
-        n_big - n_small >= 100,
-        "payload at least accounts for the 100-byte string"
-    );
+    assert!(n_big - n_small >= 100, "payload at least accounts for the 100-byte string");
+}
+
+#[test]
+fn vbyte_size_grows_with_code() {
+    let state = empty_state();
+    let n_small = vbyte_size(&[0x1d], &state).expect("vbyte_size");
+    let n_big = vbyte_size(&vec![0x1d; 100], &state).expect("vbyte_size");
+    assert!(n_big - n_small >= 99, "code length counts toward vbytes");
 }
 
 #[test]
@@ -155,11 +181,9 @@ fn vbyte_pool_introduce_adds_per_block_amount() {
 fn vbyte_pool_queue_and_release_at_maturity() {
     let mut p = VbytePool::new();
     p.queue_recycle(1000, 50);
-    let released = p.release_matured(149);
-    assert_eq!(released, 0);
+    assert_eq!(p.release_matured(149), 0);
     assert_eq!(p.available, 0);
-    let released = p.release_matured(150);
-    assert_eq!(released, 1000);
+    assert_eq!(p.release_matured(150), 1000);
     assert_eq!(p.available, 1000);
 }
 
@@ -169,10 +193,8 @@ fn vbyte_pool_multiple_recycles_accumulate_per_bucket() {
     p.queue_recycle(100, 10);
     p.queue_recycle(50, 10);
     p.queue_recycle(200, 20);
-    let released = p.release_matured(115);
-    assert_eq!(released, 150);
-    let released = p.release_matured(120);
-    assert_eq!(released, 200);
+    assert_eq!(p.release_matured(115), 150);
+    assert_eq!(p.release_matured(120), 200);
     assert_eq!(p.available, 350);
 }
 
@@ -181,29 +203,18 @@ fn grace_window_capped_at_six_months() {
     assert_eq!(grace_window(u64::MAX), GRACE_BLOCKS_CAP);
 }
 
-fn fixture_state() -> Dict {
-    let mut public = Dict::new();
-    public.insert(
-        RECV_METHOD,
-        Value::String(String::from(b"\x1d".to_vec())),
-    );
-    state_with_public(public)
-}
-
-/// Test helper: arbitrary canonical id (real deployments derive it
-/// from the constructor; tests hand-pick the bytes).
-fn fixture_id(seed: u8) -> ActorID {
-    ActorID::Hash([seed; 32])
-}
+// ── deploy / load / save ────────────────────────────────────
 
 #[test]
 fn memregistry_deploy_load_roundtrip() {
     let mut r = MemRegistry::new();
-    let s = fixture_state();
     let id = fixture_id(0xab);
-    r.deploy(id.clone(), s, 1000, 5).expect("deploy");
+    r.deploy(id.clone(), fixture_code(), state_with(&[(1, 7)]), 1000, 5).expect("deploy");
     let loaded = r.load_state(&id).expect("load");
-    assert!(resolve_method(&loaded, &RECV_METHOD).is_some());
+    match loaded {
+        Value::Dict(d) => assert_eq!(d.len(), 1),
+        _ => panic!("expected dict state"),
+    }
     assert!(r.exists(&id));
     assert_eq!(r.actor_vbytes(&id).expect("vbytes"), 1000);
 }
@@ -212,9 +223,9 @@ fn memregistry_deploy_load_roundtrip() {
 fn memregistry_deploy_collision_errors() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([0u8; 32]);
-    r.deploy(id.clone(), fixture_state(), 100, 0).expect("first");
+    r.deploy(id.clone(), fixture_code(), empty_state(), 100, 0).expect("first");
     let err = r
-        .deploy(id, fixture_state(), 100, 0)
+        .deploy(id, fixture_code(), empty_state(), 100, 0)
         .expect_err("second must error");
     assert!(matches!(err, VMError::ActorAlreadyExists));
 }
@@ -232,52 +243,22 @@ fn memregistry_load_unknown_id_errors() {
 fn memregistry_save_persists_state() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([1u8; 32]);
-    r.deploy(id.clone(), fixture_state(), 1000, 0).expect("deploy");
-    let mut updated_private = Dict::new();
-    updated_private.insert(
-        Int253::from(99u64),
-        Value::Int253(Int253::from(7u64)),
-    );
-    let mut updated = Dict::new();
-    updated.insert(Int253::from(0u64), Value::Dict(Dict::new()));
-    updated.insert(Int253::from(1u64), Value::Dict(updated_private));
+    r.deploy(id.clone(), fixture_code(), empty_state(), 1000, 0).expect("deploy");
     // Check the state out first (save only accepts a checked-out actor).
     let _ = r.load_state(&id).expect("checkout");
-    r.save_state(&id, updated).expect("save");
+    r.save_state(&id, state_with(&[(99, 7)])).expect("save");
     let loaded = r.load_state(&id).expect("load");
-    // Private dict (key 1) has 1 entry; public dict (key 0) is empty.
-    match loaded.get(&Int253::from(1u64)) {
-        Some(Value::Dict(d)) => assert_eq!(d.len(), 1),
-        _ => panic!("expected private dict"),
+    match loaded {
+        Value::Dict(d) => assert_eq!(d.len(), 1),
+        _ => panic!("expected dict state"),
     }
-    assert!(resolve_method(&loaded, &RECV_METHOD).is_none());
-}
-
-#[test]
-fn memregistry_resolve_method_returns_script() {
-    let mut r = MemRegistry::new();
-    let id = ActorID::Hash([2u8; 32]);
-    r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
-    let script = r.resolve_method(&id, RECV_METHOD).expect("resolve");
-    assert_eq!(script, vec![0x1d]);
-}
-
-#[test]
-fn memregistry_resolve_method_missing_errors() {
-    let mut r = MemRegistry::new();
-    let id = ActorID::Hash([3u8; 32]);
-    r.deploy(id.clone(), empty_state(), 100, 0).expect("deploy");
-    let err = r
-        .resolve_method(&id, Int253::from(42u64))
-        .expect_err("must error");
-    assert!(matches!(err, VMError::MethodNotFound));
 }
 
 #[test]
 fn memregistry_checkout_checkin_round_trip() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([4u8; 32]);
-    r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
+    r.deploy(id.clone(), fixture_code(), empty_state(), 100, 0).expect("deploy");
     assert!(!r.actor(&id).unwrap().is_checked_out());
     let state = r.load_state(&id).expect("checkout");
     assert!(r.actor(&id).unwrap().is_checked_out());
@@ -287,11 +268,9 @@ fn memregistry_checkout_checkin_round_trip() {
 
 #[test]
 fn memregistry_commit_tx_reaps_checked_out_actors_and_queues_vbytes() {
-    // Self-destruct: an actor left checked out at tx end (its state
-    // dismantled instead of saved) is reaped and its vbytes queued.
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([5u8; 32]);
-    r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
+    r.deploy(id.clone(), fixture_code(), empty_state(), 100, 0).expect("deploy");
     let _state = r.load_state(&id).expect("checkout"); // never saved back
     let cleared = r.commit_tx_destructions(10);
     assert_eq!(cleared, 1);
@@ -303,9 +282,8 @@ fn memregistry_commit_tx_reaps_checked_out_actors_and_queues_vbytes() {
 fn memregistry_commit_tx_leaves_present_actors_alone() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([6u8; 32]);
-    r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
-    let cleared = r.commit_tx_destructions(10);
-    assert_eq!(cleared, 0);
+    r.deploy(id.clone(), fixture_code(), empty_state(), 100, 0).expect("deploy");
+    assert_eq!(r.commit_tx_destructions(10), 0);
     assert!(r.exists(&id));
 }
 
@@ -313,7 +291,7 @@ fn memregistry_commit_tx_leaves_present_actors_alone() {
 fn memregistry_credit_vbytes_to_active_actor_adds_balance() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([7u8; 32]);
-    r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
+    r.deploy(id.clone(), fixture_code(), empty_state(), 100, 0).expect("deploy");
     r.credit_vbytes(&id, 50, 10).expect("credit");
     let a = r.actor(&id).expect("present");
     assert_eq!(a.vbytes, 150);
@@ -324,7 +302,7 @@ fn memregistry_credit_vbytes_to_active_actor_adds_balance() {
 fn memregistry_credit_unfreezes_and_resets_counters() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([8u8; 32]);
-    r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
+    r.deploy(id.clone(), fixture_code(), empty_state(), 100, 0).expect("deploy");
     {
         let a = r.actor_mut(&id).expect("present");
         a.vbytes = 0;
@@ -343,7 +321,7 @@ fn memregistry_credit_unfreezes_and_resets_counters() {
 fn tick_block_bleeds_active_actors_and_advances_counter() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([9u8; 32]);
-    r.deploy(id.clone(), fixture_state(), 10_000, 0).expect("deploy");
+    r.deploy(id.clone(), fixture_code(), empty_state(), 10_000, 0).expect("deploy");
     let _ = r.tick_block(1);
     let a = r.actor(&id).expect("present");
     assert!(a.vbytes < 10_000, "vbytes bled");
@@ -355,7 +333,7 @@ fn tick_block_bleeds_active_actors_and_advances_counter() {
 fn tick_block_freezes_on_exhaustion() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([10u8; 32]);
-    r.deploy(id.clone(), fixture_state(), 10, 0).expect("deploy");
+    r.deploy(id.clone(), fixture_code(), empty_state(), 10, 0).expect("deploy");
     let _ = r.tick_block(1);
     let a = r.actor(&id).expect("present");
     assert_eq!(a.vbytes, 0);
@@ -367,7 +345,7 @@ fn tick_block_freezes_on_exhaustion() {
 fn tick_block_expires_frozen_actor_past_grace() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([11u8; 32]);
-    r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
+    r.deploy(id.clone(), fixture_code(), empty_state(), 100, 0).expect("deploy");
     {
         let a = r.actor_mut(&id).expect("present");
         a.vbytes = 0;
@@ -383,7 +361,7 @@ fn tick_block_expires_frozen_actor_past_grace() {
 fn tick_block_keeps_frozen_actor_within_grace() {
     let mut r = MemRegistry::new();
     let id = ActorID::Hash([12u8; 32]);
-    r.deploy(id.clone(), fixture_state(), 100, 0).expect("deploy");
+    r.deploy(id.clone(), fixture_code(), empty_state(), 100, 0).expect("deploy");
     {
         let a = r.actor_mut(&id).expect("present");
         a.vbytes = 0;
@@ -393,8 +371,7 @@ fn tick_block_keeps_frozen_actor_within_grace() {
     let cleared = r.tick_block(50);
     assert!(cleared.is_empty());
     assert!(r.exists(&id));
-    let a = r.actor(&id).expect("present");
-    assert!(a.is_frozen());
+    assert!(r.actor(&id).expect("present").is_frozen());
 }
 
 #[test]

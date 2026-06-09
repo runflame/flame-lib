@@ -3,21 +3,15 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::{state_with_public, ActorID, ActorRegistry, Dict, MemRegistry, Int253, RECV_METHOD};
+use crate::{empty_state, ActorID, ActorRegistry, MemRegistry, Int253, RECV_METHOD};
 
 /// Helper: deploys an actor whose `recv` method runs `script`.
 /// Derives the actor's id from the script bytes (treats `script`
 /// as a stand-in for the constructor — real deployments would
 /// hash the actual constructor that produces this state).
 fn deploy_recv(reg: &mut MemRegistry, script: Vec<u8>, vbytes: u64) -> ActorID {
-    let mut public = Dict::new();
-    public.insert(
-        RECV_METHOD,
-        Value::String(String::from(script.clone())),
-    );
-    let state = state_with_public(public);
-    let id = ActorID::Hash(ActorID::Constructor(script).to_hash());
-    reg.deploy(id.clone(), state, vbytes, 0).expect("deploy");
+    let id = ActorID::Hash(ActorID::Constructor(script.clone()).to_hash());
+    reg.deploy(id.clone(), script, empty_state(), vbytes, 0).expect("deploy");
     id
 }
 
@@ -128,11 +122,8 @@ fn call_to_checked_out_actor_blocked() {
     // the lock; `resolve_method` returns `ActorEmpty`.
     let mut reg = MemRegistry::new();
     let id = ActorID::Hash([0xa1; 32]);
-    reg.deploy(id.clone(), state_with_public({
-        let mut p = Dict::new();
-        p.insert(RECV_METHOD, Value::String(String::from(Program::new().nop().to_bytecode())));
-        p
-    }), 10_000, 0).expect("deploy");
+    reg.deploy(id.clone(), Program::new().nop().to_bytecode(), empty_state(), 10_000, 0)
+        .expect("deploy");
     // Check the state out, as a live frame mid-update would.
     reg.actor_mut(&id).expect("present").state = None;
 
@@ -176,10 +167,9 @@ fn reentrant_call_succeeds_when_state_not_held() {
         p.push_instr(crate::ops::Instruction::Drop);
         p.to_bytecode()
     };
-    let mut a_public = Dict::new();
-    a_public.insert(RECV_METHOD, Value::String(String::from(a_recv.clone())));
-    a_public.insert(Int253::from(1u64), Value::String(String::from(a_method1)));
-    reg.deploy(a_id.clone(), state_with_public(a_public), 1_000_000, 0)
+    // A's code: a dispatch blob — method 0 → a_recv, method 1 → a_method1.
+    let a_code = dispatch_code(&[(0, a_recv.clone()), (1, a_method1)]);
+    reg.deploy(a_id.clone(), a_code, empty_state(), 1_000_000, 0)
         .expect("deploy A");
 
     // B.recv: call A.method1, drop A's [count, success].
@@ -189,9 +179,8 @@ fn reentrant_call_succeeds_when_state_not_held() {
         p.push_instr(crate::ops::Instruction::Drop);
         p.to_bytecode()
     };
-    let mut b_public = Dict::new();
-    b_public.insert(RECV_METHOD, Value::String(String::from(b_recv)));
-    reg.deploy(b_id.clone(), state_with_public(b_public), 1_000_000, 0)
+    // B has only recv (method 0) → its code is the recv script directly.
+    reg.deploy(b_id.clone(), b_recv, empty_state(), 1_000_000, 0)
         .expect("deploy B");
 
     let mut vm = vm_for_actor(a_id, a_recv);
@@ -412,11 +401,14 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
 #[test]
 fn f3_save_failure_rolls_back_and_preserves_actor() {
     let mut reg = MemRegistry::new();
+    // `save` now accepts any *portable* Value, so a non-Dict no longer
+    // fails. Trigger the save failure with a non-portable value (a Merlin).
     let evil_recv = Program::new()
-        .load()       // pop state (Dict), mark X
-        .drop_()      // drop the Dict (legal if state is droppable)
-        .push_int(0u64)
-        .save()       // save sees Int253(0), errors TypeNotDict
+        .load()                                // check out state, [state]
+        .drop_()                               // drop it (empty state is droppable)
+        .push_str(String::from(b"x".to_vec())) // ["x"]
+        .transcript()                          // [Merlin] — non-portable
+        .save()                                // NonPortableInState → frame fails
         .to_bytecode();
     let x_id = deploy_recv(&mut reg, evil_recv, 10_000);
     let root_before = crate::state_root(reg.actor(&x_id).expect("X exists").state.as_ref().expect("present"));
@@ -467,11 +459,9 @@ fn save_emits_actorsave_with_full_state() {
     // emits the ActorSave entry.
     let recv = Program::new().load().save().to_bytecode();
     let id = ActorID::Hash([0xab; 32]);
-    let mut public = Dict::new();
-    public.insert(RECV_METHOD, Value::String(crate::String::from(recv.clone())));
-    let state = state_with_public(public);
+    let state = empty_state();
     let expected_root = crate::state_root(&state);
-    reg.deploy(id.clone(), state, 10_000, 0).expect("deploy");
+    reg.deploy(id.clone(), recv.clone(), state, 10_000, 0).expect("deploy");
 
     let mut vm = vm_for_actor(id.clone(), recv);
     while vm.step_internal_with_registry(&mut reg).expect("step ok") {}

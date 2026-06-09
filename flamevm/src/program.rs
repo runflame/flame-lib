@@ -497,6 +497,7 @@ impl Program {
     pub fn call(mut self) -> Self { self.instructions.push(Instruction::Call); self }
     pub fn load(mut self) -> Self { self.instructions.push(Instruction::Load); self }
     pub fn save(mut self) -> Self { self.instructions.push(Instruction::Save); self }
+    pub fn setcode(mut self) -> Self { self.instructions.push(Instruction::Setcode); self }
 
     // ── Tx-level & frame introspection (0xe0..=0xf1) ───
 

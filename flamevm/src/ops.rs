@@ -138,6 +138,7 @@ const OP_SEND: u8 = 0xd0;
 const OP_CALL: u8 = 0xd1;
 const OP_LOAD: u8 = 0xd2;
 const OP_SAVE: u8 = 0xd3;
+const OP_SETCODE: u8 = 0xd4;
 
 // 0xeX — Frame introspection
 const OP_SELFID: u8 = 0xe0;
@@ -242,8 +243,9 @@ pub enum Instruction {
     Open,                  // cell ik nbrs pos script gas bytes args… k open → results… k'
     Send,                  // args… k refund gas bytes method addr send → ø
     Call,                  // args… k gas bytes method addr call → results… k'
-    Load,                  // ø load → dict
-    Save,                  // dict save → ø
+    Load,                  // ø load → value   (actor state, any Value)
+    Save,                  // value save → ø
+    Setcode,               // code setcode → ø  (replace actor code blob)
     Signtx,                // cell signtx → items… k
     Signcall,               // cell script sig gas bytes args… m signcall → results… k'
     Timelock,              // ø timelock → n {0|1}
@@ -380,6 +382,7 @@ impl Encodable for Instruction {
             Instruction::Call => op(w, OP_CALL),
             Instruction::Load => op(w, OP_LOAD),
             Instruction::Save => op(w, OP_SAVE),
+            Instruction::Setcode => op(w, OP_SETCODE),
             Instruction::Signtx => op(w, OP_SIGNTX),
             Instruction::Signcall => op(w, OP_SIGNCALL),
             Instruction::Timelock => op(w, OP_TIMELOCK),
@@ -524,6 +527,7 @@ impl Instruction {
             OP_CALL => Ok(Instruction::Call),
             OP_LOAD => Ok(Instruction::Load),
             OP_SAVE => Ok(Instruction::Save),
+            OP_SETCODE => Ok(Instruction::Setcode),
             OP_SIGNTX => Ok(Instruction::Signtx),
             OP_SIGNCALL => Ok(Instruction::Signcall),
             OP_TIMELOCK => Ok(Instruction::Timelock),

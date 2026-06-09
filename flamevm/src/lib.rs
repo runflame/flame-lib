@@ -21,7 +21,7 @@ mod verifier;
 mod vm;
 
 pub use actor::{
-    empty_state, grace_window, resolve_method, state_root, state_with_public,
+    code_root, empty_state, grace_window, state_root,
     vbyte_size, Actor, ActorID, ActorRegistry,
     MemRegistry, VbytePool,
     GRACE_BLOCKS_CAP, RECV_METHOD,

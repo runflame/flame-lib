@@ -248,10 +248,18 @@ impl Env for MemEnv {
         // Deploy / vbyte-credit / reaping flow is deferred — see
         // design.md §Transaction lifecycle & API (vbytes flow note).
         for entry in log.iter() {
-            if let TxEntry::ActorSave { actor, state } = entry {
-                if let Some(a) = self.registry.actor_mut(actor) {
-                    a.state = Some(state.clone());
+            match entry {
+                TxEntry::ActorSave { actor, state } => {
+                    if let Some(a) = self.registry.actor_mut(actor) {
+                        a.state = Some(state.clone());
+                    }
                 }
+                TxEntry::SetCode { actor, code } => {
+                    if let Some(a) = self.registry.actor_mut(actor) {
+                        a.code = code.clone();
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -337,7 +345,16 @@ pub enum TxEntry {
     /// `Output(Cell)`'s leaf commits to `cell.id()`.
     ActorSave {
         actor: crate::actor::ActorID,
-        state: crate::Dict,
+        state: crate::Value,
+    },
+
+    /// Actor-code replacement recorded by `setcode`. Carries the full
+    /// new code blob for state-machine replay; the merkle leaf commits
+    /// to `(actor.to_hash(), code_root(&code))`. Symmetric with
+    /// `ActorSave`. See ADR 0018.
+    SetCode {
+        actor: crate::actor::ActorID,
+        code: Vec<u8>,
     },
 
     /// Outbound asynchronous message scheduled by `op_send`. Carries
@@ -414,6 +431,10 @@ impl MerkleItem for TxEntry {
                 // pattern.
                 t.append_message(b"save.actor", &actor.to_hash());
                 t.append_message(b"save.post_state_root", &crate::actor::state_root(state));
+            }
+            TxEntry::SetCode { actor, code } => {
+                t.append_message(b"setcode.actor", &actor.to_hash());
+                t.append_message(b"setcode.code_root", &crate::actor::code_root(code));
             }
             TxEntry::Send(msg) => {
                 // Bind to the send's canonical 32-byte SendID hash,
