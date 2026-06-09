@@ -246,6 +246,43 @@ fn skip_scan_charges_gas() {
     ));
 }
 
+// ── transient-memory accounting (ADR 0002 cap) ──────────────
+
+/// `writezeros` growth is charged against the frame's mem cap; the cap
+/// is cumulative (high-water), not per-allocation.
+#[test]
+fn mem_cap_bounds_cumulative_string_growth() {
+    // Two writezeros of 60 bytes each against a 100-byte cap: first
+    // passes, second exceeds the cumulative budget.
+    let script = Program::new()
+        .push_str(String::from(Vec::new()))
+        .push_int(60u64)
+        .write_zeros()
+        .push_int(60u64)
+        .write_zeros()
+        .to_bytecode();
+    let kind = CallKind::InternalRoot {
+        actor: ActorID::Hash([0u8; 32]),
+        method: Int253::from(0u64),
+        caller: None,
+        anchor: Anchor([0u8; 32]),
+    };
+    let mut vm = VM::new(
+        dummy_header(),
+        CallFrame::new(
+            Program::parse(&script).unwrap().into_instructions(),
+            kind,
+            1_000,
+            /*mem_limit=*/ 100,
+            0,
+        ),
+    );
+    assert!(matches!(
+        run_until_tx_done(&mut vm).unwrap_err(),
+        VMError::MemLimitExceeded
+    ));
+}
+
 // ── return ──────────────────────────────────────────────────
 
 #[test]

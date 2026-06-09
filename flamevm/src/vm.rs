@@ -946,6 +946,7 @@ impl VM {
                 Ok(())
             }
             I::PushStr(s) => {
+                self.charge_mem(s.len())?;
                 self.push_value(Value::String(s));
                 Ok(())
             }
@@ -1270,9 +1271,7 @@ impl VM {
     /// merlin back, then the new String.
     fn op_tread(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
-        if n > self.transient_alloc_cap() {
-            return Err(VMError::MemLimitExceeded);
-        }
+        self.charge_mem(n)?;
         let label = self.pop_value()?.to_string()?;
         let mut m = self.pop_value()?.to_merlin()?;
         let out = m.read_bytes(&label.to_bytes(), n);
@@ -1587,27 +1586,31 @@ impl VM {
     fn op_append(&mut self) -> Result<(), VMError> {
         let s2 = self.pop_value()?.to_string()?;
         let s1 = self.pop_value()?.to_string()?;
+        self.charge_mem(s2.len())?;
         self.push_value(Value::String(s1.append_bytes(&s2.to_bytes())));
         Ok(())
     }
 
-    /// `0x47` `writezeros` — `s n → s'`. Appends `n` zero bytes.
-    /// Interim per-allocation ceiling for stack-controlled byte counts
-    /// (`writezeros`, `tread`): the frame's `mem_limit`, or a fixed 16 MiB
-    /// when unset (0), until per-instruction memory metering lands.
-    fn transient_alloc_cap(&self) -> usize {
-        const MAX_TRANSIENT_ALLOC: usize = 1 << 24;
-        match self.current_call.mem_limit {
-            0 => MAX_TRANSIENT_ALLOC,
-            lim => lim as usize,
-        }
-    }
-
-    fn op_write_zeros(&mut self) -> Result<(), VMError> {
-        let n = self.pop_byte_count(usize::MAX)?;
-        if n > self.transient_alloc_cap() {
+    /// Debits `n` bytes of transient memory from the current frame
+    /// (ADR 0002 arena cap). Monotonic high-water accounting — drops
+    /// don't release; the cap bounds the frame's total growth, and the
+    /// counter dies with the frame (failure rollback is automatic).
+    /// `mem_limit == 0` means unmetered (test frames); production
+    /// frames always carry a cap (4× vbytes, the `bytes` operand, or
+    /// the root `Limits`).
+    fn charge_mem(&mut self, n: usize) -> Result<(), VMError> {
+        let f = &mut self.current_call;
+        f.mem_used = f.mem_used.saturating_add(n as u64);
+        if f.mem_limit > 0 && f.mem_used > f.mem_limit {
             return Err(VMError::MemLimitExceeded);
         }
+        Ok(())
+    }
+
+    /// `0x47` `writezeros` — `s n → s'`. Appends `n` zero bytes.
+    fn op_write_zeros(&mut self) -> Result<(), VMError> {
+        let n = self.pop_byte_count(usize::MAX)?;
+        self.charge_mem(n)?;
         let s = self.pop_value()?.to_string()?;
         let appended = s.append_bytes(&vec![0u8; n]);
         self.push_value(Value::String(appended));

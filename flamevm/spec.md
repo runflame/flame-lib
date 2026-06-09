@@ -1293,6 +1293,8 @@ Pushes the current call's total gas budget cap (the value set at frame creation,
 
 Pushes the current call's transient-memory cap — `4 × persistent_vbytes` for actor frames per [ADR 0002](../decisions/0002-arena-memory-cap.md), or the caller-specified `bytes` operand for `CellOpen` frames, or the explicit limit passed at the outermost frame. Available in either context.
 
+**Memory accounting.** Each frame meters its transient growth against the cap with a monotonic high-water counter: `pushstr` literals, `append`, `writezeros`, and `tread` charge the bytes they add; drops do **not** release budget (the cap bounds total growth, keeping accounting O(1) and rollback-free — the counter dies with the frame). Exceeding the cap hard-fails `MemLimitExceeded`. Further growth ops (Dict inserts, stack depth) join the same charging seam as they are calibrated.
+
 ### newbytes
 
 ø → _n_
