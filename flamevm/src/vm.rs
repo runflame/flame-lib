@@ -159,6 +159,11 @@ impl Delegate for InternalDelegate {
 /// executed or skip-scanned.
 const GAS_PER_INSTRUCTION: u64 = 1;
 
+/// Maximum nested call/open/signcall depth. Re-entrancy is permitted
+/// (ADR 0017), so without this a load-free A↔B cycle would be bounded
+/// only by gas; the cap restores a structural bound (design.md §Calls).
+const MAX_CALL_DEPTH: usize = 64;
+
 /// A frame's executable code. The prover holds decoded, witness-bearing
 /// instructions; the verifier and internal actor execution hold raw
 /// bytecode and decode one instruction at a time — never materializing a
@@ -2370,7 +2375,7 @@ impl VM {
         let code = prog.into_code()?;
         // Split parent's anchor for the callee + stash post-call.
         let child_anchor = self.split_anchor_for_call()?;
-        self.enter_cell_open_frame(cell, code, gas, bytes, args, child_anchor);
+        self.enter_cell_open_frame(cell, code, gas, bytes, args, child_anchor)?;
         Ok(())
     }
 
@@ -2403,7 +2408,7 @@ impl VM {
 
         let code = prog_str.into_code()?;
         let child_anchor = self.split_anchor_for_call()?;
-        self.enter_cell_open_frame(cell, code, gas, bytes, args, child_anchor);
+        self.enter_cell_open_frame(cell, code, gas, bytes, args, child_anchor)?;
         Ok(())
     }
 
@@ -2421,7 +2426,10 @@ impl VM {
         bytes: u64,
         args: Vec<Value>,
         child_anchor: Anchor,
-    ) {
+    ) -> Result<(), VMError> {
+        if self.call_stack.len() >= MAX_CALL_DEPTH {
+            return Err(VMError::CallDepthExceeded);
+        }
         let external_context = self.is_external();
         let mut frame = CallFrame::from_code(
             code,
@@ -2443,6 +2451,7 @@ impl VM {
         let parent = core::mem::replace(&mut self.current_call, frame);
         self.call_stack.push(parent);
         self.last_anchor = Some(child_anchor);
+        Ok(())
     }
 
     /// Pops `bytes` then `gas` (in that order — `gas` is deeper) as
@@ -2565,6 +2574,9 @@ impl VM {
         // too: its state is checked out, so `resolve_method` returns
         // `ActorEmpty` (ADR 0017 — the state is the re-entrancy lock).
         let pre_frame: Result<(Vec<u8>, u64, ActorID), VMError> = (|| {
+            if self.call_stack.len() >= MAX_CALL_DEPTH {
+                return Err(VMError::CallDepthExceeded);
+            }
             let script = registry.load_code(&callee)?;
             let mem_limit = registry.actor_vbytes(&callee)?.saturating_mul(4);
             let caller = self

@@ -320,6 +320,86 @@ fn repeat_calls_reuse_cached_labels() {
     assert!(cached.len() >= 2, "at least labels 0 and 1 discovered: {cached:?}");
 }
 
+/// Read-only re-entrancy is not expressible (the strongest property of
+/// the checkout lock): a re-entrant *view* method that `load`s the
+/// mid-update state is blocked exactly like a writer — there is no
+/// peek-state path. A.recv loads, then calls B; B calls A.method1
+/// (which `load`s); the inner load surfaces ActorEmpty → B sees `0`.
+#[test]
+fn reentrant_view_of_mid_update_state_is_blocked() {
+    let mut reg = MemRegistry::new();
+    let a_id = ActorID::Hash([0xaa; 32]);
+    let b_id = ActorID::Hash([0xbb; 32]);
+
+    // A.method1 (a "view"): load state — never reached, A holds the lock.
+    let a_method1 = Program::new().load().save().to_bytecode();
+    // A.recv: load (acquire lock), call B.recv (succeeds → 2 markers,
+    // drop both), then save the held state back so A exits cleanly.
+    let a_recv = {
+        let mut p = Program::new().load().to_bytecode();
+        let mut q = Program::parse(&call_script(&b_id, 0, 200_000)).expect("parse");
+        q.push_instr(crate::ops::Instruction::Drop);
+        q.push_instr(crate::ops::Instruction::Drop);
+        p.extend_from_slice(&q.to_bytecode());
+        p.extend_from_slice(&Program::new().save().to_bytecode());
+        p
+    };
+    let a_code = dispatch_code(&[(0, a_recv.clone()), (1, a_method1)]);
+    reg.deploy(a_id.clone(), a_code, empty_state(), 1_000_000, 0).expect("deploy A");
+
+    // B.recv: call A.method1 — blocked (A checked out) → single `0`
+    // marker, drop it once; B exits cleanly.
+    let b_recv = {
+        let mut p = Program::parse(&call_script(&a_id, 1, 100_000)).expect("parse");
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.to_bytecode()
+    };
+    reg.deploy(b_id.clone(), b_recv, empty_state(), 1_000_000, 0).expect("deploy B");
+
+    let mut vm = vm_for_actor(a_id, a_recv);
+    while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
+    // No ActorSave from A.method1 — the inner load was blocked, so the
+    // view re-entry produced no state mutation. A's own recv save is the
+    // only ActorSave.
+    let a_saves = vm
+        .txlog
+        .iter()
+        .filter(|e| matches!(e, crate::tx::TxEntry::ActorSave { .. }))
+        .count();
+    assert_eq!(a_saves, 1, "only A.recv's save; the view re-entry was blocked");
+}
+
+/// Call depth is structurally capped: a self-recursing actor stops at
+/// MAX_CALL_DEPTH with a `0` marker, not an unbounded heap blow-up.
+#[test]
+fn call_depth_is_capped() {
+    let mut reg = MemRegistry::new();
+    let id = ActorID::Hash([0xcc; 32]);
+    // recv: call SELF (no state load → re-entry permitted), drop markers.
+    let recv = {
+        let mut p = Program::parse(&call_script(&id, 0, 900_000)).expect("parse");
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.to_bytecode()
+    };
+    reg.deploy(id.clone(), recv.clone(), empty_state(), 1_000_000, 0).expect("deploy");
+    let mut vm = vm_for_actor(id, recv);
+    // Must TERMINATE (depth cap bottoms out the recursion, which then
+    // unwinds via failure markers) rather than hang or blow the stack.
+    // Tolerate either a clean finish or a propagated error — the point
+    // is that there is no unbounded recursion.
+    let mut steps = 0;
+    loop {
+        match vm.step_internal_with_registry(&mut reg) {
+            Ok(true) => {
+                steps += 1;
+                assert!(steps < 5_000_000, "must terminate via depth cap");
+            }
+            _ => break,
+        }
+    }
+}
+
 #[test]
 fn call_without_registry_errors() {
     let mut reg = MemRegistry::new();

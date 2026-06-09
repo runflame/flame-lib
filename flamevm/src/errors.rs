@@ -57,6 +57,12 @@ pub enum VMError {
     #[error("out of gas")]
     OutOfGas,
 
+    /// Nested call/open/signcall depth exceeded `MAX_CALL_DEPTH` — a
+    /// structural bound on heap-recursion (re-entrancy is permitted, so
+    /// gas alone would otherwise be the only limit on a call cycle).
+    #[error("call depth exceeded")]
+    CallDepthExceeded,
+
     /// This error occurs when an instruction requires a String.
     #[error("Item is not a String")]
     TypeNotString,
