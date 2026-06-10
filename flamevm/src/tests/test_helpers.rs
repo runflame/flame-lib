@@ -13,6 +13,8 @@
 // "defined multiple times".
 pub use super::super::*;
 
+pub(crate) use super::mem_registry::{MemEnv, MemRegistry};
+
 pub use bulletproofs::PedersenGens;
 pub use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 pub use crate::{

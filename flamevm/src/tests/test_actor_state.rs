@@ -4,7 +4,7 @@
 
 use super::test_helpers::*;
 
-use crate::{empty_state, ActorID, Dict, Env, MemRegistry, Int253, RECV_METHOD};
+use crate::{empty_state, ActorID, Dict, Env, Int253, RECV_METHOD};
 
 /// Builds an empty state with a single `recv` method that runs the
 /// caller-supplied bytes. Returns (state, id).
@@ -49,7 +49,7 @@ fn vm_for(actor: ActorID, script: Vec<u8>) -> VM {
 fn facade_internal_execute_tx_roundtrip() {
     let mut reg = MemRegistry::new();
     let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
-    let mut env = crate::MemEnv { registry: reg, height: 0 };
+    let mut env = MemEnv { registry: reg, height: 0 };
     let msg = crate::Message {
         target: id,
         method: RECV_METHOD,

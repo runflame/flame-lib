@@ -6,7 +6,7 @@ use merlin::Transcript;
 use musig::Signature;
 use serde::{Deserialize, Serialize};
 
-use crate::actor::{ActorRegistry, MemRegistry};
+use crate::actor::ActorRegistry;
 use crate::errors::VMError;
 use crate::program::Program;
 use crate::prover::Prover;
@@ -229,54 +229,6 @@ impl Message {
     }
 }
 
-/// Reference [`Env`] backed by an in-memory [`MemRegistry`] at a fixed
-/// block height. For tests and pre-storage node use.
-pub struct MemEnv {
-    pub registry: MemRegistry,
-    pub height: u64,
-}
-
-impl Env for MemEnv {
-    fn working_copy(&self) -> Box<dyn ActorRegistry> {
-        Box::new(self.registry.clone())
-    }
-    fn height(&self) -> u64 {
-        self.height
-    }
-    fn apply_changes(&mut self, log: &TxLog) {
-        // First cut: replay actor-state saves onto existing actors.
-        // Deploy / vbyte-credit / reaping flow is deferred — see
-        // design.md §Transaction lifecycle & API (vbytes flow note).
-        for entry in log.iter() {
-            match entry {
-                TxEntry::ActorSave { actor, state } => {
-                    if let Some(a) = self.registry.actor_mut(actor) {
-                        a.state = Some(state.clone());
-                    }
-                }
-                TxEntry::SetCode { actor, code } => {
-                    if let Some(a) = self.registry.actor_mut(actor) {
-                        a.code = code.clone();
-                    }
-                }
-                // Exhaustive on purpose: a newly-added effect variant must
-                // force a decision here rather than be silently dropped.
-                // The following are no-ops for this first-cut applier
-                // (deploy/vbyte-credit/reaping deferred — vbytes-flow note).
-                TxEntry::Header(_)
-                | TxEntry::Data(_)
-                | TxEntry::Input(_)
-                | TxEntry::Receive(_)
-                | TxEntry::Output(_)
-                | TxEntry::IssuePub(_, _)
-                | TxEntry::IssuePriv(_, _)
-                | TxEntry::Retire(_, _)
-                | TxEntry::Fee(_)
-                | TxEntry::Send(_) => {}
-            }
-        }
-    }
-}
 
 /// Transaction ID is a unique 32-byte identifier of a transaction effects represented by `TxLog`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

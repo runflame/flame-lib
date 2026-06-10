@@ -2,9 +2,10 @@
 
 use readerwriter::{Decodable, ReadError};
 
+use super::mem_registry::MemRegistry;
 use crate::{
     empty_state, grace_window, state_root, vbyte_size,
-    ActorID, ActorRegistry, Dict, Int253, MemRegistry, String, VbytePool,
+    ActorID, ActorRegistry, Dict, Int253, String, VbytePool,
     Value, VMError,
     GRACE_BLOCKS_CAP,
     VBYTES_PER_BLOCK,

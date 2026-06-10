@@ -7,7 +7,7 @@
 
 use super::test_helpers::*;
 use crate::vm::LOCKTIME_TIMESTAMP_THRESHOLD;
-use crate::{empty_state, ActorID, MemRegistry, Int253, RECV_METHOD};
+use crate::{empty_state, ActorID, Int253, RECV_METHOD};
 
 /// Build an ExternalRoot VM with caller-controlled TxHeader and gas/mem
 /// budgets. Used by every test in this file that doesn't need a

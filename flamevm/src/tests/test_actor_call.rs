@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::{empty_state, ActorID, ActorRegistry, MemRegistry, Int253, RECV_METHOD};
+use crate::{empty_state, ActorID, ActorRegistry, Int253, RECV_METHOD};
 
 /// Helper: deploys an actor whose `recv` method runs `script`.
 /// Derives the actor's id from the script bytes (treats `script`

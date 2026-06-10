@@ -7,6 +7,7 @@
 //! [`test_helpers`] and are imported via
 //! `use super::test_helpers::*;`.
 
+pub(crate) mod mem_registry;
 pub(crate) mod test_helpers;
 
 mod test_authorization;

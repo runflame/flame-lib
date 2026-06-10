@@ -23,7 +23,7 @@ mod vm;
 pub use actor::{
     code_root, empty_state, grace_window, state_root,
     vbyte_size, Actor, ActorID, ActorRegistry,
-    MemRegistry, VbytePool,
+    VbytePool,
     GRACE_BLOCKS_CAP, RECV_METHOD,
     VBYTES_PER_BLOCK, VBYTE_MATURITY_BLOCKS,
 };
@@ -48,7 +48,7 @@ pub use value::Value;
 pub use verifier::Verifier;
 
 pub use tx::{
-    Env, ExternalTx, InternalTx, Limits, MemEnv, SigningInstructions, TxEntry, TxHeader, TxID,
+    Env, ExternalTx, InternalTx, Limits, SigningInstructions, TxEntry, TxHeader, TxID,
     TxLog, TxMetrics, UnsignedTx,
 };
 
