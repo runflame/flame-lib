@@ -124,9 +124,6 @@ pub trait Delegate {
         commitment: &crate::Commitment,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError>;
 
-    /// Consumes the delegate after VM execution finishes cleanly.
-    /// Prover builds the proof; verifier checks it.
-    fn finalize(self, deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError>;
 }
 
 /// No-op [`Delegate`] used by internal-context steps. CS opcodes
@@ -148,9 +145,6 @@ impl Delegate for InternalDelegate {
         _commitment: &crate::Commitment,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError> {
         unreachable!("InternalDelegate::commit_variable — commit/expr/mix are external-only")
-    }
-    fn finalize(self, _deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError> {
-        Ok(())
     }
 }
 
@@ -582,9 +576,6 @@ impl VM {
             ),
         );
         while vm.step_external(&mut delegate)? {}
-        let sigs = mem::take(&mut vm.deferred_sigs);
-        delegate.finalize(sigs.clone())?;
-        vm.deferred_sigs = sigs;
         Ok(vm.into_result(script, None))
     }
 

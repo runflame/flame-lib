@@ -193,11 +193,4 @@ impl Delegate for Verifier {
         Ok((point, var))
     }
 
-    fn finalize(self, _deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError> {
-        // Proof verification happens via `verify_proof` after
-        // [`VM::run`] returns; `finalize` here is a no-op
-        // retained only so `Verifier` satisfies the `Delegate` trait
-        // (mirrors the symmetric stub on the prover side).
-        Ok(())
-    }
 }

@@ -1,6 +1,5 @@
 //! Errors related to proving and verifying proofs.
 use bulletproofs::r1cs::R1CSError;
-use readerwriter::ReadError;
 use thiserror::Error;
 
 /// Represents an error in proof creation, verification, or parsing.

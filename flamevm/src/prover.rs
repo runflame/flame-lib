@@ -132,12 +132,4 @@ impl<'g> Delegate for Prover<'g> {
         Ok(self.cs.commit(scalar, blinding))
     }
 
-    fn finalize(self, _deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError> {
-        // The proof is produced by `into_proof` instead — `finalize`'s
-        // signature can't return the proof bytes without changing the
-        // trait. [`Prover::prove`] calls `into_proof` after the VM run
-        // returns; `finalize` here is a no-op retained only so `Prover`
-        // satisfies the `Delegate` trait.
-        Ok(())
-    }
 }

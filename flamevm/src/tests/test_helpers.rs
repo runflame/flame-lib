@@ -413,12 +413,6 @@ pub(crate) fn run_external_workflow(script: Vec<u8>) -> VM {
     );
     let mut delegate = StubDelegate::new();
     while vm.step_external(&mut delegate).expect("step_external ok") {}
-    // Finalize accepts whatever sigs we accumulated (stub does nothing).
-    let sigs = std::mem::replace(&mut vm.deferred_sigs, Vec::new());
-    // Keep a copy in the VM for the test to inspect.
-    let sigs_copy: Vec<DeferredSig> = sigs.iter().cloned().collect();
-    delegate.finalize(sigs).expect("finalize ok");
-    vm.deferred_sigs = sigs_copy;
     vm
 }
 
@@ -460,10 +454,6 @@ impl Delegate for StubDelegate {
         unreachable!("StubDelegate::commit_variable should not be called in Phase-10 tests");
     }
 
-    fn finalize(self, _deferred_sigs: Vec<DeferredSig>) -> Result<(), VMError> {
-        // Stub: don't actually verify a proof.
-        Ok(())
-    }
 }
 
 /// Helper: build a VM in external context with a witness-bearing
