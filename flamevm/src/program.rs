@@ -145,22 +145,13 @@ impl Program {
     }
 
     /// `pushtoken` (0x1b).
-    pub fn pushtoken(mut self) -> Self {
-        self.instructions.push(Instruction::PushToken);
-        self
-    }
+    pub fn pushtoken(mut self) -> Self { self.instructions.push(Instruction::PushToken); self }
 
     /// `drop` (0x1c).
-    pub fn drop_(mut self) -> Self {
-        self.instructions.push(Instruction::Drop);
-        self
-    }
+    pub fn drop_(mut self) -> Self { self.instructions.push(Instruction::Drop); self }
 
     /// `nop` (0x1d).
-    pub fn nop(mut self) -> Self {
-        self.instructions.push(Instruction::Nop);
-        self
-    }
+    pub fn nop(mut self) -> Self { self.instructions.push(Instruction::Nop); self }
 
     /// `dup` (0x1e) — pops `k` from the stack.
     pub fn dup(mut self) -> Self {
@@ -169,10 +160,7 @@ impl Program {
     }
 
     /// `roll` (0x1f).
-    pub fn roll(mut self) -> Self {
-        self.instructions.push(Instruction::Roll);
-        self
-    }
+    pub fn roll(mut self) -> Self { self.instructions.push(Instruction::Roll); self }
 
     /// `dup:k` (0x20..=0x2f) — `k ≤ 15`.
     pub fn dup_k(mut self, k: u8) -> Self {
@@ -228,10 +216,7 @@ impl Program {
     }
 
     /// `expr` (0x5d).
-    pub fn expr(mut self) -> Self {
-        self.instructions.push(Instruction::Expr);
-        self
-    }
+    pub fn expr(mut self) -> Self { self.instructions.push(Instruction::Expr); self }
 
     /// `range` (0x5e) — `expr n → expr`. Adds an n-bit range proof
     /// (n ∈ [1, 64]; popped as `Int253` from the stack). The
@@ -281,10 +266,7 @@ impl Program {
     pub fn keccak256(mut self) -> Self { self.instructions.push(Instruction::Keccak256); self }
 
     /// `log` (0x87) — see [`Instruction::Log`].
-    pub fn log(mut self) -> Self {
-        self.instructions.push(Instruction::Log);
-        self
-    }
+    pub fn log(mut self) -> Self { self.instructions.push(Instruction::Log); self }
 
     // ── Tokens ──────────────────────────────────────────
 
@@ -307,16 +289,10 @@ impl Program {
     pub fn split(mut self) -> Self { self.instructions.push(Instruction::Split); self }
 
     /// `mix` (0x99) — see [`Instruction::Mix`].
-    pub fn mix(mut self) -> Self {
-        self.instructions.push(Instruction::Mix);
-        self
-    }
+    pub fn mix(mut self) -> Self { self.instructions.push(Instruction::Mix); self }
 
     /// `decrypt` (0x9a) — see [`Instruction::Decrypt`].
-    pub fn decrypt(mut self) -> Self {
-        self.instructions.push(Instruction::Decrypt);
-        self
-    }
+    pub fn decrypt(mut self) -> Self { self.instructions.push(Instruction::Decrypt); self }
 
     // ── control flow ────────────────────────────────────
 

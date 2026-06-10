@@ -21,7 +21,7 @@ fn shared_bp_gens() -> &'static BulletproofGens {
 use crate::errors::VMError;
 use crate::program::Program;
 use crate::tx::TxHeader;
-use crate::vm::{Delegate, DeferredSig, TxResult, VM};
+use crate::vm::{Delegate, TxResult, VM};
 
 /// R1CS proof builder. Wraps `bulletproofs::r1cs::Prover` and a
 /// `musig::BatchVerifier` (used by deferred-signature batching at

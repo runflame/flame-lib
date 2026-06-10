@@ -257,7 +257,7 @@ fn read_int253_with_tag(r: &mut impl Reader, tag: u8) -> Result<Int253, ReadErro
             let w = r.read_u64()?;
             Ok(Int253::from(PU64_BASE) + Int253::from(w))
         }
-        INT_PFULL => read_positive_full(r),
+        INT_PFULL => read_full_int(r, false),
         INT_NEG1 => Ok(Int253::from(-1i64)),
         INT_NU8 => {
             let b = r.read_u8()?;
@@ -272,36 +272,24 @@ fn read_int253_with_tag(r: &mut impl Reader, tag: u8) -> Result<Int253, ReadErro
             let mag = Int253::from(NU64_BASE) + Int253::from(w);
             Ok(-mag)
         }
-        INT_NFULL => read_negative_full(r),
+        INT_NFULL => read_full_int(r, true),
         _ => Err(ReadError::InvalidFormat),
     }
 }
 
-fn read_positive_full(r: &mut impl Reader) -> Result<Int253, ReadError> {
+/// Shared FULL-width reader: `negative` selects the required sign and
+/// the range base whose top the magnitude must exceed (canonicality —
+/// a FULL encoding is only legal for values that don't fit the
+/// narrower u64 class of the same sign).
+fn read_full_int(r: &mut impl Reader, negative: bool) -> Result<Int253, ReadError> {
     let buf = r.read_u8x32()?;
     let int = Int253::from_bytes(buf).ok_or(ReadError::InvalidFormat)?;
-    // Sign bit must be clear for a positive FULL.
-    if int.is_negative() {
+    if int.is_negative() != negative {
         return Err(ReadError::InvalidFormat);
     }
-    // Canonicality: value must exceed the PU64 range.
-    let pu64_top = Int253::from(PU64_BASE) + Int253::from(u64::MAX);
-    if int.cmp(&pu64_top) != Ordering::Greater {
-        return Err(ReadError::InvalidFormat);
-    }
-    Ok(int)
-}
-
-fn read_negative_full(r: &mut impl Reader) -> Result<Int253, ReadError> {
-    let buf = r.read_u8x32()?;
-    let int = Int253::from_bytes(buf).ok_or(ReadError::InvalidFormat)?;
-    // Sign bit must be set for a negative FULL.
-    if !int.is_negative() {
-        return Err(ReadError::InvalidFormat);
-    }
-    // Canonicality: magnitude must exceed the NU64 range.
-    let nu64_top_mag = Int253::from(NU64_BASE) + Int253::from(u64::MAX);
-    if int.abs().cmp(&nu64_top_mag) != Ordering::Greater {
+    let base = if negative { NU64_BASE } else { PU64_BASE };
+    let top = Int253::from(base) + Int253::from(u64::MAX);
+    if int.abs().cmp(&top) != Ordering::Greater {
         return Err(ReadError::InvalidFormat);
     }
     Ok(int)

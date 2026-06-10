@@ -858,58 +858,21 @@ impl VM {
         // context (`InternalDelegate::batch_verifier` panics, so we
         // can't query it in internal mode — see `is_external`).
         let depth_before = self.call_stack.len();
-        // Two paths to keep the borrow checker happy: registry is
-        // either None (no checkpoint to do) or Some(r), in which case
-        // we reborrow `r` for step_inner and use the outer `r`
-        // afterwards. Logic is identical on both sides modulo the
-        // registry-touching calls.
-        match registry {
-            None => {
-                let result = self.step_inner(delegate, None);
-                self.post_step_no_registry(delegate, depth_before, result)
-            }
-            Some(r) => {
-                let result = self.step_inner(delegate, Some(&mut *r));
-                self.post_step_with_registry(delegate, r, depth_before, result)
-            }
-        }
+        // Reborrow for step_inner, then hand the original to post_step
+        // (one borrow live at a time — borrow checker requires the split).
+        let (result, registry) = match registry {
+            None => (self.step_inner(delegate, None), None),
+            Some(r) => (self.step_inner(delegate, Some(&mut *r)), Some(r)),
+        };
+        self.post_step(delegate, registry, depth_before, result)
     }
 
-    /// Step post-processing when no registry is in play (external
-    /// tx, test path with `InternalDelegate`). Mirrors the registry
-    /// variant minus the checkpoint calls.
-    fn post_step_no_registry<D: Delegate>(
+    /// Shared step post-processing: snapshot/checkpoint on frame entry,
+    /// checkpoint-commit on clean exit, fail_current_call on error.
+    fn post_step<D: Delegate>(
         &mut self,
         delegate: &mut D,
-        depth_before: usize,
-        result: Result<bool, VMError>,
-    ) -> Result<bool, VMError> {
-        match result {
-            Ok(cont) => {
-                let depth_after = self.call_stack.len();
-                if depth_after > depth_before {
-                    self.snapshot_parent_on_push(delegate);
-                }
-                Ok(cont)
-            }
-            Err(e) => {
-                if self.call_stack.is_empty() {
-                    return Err(e);
-                }
-                self.fail_current_call(delegate, None);
-                Ok(true)
-            }
-        }
-    }
-
-    /// Step post-processing with a live registry. Adds checkpoint
-    /// push/commit/rollback alongside the batch/CS bookkeeping so a
-    /// failed callee's `op_save` writes are rolled back — closes F1
-    /// of the op_save audit.
-    fn post_step_with_registry<D: Delegate>(
-        &mut self,
-        delegate: &mut D,
-        registry: &mut dyn ActorRegistry,
+        mut registry: Option<&mut dyn ActorRegistry>,
         depth_before: usize,
         result: Result<bool, VMError>,
     ) -> Result<bool, VMError> {
@@ -922,11 +885,16 @@ impl VM {
                     // newly-pushed frame can roll back any `op_save`/
                     // `op_load` state moves (a failed `load` restores
                     // the checked-out state, so the actor isn't
-                    // spuriously self-destructed).
-                    registry.push_checkpoint();
+                    // spuriously self-destructed) — closes F1 of the
+                    // op_save audit.
+                    if let Some(r) = registry.as_mut() {
+                        r.push_checkpoint();
+                    }
                 } else if depth_after < depth_before {
                     // Clean exit: keep effects, drop the snapshot.
-                    registry.pop_checkpoint_commit();
+                    if let Some(r) = registry.as_mut() {
+                        r.pop_checkpoint_commit();
+                    }
                 }
                 Ok(cont)
             }
@@ -934,7 +902,7 @@ impl VM {
                 if self.call_stack.is_empty() {
                     return Err(e);
                 }
-                self.fail_current_call(delegate, Some(registry));
+                self.fail_current_call(delegate, registry);
                 Ok(true)
             }
         }
@@ -1079,16 +1047,18 @@ impl VM {
             I::Signcall => self.op_signcall(),
 
             I::Timelock => self.op_timelock(),
-            I::Version => self.op_version(),
+            // version → tx header version (spec §version).
+            I::Version => { self.push_value(Value::Int253(Int253::from(self.header.version as u64))); Ok(()) }
             I::Selfid => self.op_selfid(),
             I::Anchor => self.op_anchor(),
             I::Gas => self.op_gas(),
             I::Bytes => self.op_bytes(registry),
             I::Callerid => self.op_callerid(),
             I::Method => self.op_method(),
-            I::Gaslimit => self.op_gaslimit(),
-            I::Memlimit => self.op_memlimit(),
-            I::Newbytes => self.op_newbytes(),
+            // gaslimit / memlimit / newbytes → frame budget fields.
+            I::Gaslimit => { self.push_value(Value::Int253(Int253::from(self.current_call.gas_limit))); Ok(()) }
+            I::Memlimit => { self.push_value(Value::Int253(Int253::from(self.current_call.mem_limit))); Ok(()) }
+            I::Newbytes => { self.push_value(Value::Int253(Int253::from(self.current_call.newbytes))); Ok(()) }
 
             I::Ext(b) => Err(VMError::UnknownOpcode(b)),
         }?;
@@ -1099,6 +1069,24 @@ impl VM {
     /// must be empty (use `return k` to send values across the boundary).
     /// Leftover gas is refunded to the parent. Implicit clean exits
     /// push `{0, 1}` onto the parent's stack (success with k=0).
+    /// Shared clean-exit epilogue: pop to `parent` (already swapped in
+    /// by the caller), harvest the exiting frame's labels, refund
+    /// leftover gas, apply the parent's post-call anchor, and discard
+    /// the entry-time batch/CS snapshots (failure-path only). Order is
+    /// load-bearing — identical in `finish_call` and `op_return`.
+    fn clean_exit_to_parent(&mut self, exiting: &CallFrame, leftover_gas: u64) {
+        self.harvest_labels(exiting);
+        self.current_call.gas_limit = self
+            .current_call
+            .gas_limit
+            .saturating_add(leftover_gas);
+        if let Some(post) = self.current_call.post_call_anchor.take() {
+            self.last_anchor = Some(post);
+        }
+        self.current_call.snap_batch = None;
+        self.current_call.snap_cs = None;
+    }
+
     fn finish_call(&mut self) -> Result<bool, VMError> {
         if !self.current_call.stack.is_empty() {
             return Err(VMError::StackNotClean);
@@ -1110,22 +1098,7 @@ impl VM {
 
         if let Some(parent) = self.call_stack.pop() {
             let exiting = mem::replace(&mut self.current_call, parent);
-            self.harvest_labels(&exiting);
-            self.current_call.gas_limit = self
-                .current_call
-                .gas_limit
-                .saturating_add(leftover_gas);
-            // Apply parent's post-call anchor — the `right` half of
-            // the split taken at call entry.
-            if let Some(post) = self.current_call.post_call_anchor.take() {
-                self.last_anchor = Some(post);
-            }
-            // Clean exit: child's MSM contributions stay in the
-            // delegate's batch, and the CS contributions stay in the
-            // R1CS. Drop both entry-time snapshots — they would only
-            // be used on the failure path.
-            self.current_call.snap_batch = None;
-            self.current_call.snap_cs = None;
+            self.clean_exit_to_parent(&exiting, leftover_gas);
             // Success marker with k=0: stack += [count=0, success=1].
             self.current_call.stack.push(Value::Int253(Int253::from(0u64)));
             self.current_call.stack.push(Value::Int253(Int253::ONE));
@@ -1978,21 +1951,7 @@ impl VM {
 
         let parent = self.call_stack.pop().expect("checked non-empty above");
         let exiting = mem::replace(&mut self.current_call, parent);
-        self.harvest_labels(&exiting);
-        self.current_call.gas_limit = self
-            .current_call
-            .gas_limit
-            .saturating_add(leftover_gas);
-        // Apply parent's post-call anchor (set at call entry).
-        if let Some(post) = self.current_call.post_call_anchor.take() {
-            self.last_anchor = Some(post);
-        }
-        // Clean exit: the child's contributions to the delegate's
-        // batch and R1CS already live there and are kept. Discard
-        // both entry-time snapshots — they would only be used on
-        // the failure path.
-        self.current_call.snap_batch = None;
-        self.current_call.snap_cs = None;
+        self.clean_exit_to_parent(&exiting, leftover_gas);
         // Pour return values, then count, then success marker (1).
         self.current_call.stack.extend(return_values);
         self.current_call.stack.push(Value::Int253(Int253::from(k as u64)));
@@ -2782,12 +2741,6 @@ impl VM {
         Ok(())
     }
 
-    /// **version** → _n_  Pushes the transaction version field.
-    fn op_version(&mut self) -> Result<(), VMError> {
-        self.push_value(Value::Int253(Int253::from(self.header.version as u64)));
-        Ok(())
-    }
-
     /// **gas** → _n_  Pushes remaining gas for the current call.
     fn op_gas(&mut self) -> Result<(), VMError> {
         let remaining = self
@@ -2795,29 +2748,6 @@ impl VM {
             .gas_limit
             .saturating_sub(self.current_call.gas_used);
         self.push_value(Value::Int253(Int253::from(remaining)));
-        Ok(())
-    }
-
-    /// **gaslimit** → _n_  Pushes the call's total gas budget cap.
-    fn op_gaslimit(&mut self) -> Result<(), VMError> {
-        self.push_value(Value::Int253(Int253::from(self.current_call.gas_limit)));
-        Ok(())
-    }
-
-    /// **memlimit** → _n_  Pushes the call's transient-memory cap
-    /// (4 × persistent_vbytes for actor frames; caller-specified
-    /// `bytes` operand for cell-open frames; explicit limit for the
-    /// outermost frame).
-    fn op_memlimit(&mut self) -> Result<(), VMError> {
-        self.push_value(Value::Int253(Int253::from(self.current_call.mem_limit)));
-        Ok(())
-    }
-
-    /// **newbytes** → _n_  Pushes the vbyte allotment delivered with
-    /// the current call (the parent's `bytes` operand at the
-    /// `call`/`send`/`open`/`signcall` site). Zero for `ExternalRoot`.
-    fn op_newbytes(&mut self) -> Result<(), VMError> {
-        self.push_value(Value::Int253(Int253::from(self.current_call.newbytes)));
         Ok(())
     }
 
