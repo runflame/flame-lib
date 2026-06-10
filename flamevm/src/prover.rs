@@ -120,6 +120,12 @@ impl<'g> Delegate for Prover<'g> {
         // construction (which is what the verifier independently
         // commits to its CS). `r1cs::Prover::commit` is an inherent
         // method — no `ConstraintSystem` trait import needed.
+        // `WitnessMissing` is prover-only (the verifier has no witness and
+        // takes the closed-point path). A script that `commit`s then
+        // `expr`s over an opaque commitment fails here on the prover but
+        // not the verifier — a fail-closed liveness divergence (the proof
+        // binds the whole CS, so the verifier rejects rather than accepts;
+        // see vm.rs `int253_to_signed_integer`). Not a soundness hole.
         let (value, blinding) =
             commitment.witness().ok_or(VMError::WitnessMissing)?;
         let scalar: curve25519_dalek::scalar::Scalar = value.into();

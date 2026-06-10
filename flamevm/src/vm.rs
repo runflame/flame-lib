@@ -3226,6 +3226,23 @@ fn int_fits_in_n_bits(value: Int253, n: usize) -> bool {
 
 /// Converts an `Int253` to `spacesuit::SignedInteger` if it fits the
 /// `±2^64` range. Out-of-range values error `InvalidBitrange`.
+/// Converts a cleartext `Int253` witness to a `SignedInteger` for a
+/// range-proof assignment.
+///
+/// **Prover/verifier asymmetry (fail-closed, liveness-only).** Callers
+/// invoke this only on the *prover* side (`commitment.assignment()` is
+/// `Some` for the prover, `None` for the verifier). An out-of-`u64`
+/// witness makes this error on the prover while the verifier — lacking
+/// the assignment — does not, so a caught sub-call could push a `0`
+/// marker on the prover and `1` on the verifier. That divergence is
+/// **fail-closed**: the proof binds the whole CS via Fiat–Shamir, so
+/// any prover/verifier control-flow divergence makes the proof fail to
+/// verify (verifier rejects) — it can never make the verifier *accept*
+/// an invalid tx. The effect is a self-inflicted liveness edge (a
+/// prover that commits to an out-of-range qty produces an unverifiable
+/// tx), not a soundness break. Hardening (making such witness-gated
+/// failures tx-level/uncatchable so they never reach a marker) is a
+/// deliberate ZK-review item, not a drive-by change.
 fn int253_to_signed_integer(value: Int253) -> Result<spacesuit::SignedInteger, VMError> {
     if value.is_negative() {
         let mag = value.abs();
