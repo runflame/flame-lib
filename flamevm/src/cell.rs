@@ -210,13 +210,6 @@ impl Predicate {
         self.witness.as_ref()?.as_any().downcast_ref::<W>()
     }
 
-    /// True iff a witness is attached. Cheap probe before a
-    /// downcast when the caller doesn't know which witness type to
-    /// expect.
-    pub fn has_witness(&self) -> bool {
-        self.witness.is_some()
-    }
-
     /// The 32-byte verification key for `signtx` / `signcall`.
     /// Equal to the predicate's opaque point.
     pub fn verification_key(&self) -> CompressedRistretto {
@@ -346,17 +339,6 @@ impl PredicateTree {
             PredicateLeaf::Program(p) => Some(p.as_slice()),
             PredicateLeaf::Blinding(_) => None,
         })
-    }
-
-    /// Returns the cached Taproot-tweaked point
-    /// `P = X + H(X, M) · B`. O(1) — `PredicateTree::new` computes
-    /// it once at construction and stores it in `self.point`.
-    ///
-    /// The historic name `compute_point` is kept for backwards
-    /// compatibility but no longer recomputes; new code should
-    /// prefer `tree.point` or `Predicate::to_point()`.
-    pub fn compute_point(&self) -> CompressedRistretto {
-        self.point
     }
 
     /// The predicate's merkle commitment `M` — the root over its program/

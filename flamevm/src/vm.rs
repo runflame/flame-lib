@@ -528,7 +528,6 @@ impl core::fmt::Debug for TxResult {
 }
 
 pub(crate) struct VM {
-    #[allow(dead_code)]
     header: TxHeader,
 
     /// Per-tx current anchor. `None` for fresh ExternalRoot txs (the
@@ -539,9 +538,6 @@ pub(crate) struct VM {
     /// `call` / `open` / `signcall` don't touch it (intra-tx calls
     /// don't mint new cross-tx entities).
     pub(crate) last_anchor: Option<Anchor>,
-
-    gas_used: u64,
-    vbytes_used: u64,
 
     current_call: CallFrame,
     call_stack: Vec<CallFrame>,
@@ -567,6 +563,7 @@ impl VM {
     /// Executes an external transaction script with the given delegate,
     /// then calls `delegate.finalize`. Crate-internal: the public path
     /// is `Program::build_tx` / `ExternalTx::verify`.
+    #[cfg(test)]
     pub(crate) fn execute_external<D: Delegate>(
         header: TxHeader,
         script: Vec<u8>,
@@ -732,8 +729,6 @@ impl VM {
         Self {
             header,
             last_anchor,
-            gas_used: 0,
-            vbytes_used: 0,
             current_call: initial_call,
             call_stack: Vec::new(),
             txlog,
@@ -799,8 +794,10 @@ impl VM {
             txid,
             txlog,
             total_fee: self.total_fee.total(),
-            gas_used: self.gas_used,
-            vbytes_used: self.vbytes_used,
+            // Root frame's metered gas (per-instruction; spec §gas).
+            gas_used: self.current_call.gas_used,
+            // Vbytes flow is deferred (design.md note); not yet metered.
+            vbytes_used: 0,
             bytecode,
             proof,
             deferred_sigs,
@@ -1234,7 +1231,7 @@ impl VM {
     /// point for issuance / borrow flows.
     fn op_pushtoken(&mut self) -> Result<(), VMError> {
         let flv = self.pop_value()?.to_int253()?;
-        self.push_value(Value::ClearToken(ClearToken::new(Int253::zero(), flv)));
+        self.push_value(Value::ClearToken(ClearToken::new(Int253::ZERO, flv)));
         Ok(())
     }
 
@@ -1389,7 +1386,7 @@ impl VM {
                 self.push_value(Value::Int253(Int253::from(1u64)));
             }
             None => {
-                self.push_value(Value::Int253(Int253::zero()));
+                self.push_value(Value::Int253(Int253::ZERO));
             }
         }
         Ok(())
@@ -1440,7 +1437,7 @@ impl VM {
                 self.push_value(v);
                 self.push_value(Value::Int253(Int253::from(1u64)));
             }
-            None => self.push_value(Value::Int253(Int253::zero())),
+            None => self.push_value(Value::Int253(Int253::ZERO)),
         }
     }
 
@@ -1491,7 +1488,7 @@ impl VM {
     /// original string is restored under the marker.
     fn push_read_failure(&mut self, original: String) {
         self.push_value(Value::String(original));
-        self.push_value(Value::Int253(Int253::zero()));
+        self.push_value(Value::Int253(Int253::ZERO));
     }
 
     /// _s n_ **readbits** → _s' x 1_ | _s 0_
@@ -2209,7 +2206,7 @@ impl VM {
             Err((a, b)) => {
                 self.push_value(Value::ClearToken(a));
                 self.push_value(Value::ClearToken(b));
-                self.push_value(Value::Int253(Int253::zero()));
+                self.push_value(Value::Int253(Int253::ZERO));
             }
         }
         Ok(())

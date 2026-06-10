@@ -20,7 +20,7 @@ fn read_bits_n_zero_succeeds_and_yields_zero() {
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 3);
     assert_str(&vm.current_call.stack[0], &[0xaa, 0xbb]);
-    assert_int(&vm.current_call.stack[1], Int253::zero());
+    assert_int(&vm.current_call.stack[1], Int253::ZERO);
     assert_int(&vm.current_call.stack[2], Int253::from(1u64));
 }
 
@@ -200,7 +200,7 @@ fn read_int_negative_roundtrip() {
 
 #[test]
 fn read_int_zero_roundtrip() {
-    let value = Int253::zero();
+    let value = Int253::ZERO;
     let mut vm = vm_with_script(
         Program::new().push_str(s(&value.to_bytes())).read_int().to_bytecode(),
     );
@@ -419,7 +419,7 @@ fn write_then_read_int_roundtrip_signs_and_extremes() {
         Int253::from_parts(true, Scalar::from(1u64)),
         Int253::from_bytes(ell_minus_1).unwrap(),
         Int253::from_bytes(neg_ell_minus_1).unwrap(),
-        Int253::zero(),
+        Int253::ZERO,
         Int253::from(0xdead_beef_cafe_babe_u64),
     ];
     for v in values {

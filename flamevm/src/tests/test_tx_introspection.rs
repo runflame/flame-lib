@@ -108,7 +108,7 @@ fn newbytes_value_observable_inside_cell_open_frame() {
     // exact value on its stack.
     let leaf = Program::new().newbytes().push_int(1u64).return_().to_bytecode();
     let (tree, cp) = build_predicate_with_program(&leaf, 0);
-    let pred_point = tree.compute_point();
+    let pred_point = tree.point;
     let mut p = Program::new()
         .push_int(0u64)                                // payload count = 0
         .push_point(*pred_point.as_bytes())

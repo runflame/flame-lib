@@ -6,10 +6,6 @@ use thiserror::Error;
 /// Represents an error in proof creation, verification, or parsing.
 #[derive(Error, Debug)]
 pub enum VMError {
-    /// This error occurs when a value can not be decoded from its compact wire format.
-    #[error("encoding error: {0}")]
-    Encoding(#[from] ReadError),
-
     /// This error occurs when VM is left with some items on the stack at the end of a frame.
     #[error("Stack is not cleared by the script")]
     StackNotClean,
@@ -152,10 +148,6 @@ pub enum VMError {
     #[error("Item is not a Point")]
     TypeNotPoint,
 
-    /// This error occurs when a MultiscalarMul has a non-decompressable point.
-    #[error("MultiscalarMul contains non-decompressable point")]
-    MsmInvalidPoint,
-
     /// This error occurs when a CallProof's wire pieces are malformed.
     #[error("Malformed CallProof")]
     MalformedCallProof,
@@ -198,10 +190,6 @@ pub enum VMError {
     /// This error occurs when an operation targets a frozen actor.
     #[error("Actor is frozen")]
     ActorFrozen,
-
-    /// This error occurs when an actor has no method at the requested key.
-    #[error("Method not found on actor")]
-    MethodNotFound,
 
     /// This error occurs when `deploy` is called against an existing actor ID.
     #[error("Actor already exists at this id")]

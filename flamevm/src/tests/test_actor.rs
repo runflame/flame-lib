@@ -100,12 +100,6 @@ fn actorid_decode_rejects_unknown_tag() {
     assert!(matches!(err, ReadError::InvalidFormat));
 }
 
-#[test]
-fn actorid_unresolved_for_constructor_form() {
-    assert!(!ActorID::Constructor(vec![0u8; 4]).is_resolved());
-    assert!(ActorID::Hash([0u8; 32]).is_resolved());
-}
-
 // ── code blob: load_code / set_code ─────────────────────────
 
 #[test]

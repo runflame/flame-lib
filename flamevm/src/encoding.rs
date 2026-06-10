@@ -204,7 +204,7 @@ fn write_positive_int253(w: &mut impl Writer, int: &Int253) -> Result<(), WriteE
 
 fn write_negative_int253(w: &mut impl Writer, int: &Int253) -> Result<(), WriteError> {
     let abs = int.abs();
-    if abs == Int253::one() {
+    if abs == Int253::ONE {
         return w.write_u8(b"int.tag", INT_NEG1);
     }
     if let Some(mag) = abs.to_u64() {
@@ -656,7 +656,7 @@ mod tests {
         // Negative tag with sign bit clear in the payload must be rejected.
         let mut buf = Vec::new();
         buf.push(INT_NFULL);
-        let pos_large = Int253::from(PU64_BASE) + Int253::from(u64::MAX) + Int253::one();
+        let pos_large = Int253::from(PU64_BASE) + Int253::from(u64::MAX) + Int253::ONE;
         buf.extend_from_slice(&pos_large.to_bytes());
         let mut r = buf.as_slice();
         assert!(matches!(read_int253(&mut r), Err(ReadError::InvalidFormat)));

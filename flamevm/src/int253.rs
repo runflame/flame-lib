@@ -39,11 +39,6 @@ impl Int253 {
         self.bytes[31] & 0x80 != 0
     }
 
-    /// Returns the sign bit and the magnitude as a `Scalar`.
-    pub fn to_parts(self) -> (bool, Scalar) {
-        (self.is_negative(), self.abs_scalar())
-    }
-
     /// Returns the value as a non-negative `u64` if it fits; otherwise `None`.
     /// Negative values always return `None`.
     pub fn to_u64(&self) -> Option<u64> {
@@ -122,16 +117,6 @@ impl Int253 {
             b
         },
     };
-
-    /// Returns the additive identity.
-    pub fn zero() -> Int253 {
-        Self::ZERO
-    }
-
-    /// Returns the multiplicative identity.
-    pub fn one() -> Int253 {
-        Self::ONE
-    }
 
     /// Returns `true` if the value is zero.
     pub fn is_zero(&self) -> bool {
@@ -514,34 +499,32 @@ mod tests {
     }
 
     #[test]
-    fn to_parts() {
+    fn sign_and_magnitude() {
         let i = Int253::from(-42i64);
-        let (sign, abs) = i.to_parts();
-        assert!(sign);
-        assert_eq!(abs, Scalar::from(42u64));
+        assert!(i.is_negative());
+        assert_eq!(i.abs_scalar(), Scalar::from(42u64));
 
         let i = Int253::from(42u64);
-        let (sign, abs) = i.to_parts();
-        assert!(!sign);
-        assert_eq!(abs, Scalar::from(42u64));
+        assert!(!i.is_negative());
+        assert_eq!(i.abs_scalar(), Scalar::from(42u64));
     }
 
     // ── Constants & predicates ─────────────────────────────────────
 
     #[test]
     fn zero_and_one() {
-        assert!(Int253::zero().is_zero());
-        assert_eq!(Int253::zero(), Int253::from(0u64));
-        assert_eq!(Int253::one(), Int253::from(1u64));
-        assert!(!Int253::one().is_zero());
+        assert!(Int253::ZERO.is_zero());
+        assert_eq!(Int253::ZERO, Int253::from(0u64));
+        assert_eq!(Int253::ONE, Int253::from(1u64));
+        assert!(!Int253::ONE.is_zero());
         // Const counterparts match the function returns.
-        assert_eq!(Int253::ZERO, Int253::zero());
-        assert_eq!(Int253::ONE, Int253::one());
+        assert_eq!(Int253::ZERO, Int253::ZERO);
+        assert_eq!(Int253::ONE, Int253::ONE);
     }
 
     #[test]
     fn is_zero_after_neg() {
-        let z = -Int253::zero();
+        let z = -Int253::ZERO;
         assert!(z.is_zero());
         assert!(!z.is_negative());
     }
@@ -552,7 +535,7 @@ mod tests {
     fn neg_basic() {
         assert_eq!(-Int253::from(5i64), Int253::from(-5i64));
         assert_eq!(-Int253::from(-5i64), Int253::from(5i64));
-        assert_eq!(-Int253::zero(), Int253::zero());
+        assert_eq!(-Int253::ZERO, Int253::ZERO);
         assert_eq!(-(-Int253::from(7i64)), Int253::from(7i64));
     }
 
@@ -579,8 +562,8 @@ mod tests {
     #[test]
     fn add_zero_is_identity() {
         let a = Int253::from(42i64);
-        assert_eq!(a + Int253::zero(), a);
-        assert_eq!(Int253::zero() + a, a);
+        assert_eq!(a + Int253::ZERO, a);
+        assert_eq!(Int253::ZERO + a, a);
     }
 
     #[test]
@@ -631,11 +614,11 @@ mod tests {
     #[test]
     fn mul_zero_is_zero() {
         let a = Int253::from(42i64);
-        assert!((a * Int253::zero()).is_zero());
-        assert!((Int253::zero() * a).is_zero());
+        assert!((a * Int253::ZERO).is_zero());
+        assert!((Int253::ZERO * a).is_zero());
 
         let a = Int253::from(-42i64);
-        let z = a * Int253::zero();
+        let z = a * Int253::ZERO;
         assert!(z.is_zero());
         assert!(!z.is_negative());
     }
@@ -643,8 +626,8 @@ mod tests {
     #[test]
     fn mul_one_is_identity() {
         let a = Int253::from(-77i64);
-        assert_eq!(a * Int253::one(), a);
-        assert_eq!(Int253::one() * a, a);
+        assert_eq!(a * Int253::ONE, a);
+        assert_eq!(Int253::ONE * a, a);
     }
 
     #[test]
@@ -679,7 +662,7 @@ mod tests {
     #[test]
     fn add_wraps_at_l() {
         // (ℓ-1) + 1 == 0 (mod ℓ).
-        let got = l_minus_one() + Int253::one();
+        let got = l_minus_one() + Int253::ONE;
         assert!(got.is_zero());
     }
 
@@ -688,7 +671,7 @@ mod tests {
         // (ℓ-1) + (ℓ-1) == ℓ-2 (mod ℓ), still positive.
         let got = l_minus_one() + l_minus_one();
         assert!(!got.is_negative());
-        let want = l_minus_one() - Int253::one();
+        let want = l_minus_one() - Int253::ONE;
         assert_eq!(got, want);
     }
 
@@ -697,7 +680,7 @@ mod tests {
         // (-(ℓ-1)) + (-(ℓ-1)) == -(ℓ-2) (mod ℓ).
         let got = -l_minus_one() + -l_minus_one();
         assert!(got.is_negative());
-        let want = -(l_minus_one() - Int253::one());
+        let want = -(l_minus_one() - Int253::ONE);
         assert_eq!(got, want);
     }
 
@@ -706,7 +689,7 @@ mod tests {
         // (ℓ-1) * 2 == ℓ-2 (mod ℓ), positive.
         let got = l_minus_one() * Int253::from(2u64);
         assert!(!got.is_negative());
-        let want = l_minus_one() - Int253::one();
+        let want = l_minus_one() - Int253::ONE;
         assert_eq!(got, want);
     }
 
@@ -725,7 +708,7 @@ mod tests {
         // magnitude is (ℓ-1)^2 mod ℓ = 1.
         let got = -l_minus_one() * -l_minus_one();
         assert!(!got.is_negative());
-        assert_eq!(got, Int253::one());
+        assert_eq!(got, Int253::ONE);
     }
 
     #[test]
@@ -738,7 +721,7 @@ mod tests {
         assert_ne!(by_two, by_three);
         assert!(!by_two.is_zero());
         assert!(!by_three.is_zero());
-        assert_eq!(by_two, l_minus_one() - Int253::one());
+        assert_eq!(by_two, l_minus_one() - Int253::ONE);
         assert_eq!(by_three, l_minus_one() - Int253::from(2u64));
     }
 
@@ -749,7 +732,7 @@ mod tests {
         let xs = [
             Int253::from(-3i64),
             Int253::from(-1i64),
-            Int253::zero(),
+            Int253::ZERO,
             Int253::from(1i64),
             Int253::from(3i64),
         ];
@@ -765,7 +748,7 @@ mod tests {
     #[test]
     fn ordering_zero_signs() {
         // -0 cannot be constructed, but zero must equal itself.
-        assert_eq!(Int253::zero().cmp(&Int253::zero()), Ordering::Equal);
+        assert_eq!(Int253::ZERO.cmp(&Int253::ZERO), Ordering::Equal);
     }
 
     #[test]
@@ -789,8 +772,8 @@ mod tests {
 
     #[test]
     fn div_rem_zero_divisor_is_none() {
-        assert!(Int253::from(1i64).div_rem(Int253::zero()).is_none());
-        assert!(Int253::zero().div_rem(Int253::zero()).is_none());
+        assert!(Int253::from(1i64).div_rem(Int253::ZERO).is_none());
+        assert!(Int253::ZERO.div_rem(Int253::ZERO).is_none());
     }
 
     #[test]

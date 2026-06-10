@@ -158,7 +158,7 @@ fn open_with_valid_callproof_runs_program() {
     // gets [count=0, success=1].
     let inner_program = Program::new().drop_().push_int(0u64).return_().to_bytecode();
     let (tree, cp) = build_predicate_with_program(&inner_program, 7);
-    let pred_point = tree.compute_point();
+    let pred_point = tree.point;
 
     let mut program = Program::new()
         .push_int(5u64)                                // payload
@@ -193,7 +193,7 @@ fn open_with_wrong_program_hard_fails() {
         position: Vec::new(),
         program: fake_program,
     };
-    let pred_point = tree.compute_point();
+    let pred_point = tree.point;
 
     let mut program = Program::new()
         .push_int(5u64)
@@ -251,7 +251,7 @@ fn open_preserves_alloc_witnesses_via_script_string() {
     )
     .expect("scripts_only tree");
     let cp = tree.callproof_for(0).expect("callproof for leaf 0");
-    let pred_point = tree.compute_point();
+    let pred_point = tree.point;
 
     // Construct the input cell with an empty payload — the witness
     // we care about lives in the unlock script, not the payload.
@@ -327,7 +327,7 @@ fn open_passes_args_after_payload() {
         .return_()
         .to_bytecode();
     let (tree, cp) = build_predicate_with_program(&inner_program, 11);
-    let pred_point = tree.compute_point();
+    let pred_point = tree.point;
 
     let mut program = Program::new()
         .push_int(10u64)                               // payload
@@ -378,7 +378,7 @@ fn predicate_tree_new_validates_inputs() {
         TEST_BLINDING_KEY,
     )
     .unwrap();
-    assert_eq!(via_helper.compute_point(), tree.compute_point());
+    assert_eq!(via_helper.point, tree.point);
 }
 
 #[test]
@@ -394,7 +394,7 @@ fn scripts_only_predicate_opens_via_program_path() {
     )
     .unwrap();
     let cp = tree.callproof_for(0).unwrap();
-    let pred_point = tree.compute_point();
+    let pred_point = tree.point;
 
     let mut p = Program::new()
         .push_int(5u64)                                // payload
@@ -430,7 +430,7 @@ fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
     for i in 0..programs.len() {
         let (tree, cp) =
             build_multi_leaf_predicate(programs.clone(), i, 11 + i as u64);
-        let pred_point = tree.compute_point();
+        let pred_point = tree.point;
 
         // payload = i+1 copies of `5` (so program of length i+1
         // can drop them all and end with empty stack)
@@ -486,7 +486,7 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
         position: valid_cp_for_1.position.clone(),
         program: programs[0].clone(),
     };
-    let pred_point = tree.compute_point();
+    let pred_point = tree.point;
 
     let mut p = Program::new()
         .push_int(5u64)
@@ -964,7 +964,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
 
     let (tree1, cp1) = build_predicate_with_program(&prog, 11);
     let cell1 = Cell::new(
-        Predicate::opaque(tree1.compute_point()),
+        Predicate::opaque(tree1.point),
         Anchor([0xa1; 32]),
         vec![Value::Int253(Int253::from(11u64))],
     );
@@ -973,7 +973,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
 
     let (tree2, cp2) = build_predicate_with_program(&prog, 22);
     let cell2 = Cell::new(
-        Predicate::opaque(tree2.compute_point()),
+        Predicate::opaque(tree2.point),
         Anchor([0xa2; 32]),
         vec![Value::Int253(Int253::from(22u64))],
     );
@@ -1104,7 +1104,7 @@ fn op_open_selfid_errors_no_actor_context() {
     // child-frame error is caught and converted to a marker.
     let inner = Program::new().selfid().to_bytecode();
     let (tree, cp) = build_predicate_with_program(&inner, 5);
-    let pred_point = tree.compute_point();
+    let pred_point = tree.point;
     let mut p = Program::new()
         .push_int(5u64)                                // payload
         .push_int(1u64)                                // count
@@ -1130,7 +1130,7 @@ fn op_open_return_arity_mismatch_errors() {
     // push:1, return — pops k=1 from stack, then stack.len()(0) < 1.
     let inner = Program::new().push_int(1u64).return_().to_bytecode();
     let (tree, cp) = build_predicate_with_program(&inner, 0);
-    let pred_point = tree.compute_point();
+    let pred_point = tree.point;
     let mut p = Program::new()
         .push_int(0u64)                                // payload count = 0
         .push_point(*pred_point.as_bytes())

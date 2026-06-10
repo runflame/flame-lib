@@ -77,13 +77,6 @@ impl ActorID {
             ActorID::Constructor(_) => ActorID::Hash(self.to_hash()),
         }
     }
-
-    /// True iff this id is in the compact (`Hash`) form. Both forms
-    /// resolve to the same canonical hash, so this is a wire-shape
-    /// query, not an identity query.
-    pub fn is_resolved(&self) -> bool {
-        matches!(self, ActorID::Hash(_))
-    }
 }
 
 /// Canonical wire form (tag byte + payload). `Hash` writes a 32-byte

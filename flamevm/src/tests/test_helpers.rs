@@ -632,7 +632,7 @@ pub(crate) fn output_predicate_point(tag: u8) -> CompressedRistretto {
     blinding[0] = tag;
     PredicateTree::scripts_only(vec![Vec::new()], blinding)
         .expect("scripts_only tree builds")
-        .compute_point()
+        .point
 }
 
 /// Builds the prover-side `Program` for the N→M script. The
@@ -794,7 +794,7 @@ pub(crate) fn build_input_cell(inp: &NMInputSpec) -> (Cell, CallProof) {
     )
     .expect("scripts_only tree builds");
     let cp = tree.callproof_for(0).expect("callproof for leaf 0");
-    let pred_point = tree.compute_point();
+    let pred_point = tree.point;
     let cell = Cell::new(
         Predicate::opaque(pred_point),
         Anchor(inp.anchor),

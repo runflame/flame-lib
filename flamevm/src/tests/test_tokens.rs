@@ -25,7 +25,7 @@ fn token_is_noncopyable_and_nondroppable() {
 
 #[test]
 fn cleartoken_zero_qty_is_droppable() {
-    let v = Value::ClearToken(ClearToken::new(Int253::zero(), Int253::from(7u64)));
+    let v = Value::ClearToken(ClearToken::new(Int253::ZERO, Int253::from(7u64)));
     assert!(v.is_droppable());
 }
 
@@ -409,7 +409,7 @@ fn issuepriv_prove_then_verify_end_to_end() {
     )
     .expect("scripts_only tree");
     let cp = tree.callproof_for(0).expect("callproof for leaf 0");
-    let pred_point = tree.compute_point();
+    let pred_point = tree.point;
 
     // Cell with empty payload — the witness rides on the open arg.
     let cell = crate::Cell::new(
@@ -634,7 +634,7 @@ fn merge_flavor_mismatch_soft_fails() {
     vm.step_internal().expect("merge ok (soft-fail)");
     // Stack: [a, b, 0].
     assert_eq!(vm.current_call.stack.len(), 3);
-    assert_int(&vm.current_call.stack[2], Int253::zero());
+    assert_int(&vm.current_call.stack[2], Int253::ZERO);
 }
 
 #[test]

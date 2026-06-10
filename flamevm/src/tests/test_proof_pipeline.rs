@@ -493,7 +493,7 @@ fn phase21_txresult_populated_for_trivial_program() {
     // accounting not wired yet); bytecode populated; proof Some;
     // deferred_sigs empty; sends empty.
     assert_eq!(prover_result.total_fee, 0);
-    assert_eq!(prover_result.gas_used, 0);
+    assert!(prover_result.gas_used > 0, "per-instruction metering");
     assert_eq!(prover_result.vbytes_used, 0);
     assert!(!prover_result.bytecode.is_empty());
     assert!(prover_result.proof.is_some());

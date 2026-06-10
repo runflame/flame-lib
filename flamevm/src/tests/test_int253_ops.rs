@@ -222,7 +222,7 @@ fn divmod_full_width_magnitude_succeeds() {
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], huge_int);
-    assert_int(&vm.current_call.stack[1], Int253::zero());
+    assert_int(&vm.current_call.stack[1], Int253::ZERO);
 }
 
 #[test]

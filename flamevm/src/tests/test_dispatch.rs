@@ -10,7 +10,7 @@ fn internal_empty_script_finishes() {
     let block = BlockContext { height: 0 };
     let result =
         VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block).unwrap();
-    assert_eq!(result.gas_used, 0);
+    assert!(result.gas_used > 0, "per-instruction metering");
 }
 
 #[test]
@@ -21,7 +21,7 @@ fn internal_nop_script_finishes() {
     let block = BlockContext { height: 0 };
     let result =
         VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block).unwrap();
-    assert_eq!(result.gas_used, 0); // gas accounting not yet wired up
+    assert!(result.gas_used > 0, "per-instruction metering"); // gas accounting not yet wired up
 }
 
 #[test]

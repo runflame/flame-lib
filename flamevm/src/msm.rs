@@ -59,11 +59,9 @@ impl MultiscalarMul {
         Self { terms: vec![(s, p)] }
     }
 
-    /// Constructs an empty MSM (sum over zero terms = identity, so it
-    /// trivially verifies). Exposed for tests and edge-case callers;
-    /// the normal construction path is implicit via arithmetic ops.
-    pub fn empty() -> Self {
-        Self { terms: Vec::new() }
+    /// Term count. Useful for tests and gas accounting.
+    pub fn len(&self) -> usize {
+        self.terms.len()
     }
 
     /// Appends another MSM's terms (consumes both).
@@ -102,16 +100,6 @@ impl MultiscalarMul {
     /// Consumes self, returning the `(scalar, point)` terms.
     pub fn into_terms(self) -> Vec<(Scalar, CompressedRistretto)> {
         self.terms
-    }
-
-    /// Term count. Useful for tests and gas accounting.
-    pub fn len(&self) -> usize {
-        self.terms.len()
-    }
-
-    /// True iff the MSM has no terms (verifies trivially).
-    pub fn is_empty(&self) -> bool {
-        self.terms.is_empty()
     }
 }
 
