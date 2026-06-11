@@ -285,41 +285,6 @@ fn call_refunds_leftover_gas_to_caller() {
     );
 }
 
-/// Label-table cache: calling the same actor twice in one tx seeds the
-/// second frame from labels harvested off the first (and survives the
-/// re-visit rule). The callee uses real label/jump dispatch.
-#[test]
-fn repeat_calls_reuse_cached_labels() {
-    let mut reg = MemRegistry::new();
-    // Callee: 2-method dispatch blob (labels 0, 1 + end label 2).
-    let m0 = Program::new().push_int(0u64).return_().to_bytecode();
-    let m1 = Program::new().push_int(0u64).return_().to_bytecode();
-    let b_code = dispatch_code(&[(0, m0), (1, m1)]);
-    let b = deploy_recv(&mut reg, b_code, 1_000);
-
-    // Caller: call B.method1 twice (method 1 is past method 0's handler,
-    // so the first call forward-scans; the second should be seeded).
-    let a_script = {
-        let mut p = Program::parse(&call_script(&b, 1, 50_000)).expect("parse");
-        p.push_instr(crate::ops::Instruction::Drop);
-        p.push_instr(crate::ops::Instruction::Drop);
-        let second = Program::parse(&call_script(&b, 1, 50_000)).expect("parse");
-        for i in second.into_instructions() {
-            p.push_instr(i);
-        }
-        p.push_instr(crate::ops::Instruction::Drop);
-        p.push_instr(crate::ops::Instruction::Drop);
-        p.to_bytecode()
-    };
-    let a = deploy_recv(&mut reg, a_script.clone(), 100_000);
-    let mut vm = vm_for_actor(a, a_script);
-    while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
-    // The cache holds B's discovered labels (dispatch jumped to label 1,
-    // recording 0 and 1 on the way; the handler's `jump 2` records 2).
-    let cached = vm.label_cache.get(&b.to_hash()).expect("labels cached");
-    assert!(cached.len() >= 2, "at least labels 0 and 1 discovered: {cached:?}");
-}
-
 /// Read-only re-entrancy is not expressible (the strongest property of
 /// the checkout lock): a re-entrant *view* method that `load`s the
 /// mid-update state is blocked exactly like a writer — there is no
@@ -403,9 +368,9 @@ fn call_depth_is_capped() {
 /// setcode end-to-end: deploy A with code C1 (method 0 logs "v1",
 /// method 1 self-upgrades to C2), drive call(0) → call(1) → call(0)
 /// in ONE tx. The third call must run C2 (logs "v2"), the txlog must
-/// carry the SetCode entry, the registry must hold C2 — and because
-/// C2's label positions differ from C1's, a stale label cache (not
-/// invalidated by setcode) would misdispatch and fail this test.
+/// carry the SetCode entry, and the registry must hold C2. Labels are
+/// collected fresh per frame (no caching — gas must not depend on
+/// cache state), so the upgraded code dispatches from scratch.
 #[test]
 fn setcode_upgrade_end_to_end() {
     let mut reg = MemRegistry::new();

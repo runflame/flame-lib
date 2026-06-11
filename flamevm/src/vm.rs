@@ -412,11 +412,6 @@ pub struct CallFrame {
     /// internal context (no real CS).
     pub(crate) snap_cs: Option<r1cs::Checkpoint>,
 
-    /// VM `code_epoch` at frame creation. A frame whose epoch is stale
-    /// (a `setcode` ran after it was created) must not harvest its
-    /// label table into the cache — the positions may describe
-    /// replaced code.
-    pub(crate) code_epoch: u64,
 }
 
 impl CallFrame {
@@ -469,7 +464,6 @@ impl CallFrame {
             snap_total_fee: crate::fees::CheckedFee::zero(),
             snap_batch: None,
             snap_cs: None,
-            code_epoch: 0,
         }
     }
 }
@@ -552,16 +546,6 @@ pub(crate) struct VM {
     /// Signature checks deferred to `Delegate::finalize`.
     deferred_sigs: Vec<DeferredSig>,
 
-    /// Bumped on every `setcode`; frames created before the bump are
-    /// barred from harvesting labels (their code snapshot may be stale).
-    code_epoch: u64,
-
-    /// Per-tx label-table cache for actor code, keyed by actor id hash.
-    /// An actor's code is immutable between `setcode`s, so label
-    /// positions discovered by one call seed the next call's frame —
-    /// repeated dispatch into the same actor skips the forward scan
-    /// (ADR 0018 follow-up). Invalidated by `setcode`; dies with the tx.
-    label_cache: std::collections::BTreeMap<[u8; 32], Vec<usize>>,
 }
 
 impl VM {
@@ -736,28 +720,9 @@ impl VM {
             txlog,
             total_fee: crate::fees::CheckedFee::zero(),
             deferred_sigs: Vec::new(),
-            code_epoch: 0,
-            label_cache: std::collections::BTreeMap::new(),
         }
     }
 
-    /// Stores an exiting actor frame's discovered labels for reuse by a
-    /// later call to the same actor in this tx. Label positions are a
-    /// deterministic property of the code, so partial tables from failed
-    /// frames are equally valid; keep the longest discovered prefix.
-    fn harvest_labels(&mut self, exiting: &CallFrame) {
-        // A setcode since this frame's creation may have replaced the
-        // very code these positions describe — never re-cache them.
-        if exiting.code_epoch != self.code_epoch {
-            return;
-        }
-        if let CallKind::ActorCall { actor, .. } = &exiting.kind {
-            let entry = self.label_cache.entry(actor.to_hash()).or_default();
-            if exiting.labels.len() > entry.len() {
-                *entry = exiting.labels.clone();
-            }
-        }
-    }
 
     /// Splits `last_anchor`: returns the `left` half (to embed in
     /// a fresh unique-anchored entity — cell, message), and writes
@@ -1086,13 +1051,12 @@ impl VM {
     /// must be empty (use `return k` to send values across the boundary).
     /// Leftover gas is refunded to the parent. Implicit clean exits
     /// push `{0, 1}` onto the parent's stack (success with k=0).
-    /// Shared clean-exit epilogue: pop to `parent` (already swapped in
-    /// by the caller), harvest the exiting frame's labels, refund
-    /// leftover gas, apply the parent's post-call anchor, and discard
-    /// the entry-time batch/CS snapshots (failure-path only). Order is
-    /// load-bearing — identical in `finish_call` and `op_return`.
-    fn clean_exit_to_parent(&mut self, exiting: &CallFrame, leftover_gas: u64) {
-        self.harvest_labels(exiting);
+    /// Shared clean-exit epilogue: refund leftover gas to the parent
+    /// (already swapped in by the caller), apply the parent's post-call
+    /// anchor, and discard the entry-time batch/CS snapshots
+    /// (failure-path only). Order is load-bearing — identical in
+    /// `finish_call` and `op_return`.
+    fn clean_exit_to_parent(&mut self, leftover_gas: u64) {
         self.current_call.gas_limit = self
             .current_call
             .gas_limit
@@ -1114,8 +1078,8 @@ impl VM {
             .saturating_sub(self.current_call.gas_used);
 
         if let Some(parent) = self.call_stack.pop() {
-            let exiting = mem::replace(&mut self.current_call, parent);
-            self.clean_exit_to_parent(&exiting, leftover_gas);
+            self.current_call = parent;
+            self.clean_exit_to_parent(leftover_gas);
             // Success marker with k=0: stack += [count=0, success=1].
             self.current_call.stack.push(Value::Int253(Int253::from(0u64)));
             self.current_call.stack.push(Value::Int253(Int253::ONE));
@@ -1150,8 +1114,7 @@ impl VM {
             .call_stack
             .pop()
             .expect("fail_current_call: outermost frame errors must propagate");
-        let exiting = mem::replace(&mut self.current_call, parent);
-        self.harvest_labels(&exiting);
+        self.current_call = parent;
         // Roll back side effects via the snapshots taken at call
         // entry.
         self.txlog.truncate(self.current_call.snap_txlog_len);
@@ -1967,8 +1930,8 @@ impl VM {
             .saturating_sub(self.current_call.gas_used);
 
         let parent = self.call_stack.pop().expect("checked non-empty above");
-        let exiting = mem::replace(&mut self.current_call, parent);
-        self.clean_exit_to_parent(&exiting, leftover_gas);
+        self.current_call = parent;
+        self.clean_exit_to_parent(leftover_gas);
         // Pour return values, then count, then success marker (1).
         self.current_call.stack.extend(return_values);
         self.current_call.stack.push(Value::Int253(Int253::from(k as u64)));
@@ -2571,7 +2534,6 @@ impl VM {
         // cursors so we can roll back if the child errors out.
         let callee_anchor = self.split_anchor_for_call()?;
 
-        let callee_hash = callee.to_hash();
         let mut frame = CallFrame::from_bytecode(
             script,
             CallKind::ActorCall {
@@ -2584,12 +2546,6 @@ impl VM {
             mem_limit,
             vbytes,
         );
-        frame.code_epoch = self.code_epoch;
-        // Seed labels discovered by earlier calls to this actor in this
-        // tx — repeated dispatch skips the forward scan.
-        if let Some(cached) = self.label_cache.get(&callee_hash) {
-            frame.labels = cached.clone();
-        }
         for v in args {
             frame.stack.push(v);
         }
@@ -2684,11 +2640,6 @@ impl VM {
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
         let code = self.pop_value()?.to_string()?.to_bytes_vec();
         registry.set_code(&actor, code.clone())?;
-        // New code → old label positions are invalid; bump the epoch so
-        // in-flight frames (which may still run the old code) can't
-        // re-harvest stale positions at exit.
-        self.label_cache.remove(&actor.to_hash());
-        self.code_epoch += 1;
         self.txlog.push(crate::tx::TxEntry::SetCode { actor, code });
         Ok(())
     }
