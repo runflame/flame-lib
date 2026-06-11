@@ -400,6 +400,140 @@ fn call_depth_is_capped() {
     }
 }
 
+/// setcode end-to-end: deploy A with code C1 (method 0 logs "v1",
+/// method 1 self-upgrades to C2), drive call(0) → call(1) → call(0)
+/// in ONE tx. The third call must run C2 (logs "v2"), the txlog must
+/// carry the SetCode entry, the registry must hold C2 — and because
+/// C2's label positions differ from C1's, a stale label cache (not
+/// invalidated by setcode) would misdispatch and fail this test.
+#[test]
+fn setcode_upgrade_end_to_end() {
+    let mut reg = MemRegistry::new();
+    let a_id = ActorID::Hash([0x5c; 32]);
+
+    // C2: method 0 logs "v2"; padded with nops so its label positions
+    // differ from C1's (staleness detector).
+    let v2_handler = Program::new()
+        .nop()
+        .nop()
+        .nop()
+        .push_str(String::from(b"v2".to_vec()))
+        .log()
+        .push_int(0u64)
+        .return_()
+        .to_bytecode();
+    let c2 = dispatch_code(&[(0, v2_handler)]);
+
+    // C1: method 0 logs "v1"; method 1 replaces code with C2.
+    let v1_handler = Program::new()
+        .push_str(String::from(b"v1".to_vec()))
+        .log()
+        .push_int(0u64)
+        .return_()
+        .to_bytecode();
+    let upgrade_handler = Program::new()
+        .push_str(String::from(c2.clone()))
+        .setcode()
+        .push_int(0u64)
+        .return_()
+        .to_bytecode();
+    let c1 = dispatch_code(&[(0, v1_handler), (1, upgrade_handler)]);
+    reg.deploy(a_id.clone(), c1, empty_state(), 1_000_000, 0).expect("deploy A");
+
+    // Driver R: call A.0, call A.1 (upgrade), call A.0 — drop markers.
+    let mut driver = Program::parse(&call_script(&a_id, 0, 100_000)).expect("parse");
+    driver.push_instr(crate::ops::Instruction::Drop);
+    driver.push_instr(crate::ops::Instruction::Drop);
+    for instr in Program::parse(&call_script(&a_id, 1, 100_000)).expect("parse").into_instructions() {
+        driver.push_instr(instr);
+    }
+    driver.push_instr(crate::ops::Instruction::Drop);
+    driver.push_instr(crate::ops::Instruction::Drop);
+    for instr in Program::parse(&call_script(&a_id, 0, 100_000)).expect("parse").into_instructions() {
+        driver.push_instr(instr);
+    }
+    driver.push_instr(crate::ops::Instruction::Drop);
+    driver.push_instr(crate::ops::Instruction::Drop);
+    let script = driver.to_bytecode();
+
+    let r_id = ActorID::Hash([0xd1; 32]);
+    let mut vm = vm_for_actor(r_id, script);
+    while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
+
+    // Effects: Data("v1"), SetCode, Data("v2") in that order.
+    let datas: Vec<&[u8]> = vm
+        .txlog
+        .iter()
+        .filter_map(|e| match e {
+            crate::tx::TxEntry::Data(d) => Some(d.as_slice()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(datas, vec![b"v1".as_slice(), b"v2".as_slice()], "old code then NEW code ran");
+    assert!(
+        vm.txlog.iter().any(|e| matches!(e, crate::tx::TxEntry::SetCode { .. })),
+        "SetCode effect recorded"
+    );
+    assert_eq!(reg.actor(&a_id).unwrap().code, c2, "registry holds the new code");
+}
+
+/// A failed sub-call burns the entire gas grant (spec §gas): the parent
+/// gets no refund when the child fails mid-execution.
+#[test]
+fn failed_call_burns_full_grant() {
+    let mut reg = MemRegistry::new();
+    // B: runs a couple of instructions, then fails.
+    let b_code = Program::new().nop().push_int(0u64).verify().to_bytecode();
+    let b = deploy_recv(&mut reg, b_code, 1_000);
+    // A: call B with a 5_000 grant, drop the single failure marker.
+    let a_script = {
+        let mut p = Program::parse(&call_script(&b, 0, 5_000)).expect("parse");
+        p.push_instr(crate::ops::Instruction::Drop);
+        p.to_bytecode()
+    };
+    let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
+    let mut vm = vm_for_actor(a, a_script);
+    while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
+    // Parent budget 1_000_000 (vm_for_actor): the full 5_000 grant is
+    // burned (no refund on failure) plus a handful of own instructions.
+    let remaining = vm.current_call.gas_limit - vm.current_call.gas_used;
+    assert!(remaining <= 1_000_000 - 5_000, "grant must not be refunded: {remaining}");
+    assert!(remaining > 1_000_000 - 5_100, "only the grant + own instrs spent: {remaining}");
+}
+
+/// The recursion cap binds at exactly MAX_CALL_DEPTH parents on the
+/// call stack (an off-by-one would silently change the bound). The
+/// recursive grant is `gas − 200` (computed via the `gas` opcode) so
+/// each level can afford the next — depth, not gas, is the binding
+/// constraint.
+#[test]
+fn call_depth_caps_at_exactly_max() {
+    let mut reg = MemRegistry::new();
+    let id = ActorID::Hash([0xce; 32]);
+    // recv: args…k=0, gas−200, bytes=0, method=0, addr → call; drop marker.
+    let recv = Program::new()
+        .push_int(0u64) // k = 0 args
+        .gas()
+        .push_int(-200i64)
+        .add() // grant = remaining − 200
+        .push_int(0u64) // bytes
+        .push_int(0u64) // method
+        .push_str(String::from(id.to_hash().to_vec()))
+        .call()
+        .drop_()
+        .to_bytecode();
+    reg.deploy(id.clone(), recv.clone(), empty_state(), 1_000_000, 0).expect("deploy");
+    let mut vm = vm_for_actor(id.clone(), recv);
+    let mut max_depth = 0;
+    loop {
+        match vm.step_internal_with_registry(&mut reg) {
+            Ok(true) => max_depth = max_depth.max(vm.call_stack.len()),
+            _ => break,
+        }
+    }
+    assert_eq!(max_depth, MAX_CALL_DEPTH, "cap binds exactly at the constant");
+}
+
 #[test]
 fn call_without_registry_errors() {
     let mut reg = MemRegistry::new();

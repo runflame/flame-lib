@@ -65,9 +65,60 @@ fn facade_internal_execute_tx_roundtrip() {
         .expect("execute_tx");
     // Header + Receive are emitted before the recv body runs.
     assert!(itx.log().entries().len() >= 2, "header + receive at minimum");
+    assert!(itx.metrics().gas_used > 0, "internal metering reported via TxMetrics");
     // env was read-only during execution; apply effects afterwards (the
     // nop recv saves no state, so this replays nothing).
     env.apply_changes(itx.log());
+}
+
+/// Deploy-on-first-delivery edge: a second message to the same
+/// Constructor-form target must NOT re-deploy or re-credit vbytes —
+/// the actor (and its balance) persists from the first delivery.
+#[test]
+fn second_constructor_send_does_not_redeploy() {
+    let mut reg = MemRegistry::new();
+    let code = Program::new().nop().to_bytecode();
+    let target = ActorID::Constructor(code.clone());
+    let canonical = ActorID::Hash(target.to_hash());
+    let mk = |vbytes| Message {
+        target: target.clone(),
+        method: RECV_METHOD,
+        caller: None,
+        anchor: Anchor([0x07; 32]),
+        payload: Vec::new(),
+        gas: 10_000,
+        vbytes,
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+    };
+    let block = BlockContext { height: 1 };
+    VM::execute_internal(dummy_header(), mk(777), &mut reg, &block).expect("first");
+    VM::execute_internal(dummy_header(), mk(500), &mut reg, &block).expect("second");
+    let a = reg.actor(&canonical).expect("deployed once");
+    assert_eq!(a.vbytes, 777, "second delivery must not re-deploy or re-credit");
+    assert_eq!(a.code, code);
+}
+
+/// Deploy-on-first-delivery edge: a zero-vbyte constructor send still
+/// deploys (with an empty storage budget).
+#[test]
+fn constructor_send_with_zero_vbytes_deploys() {
+    let mut reg = MemRegistry::new();
+    let code = Program::new().nop().to_bytecode();
+    let target = ActorID::Constructor(code.clone());
+    let msg = Message {
+        target: target.clone(),
+        method: RECV_METHOD,
+        caller: None,
+        anchor: Anchor([0x08; 32]),
+        payload: Vec::new(),
+        gas: 10_000,
+        vbytes: 0,
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+    };
+    let block = BlockContext { height: 0 };
+    VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("deploy+run");
+    let a = reg.actor(&ActorID::Hash(target.to_hash())).expect("deployed");
+    assert_eq!(a.vbytes, 0);
 }
 
 #[test]

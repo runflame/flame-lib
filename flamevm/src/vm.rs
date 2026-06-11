@@ -411,6 +411,12 @@ pub struct CallFrame {
     /// constraints the failed callee made are dropped. `None` in
     /// internal context (no real CS).
     pub(crate) snap_cs: Option<r1cs::Checkpoint>,
+
+    /// VM `code_epoch` at frame creation. A frame whose epoch is stale
+    /// (a `setcode` ran after it was created) must not harvest its
+    /// label table into the cache — the positions may describe
+    /// replaced code.
+    pub(crate) code_epoch: u64,
 }
 
 impl CallFrame {
@@ -463,6 +469,7 @@ impl CallFrame {
             snap_total_fee: crate::fees::CheckedFee::zero(),
             snap_batch: None,
             snap_cs: None,
+            code_epoch: 0,
         }
     }
 }
@@ -544,6 +551,10 @@ pub(crate) struct VM {
 
     /// Signature checks deferred to `Delegate::finalize`.
     deferred_sigs: Vec<DeferredSig>,
+
+    /// Bumped on every `setcode`; frames created before the bump are
+    /// barred from harvesting labels (their code snapshot may be stale).
+    code_epoch: u64,
 
     /// Per-tx label-table cache for actor code, keyed by actor id hash.
     /// An actor's code is immutable between `setcode`s, so label
@@ -725,6 +736,7 @@ impl VM {
             txlog,
             total_fee: crate::fees::CheckedFee::zero(),
             deferred_sigs: Vec::new(),
+            code_epoch: 0,
             label_cache: std::collections::BTreeMap::new(),
         }
     }
@@ -734,6 +746,11 @@ impl VM {
     /// deterministic property of the code, so partial tables from failed
     /// frames are equally valid; keep the longest discovered prefix.
     fn harvest_labels(&mut self, exiting: &CallFrame) {
+        // A setcode since this frame's creation may have replaced the
+        // very code these positions describe — never re-cache them.
+        if exiting.code_epoch != self.code_epoch {
+            return;
+        }
         if let CallKind::ActorCall { actor, .. } = &exiting.kind {
             let entry = self.label_cache.entry(actor.to_hash()).or_default();
             if exiting.labels.len() > entry.len() {
@@ -2567,6 +2584,7 @@ impl VM {
             mem_limit,
             vbytes,
         );
+        frame.code_epoch = self.code_epoch;
         // Seed labels discovered by earlier calls to this actor in this
         // tx — repeated dispatch skips the forward scan.
         if let Some(cached) = self.label_cache.get(&callee_hash) {
@@ -2666,8 +2684,11 @@ impl VM {
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
         let code = self.pop_value()?.to_string()?.to_bytes_vec();
         registry.set_code(&actor, code.clone())?;
-        // New code → old label positions are invalid.
+        // New code → old label positions are invalid; bump the epoch so
+        // in-flight frames (which may still run the old code) can't
+        // re-harvest stale positions at exit.
         self.label_cache.remove(&actor.to_hash());
+        self.code_epoch += 1;
         self.txlog.push(crate::tx::TxEntry::SetCode { actor, code });
         Ok(())
     }

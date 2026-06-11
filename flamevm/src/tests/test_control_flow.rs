@@ -283,6 +283,63 @@ fn mem_cap_bounds_cumulative_string_growth() {
     ));
 }
 
+/// Each mem-charging op independently trips the cap: `pushstr` literal,
+/// `append`, and `tread` (writezeros is covered above).
+#[test]
+fn mem_cap_trips_on_pushstr_append_and_tread() {
+    let run_capped = |script: Vec<u8>, cap: u64| {
+        let kind = CallKind::InternalRoot {
+            actor: ActorID::Hash([0u8; 32]),
+            method: Int253::from(0u64),
+            caller: None,
+            anchor: Anchor([0u8; 32]),
+        };
+        let mut vm = VM::new(
+            dummy_header(),
+            CallFrame::new(
+                Program::parse(&script).unwrap().into_instructions(),
+                kind,
+                10_000,
+                cap,
+                0,
+            ),
+        );
+        run_until_tx_done(&mut vm)
+    };
+
+    // pushstr: a 60-byte literal against a 50-byte cap.
+    let s = run_capped(
+        Program::new().push_str(String::from(vec![7u8; 60])).to_bytecode(),
+        50,
+    );
+    assert!(matches!(s.unwrap_err(), VMError::MemLimitExceeded), "pushstr charges");
+
+    // append: 40 + 40 literals fit a 100 cap (80), the 40-byte append
+    // pushes the high-water to 120.
+    let s = run_capped(
+        Program::new()
+            .push_str(String::from(vec![1u8; 40]))
+            .push_str(String::from(vec![2u8; 40]))
+            .append()
+            .to_bytecode(),
+        100,
+    );
+    assert!(matches!(s.unwrap_err(), VMError::MemLimitExceeded), "append charges");
+
+    // tread: a 200-byte challenge squeeze against a 100 cap.
+    let s = run_capped(
+        Program::new()
+            .push_str(String::from(b"L".to_vec()))
+            .transcript()
+            .push_str(String::from(b"x".to_vec()))
+            .push_int(200u64)
+            .tread()
+            .to_bytecode(),
+        100,
+    );
+    assert!(matches!(s.unwrap_err(), VMError::MemLimitExceeded), "tread charges");
+}
+
 // ── return ──────────────────────────────────────────────────
 
 #[test]

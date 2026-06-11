@@ -55,6 +55,24 @@ fn callframe_advances_through_instructions() {
     assert!(frame.next_instruction().unwrap().is_none());
 }
 
+/// The reserved chain-info bytes (0xf2–0xf7: height, blockhash,
+/// blockburn, blockweight, blockrate, chainstate) must reject with
+/// `UnknownOpcode` at *dispatch*, not just parse to `Ext` — scripts
+/// using them fail deterministically until the handlers land.
+#[test]
+fn reserved_chain_info_opcodes_reject_at_dispatch() {
+    for byte in 0xf2u8..=0xf7 {
+        let mut reg = StubRegistry { script: vec![byte] };
+        let block = BlockContext { height: 0 };
+        let err = VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block)
+            .expect_err("reserved opcode must error");
+        assert!(
+            matches!(err, VMError::UnknownOpcode(b) if b == byte),
+            "0x{byte:02x} → {err:?}"
+        );
+    }
+}
+
 #[test]
 fn dirty_stack_at_call_exit_is_an_error() {
     // Strict cross-call semantics: a script that leaves anything on the
