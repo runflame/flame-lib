@@ -11,7 +11,6 @@ use crate::tx::TxID;
 fn internal_kind() -> CallKind {
     CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
-        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     }

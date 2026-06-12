@@ -39,9 +39,6 @@ pub struct Message {
     /// hash to the same id produce the same SendID.
     pub target: ActorID,
 
-    /// Which method on `target` to dispatch. `Int253(0)` is `recv`,
-    /// the only method an external sender can target.
-    pub method: Int253,
 
     /// Originating actor's id if this send was emitted by an internal
     /// tx; `None` if it was emitted by an external tx (the external
@@ -119,7 +116,6 @@ impl Encodable for Message {
                 c.to_canonical().encode(w)?;
             }
         }
-        write_int253(w, &self.method)?;
         self.refund_predicate.encode(w)?;
         w.write_u64(b"send.gas", self.gas)?;
         w.write_u64(b"send.vbytes", self.vbytes)?;
@@ -144,7 +140,6 @@ mod tests {
     fn fixture_message(anchor: Anchor) -> Message {
         Message {
             target: ActorID::Hash([0x11; 32]),
-            method: Int253::from(0u64),
             caller: None,
             anchor,
             payload: Vec::new(),

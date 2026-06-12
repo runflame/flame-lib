@@ -206,7 +206,6 @@ fn infinite_loop_exhausts_gas() {
     let script = Program::new().build_loop(|p| p.nop()).to_bytecode();
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
-        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -232,7 +231,6 @@ fn skip_scan_charges_gas() {
     let script = p.label(0).to_bytecode();
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
-        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -263,7 +261,6 @@ fn mem_cap_bounds_cumulative_string_growth() {
         .to_bytecode();
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
-        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -290,7 +287,6 @@ fn mem_cap_trips_on_pushstr_append_and_tread() {
     let run_capped = |script: Vec<u8>, cap: u64| {
         let kind = CallKind::InternalRoot {
             actor: ActorID::Hash([0u8; 32]),
-            method: Int253::from(0u64),
             caller: None,
             anchor: Anchor([0u8; 32]),
         };

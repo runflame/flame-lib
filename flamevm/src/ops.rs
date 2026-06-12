@@ -144,7 +144,6 @@ const OP_SETCODE: u8 = 0xd4;
 const OP_SELFID: u8 = 0xe0;
 const OP_ANCHOR: u8 = 0xe1;
 const OP_CALLERID: u8 = 0xe2;
-const OP_METHOD: u8 = 0xe3;
 const OP_GAS: u8 = 0xe4;
 const OP_GASLIMIT: u8 = 0xe5;
 const OP_BYTES: u8 = 0xe6;
@@ -241,8 +240,8 @@ pub enum Instruction {
     Cell,                  // items… k pred cell → cell
     Output,                // items… k pred output → ø
     Open,                  // cell ik nbrs pos script gas bytes args… k open → results… k'
-    Send,                  // args… k refund gas bytes method addr send → ø
-    Call,                  // args… k gas bytes method addr call → results… k'
+    Send,                  // args… k refund gas bytes addr send → ø
+    Call,                  // args… k gas bytes addr call → results… k'
     Load,                  // ø load → value   (actor state, any Value)
     Save,                  // value save → ø
     Setcode,               // code setcode → ø  (replace actor code blob)
@@ -255,7 +254,6 @@ pub enum Instruction {
     Gas,                   // ø gas → n
     Bytes,                 // ø bytes → n
     Callerid,              // ø callerid → s
-    Method,                // ø method → int
     Gaslimit,              // ø gaslimit → n
     Memlimit,              // ø memlimit → n
     Newbytes,              // ø newbytes → n
@@ -392,7 +390,6 @@ impl Encodable for Instruction {
             Instruction::Gas => op(w, OP_GAS),
             Instruction::Bytes => op(w, OP_BYTES),
             Instruction::Callerid => op(w, OP_CALLERID),
-            Instruction::Method => op(w, OP_METHOD),
             Instruction::Gaslimit => op(w, OP_GASLIMIT),
             Instruction::Memlimit => op(w, OP_MEMLIMIT),
             Instruction::Newbytes => op(w, OP_NEWBYTES),
@@ -542,7 +539,6 @@ impl Instruction {
             OP_GAS => Ok(Instruction::Gas),
             OP_BYTES => Ok(Instruction::Bytes),
             OP_CALLERID => Ok(Instruction::Callerid),
-            OP_METHOD => Ok(Instruction::Method),
             OP_GASLIMIT => Ok(Instruction::Gaslimit),
             OP_MEMLIMIT => Ok(Instruction::Memlimit),
             OP_NEWBYTES => Ok(Instruction::Newbytes),

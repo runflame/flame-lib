@@ -106,7 +106,6 @@ pub(crate) fn dummy_header() -> TxHeader {
 pub(crate) fn dummy_message(gas: u64) -> Message {
     Message {
         target: ActorID::Hash([0u8; 32]),
-        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
         payload: Vec::new(),
@@ -123,7 +122,6 @@ pub(crate) fn dummy_message(gas: u64) -> Message {
 pub(crate) fn vm_with_script(script: Vec<u8>) -> VM {
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
-        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -183,16 +181,18 @@ pub(crate) fn pushstr_bytes(payload: &[u8]) -> Vec<u8> {
     s
 }
 
-/// Builds an actor code blob that dispatches on the `method` opcode to
-/// one of `arms` (selector → handler bytecode). Handlers must be
-/// label-free (the dispatch owns labels `0..=arms.len()`). See ADR 0018.
+/// Builds an actor code blob that dispatches on the **top-of-stack
+/// selector** (ADR 0020 convention) to one of `arms`
+/// (selector → handler bytecode). Callers pass the selector as the
+/// last (= topmost) argument. Handlers must be label-free (the
+/// dispatch owns labels `0..=arms.len()`).
 pub(crate) fn dispatch_code(arms: &[(u64, Vec<u8>)]) -> Vec<u8> {
     // `eq` is non-consuming in the cleartext branch (`a b → a b {0|1}`,
     // spec §eq), so each compare leaves the selector `S` and the arm
     // value `sel`; we drop them explicitly. A matched `jumpif` lands at
     // `label i` with `[S sel]` on the stack → the handler drops both.
     let n = arms.len() as u32;
-    let mut p = Program::new().method(); // [S]
+    let mut p = Program::new(); // selector S already on the stack
     for (i, (sel, _)) in arms.iter().enumerate() {
         // [S] → push sel [S sel] → eq [S sel b] → jumpif (pops b);
         // no-match falls through to drop the arm value → [S].
@@ -324,7 +324,6 @@ pub(crate) fn make_cleartext_token(qty: u64, flv: u64) -> Token {
 pub(crate) fn vm_internal_with_actor(script: Vec<u8>, actor: ActorID) -> VM {
     let kind = CallKind::InternalRoot {
         actor,
-        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };

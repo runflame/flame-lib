@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::{empty_state, ActorID, ActorRegistry, Int253, RECV_METHOD};
+use crate::{empty_state, ActorID, ActorRegistry, Int253};
 
 /// Helper: deploys an actor whose `recv` method runs `script`.
 /// Derives the actor's id from the script bytes (treats `script`
@@ -20,7 +20,6 @@ fn deploy_recv(reg: &mut MemRegistry, script: Vec<u8>, vbytes: u64) -> ActorID {
 fn vm_for_actor(actor: ActorID, script: Vec<u8>) -> VM {
     let kind = CallKind::InternalRoot {
         actor,
-        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -38,17 +37,29 @@ fn vm_for_actor(actor: ActorID, script: Vec<u8>) -> VM {
     )
 }
 
-/// Helper: builds bytecode that prepares the call stack and invokes
-/// `op_call` with `k=0` args. Built via the public `Program` builder.
-/// Spec stack (bottom→top, popped top-first by `op_call`):
-///   k   gas   bytes   method   addr   call
-fn call_script(target: &ActorID, method: u64, gas: u64) -> Vec<u8> {
+/// Helper: builds bytecode that invokes `op_call` with `k=0` args
+/// (plain single-action callee — no selector). Spec stack
+/// (bottom→top): `k gas bytes addr call`.
+fn call_script(target: &ActorID, gas: u64) -> Vec<u8> {
     Program::new()
         .push_int(0u64)                                // k = 0 args
         .push_int(gas)                                 // gas
         .push_int(0u64)                                // bytes
-        .push_int(method)                              // method
         .push_str(String::from(target.to_hash().to_vec())) // addr (32-byte)
+        .call()
+        .to_bytecode()
+}
+
+/// Helper: like [`call_script`] but passes `sel` as the single
+/// (topmost) argument — the ADR 0020 selector convention for
+/// dispatch-coded callees.
+fn call_with_selector(target: &ActorID, sel: u64, gas: u64) -> Vec<u8> {
+    Program::new()
+        .push_int(sel)                                 // selector arg (top)
+        .push_int(1u64)                                // k = 1 arg
+        .push_int(gas)
+        .push_int(0u64)                                // bytes
+        .push_str(String::from(target.to_hash().to_vec()))
         .call()
         .to_bytecode()
 }
@@ -66,7 +77,7 @@ fn call_a_to_b_creates_new_frame_with_callee_identity() {
     let b = deploy_recv(&mut reg, nop_recv(), 1_000);
 
     // A: call B; expect 0 results.
-    let a_script = call_script(&b, 0, 10_000);
+    let a_script = call_script(&b, 10_000);
     let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
 
     let mut vm = vm_for_actor(a.clone(), a_script);
@@ -96,7 +107,7 @@ fn call_does_not_emit_txlog_entry_by_itself() {
     // txlog after the call is just the Header.
     let mut reg = MemRegistry::new();
     let b = deploy_recv(&mut reg, nop_recv(), 1_000);
-    let a_script = call_script(&b, 0, 10_000);
+    let a_script = call_script(&b, 10_000);
     let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
 
     let mut vm = vm_for_actor(a, a_script);
@@ -127,7 +138,7 @@ fn call_to_checked_out_actor_blocked() {
     // Check the state out, as a live frame mid-update would.
     reg.actor_mut(&id).expect("present").state = None;
 
-    let script = call_script(&id, 0, 10_000);
+    let script = call_script(&id, 10_000);
     let mut vm = vm_for_actor(id.clone(), script);
     while vm.step_internal_with_registry(&mut reg).is_ok() {
         if vm.current_call.stack.len() == 1 {
@@ -162,7 +173,7 @@ fn reentrant_call_succeeds_when_state_not_held() {
         .to_bytecode();
     // A.recv (method 0): call B, drop B's [count, success].
     let a_recv = {
-        let mut p = Program::parse(&call_script(&b_id, 0, 200_000)).expect("parse");
+        let mut p = Program::parse(&call_script(&b_id, 200_000)).expect("parse");
         p.push_instr(crate::ops::Instruction::Drop);
         p.push_instr(crate::ops::Instruction::Drop);
         p.to_bytecode()
@@ -174,7 +185,7 @@ fn reentrant_call_succeeds_when_state_not_held() {
 
     // B.recv: call A.method1, drop A's [count, success].
     let b_recv = {
-        let mut p = Program::parse(&call_script(&a_id, 1, 100_000)).expect("parse");
+        let mut p = Program::parse(&call_with_selector(&a_id, 1, 100_000)).expect("parse");
         p.push_instr(crate::ops::Instruction::Drop);
         p.push_instr(crate::ops::Instruction::Drop);
         p.to_bytecode()
@@ -205,10 +216,10 @@ fn sibling_calls_to_same_actor_allowed_after_return() {
     // drop those two markers — leaves an empty stack for the implicit
     // root finish_call.
     let a_script = {
-        let mut p = Program::parse(&call_script(&b, 0, 5_000)).expect("parse");
+        let mut p = Program::parse(&call_script(&b, 5_000)).expect("parse");
         p.push_instr(crate::ops::Instruction::Drop);
         p.push_instr(crate::ops::Instruction::Drop);
-        let second = Program::parse(&call_script(&b, 0, 5_000)).expect("parse");
+        let second = Program::parse(&call_script(&b, 5_000)).expect("parse");
         for i in second.into_instructions() {
             p.push_instr(i);
         }
@@ -230,11 +241,10 @@ fn call_grant_exceeding_caller_budget_is_out_of_gas() {
     let mut reg = MemRegistry::new();
     let b = deploy_recv(&mut reg, nop_recv(), 1_000);
     // Caller budget 100; grant 5_000 to the callee.
-    let a_script = call_script(&b, 0, 5_000);
+    let a_script = call_script(&b, 5_000);
     let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
     let kind = CallKind::InternalRoot {
         actor: a,
-        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -268,7 +278,7 @@ fn call_refunds_leftover_gas_to_caller() {
     let b_recv = Program::new().push_int(0u64).return_().to_bytecode();
     let b = deploy_recv(&mut reg, b_recv, 1_000);
     let a_script = {
-        let mut p = Program::parse(&call_script(&b, 0, 5_000)).expect("parse");
+        let mut p = Program::parse(&call_script(&b, 5_000)).expect("parse");
         p.push_instr(crate::ops::Instruction::Drop);
         p.push_instr(crate::ops::Instruction::Drop);
         p.to_bytecode()
@@ -302,7 +312,7 @@ fn reentrant_view_of_mid_update_state_is_blocked() {
     // drop both), then save the held state back so A exits cleanly.
     let a_recv = {
         let mut p = Program::new().load().to_bytecode();
-        let mut q = Program::parse(&call_script(&b_id, 0, 200_000)).expect("parse");
+        let mut q = Program::parse(&call_script(&b_id, 200_000)).expect("parse");
         q.push_instr(crate::ops::Instruction::Drop);
         q.push_instr(crate::ops::Instruction::Drop);
         p.extend_from_slice(&q.to_bytecode());
@@ -315,7 +325,7 @@ fn reentrant_view_of_mid_update_state_is_blocked() {
     // B.recv: call A.method1 — blocked (A checked out) → single `0`
     // marker, drop it once; B exits cleanly.
     let b_recv = {
-        let mut p = Program::parse(&call_script(&a_id, 1, 100_000)).expect("parse");
+        let mut p = Program::parse(&call_with_selector(&a_id, 1, 100_000)).expect("parse");
         p.push_instr(crate::ops::Instruction::Drop);
         p.to_bytecode()
     };
@@ -342,7 +352,7 @@ fn call_depth_is_capped() {
     let id = ActorID::Hash([0xcc; 32]);
     // recv: call SELF (no state load → re-entry permitted), drop markers.
     let recv = {
-        let mut p = Program::parse(&call_script(&id, 0, 900_000)).expect("parse");
+        let mut p = Program::parse(&call_script(&id, 900_000)).expect("parse");
         p.push_instr(crate::ops::Instruction::Drop);
         p.push_instr(crate::ops::Instruction::Drop);
         p.to_bytecode()
@@ -406,15 +416,15 @@ fn setcode_upgrade_end_to_end() {
     reg.deploy(a_id.clone(), c1, empty_state(), 1_000_000, 0).expect("deploy A");
 
     // Driver R: call A.0, call A.1 (upgrade), call A.0 — drop markers.
-    let mut driver = Program::parse(&call_script(&a_id, 0, 100_000)).expect("parse");
+    let mut driver = Program::parse(&call_with_selector(&a_id, 0, 100_000)).expect("parse");
     driver.push_instr(crate::ops::Instruction::Drop);
     driver.push_instr(crate::ops::Instruction::Drop);
-    for instr in Program::parse(&call_script(&a_id, 1, 100_000)).expect("parse").into_instructions() {
+    for instr in Program::parse(&call_with_selector(&a_id, 1, 100_000)).expect("parse").into_instructions() {
         driver.push_instr(instr);
     }
     driver.push_instr(crate::ops::Instruction::Drop);
     driver.push_instr(crate::ops::Instruction::Drop);
-    for instr in Program::parse(&call_script(&a_id, 0, 100_000)).expect("parse").into_instructions() {
+    for instr in Program::parse(&call_with_selector(&a_id, 0, 100_000)).expect("parse").into_instructions() {
         driver.push_instr(instr);
     }
     driver.push_instr(crate::ops::Instruction::Drop);
@@ -452,7 +462,7 @@ fn failed_call_burns_full_grant() {
     let b = deploy_recv(&mut reg, b_code, 1_000);
     // A: call B with a 5_000 grant, drop the single failure marker.
     let a_script = {
-        let mut p = Program::parse(&call_script(&b, 0, 5_000)).expect("parse");
+        let mut p = Program::parse(&call_script(&b, 5_000)).expect("parse");
         p.push_instr(crate::ops::Instruction::Drop);
         p.to_bytecode()
     };
@@ -482,7 +492,6 @@ fn call_depth_caps_at_exactly_max() {
         .push_int(-200i64)
         .add() // grant = remaining − 200
         .push_int(0u64) // bytes
-        .push_int(0u64) // method
         .push_str(String::from(id.to_hash().to_vec()))
         .call()
         .drop_()
@@ -503,7 +512,7 @@ fn call_depth_caps_at_exactly_max() {
 fn call_without_registry_errors() {
     let mut reg = MemRegistry::new();
     let b = deploy_recv(&mut reg, nop_recv(), 1_000);
-    let a_script = call_script(&b, 0, 10_000);
+    let a_script = call_script(&b, 10_000);
     let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
     let mut vm = vm_for_actor(a, a_script);
     // step_internal (no registry) hits RegistryUnavailable at the
@@ -549,7 +558,6 @@ fn f1_failed_subcall_load_does_not_destroy_actor() {
         .push_int(0u64)                              // k = 0 args
         .push_int(5_000u64)                          // gas
         .push_int(0u64)                              // bytes
-        .push_int(RECV_METHOD)                       // method
         .push_str(String::from(x_id.to_hash().to_vec())) // addr
         .call()
         .drop_()                                     // drop failure marker (0)
@@ -560,7 +568,6 @@ fn f1_failed_subcall_load_does_not_destroy_actor() {
     let block = BlockContext { height: 100 };
     let msg = Message {
         target: a_id,
-        method: RECV_METHOD,
         caller: None,
         anchor: Anchor([0x42; 32]),
         payload: Vec::new(),
@@ -615,7 +622,6 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
         .push_int(0u64)
         .push_int(5_000u64)
         .push_int(0u64)
-        .push_int(RECV_METHOD)
         .push_str(String::from(x_id.to_hash().to_vec()))
         .call()
         .drop_()
@@ -625,7 +631,6 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
     let block = BlockContext { height: 100 };
     let msg = Message {
         target: a_id,
-        method: RECV_METHOD,
         caller: None,
         anchor: Anchor([0x42; 32]),
         payload: Vec::new(),
@@ -693,7 +698,6 @@ fn f3_save_failure_rolls_back_and_preserves_actor() {
         .push_int(0u64)
         .push_int(5_000u64)
         .push_int(0u64)
-        .push_int(RECV_METHOD)
         .push_str(String::from(x_id.to_hash().to_vec()))
         .call()
         .drop_()
@@ -703,7 +707,6 @@ fn f3_save_failure_rolls_back_and_preserves_actor() {
     let block = BlockContext { height: 100 };
     let msg = Message {
         target: a_id,
-        method: RECV_METHOD,
         caller: None,
         anchor: Anchor([0x42; 32]),
         payload: Vec::new(),
@@ -762,7 +765,7 @@ fn call_to_unknown_actor_rejected_with_marker() {
     // Caller exists; target does not — pre-frame registry lookup
     // fails → marker `0` on caller's stack. No side effects emitted.
     let ghost = ActorID::Hash([0xab; 32]);
-    let a_script = call_script(&ghost, 0, 10_000);
+    let a_script = call_script(&ghost, 10_000);
     let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
     let mut vm = vm_for_actor(a, a_script);
     while vm.step_internal_with_registry(&mut reg).is_ok() {

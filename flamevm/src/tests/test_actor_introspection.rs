@@ -1,4 +1,4 @@
-//! Tests for selfid / anchor / callerid / method.
+//! Tests for selfid / anchor / callerid.
 
 #![allow(unused_imports)]
 
@@ -8,14 +8,12 @@ use crate::{ActorID, ActorRegistry, Int253};
 /// Builds an InternalRoot VM with explicit identity fields.
 fn vm_internal_with(
     actor: ActorID,
-    method: Int253,
     caller: Option<ActorID>,
     anchor: Anchor,
     script: Vec<u8>,
 ) -> VM {
     let kind = CallKind::InternalRoot {
         actor,
-        method,
         caller,
         anchor,
     };
@@ -50,7 +48,6 @@ fn selfid_in_internal_root_pushes_hash_string() {
     let id = ActorID::Hash([0xab; 32]);
     let mut vm = vm_internal_with(
         id.clone(),
-        Int253::from(0u64),
         None,
         Anchor([0u8; 32]),
         Program::new().selfid().to_bytecode(),
@@ -78,7 +75,6 @@ fn selfid_in_constructor_form_uses_canonical_hash_seed() {
     let expected = ctor.to_hash();
     let mut vm = vm_internal_with(
         ctor,
-        Int253::from(0u64),
         None,
         Anchor([0u8; 32]),
         Program::new().selfid().to_bytecode(),
@@ -96,7 +92,6 @@ fn anchor_in_internal_root_pushes_frame_anchor() {
     let anc = Anchor([0xff; 32]);
     let mut vm = vm_internal_with(
         id,
-        Int253::from(0u64),
         None,
         anc,
         Program::new().anchor().to_bytecode(),
@@ -124,7 +119,6 @@ fn callerid_with_some_caller_pushes_hash_string() {
     let caller = ActorID::Hash([0x33; 32]);
     let mut vm = vm_internal_with(
         ActorID::Hash([0x44; 32]),
-        Int253::from(0u64),
         Some(caller),
         Anchor([0u8; 32]),
         Program::new().callerid().to_bytecode(),
@@ -141,7 +135,6 @@ fn callerid_with_none_caller_pushes_zero_string() {
     // External originator → caller None → push zeros (not error).
     let mut vm = vm_internal_with(
         ActorID::Hash([0x44; 32]),
-        Int253::from(0u64),
         None,
         Anchor([0u8; 32]),
         Program::new().callerid().to_bytecode(),
@@ -160,25 +153,4 @@ fn callerid_in_external_root_errors_actor_context() {
     assert!(matches!(err, VMError::OpcodeRequiresActorContext));
 }
 
-#[test]
-fn method_pushes_int253_key() {
-    let mut vm = vm_internal_with(
-        ActorID::Hash([0u8; 32]),
-        Int253::from(42u64),
-        None,
-        Anchor([0u8; 32]),
-        Program::new().method().to_bytecode(),
-    );
-    vm.step_internal().expect("step ok");
-    assert_int(
-        vm.current_call.stack.last().expect("stack non-empty"),
-        Int253::from(42u64),
-    );
-}
 
-#[test]
-fn method_in_external_root_errors_actor_context() {
-    let mut vm = vm_external(Program::new().method().to_bytecode());
-    let err = vm.step_internal().expect_err("must error");
-    assert!(matches!(err, VMError::OpcodeRequiresActorContext));
-}

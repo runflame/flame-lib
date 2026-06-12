@@ -9,11 +9,6 @@ use crate::errors::VMError;
 use crate::int253::Int253;
 use crate::value::Value;
 
-/// Conventional method selector for a plain inbound `send` (`recv`).
-/// The actor's code dispatches on the `method` opcode; this is just the
-/// default selector a send with no explicit method targets.
-pub const RECV_METHOD: Int253 = Int253::ZERO;
-
 // ── ActorID ──────────────────────────────────────────────────────
 
 /// Actor identifier. **Every actor has exactly one identity**;

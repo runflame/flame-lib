@@ -18,16 +18,17 @@ use crate::{ActorID, ActorRegistry, Int253};
 fn send_script(
     target: &ActorID,
     refund_bytes: [u8; 32],
-    method: u64,
+    selector: u64,
     gas: u64,
     vbytes: u64,
 ) -> Vec<u8> {
+    // ADR 0020: the selector is just the topmost payload arg.
     Program::new()
-        .push_int(0u64)                                // k = 0 args
+        .push_int(selector)                            // selector arg
+        .push_int(1u64)                                // k = 1 arg
         .push_str(String::from(refund_bytes.to_vec())) // refund (32-byte)
         .push_int(gas)
         .push_int(vbytes)
-        .push_int(method)
         .push_str(String::from(target.to_hash().to_vec())) // addr (32-byte)
         .send()
         .to_bytecode()
@@ -37,7 +38,6 @@ fn send_script(
 fn vm_internal(actor: ActorID, script: Vec<u8>) -> VM {
     let kind = CallKind::InternalRoot {
         actor,
-        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -69,7 +69,7 @@ fn send_queues_message_and_emits_txentry() {
     match vm.txlog.iter().find(|e| matches!(e, crate::tx::TxEntry::Send(_))) {
         Some(crate::tx::TxEntry::Send(msg)) => {
             assert_eq!(msg.target, target);
-            assert_eq!(msg.method, Int253::from(3u64));
+
             assert_eq!(msg.gas, 10_000);
             assert_eq!(msg.vbytes, 500);
             assert_eq!(msg.refund_predicate.to_point().as_bytes(), &refund_bytes);
@@ -79,8 +79,12 @@ fn send_queues_message_and_emits_txentry() {
             assert_eq!(msg.anchor, expected_send_anchor);
             // Caller = the executing actor (InternalRoot's `actor`).
             assert_eq!(msg.caller, Some(ActorID::Hash([0xaa; 32])));
-            // No payload args in this test.
-            assert!(msg.payload.is_empty());
+            // The selector rides as the sole payload arg (ADR 0020).
+            assert_eq!(msg.payload.len(), 1);
+            match &msg.payload[0] {
+                Value::Int253(i) => assert_eq!(*i, Int253::from(3u64)),
+                other => panic!("expected selector arg, got {other:?}"),
+            }
         }
         _ => panic!("expected Send entry"),
     }
@@ -157,7 +161,6 @@ fn send_payload_in_txlog_differs_across_args() {
             .push_str(String::from(refund.to_vec()))           // refund
             .push_int(1u64)                                    // gas
             .push_int(0u64)                                    // bytes
-            .push_int(0u64)                                    // method
             .push_str(String::from(target.to_hash().to_vec())) // addr
             .send()
             .to_bytecode()
@@ -226,7 +229,6 @@ fn send_with_non_32_byte_addr_errors() {
         .push_str(String::from(vec![0u8; 32]))       // refund (valid 32 bytes)
         .push_int(1u64)                              // gas
         .push_int(0u64)                              // bytes
-        .push_int(0u64)                              // method
         .push_str(String::from(vec![0u8; 16]))       // BAD addr: 16 bytes
         .send()
         .to_bytecode();
@@ -248,7 +250,6 @@ fn send_with_non_32_byte_refund_errors() {
         .push_str(String::from(vec![0u8; 16]))       // BAD refund: 16 bytes
         .push_int(1u64)                              // gas
         .push_int(0u64)                              // bytes
-        .push_int(0u64)                              // method
         .push_str(String::from(vec![0u8; 32]))       // addr (valid)
         .send()
         .to_bytecode();

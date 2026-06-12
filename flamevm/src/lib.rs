@@ -24,7 +24,7 @@ pub use actor::{
     code_root, empty_state, grace_window, state_root,
     vbyte_size, Actor, ActorID, ActorRegistry,
     VbytePool,
-    GRACE_BLOCKS_CAP, RECV_METHOD,
+    GRACE_BLOCKS_CAP,
     VBYTES_PER_BLOCK, VBYTE_MATURITY_BLOCKS,
 };
 pub use address::Address;

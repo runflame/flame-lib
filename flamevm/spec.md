@@ -37,7 +37,7 @@ Internal transactions do not have a pre-determined effect and therefore do not s
 
 Like external, internal transactions produce effects:
 
-1. `Receive(SendID)` (txlog variant `TxEntry::Receive`) — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating `SendID` (canonical 32-byte hash of the whole Send: anchor, target, caller, method, payload, gas, vbytes, refund predicate — analogous to `CellID` for cells) into the Internal TxID merkle root. Symmetric with `Input` for external transactions.
+1. `Receive(SendID)` (txlog variant `TxEntry::Receive`) — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating `SendID` (canonical 32-byte hash of the whole Send: anchor, target, caller, payload, gas, vbytes, refund predicate — analogous to `CellID` for cells) into the Internal TxID merkle root. Symmetric with `Input` for external transactions.
 2. Outputs — creation of new entries in the Utreexo.
 3. Sends — messages sent to actors that produce other internal transactions.
 4. Issuance and retirement — creation and removal of tokens to/from circulation.
@@ -280,7 +280,7 @@ Token: encrypted token with a proven non-negative qty,
 
 An actor is **`(code, state)`** ([ADR 0018](../decisions/0018-actor-code-state-split.md)):
 
-- **code** — a single bytecode blob, set at deploy and replaced by [`setcode`](#setcode). Dispatch is method-agnostic: the registry returns the blob (`load_code`); the blob itself dispatches on the [`method`](#method) opcode (a prologue that compares the selector against author-chosen values and jumps to the matching handler). The VM imposes **no method layout** and reserves no method key — entirely author-defined.
+- **code** — a single bytecode blob, set at deploy and replaced by [`setcode`](#setcode). Dispatch is selector-agnostic: the registry returns the blob (`load_code`); by convention the blob dispatches on its **top-of-stack argument** (a prologue that compares it against author-chosen values and jumps to the matching handler — [ADR 0020](../decisions/0020-no-method-selector.md)). The VM imposes **no method layout** and reserves nothing — entirely author-defined.
 
 - **state** — **any portable `Value`** (Int253, String, Point, Token, Dict, …), with no mandated shape and no methods-in-state. [`load`](#load) checks it out, [`save`](#save) moves it back; the author structures it however they like.
 
@@ -298,15 +298,14 @@ Not only users, but also actors can send async messages to each other. This allo
 
 # Addresses
 
-Address is an entity that supports sending funds to predicates or actor methods.
+Address is an entity that supports sending funds to predicates or actors.
 
 ```rust
 Address = enum {
    0: Predicate,
    1: Message = struct {
       dst#0: ActorID,
-      method#1: <method name>,
-      args: struct{0:...,1:...},
+      args: struct{0:...,1:...},   // selector (if any) rides as the top arg — ADR 0020
       gas: Int253,
    }
 }
@@ -469,8 +468,8 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | c4 | [signtx](#signtx) | | cell → items… k | Authorize the tx with the cell predicate's signature; pour payload. |
 | c5 | [signcall](#signcall) | | cell script sig gas bytes args… m → results… k' | Run a script signed by the cell predicate in an isolated frame. |
 |    | **Actors** | | | |
-| d0 | [send](#send) | | args… k refund gas bytes method addr → ø | Queue an asynchronous message to an actor. |
-| d1 | [call](#call) | int. | args… k gas bytes method addr → results… k' | Synchronous actor-to-actor call (isolated frame; re-entry gated by state presence). |
+| d0 | [send](#send) | | args… k refund gas bytes addr → ø | Queue an asynchronous message to an actor. |
+| d1 | [call](#call) | int. | args… k gas bytes addr → results… k' | Synchronous actor-to-actor call (isolated frame; re-entry gated by state presence). |
 | d2 | [load](#load) | int. | ø → value | Check out the actor's state (any portable Value; moves it out, locks re-entry). |
 | d3 | [save](#save) | int. | value → ø | Move the state value back in (requires checkout; unlocks). |
 | d4 | [setcode](#setcode) | int. | code → ø | Replace the actor's code blob (author-gated upgrade). |
@@ -478,7 +477,6 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | e0 | [selfid](#selfid) | | ø → s | Push the current actor's id (32-byte string). |
 | e1 | [anchor](#anchor) | | ø → s | Push the current frame's anchor (32-byte string). |
 | e2 | [callerid](#callerid) | | ø → s | Push the caller actor's id (zero string if invoked externally). |
-| e3 | [method](#method) | | ø → int | Push the method key the current call is dispatched under. |
 | e4 | [gas](#gas) | | ø → n | Push remaining gas budget for the current call. |
 | e5 | [gaslimit](#gaslimit) | | ø → n | Push the call's total gas budget cap. |
 | e6 | [bytes](#bytes) | int. | ø → n | Push the actor's remaining persistent vbyte balance. |
@@ -1134,17 +1132,18 @@ Hard-fails: `CallProofMismatch`, `MalformedCallProof`, plus the type errors from
 
 ### send
 
-_args… k refund gas bytes method addr_ → ø
+_args… k refund gas bytes addr_ → ø
 
 Asynchronous message-send. Pops operands top-first:
 
 1. `addr` (32-byte String) — target [`ActorID::Hash`](#addresses).
-2. `method` (`Int253`) — target method key.
-3. `bytes` (`Int253`) — vbyte allotment.
-4. `gas` (`Int253`) — gas allotment.
-5. `refund` (32-byte String) — bounce predicate point.
-6. `k` (`Int253`) — args count.
-7. `args…` — k portable values, delivery payload.
+2. `bytes` (`Int253`) — vbyte allotment.
+3. `gas` (`Int253`) — gas allotment.
+4. `refund` (32-byte String) — bounce predicate point.
+5. `k` (`Int253`) — args count.
+6. `args…` — k portable values, delivery payload.
+
+There is **no VM-level method selector** ([ADR 0020](../decisions/0020-no-method-selector.md)): the callee receives the `k` args as-is. *Convention (non-normative):* a multi-action contract reads its selector — any comparable value, including a `String` name — from the **top-of-stack argument**; a single-action contract needs none.
 
 Splits the frame's `last_anchor` (see §Anchors): the `left` half becomes the message's `anchor`, the `right` half replaces `last_anchor`. Hard-fails `AnchorMissing` if no anchor has been claimed yet. Emits `TxEntry::Send(Message)` — the full `Message` lives in the entry, symmetric with `TxEntry::Output(Cell)`. There is no separate "sends queue"; the block builder reads `TxEntry::Send` records from the TxLog when constructing internal-tx deliveries. The originator's actor id (if any) becomes the message's `caller`.
 
@@ -1153,11 +1152,10 @@ The send's identity is the canonical 32-byte `SendID = H(b"flamevm.send.id" ‖ 
 1. `anchor` — 32 raw bytes.
 2. `target` — canonical `ActorID` (Hash or Constructor) via `ActorID::encode`, with the variant force-canonicalized so a Hash form and a Constructor form of the same actor produce identical bytes.
 3. `caller` — `0x00` for None, `0x01 ‖ ActorID::encode(canonical)` for Some.
-4. `method` — `Int253` canonical encoding.
-5. `refund_predicate` — 32-byte compressed Ristretto.
-6. `gas` — little-endian u64.
-7. `vbytes` — little-endian u64.
-8. `payload` — little-endian u64 count, then each value's canonical `Value` encoding.
+4. `refund_predicate` — 32-byte compressed Ristretto.
+5. `gas` — little-endian u64.
+6. `vbytes` — little-endian u64.
+7. `payload` — little-endian u64 count, then each value's canonical `Value` encoding.
 
 The merkle leaf for `TxEntry::Send` commits to this single 32-byte SendID, just as `TxEntry::Output(Cell)`'s leaf commits to `Cell::id()`. Uniqueness is inherited from `anchor`: every distinct send carries a distinct anchor, hence a distinct SendID.
 
@@ -1167,17 +1165,17 @@ On internal-tx failure during delivery, consensus seals the message payload into
 
 ### call
 
-_args… k gas bytes method addr_ → _results… k'_
+_args… k gas bytes addr_ → _results… k'_
 
-Synchronous actor-to-actor call. Same operand shape as [`send`](#send) minus `refund`.
+Synchronous actor-to-actor call. Same operand shape as [`send`](#send) minus `refund` — and, likewise, no method selector (ADR 0020).
 
 **Re-entrancy & state discipline.** The state-checkout lock (ADR 0017) closes both the DAO write-mid-update class and the read-only re-entrancy class *by construction*: state is reachable **only** via `load`, which acquires the lock (`take()` → `None`), and there is no peek-state opcode, so a half-applied update is never observable — a re-entrant `call`/`load` into an actor that has already `load`ed its state fails `ActorEmpty` (→ `0` marker for `call`). The lock does **not** enforce checks-effects-interactions ordering *within* a load/save window: holding a loaded state across a `call`/`send`/`open` is legal, but anything `save`d afterward is a pre-call snapshot — authors must `save` (or fully discharge) before calling out. Nested call depth is capped at `MAX_CALL_DEPTH` (64); deeper entry fails `CallDepthExceeded` (→ `0` marker for `call`, hard-fail for `open`/`signcall`).
 
-Loads the callee's **code** via the registry — method-agnostic; the code blob itself dispatches on the [`method`](#method) opcode ([ADR 0018](../decisions/0018-actor-code-state-split.md)) — then splits the parent's anchor (left to the child frame, right held in `post_call_anchor` for restoration on return). **Re-entrancy is governed by the actor's state, not a call-stack guard** ([ADR 0017](../decisions/0017-actor-state-linear-lock.md)): if the callee's state is currently **checked out** (a live frame `load`ed it and hasn't `save`d it back), `load_code` returns `ActorEmpty` and the call returns the `0` failure marker — the call "did not happen". A callee whose state is committed (or never loaded) is entered normally, so safe re-entry is permitted.
+Loads the callee's **code** via the registry — selector-agnostic; the code blob itself dispatches on its top-of-stack argument by convention ([ADR 0018](../decisions/0018-actor-code-state-split.md), [ADR 0020](../decisions/0020-no-method-selector.md)) — then splits the parent's anchor (left to the child frame, right held in `post_call_anchor` for restoration on return). **Re-entrancy is governed by the actor's state, not a call-stack guard** ([ADR 0017](../decisions/0017-actor-state-linear-lock.md)): if the callee's state is currently **checked out** (a live frame `load`ed it and hasn't `save`d it back), `load_code` returns `ActorEmpty` and the call returns the `0` failure marker — the call "did not happen". A callee whose state is committed (or never loaded) is entered normally, so safe re-entry is permitted.
 
 **Emits no txlog entry.** Calls are intra-tx control flow; the structural effects produced inside the callee (`Output`, `Send`, `ActorSave`, `Issue`, `Retire`, `Fee`, `Data`) are what the state machine reads. The `(External TxID, Internal TxID)` of a tx is a merkle root over effects only — see `design.md` §"TxLog records effects, not control flow".
 
-Creates an isolated `CallKind::ActorCall { actor, method, caller, anchor }` frame with the popped `gas` / `bytes` allotments. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
+Creates an isolated `CallKind::ActorCall { actor, caller, anchor }` frame with the popped `gas` / `bytes` allotments. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
 
 Returns via `return k'`. Hard-fails `RegistryUnavailable` outside an internal-tx execution.
 
@@ -1199,7 +1197,7 @@ _value_ → ø
 
 Pops the state `Value`, **validates portability** (every value must be portable per `Value::is_portable`), and **moves it back** into the current actor — which must be **checked out** by a prior `load`, else `SaveWithoutLoad` (saving to a non-checked-out actor would clobber, and silently drop the tokens of, live state). Emits `TxEntry::ActorSave { actor, state }` carrying the **full** post-save state — symmetric with `Output(Cell)` which carries the full Cell. The merkle leaf for this entry hashes `(actor.to_hash(), state_root(&state))`, so the TxID commits to the canonical state root while consumers reading the txlog directly get the bytes (no separate state-witness channel needed).
 
-**State is any portable Value.** There is no mandated `{public, private}` shape and no methods-in-state — methods live in the actor's code blob (`setcode`), dispatched on the `method` opcode ([ADR 0018](../decisions/0018-actor-code-state-split.md)). The author structures state however they like (a Dict, an Int, a Token, …).
+**State is any portable Value.** There is no mandated `{public, private}` shape and no methods-in-state — methods live in the actor's code blob (`setcode`), dispatched on the top-of-stack selector by convention ([ADR 0018](../decisions/0018-actor-code-state-split.md), ADR 0020). The author structures state however they like (a Dict, an Int, a Token, …).
 
 **Portability is the canonical storage gate.** Portable values: `Int253`, `String`, `Point`, `Dict` of portable, non-negative `ClearToken`, `Token`. Non-portable values (`Cell`, `Merlin`, `Variable`, `Expression`, `Constraint`, `MultiscalarMul`, `WideToken`, negative `ClearToken`) hard-fail `NonPortableInState`. Portability is distinct from VM stack-copyability (Tokens are portable but not copyable — they survive the load/save round-trip via Rust-level deep clone, ignoring the linear-type discipline that gates `dup`).
 
@@ -1286,12 +1284,6 @@ Pushes the current actor's remaining persistent vbyte balance, read from the reg
 ø → _s_
 
 Pushes the caller actor id as a 32-byte String. For `InternalRoot` triggered by an external send (caller = None), pushes the all-zero String. Hard-fails from `ExternalRoot` / `CellOpen` (no actor context).
-
-### method
-
-ø → _int_
-
-Pushes the dispatched method key as `Int253`. Hard-fails from non-actor frames.
 
 ### gaslimit
 

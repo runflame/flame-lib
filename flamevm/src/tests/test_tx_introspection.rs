@@ -7,7 +7,7 @@
 
 use super::test_helpers::*;
 use crate::vm::LOCKTIME_TIMESTAMP_THRESHOLD;
-use crate::{empty_state, ActorID, Int253, RECV_METHOD};
+use crate::{empty_state, ActorID, Int253};
 
 /// Build an ExternalRoot VM with caller-controlled TxHeader and gas/mem
 /// budgets. Used by every test in this file that doesn't need a
@@ -141,7 +141,6 @@ fn bytes_pushes_actor_vbyte_balance() {
     reg.deploy(id.clone(), code, empty_state(), 12_345, 0).expect("deploy");
     let kind = CallKind::InternalRoot {
         actor: id.clone(),
-        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -173,7 +172,6 @@ fn bytes_without_registry_in_actor_frame_errors_registry_unavailable() {
     // InternalRoot frame but driven through registry-less stepper.
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0xab; 32]),
-        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };

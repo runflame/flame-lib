@@ -4,7 +4,7 @@
 
 use super::test_helpers::*;
 
-use crate::{empty_state, ActorID, Dict, Env, Int253, RECV_METHOD};
+use crate::{empty_state, ActorID, Dict, Env, Int253};
 
 /// Builds an empty state with a single `recv` method that runs the
 /// caller-supplied bytes. Returns (state, id).
@@ -24,7 +24,6 @@ fn deploy_with_recv(reg: &mut MemRegistry, recv: Vec<u8>, vbytes: u64, height: u
 fn vm_for(actor: ActorID, script: Vec<u8>) -> VM {
     let kind = CallKind::InternalRoot {
         actor,
-        method: Int253::from(0u64),
         caller: None,
         anchor: Anchor([0u8; 32]),
     };
@@ -52,7 +51,6 @@ fn facade_internal_execute_tx_roundtrip() {
     let mut env = MemEnv { registry: reg, height: 0 };
     let msg = crate::Message {
         target: id,
-        method: RECV_METHOD,
         caller: None,
         anchor: Anchor([1u8; 32]),
         payload: Vec::new(),
@@ -82,7 +80,6 @@ fn second_constructor_send_does_not_redeploy() {
     let canonical = ActorID::Hash(target.to_hash());
     let mk = |vbytes| Message {
         target: target.clone(),
-        method: RECV_METHOD,
         caller: None,
         anchor: Anchor([0x07; 32]),
         payload: Vec::new(),
@@ -107,7 +104,6 @@ fn constructor_send_with_zero_vbytes_deploys() {
     let target = ActorID::Constructor(code.clone());
     let msg = Message {
         target: target.clone(),
-        method: RECV_METHOD,
         caller: None,
         anchor: Anchor([0x08; 32]),
         payload: Vec::new(),
@@ -297,7 +293,6 @@ fn load_then_dismantle_self_destructs_and_queues_vbytes() {
     let block = BlockContext { height: 100 };
     let msg = Message {
         target: id.clone(),
-        method: RECV_METHOD,
         caller: None,
         anchor: Anchor([0x07; 32]),
         payload: Vec::new(),
@@ -331,7 +326,6 @@ fn token_survives_load_save_roundtrip_exactly_once() {
 
     let msg = Message {
         target: id.clone(),
-        method: RECV_METHOD,
         caller: None,
         anchor: Anchor([0x11; 32]),
         payload: Vec::new(),
@@ -371,7 +365,6 @@ fn constructor_send_deploys_then_runs() {
 
     let msg = Message {
         target: target.clone(),
-        method: RECV_METHOD,
         caller: None,
         anchor: Anchor([0x07; 32]),
         payload: Vec::new(),
@@ -420,7 +413,6 @@ fn dismantle_token_bearing_state_requires_retire() {
     let block = BlockContext { height: 100 };
     let msg = Message {
         target: id.clone(),
-        method: RECV_METHOD,
         caller: None,
         anchor: Anchor([0x09; 32]),
         payload: Vec::new(),
@@ -443,7 +435,6 @@ fn load_without_discharge_errors_stack_not_clean() {
     let block = BlockContext { height: 100 };
     let msg = Message {
         target: id.clone(),
-        method: RECV_METHOD,
         caller: None,
         anchor: Anchor([0x08; 32]),
         payload: Vec::new(),
@@ -473,7 +464,6 @@ fn load_followed_by_save_preserves_actor() {
     let block = BlockContext { height: 100 };
     let msg = Message {
         target: id.clone(),
-        method: RECV_METHOD,
         caller: None,
         anchor: Anchor([0x02; 32]),
         payload: Vec::new(),
@@ -515,7 +505,6 @@ fn receive_committed_as_first_effect_after_header() {
     let known_anchor = [0xab; 32];
     let msg = Message {
         target: id.clone(),
-        method: RECV_METHOD,
         caller: None,
         anchor: Anchor(known_anchor),
         payload: Vec::new(),
@@ -560,7 +549,6 @@ fn receive_makes_internal_txid_bind_to_send_anchor() {
         let block = BlockContext { height: 100 };
         let msg = Message {
             target: id,
-            method: RECV_METHOD,
             caller: None,
             anchor: Anchor(anchor_bytes),
             payload: Vec::new(),

@@ -281,7 +281,6 @@ pub enum CallKind {
     /// Outer scope of an internal tx; dispatched to the target's method.
     InternalRoot {
         actor: ActorID,
-        method: Int253,
         caller: Option<ActorID>,
         anchor: Anchor,
     },
@@ -289,7 +288,6 @@ pub enum CallKind {
     /// Synchronous actor-to-actor call inside an internal tx.
     ActorCall {
         actor: ActorID,
-        method: Int253,
         caller: ActorID,
         anchor: Anchor,
     },
@@ -315,14 +313,6 @@ impl CallKind {
         }
     }
 
-    /// Returns the dispatched method key, if the frame has one.
-    /// `op_method` reads this; pure read.
-    pub fn method(&self) -> Option<Int253> {
-        match self {
-            Self::InternalRoot { method, .. } | Self::ActorCall { method, .. } => Some(*method),
-            Self::ExternalRoot | Self::CellOpen { .. } => None,
-        }
-    }
 
     /// Returns the caller's actor id, if any. `op_callerid` reads
     /// this — for `InternalRoot` with a `None` caller (the
@@ -656,7 +646,6 @@ impl VM {
         let send_id = *message.id().as_bytes();
         let kind = CallKind::InternalRoot {
             actor: message.target,
-            method: message.method,
             caller: message.caller,
             anchor: message.anchor,
         };
@@ -1036,7 +1025,6 @@ impl VM {
             I::Gas => self.op_gas(),
             I::Bytes => self.op_bytes(registry),
             I::Callerid => self.op_callerid(),
-            I::Method => self.op_method(),
             // gaslimit / memlimit / newbytes → frame budget fields.
             I::Gaslimit => { self.push_value(Value::Int253(Int253::from(self.current_call.gas_limit))); Ok(()) }
             I::Memlimit => { self.push_value(Value::Int253(Int253::from(self.current_call.mem_limit))); Ok(()) }
@@ -2438,7 +2426,6 @@ impl VM {
     /// ratcheted from `last_anchor` before the entry is appended.
     fn op_send(&mut self) -> Result<(), VMError> {
         let target = ActorID::Hash(self.pop_string_32()?);
-        let method = Int253::from(self.pop_value()?.to_int253()?);
         let (gas, vbytes) = self.pop_gas_bytes()?;
         let refund_predicate = Predicate::opaque(
             curve25519_dalek::ristretto::CompressedRistretto(self.pop_string_32()?),
@@ -2461,7 +2448,6 @@ impl VM {
         // queue.
         let message = crate::send::Message {
             target,
-            method,
             caller,
             anchor,
             payload: args,
@@ -2485,7 +2471,6 @@ impl VM {
     ) -> Result<(), VMError> {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let callee = ActorID::Hash(self.pop_string_32()?);
-        let method = Int253::from(self.pop_value()?.to_int253()?);
         let (gas, vbytes) = self.pop_gas_bytes()?;
         // Debit the grant from the caller (see op_open). A caller that
         // can't afford the grant hard-fails OutOfGas — its own budget
@@ -2538,7 +2523,6 @@ impl VM {
             script,
             CallKind::ActorCall {
                 actor: callee,
-                method,
                 caller,
                 anchor: callee_anchor,
             },
@@ -2692,12 +2676,6 @@ impl VM {
         Ok(())
     }
 
-    /// **method** → _int_
-    fn op_method(&mut self) -> Result<(), VMError> {
-        let m = self.current_call.kind.method().ok_or(VMError::OpcodeRequiresActorContext)?;
-        self.push_value(Value::Int253(m));
-        Ok(())
-    }
 
     /// **timelock** → _n {0|1}_
     ///
