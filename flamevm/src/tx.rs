@@ -4,6 +4,7 @@ use curve25519_dalek::ristretto::CompressedRistretto;
 use merkle::{Hash, MerkleItem, MerkleTree};
 use merlin::Transcript;
 use musig::Signature;
+use readerwriter::{Encodable, WriteError, Writer};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::ActorRegistry;
@@ -69,6 +70,14 @@ pub struct Limits {
 /// Ordered transaction effects — the canonical change set a node
 /// applies to its state. The [`TxID`] is the merkle root over these.
 pub struct TxLog(Vec<TxEntry>);
+
+/// For the node layer (and tests): wrap a re-derived effect list.
+/// The crate itself only ever produces TxLogs by execution.
+impl From<Vec<TxEntry>> for TxLog {
+    fn from(entries: Vec<TxEntry>) -> Self {
+        TxLog(entries)
+    }
+}
 
 impl TxLog {
     /// Canonical transaction id (merkle root over the effect list).
@@ -412,5 +421,104 @@ impl MerkleItem for TxEntry {
                 t.append_message(b"send", msg.id().as_bytes());
             }
         }
+    }
+}
+
+impl TxEntry {
+    /// Wire tag bytes, sequential in declaration order (spec §TxLog
+    /// transport). Encode-only: the TxLog is re-derived by execution,
+    /// never decoded from the wire by this crate.
+    pub const TAG_HEADER: u8 = 0;
+    pub const TAG_DATA: u8 = 1;
+    pub const TAG_INPUT: u8 = 2;
+    pub const TAG_RECEIVE: u8 = 3;
+    pub const TAG_OUTPUT: u8 = 4;
+    pub const TAG_ISSUE_PUB: u8 = 5;
+    pub const TAG_ISSUE_PRIV: u8 = 6;
+    pub const TAG_RETIRE: u8 = 7;
+    pub const TAG_FEE: u8 = 8;
+    pub const TAG_ACTOR_SAVE: u8 = 9;
+    pub const TAG_SET_CODE: u8 = 10;
+    pub const TAG_SEND: u8 = 11;
+}
+
+/// Canonical wire serialization of one effect: a tag byte followed by
+/// the variant's fields, each in its existing canonical form (reusing
+/// `Cell`/`Message`/`ActorID` encoders and `write_value`/`write_int253`
+/// — never a parallel re-implementation, per spec §TxLog transport).
+/// All integers little-endian (ADR 0006); byte blobs are u64-LE
+/// length-prefixed (matching `Message` payload / `ActorID` ctor style).
+impl Encodable for TxEntry {
+    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
+        match self {
+            TxEntry::Header(h) => {
+                w.write_u8(b"txentry.tag", Self::TAG_HEADER)?;
+                w.write(b"tx.version", &h.version.to_le_bytes())?;
+                w.write(b"tx.locktime", &h.locktime.to_le_bytes())
+            }
+            TxEntry::Data(bytes) => {
+                w.write_u8(b"txentry.tag", Self::TAG_DATA)?;
+                w.write_u64(b"data.len", bytes.len() as u64)?;
+                w.write(b"data.bytes", bytes)
+            }
+            TxEntry::Input(cell_id) => {
+                w.write_u8(b"txentry.tag", Self::TAG_INPUT)?;
+                w.write(b"input.cell_id", cell_id)
+            }
+            TxEntry::Receive(send_id) => {
+                w.write_u8(b"txentry.tag", Self::TAG_RECEIVE)?;
+                w.write(b"receive.send_id", send_id)
+            }
+            TxEntry::Output(cell) => {
+                w.write_u8(b"txentry.tag", Self::TAG_OUTPUT)?;
+                cell.encode(w)
+            }
+            TxEntry::IssuePub(qty, flv) => {
+                w.write_u8(b"txentry.tag", Self::TAG_ISSUE_PUB)?;
+                crate::encoding::write_int253(w, qty)?;
+                crate::encoding::write_int253(w, flv)
+            }
+            TxEntry::IssuePriv(qty_pt, flv_pt) => {
+                w.write_u8(b"txentry.tag", Self::TAG_ISSUE_PRIV)?;
+                w.write(b"issuepriv.qty", qty_pt.as_bytes())?;
+                w.write(b"issuepriv.flv", flv_pt.as_bytes())
+            }
+            TxEntry::Retire(qty_pt, flv_pt) => {
+                w.write_u8(b"txentry.tag", Self::TAG_RETIRE)?;
+                w.write(b"retire.qty", qty_pt.as_bytes())?;
+                w.write(b"retire.flv", flv_pt.as_bytes())
+            }
+            TxEntry::Fee(qty) => {
+                w.write_u8(b"txentry.tag", Self::TAG_FEE)?;
+                w.write_u64(b"fee.qty", *qty)
+            }
+            TxEntry::ActorSave { actor, state } => {
+                w.write_u8(b"txentry.tag", Self::TAG_ACTOR_SAVE)?;
+                actor.to_canonical().encode(w)?;
+                crate::encoding::write_value(w, state)
+            }
+            TxEntry::SetCode { actor, code } => {
+                w.write_u8(b"txentry.tag", Self::TAG_SET_CODE)?;
+                actor.to_canonical().encode(w)?;
+                w.write_u64(b"setcode.len", code.len() as u64)?;
+                w.write(b"setcode.bytes", code)
+            }
+            TxEntry::Send(msg) => {
+                w.write_u8(b"txentry.tag", Self::TAG_SEND)?;
+                msg.encode(w)
+            }
+        }
+    }
+}
+
+/// Canonical wire serialization of a whole log: u64-LE entry count
+/// followed by each entry's encoding.
+impl Encodable for TxLog {
+    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
+        w.write_u64(b"txlog.len", self.0.len() as u64)?;
+        for entry in &self.0 {
+            entry.encode(w)?;
+        }
+        Ok(())
     }
 }

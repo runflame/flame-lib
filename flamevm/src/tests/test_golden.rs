@@ -77,3 +77,47 @@ fn golden_consensus_hashes() {
     let ba = format!("{:?}", TxID::from_log(&[TxEntry::Header(h(1, 0)), TxEntry::Fee(7), TxEntry::Data(vec![1])]));
     assert_ne!(ab, ba, "effect order is committed");
 }
+
+/// Golden wire bytes for the canonical TxLog/TxEntry encoding
+/// (encode-only; spec §TxLog transport). Pins tag values, field order,
+/// and LE widths — any serializer drift shows up as a diff here.
+#[test]
+fn golden_txlog_wire_encoding() {
+    use curve25519_dalek::ristretto::CompressedRistretto as CR;
+    use readerwriter::Encodable;
+    let actor = ActorID::Hash([0x07; 32]);
+    let log = crate::tx::TxLog::from(vec![
+        TxEntry::Header(h(1, 7)),
+        TxEntry::Data(vec![0xab, 0xcd]),
+        TxEntry::Input([0x11; 32]),
+        TxEntry::Receive([0x22; 32]),
+        TxEntry::IssuePub(Int253::from(5u64), Int253::from(-3i64)),
+        TxEntry::IssuePriv(CR([0x33; 32]), CR([0x44; 32])),
+        TxEntry::Retire(CR([0x55; 32]), CR([0x66; 32])),
+        TxEntry::Fee(1_000),
+        TxEntry::ActorSave { actor: actor.clone(), state: Value::Int253(Int253::from(42u64)) },
+        TxEntry::SetCode { actor: actor.clone(), code: vec![0x1d] },
+        TxEntry::Output(Cell::new(
+            Predicate::opaque(CR([0x77; 32])),
+            Anchor([0x88; 32]),
+            vec![Value::Int253(Int253::from(9u64))],
+        )),
+        TxEntry::Send(Message {
+            target: actor,
+            method: Int253::from(1u64),
+            caller: None,
+            anchor: Anchor([0x99; 32]),
+            payload: Vec::new(),
+            gas: 50,
+            vbytes: 60,
+            refund_predicate: Predicate::opaque(CR([0xaa; 32])),
+        }),
+    ]);
+    let wire = log.encode_to_vec();
+    let hex: std::string::String = wire.iter().map(|b| format!("{b:02x}")).collect();
+    if REGEN {
+        eprintln!("GOLDEN wire = {hex}");
+        panic!("REGEN — paste wire hex");
+    }
+    assert_eq!(hex, "0c00000000000000000100000007000000010200000000000000abcd021111111111111111111111111111111111111111111111111111111111111111032222222222222222222222222222222222222222222222222222222222222222050540010633333333333333333333333333333333333333333333333333333333333333334444444444444444444444444444444444444444444444444444444444444444075555555555555555555555555555555555555555555555555555555555555555666666666666666666666666666666666666666666666666666666666666666608e803000000000000090007070707070707070707070707070707070707070707070707070707070707072a0a00070707070707070707070707070707070707070707070707070707070707070701000000000000001d0483f8777777777777777777777777777777777777777777777777777777777777777764888888888888888888888888888888888888888888888888888888888888888881090b99999999999999999999999999999999999999999999999999999999999999990007070707070707070707070707070707070707070707070707070707070707070001aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa32000000000000003c000000000000000000000000000000");
+}
