@@ -6,7 +6,6 @@ use readerwriter::{Decodable, Encodable, ReadError, Reader, WriteError, Writer};
 use crate::dict::Dict;
 use crate::encoding::write_value;
 use crate::errors::VMError;
-use crate::int253::Int253;
 use crate::value::Value;
 
 // ── ActorID ──────────────────────────────────────────────────────

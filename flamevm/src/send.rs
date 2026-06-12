@@ -5,8 +5,7 @@ use readerwriter::{Encodable, WriteError, Writer};
 
 use crate::actor::ActorID;
 use crate::cell::Predicate;
-use crate::encoding::{write_int253, write_value};
-use crate::int253::Int253;
+use crate::encoding::write_value;
 use crate::value::Value;
 use crate::vm::Anchor;
 
