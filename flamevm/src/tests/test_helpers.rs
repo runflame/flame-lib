@@ -20,7 +20,7 @@ pub use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 pub use crate::{
     Prover, Verifier,
     Program, ProgramItem,
-    Token, WideToken,
+    Token, WideToken, Value,
     PredicateTree,
     Instruction,
     CheckedFee, MAX_FEE,
@@ -54,7 +54,7 @@ impl ActorRegistry for StubRegistry {
     // pin this stub — once Units 5–8 land the affected tests
     // construct a `MemRegistry` instead. Surface a clear panic
     // so a future test that strays here gets an obvious error.
-    fn load_state(&mut self, _id: &ActorID) -> Result<crate::Value, VMError> {
+    fn load_state(&mut self, _id: &ActorID) -> Result<Value, VMError> {
         unimplemented!("StubRegistry::load_state — use MemRegistry for state-touching tests")
     }
     fn save_state(

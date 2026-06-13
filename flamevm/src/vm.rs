@@ -16,7 +16,7 @@ use crate::constraints::Commitment;
 use crate::fees::CheckedFee;
 use crate::token::{flavor_from_actor, flavor_from_predicate};
 use crate::tx::TxEntry;
-use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
+use crate::{Token, ClearToken, Dict, Int253, Merlin, Point, String, Value};
 use crate::ops::Instruction;
 use crate::actor::{ActorID, ActorRegistry};
 use crate::send::Message;
@@ -2977,7 +2977,7 @@ impl VM {
         // Strings → builds Token (with Closed commitments since the
         // String→Commitment downcast retains witness only for
         // String::Commitment variants).
-        let mut output_tokens: Vec<crate::Token> = Vec::with_capacity(n);
+        let mut output_tokens: Vec<Token> = Vec::with_capacity(n);
         let mut cloak_outs: Vec<spacesuit::AllocatedValue> = Vec::with_capacity(n);
         for _ in 0..n {
             let flv_str = self.pop_value()?.to_string()?;
