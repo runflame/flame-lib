@@ -11,9 +11,11 @@ use readerwriter::{Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, 
 
 use crate::errors::VMError;
 use crate::tx::TxHeader;
-use crate::cell::{CallProof, Cell, Predicate};
+use crate::cell::{CallProof, Cell, CellID, Predicate};
 use crate::constraints::Commitment;
+use crate::fees::CheckedFee;
 use crate::token::{flavor_from_actor, flavor_from_predicate};
+use crate::tx::TxEntry;
 use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
 use crate::ops::Instruction;
 
@@ -75,7 +77,7 @@ impl Decodable for Anchor {
     }
 }
 
-// `Predicate` lives in `cell::predicate`; re-exported via `crate::Predicate`.
+// `Predicate` lives in `cell::predicate`; re-exported via `Predicate`.
 
 /// Signature check deferred to `Delegate::finalize`. `TxBound` comes
 /// from `signtx` (aggregated MuSig verified against TxID); `Explicit`
@@ -84,7 +86,7 @@ impl Decodable for Anchor {
 pub enum DeferredSig {
     TxBound {
         verification_key: CompressedRistretto,
-        cell_id: crate::cell::CellID,
+        cell_id: CellID,
     },
     Explicit {
         verification_key: CompressedRistretto,
@@ -122,7 +124,7 @@ pub trait Delegate {
     /// Adds a Commitment to the CS, producing a high-level variable.
     fn commit_variable(
         &mut self,
-        commitment: &crate::Commitment,
+        commitment: &Commitment,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError>;
 
 }
@@ -143,7 +145,7 @@ impl Delegate for InternalDelegate {
     }
     fn commit_variable(
         &mut self,
-        _commitment: &crate::Commitment,
+        _commitment: &Commitment,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError> {
         unreachable!("InternalDelegate::commit_variable — commit/expr/mix are external-only")
     }
@@ -384,7 +386,7 @@ pub struct CallFrame {
     /// discarded.
     pub(crate) snap_txlog_len: usize,
     pub(crate) snap_deferred_sigs_len: usize,
-    pub(crate) snap_total_fee: crate::fees::CheckedFee,
+    pub(crate) snap_total_fee: CheckedFee,
 
     /// Snapshot of the delegate's MSM/signature batch state taken
     /// when this frame's child was pushed. Restored on child
@@ -452,7 +454,7 @@ impl CallFrame {
             post_call_anchor: None,
             snap_txlog_len: 0,
             snap_deferred_sigs_len: 0,
-            snap_total_fee: crate::fees::CheckedFee::zero(),
+            snap_total_fee: CheckedFee::zero(),
             snap_batch: None,
             snap_cs: None,
         }
@@ -466,7 +468,7 @@ pub struct TxResult {
     pub txid: crate::tx::TxID,
 
     /// Full txlog including the `Header` entry at index 0.
-    pub txlog: Vec<crate::tx::TxEntry>,
+    pub txlog: Vec<TxEntry>,
 
     /// Aggregate fee in flames recorded by `op_fee`.
     pub total_fee: u64,
@@ -529,10 +531,10 @@ pub(crate) struct VM {
     call_stack: Vec<CallFrame>,
 
     /// Effects emitted during execution; used to compute TxID.
-    pub(crate) txlog: Vec<crate::tx::TxEntry>,
+    pub(crate) txlog: Vec<TxEntry>,
 
     /// Running per-tx fee accumulator (overflow → `FeeTooHigh`).
-    total_fee: crate::fees::CheckedFee,
+    total_fee: CheckedFee,
 
     /// Signature checks deferred to `Delegate::finalize`.
     deferred_sigs: Vec<DeferredSig>,
@@ -664,7 +666,7 @@ impl VM {
         // root. Symmetric with `op_input` for external txs: the first
         // post-Header effect identifies *what consumed-once entity*
         // brought this tx into existence.
-        vm.txlog.push(crate::tx::TxEntry::Receive(send_id));
+        vm.txlog.push(TxEntry::Receive(send_id));
 
         // Tx-level checkpoint: if the script aborts at the root
         // frame (no caller to swallow into a failure marker), the
@@ -697,7 +699,7 @@ impl VM {
     fn new(header: TxHeader, initial_call: CallFrame) -> Self {
         // Header is the first txlog entry so TxID binds to version + locktime.
         let mut txlog = Vec::new();
-        txlog.push(crate::tx::TxEntry::Header(header));
+        txlog.push(TxEntry::Header(header));
         // Seed last_anchor from the root frame's kind: ExternalRoot →
         // None (op_input must seed); InternalRoot → Some(Message.anchor)
         // (already unique from prior tx's op_send split).
@@ -708,7 +710,7 @@ impl VM {
             current_call: initial_call,
             call_stack: Vec::new(),
             txlog,
-            total_fee: crate::fees::CheckedFee::zero(),
+            total_fee: CheckedFee::zero(),
             deferred_sigs: Vec::new(),
         }
     }
@@ -1271,7 +1273,7 @@ impl VM {
     /// the same canonical bytes.
     fn op_log(&mut self) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
-        self.txlog.push(crate::tx::TxEntry::Data(s.to_bytes()));
+        self.txlog.push(TxEntry::Data(s.to_bytes()));
         Ok(())
     }
 
@@ -2005,7 +2007,7 @@ impl VM {
         // Cleartext qty + flv go straight into the txlog as `Int253`s —
         // no commitment indirection. The `IssuePub` entry is publicly
         // auditable directly on the wire.
-        self.txlog.push(crate::tx::TxEntry::IssuePub(qty, flv));
+        self.txlog.push(TxEntry::IssuePub(qty, flv));
         self.push_value(Value::ClearToken(ClearToken::new(qty, flv)));
         Ok(())
     }
@@ -2051,7 +2053,7 @@ impl VM {
         let flv = flavor_from_predicate(&predicate, &tag);
         let flv_commit = Commitment::unblinded(flv);
 
-        self.txlog.push(crate::tx::TxEntry::IssuePriv(
+        self.txlog.push(TxEntry::IssuePriv(
             qty_var.commitment.to_point(),
             flv_commit.to_point(),
         ));
@@ -2069,14 +2071,14 @@ impl VM {
             Value::ClearToken(t) => {
                 let qty_commit = Commitment::unblinded(t.qty());
                 let flv_commit = Commitment::unblinded(t.flv());
-                self.txlog.push(crate::tx::TxEntry::Retire(
+                self.txlog.push(TxEntry::Retire(
                     qty_commit.to_point(),
                     flv_commit.to_point(),
                 ));
                 Ok(())
             }
             Value::Token(t) => {
-                self.txlog.push(crate::tx::TxEntry::Retire(
+                self.txlog.push(TxEntry::Retire(
                     t.qty.to_point(),
                     t.flv.to_point(),
                 ));
@@ -2234,7 +2236,7 @@ impl VM {
         // prior `last_anchor` (e.g. unused residue from a previous
         // input + outputs sequence) is replaced. See spec §Anchors.
         self.last_anchor = Some(Anchor(cell.id()));
-        self.txlog.push(crate::tx::TxEntry::Input(cell.id()));
+        self.txlog.push(TxEntry::Input(cell.id()));
         self.push_value(Value::Cell(cell));
         Ok(())
     }
@@ -2257,7 +2259,7 @@ impl VM {
         let payload = self.pop_n_portable(k)?;
         let anchor = self.consume_anchor()?;
         let cell = Cell::new(pred, anchor, payload);
-        self.txlog.push(crate::tx::TxEntry::Output(cell));
+        self.txlog.push(TxEntry::Output(cell));
         Ok(())
     }
 
@@ -2456,7 +2458,7 @@ impl VM {
             vbytes,
             refund_predicate,
         };
-        self.txlog.push(crate::tx::TxEntry::Send(message));
+        self.txlog.push(TxEntry::Send(message));
         Ok(())
     }
 
@@ -2603,7 +2605,7 @@ impl VM {
         // last-write-wins per actor; the merkle leaf hashes
         // `state_root(state)`, while the entry carries the full
         // Dict for direct consumers.
-        self.txlog.push(crate::tx::TxEntry::ActorSave {
+        self.txlog.push(TxEntry::ActorSave {
             actor,
             state: state_for_log,
         });
@@ -2625,7 +2627,7 @@ impl VM {
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
         let code = self.pop_value()?.to_string()?.to_bytes_vec();
         registry.set_code(&actor, code.clone())?;
-        self.txlog.push(crate::tx::TxEntry::SetCode { actor, code });
+        self.txlog.push(TxEntry::SetCode { actor, code });
         Ok(())
     }
 
@@ -2917,7 +2919,7 @@ impl VM {
             assignment,
         });
         self.push_value(Value::WideToken(wide));
-        self.txlog.push(crate::tx::TxEntry::Fee(qty_u64));
+        self.txlog.push(TxEntry::Fee(qty_u64));
         Ok(())
     }
 

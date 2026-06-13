@@ -2,6 +2,7 @@ use curve25519_dalek::ristretto::CompressedRistretto;
 use merlin::Transcript;
 
 use crate::constraints::Commitment;
+use crate::cell::Predicate;
 use crate::errors::VMError;
 
 /// Ristretto255 group element on the stack — always 32 bytes on the
@@ -19,7 +20,7 @@ pub enum Point {
     /// Pedersen commitment witness; canonical bytes via `commitment.to_point()`.
     Commitment(Box<Commitment>),
     /// Taproot predicate witness; canonical bytes via `predicate.to_point()`.
-    Predicate(Box<crate::cell::Predicate>),
+    Predicate(Box<Predicate>),
 }
 
 impl Point {
@@ -41,7 +42,7 @@ impl Point {
     }
 
     /// Constructs a witness-bearing `Predicate` variant.
-    pub fn predicate(p: crate::cell::Predicate) -> Self {
+    pub fn predicate(p: Predicate) -> Self {
         Point::Predicate(Box::new(p))
     }
 
@@ -73,10 +74,10 @@ impl Point {
 
     /// Downcasts to `Predicate`. `Opaque` → `Predicate::Opaque`;
     /// `Predicate` returns its witness directly; `Commitment` errors.
-    pub fn to_predicate(self) -> Result<crate::cell::Predicate, VMError> {
+    pub fn to_predicate(self) -> Result<Predicate, VMError> {
         match self {
             Point::Predicate(p) => Ok(*p),
-            Point::Opaque(c) => Ok(crate::cell::Predicate::opaque(c)),
+            Point::Opaque(c) => Ok(Predicate::opaque(c)),
             Point::Commitment(_) => Err(VMError::TypeNotPoint),
         }
     }

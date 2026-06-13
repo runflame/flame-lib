@@ -7,7 +7,7 @@ use crate::int253::Int253;
 use readerwriter::Encodable;
 
 use crate::ops::Instruction;
-use crate::cell::Cell;
+use crate::cell::{Cell, Predicate};
 
 /// Variable-length binary string with optional witness-bearing
 /// variants. See module docs for the design.
@@ -55,7 +55,7 @@ impl String {
     }
 
     /// Convenience: wrap a `Predicate` as a `String::Point(Point::Predicate)`.
-    pub fn predicate(p: crate::cell::Predicate) -> String {
+    pub fn predicate(p: Predicate) -> String {
         String::Point(Point::predicate(p))
     }
 
@@ -196,12 +196,12 @@ impl String {
     /// Downcasts to a `Predicate`. `Point` routes through
     /// `Point::to_predicate` (preserves witness when present);
     /// `Opaque` parses 32 bytes as `Predicate::Opaque`.
-    pub fn to_predicate(self) -> Result<crate::cell::Predicate, VMError> {
+    pub fn to_predicate(self) -> Result<Predicate, VMError> {
         match self {
             String::Point(p) => p.to_predicate(),
             String::Opaque(data) => {
                 let bytes = array32(&data).ok_or(VMError::InvalidPoint)?;
-                Ok(crate::cell::Predicate::opaque(
+                Ok(Predicate::opaque(
                     curve25519_dalek::ristretto::CompressedRistretto(bytes),
                 ))
             }
