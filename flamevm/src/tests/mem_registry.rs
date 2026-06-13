@@ -4,8 +4,7 @@
 //! 1k-line reduction review.
 
 use crate::actor::{
-    grace_window, vbyte_size, Actor, ActorID, ActorRegistry, VbytePool,
-    VBYTE_MATURITY_BLOCKS,
+    grace_window, vbyte_size, Actor, ActorID, ActorRegistry, VbytePool
 };
 use crate::errors::VMError;
 use crate::tx::{Env, TxEntry, TxLog};

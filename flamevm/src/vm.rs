@@ -15,6 +15,7 @@ use crate::cell::{CallProof, Cell, Predicate};
 use crate::constraints::Commitment;
 use crate::token::{flavor_from_actor, flavor_from_predicate};
 use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
+use crate::ops::Instruction;
 
 // Re-export from canonical homes so vm.rs callers (notably the
 // test helpers, which inherit `super::super::*`) keep their
@@ -164,7 +165,7 @@ const MAX_CALL_DEPTH: usize = 64;
 /// `Vec<Instruction>`. See ADR 0015.
 pub(crate) enum Code {
     /// Pre-decoded instructions (prover witnesses inline; `String::Script`).
-    Instrs(Vec<crate::ops::Instruction>),
+    Instrs(Vec<Instruction>),
     /// Raw bytecode, decoded on demand (verifier; `String::Opaque`).
     Bytes(Vec<u8>),
 }
@@ -180,7 +181,7 @@ impl CallFrame {
     /// advances by its encoded length.
     pub(crate) fn next_instruction(
         &mut self,
-    ) -> Result<Option<crate::ops::Instruction>, VMError> {
+    ) -> Result<Option<Instruction>, VMError> {
         let cursor = self.cursor;
         match &self.code {
             Code::Instrs(instrs) => {
@@ -197,7 +198,7 @@ impl CallFrame {
                 }
                 let mut reader: &[u8] = &bytes[cursor..];
                 let before = reader.len();
-                let instr = crate::ops::Instruction::parse(&mut reader)?;
+                let instr = Instruction::parse(&mut reader)?;
                 let consumed = before - reader.len();
                 self.cursor = cursor + consumed;
                 Ok(Some(instr))
@@ -260,7 +261,7 @@ impl CallFrame {
             self.charge_gas(GAS_PER_INSTRUCTION)?;
             match self.next_instruction()? {
                 None => return Err(VMError::LabelNotFound),
-                Some(crate::ops::Instruction::Label(m)) => {
+                Some(Instruction::Label(m)) => {
                     let m = m as usize;
                     self.record_label(m)?;
                     if m == n {
@@ -409,7 +410,7 @@ impl CallFrame {
     /// and pre-parsed paths). The verifier / internal execution uses
     /// [`CallFrame::from_bytecode`] to stream raw bytecode instead.
     pub fn new(
-        instructions: Vec<crate::ops::Instruction>,
+        instructions: Vec<Instruction>,
         kind: CallKind,
         gas_limit: u64,
         mem_limit: u64,
@@ -907,7 +908,7 @@ impl VM {
         let Some(instr) = self.current_call.next_instruction()? else {
             return self.finish_call();
         };
-        use crate::ops::Instruction as I;
+        use Instruction as I;
         match instr {
 
             I::PushInt(i) => {

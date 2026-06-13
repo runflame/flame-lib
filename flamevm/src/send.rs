@@ -13,9 +13,9 @@ use crate::vm::Anchor;
 /// Uniqueness is inherited from the embedded `anchor`: each send consumes a
 /// unique-anchored split, so two distinct sends always carry distinct SendIDs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SendID(pub [u8; 32]);
+pub struct MessageID(pub [u8; 32]);
 
-impl SendID {
+impl MessageID {
     /// Returns the underlying 32 bytes.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
@@ -75,13 +75,13 @@ impl Message {
     /// Unique ID identifying the message that spawns the internal transaction.
     /// Note: SendID is not the same as TxID, which can only be determined after
     /// processing the message.
-    pub fn id(&self) -> SendID {
+    pub fn id(&self) -> MessageID {
         let buf = self.encode_to_vec();
         let mut t = Transcript::new(b"flamevm.send.id");
         t.append_message(b"send", &buf);
         let mut h = [0u8; 32];
         t.challenge_bytes(b"id", &mut h);
-        SendID(h)
+        MessageID(h)
     }
 }
 

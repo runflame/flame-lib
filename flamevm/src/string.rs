@@ -7,6 +7,7 @@ use crate::int253::Int253;
 use readerwriter::Encodable;
 
 use crate::ops::Instruction;
+use crate::cell::Cell;
 
 /// Variable-length binary string with optional witness-bearing
 /// variants. See module docs for the design.
@@ -32,7 +33,7 @@ pub enum String {
     /// decodes via `Cell::decode` to closed commitments. Consumed
     /// by `op_input` via [`String::to_cell`], which moves the cell
     /// straight out of the box.
-    Cell(Box<crate::cell::Cell>),
+    Cell(Box<Cell>),
 }
 
 impl String {
@@ -70,7 +71,7 @@ impl String {
     /// before `op_input` to push a cell whose Token payloads still
     /// carry `Commitment::Open` quantities/flavors. The verifier-side
     /// equivalent is `String::Opaque(cell.to_bytes())`.
-    pub fn cell(c: crate::cell::Cell) -> String {
+    pub fn cell(c: Cell) -> String {
         String::Cell(Box::new(c))
     }
 
@@ -216,12 +217,12 @@ impl String {
     /// malformed bytes, trailing data, or any non-decodable variant.
     ///
     /// Used by `op_input`.
-    pub fn to_cell(self) -> Result<crate::cell::Cell, VMError> {
+    pub fn to_cell(self) -> Result<Cell, VMError> {
         match self {
             String::Cell(b) => Ok(*b),
             String::Opaque(data) => {
                 let mut reader: &[u8] = &data;
-                let cell = <crate::cell::Cell as readerwriter::Decodable>::decode(&mut reader)
+                let cell = <Cell as readerwriter::Decodable>::decode(&mut reader)
                     .map_err(|_| VMError::MalformedCellEncoding)?;
                 if !reader.is_empty() {
                     return Err(VMError::MalformedCellEncoding);
