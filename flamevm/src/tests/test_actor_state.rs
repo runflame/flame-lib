@@ -345,10 +345,10 @@ fn token_survives_load_save_roundtrip_exactly_once() {
                     assert_eq!(t.qty, Int253::from(5u64));
                     assert_eq!(t.flv, Int253::from(9u64));
                 }
-                other => panic!("token vanished or mutated: {other:?}"),
+                other => panic!("token vanished or mutated: {:?}", other),
             }
         }
-        other => panic!("unexpected state shape: {other:?}"),
+        other => panic!("unexpected state shape: {:?}", other),
     }
 }
 

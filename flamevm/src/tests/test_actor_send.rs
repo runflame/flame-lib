@@ -83,7 +83,7 @@ fn send_queues_message_and_emits_txentry() {
             assert_eq!(msg.payload.len(), 1);
             match &msg.payload[0] {
                 Value::Int253(i) => assert_eq!(*i, Int253::from(3u64)),
-                other => panic!("expected selector arg, got {other:?}"),
+                other => panic!("expected selector arg, got {:?}", other),
             }
         }
         _ => panic!("expected Send entry"),

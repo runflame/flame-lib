@@ -68,7 +68,8 @@ fn reserved_chain_info_opcodes_reject_at_dispatch() {
             .expect_err("reserved opcode must error");
         assert!(
             matches!(err, VMError::UnknownOpcode(b) if b == byte),
-            "0x{byte:02x} → {err:?}"
+            "0x{:02x} → {:?}",
+            byte, err
         );
     }
 }

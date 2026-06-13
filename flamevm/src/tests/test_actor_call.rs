@@ -198,7 +198,9 @@ fn reentrant_call_succeeds_when_state_not_held() {
     while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
 
     // A.method1 ran via the re-entry → its Data entry is in the txlog.
-    let logged = vm.txlog.iter().any(|e| matches!(e, crate::tx::TxEntry::Data(_)));
+    let logged = vm.txlog.iter().any(|e| -> bool {
+        matches!(e, crate::tx::TxEntry::Data(_))
+    });
     assert!(logged, "re-entrant A.method1 must have run (and logged)");
 }
 
@@ -291,7 +293,7 @@ fn call_refunds_leftover_gas_to_caller() {
     let remaining = vm.current_call.gas_limit - vm.current_call.gas_used;
     assert!(
         remaining > 1_000_000 - 100,
-        "leftover grant must be refunded; remaining = {remaining}"
+        "leftover grant must be refunded; remaining = {}", remaining
     );
 }
 
@@ -472,8 +474,8 @@ fn failed_call_burns_full_grant() {
     // Parent budget 1_000_000 (vm_for_actor): the full 5_000 grant is
     // burned (no refund on failure) plus a handful of own instructions.
     let remaining = vm.current_call.gas_limit - vm.current_call.gas_used;
-    assert!(remaining <= 1_000_000 - 5_000, "grant must not be refunded: {remaining}");
-    assert!(remaining > 1_000_000 - 5_100, "only the grant + own instrs spent: {remaining}");
+    assert!(remaining <= 1_000_000 - 5_000, "grant must not be refunded: {}", remaining);
+    assert!(remaining > 1_000_000 - 5_100, "only the grant + own instrs spent: {}", remaining);
 }
 
 /// The recursion cap binds at exactly MAX_CALL_DEPTH parents on the

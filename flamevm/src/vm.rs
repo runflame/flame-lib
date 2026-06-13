@@ -18,13 +18,8 @@ use crate::token::{flavor_from_actor, flavor_from_predicate};
 use crate::tx::TxEntry;
 use crate::{ClearToken, Dict, Int253, Merlin, Point, String, Value};
 use crate::ops::Instruction;
-
-// Re-export from canonical homes so vm.rs callers (notably the
-// test helpers, which inherit `super::super::*`) keep their
-// existing import shape. The types themselves live in `actor.rs`
-// and `send.rs`; vm.rs just plumbs them.
-pub use crate::actor::{ActorID, ActorRegistry};
-pub use crate::send::Message;
+use crate::actor::{ActorID, ActorRegistry};
+use crate::send::Message;
 
 /// Bitcoin BIP-65 convention threshold for distinguishing
 /// `TxHeader::locktime` as a block height vs. a Unix timestamp:
