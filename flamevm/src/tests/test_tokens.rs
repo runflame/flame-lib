@@ -408,7 +408,7 @@ fn issuepriv_prove_then_verify_end_to_end() {
         TEST_BLINDING_KEY,
     )
     .expect("scripts_only tree");
-    let cp = tree.callproof_for(0).expect("callproof for leaf 0");
+    let cp = tree.taproot_proof_for(0).expect("taproot_proof for leaf 0");
     let pred_point = tree.point;
 
     // Cell with empty payload — the witness rides on the open arg.

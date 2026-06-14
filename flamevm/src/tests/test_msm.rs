@@ -327,7 +327,7 @@ fn open_with_inner(inner: crate::program::Program) -> crate::program::Program {
         vec![inner_bytes.clone()],
         TEST_BLINDING_KEY,
     ).expect("scripts_only tree");
-    let cp = tree.callproof_for(0).expect("cp");
+    let cp = tree.taproot_proof_for(0).expect("cp");
     let pred_point = tree.point;
     let cell = Cell::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![]);
     let cell_bytes = encode_cell_to_bytes(&cell);

@@ -127,9 +127,9 @@ pub enum VMError {
     #[error("Item is not a Cell")]
     TypeNotCell,
 
-    /// This error occurs when a CallProof does not verify against the cell's predicate.
-    #[error("CallProof does not match the cell's predicate")]
-    CallProofMismatch,
+    /// This error occurs when a TaprootProof does not verify against the cell's predicate.
+    #[error("TaprootProof does not match the cell's predicate")]
+    TaprootProofMismatch,
 
     /// This error occurs when `cell` or `output` is invoked without a seeded anchor.
     #[error("No anchor available — input or seed required first")]
@@ -147,9 +147,9 @@ pub enum VMError {
     #[error("Item is not a Point")]
     TypeNotPoint,
 
-    /// This error occurs when a CallProof's wire pieces are malformed.
-    #[error("Malformed CallProof")]
-    MalformedCallProof,
+    /// This error occurs when a TaprootProof's wire pieces are malformed.
+    #[error("Malformed TaprootProof")]
+    MalformedTaprootProof,
 
     /// This error occurs when `PredicateTree::new` is called with zero programs.
     #[error("PredicateTree must have at least one program")]

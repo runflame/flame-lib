@@ -29,7 +29,7 @@ pub use actor::{
 };
 pub use address::Address;
 pub use send::{Message, MessageID};
-pub use cell::{CallProof, Cell, Predicate, PredicateTree};
+pub use cell::{TaprootProof, Cell, Predicate, PredicateTree};
 pub use constraints::{
     Commitment, CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,
 };

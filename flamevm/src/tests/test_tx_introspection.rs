@@ -113,7 +113,7 @@ fn newbytes_value_observable_inside_cell_open_frame() {
         .push_int(0u64)                                // payload count = 0
         .push_point(*pred_point.as_bytes())
         .cell();
-    p = push_callproof_to_program(p, &cp);
+    p = push_taproot_proof_to_program(p, &cp);
     let script = p
         .push_int(1024u64)                             // gas
         .push_int(777u64)                              // bytes

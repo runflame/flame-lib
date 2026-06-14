@@ -448,7 +448,7 @@ fn confidential_2_to_3_two_flavors() {
 ///
 /// Script shape (single flavor 0):
 ///
-///   pushstr <cell>; input(w); <callproof>; push:0; open
+///   pushstr <cell>; input(w); <taproot_proof>; push:0; open
 ///       → stack: [Token(10, 0)]
 ///   push:3; push:0; fee
 ///       → stack: [Token(10, 0), WideToken(-3, 0)]
@@ -489,7 +489,7 @@ fn confidential_1_to_1_with_fee() {
     // so the Token's open commitments survive into the CS.
     program = program.push_str(crate::String::cell(cell));
     program = program.input();
-    program = push_callproof_to_program(program, &cp);
+    program = push_taproot_proof_to_program(program, &cp);
     program = program
         .push_int(1024u64) // gas
         .push_int(1024u64) // bytes
@@ -704,7 +704,7 @@ fn confidential_with_fee_undersupply_rejected() {
     let mut program = Program::new();
     program = program.push_str(crate::String::cell(cell));
     program = program.input();
-    program = push_callproof_to_program(program, &cp);
+    program = push_taproot_proof_to_program(program, &cp);
     program = program
         .push_int(1024u64)
         .push_int(1024u64)

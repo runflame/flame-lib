@@ -133,7 +133,7 @@ Stack-only types (non-portable, never encoded on the wire):
 
 Every value has exactly one canonical wire byte sequence. The first byte is a type+width tag; within each type, width classes carve the value range into disjoint, offset-based sub-ranges so the encoder has no choice about which tag to use.
 
-**Group-element validation is lazy.** `Point` (`POINT_TAG`) and `Token` (`TOKEN_TAG`) bytes are accepted at decode **without** Ristretto decompression — they land as `Point::Opaque` / `Commitment::Closed` and are validated only at first cryptographic use (signature batch, `verify_callproof`, CS decompression), where an invalid element fails the proof. A structurally-invalid group element may therefore sit inside a committed Cell / actor-state / Send until used; this is deliberate (it preserves byte-identical prover/verifier round-tripping and keeps decode allocation-free), not a malleability hole — the 32 bytes are canonical, and any non-decompressable element is unusable. **Length-prefixed counts (list/dict/string payloads) are always bounded against remaining input before allocation** (`Cell::decode` payload count, `pushstr`/`ActorID` lengths), so a small hostile prefix cannot force a large allocation.
+**Group-element validation is lazy.** `Point` (`POINT_TAG`) and `Token` (`TOKEN_TAG`) bytes are accepted at decode **without** Ristretto decompression — they land as `Point::Opaque` / `Commitment::Closed` and are validated only at first cryptographic use (signature batch, `verify_taproot_proof`, CS decompression), where an invalid element fails the proof. A structurally-invalid group element may therefore sit inside a committed Cell / actor-state / Send until used; this is deliberate (it preserves byte-identical prover/verifier round-tripping and keeps decode allocation-free), not a malleability hole — the 32 bytes are canonical, and any non-decompressable element is unusable. **Length-prefixed counts (list/dict/string payloads) are always bounded against remaining input before allocation** (`Cell::decode` payload count, `pushstr`/`ActorID` lengths), so a small hostile prefix cannot force a large allocation.
 
 Tag namespace (one byte, 256 values total):
 
@@ -1114,21 +1114,21 @@ Same construction as [`cell`](#cell) but emits an `Output` effect into the txlog
 
 _cell internal_key neighbors position script gas bytes args… k_ → _results… k'_
 
-Verifies the Taproot call-proof against the cell's predicate:
+Verifies the Taproot proof against the cell's predicate:
 
 1. Pops `k` (Int253) and `args` (k portable values).
 2. Pops `bytes` and `gas` as `Int253` (vbyte and gas allotments).
 3. Pops `script` (String) — the revealed leaf bytes (or witness-bearing `String::Script` on the prover).
 4. Pops `position` (String, bit-packed path), `neighbors` (list-Dict of 32-byte Strings, leaf-to-root), `internal_key` (Point).
 5. Pops `cell`.
-6. Constructs a `CallProof` and verifies `predicate.verify_callproof` — checks the Merkle root and the tweaked-key relation `P = X + h(X, M)·B`.
+6. Constructs a `TaprootProof` and verifies `predicate.verify_taproot_proof` — checks the Merkle root and the tweaked-key relation `P = X + h(X, M)·B`.
 7. On success, creates a new isolated `CallKind::CellOpen { anchor: Anchor(cell.id()), predicate: cell.predicate, external_context }` frame with the popped `gas` / `bytes` allotments, pours the cell's payload then the `args` onto the new frame's stack, and enters the unlocked `script`. The tx's `last_anchor` is **not** touched — `op_open` is intra-tx and doesn't mint anything cross-tx. The `CellOpen.anchor` field is metadata (a reference to the opened cell's id), not a separate anchor slot.
 
 The new frame has **no actor identity** by default — `op_load`/`op_save`/`op_call`/`op_send` all error from inside. The frame inherits CS access from the caller's context (external root → CS available; internal → not). Results return via `return k'`; leftover gas refunds to the parent.
 
 Position bits are read LSB-first within byte, zero-extended past the end; bit `0` = current hash on left, neighbor on right; bit `1` = swap.
 
-Hard-fails: `CallProofMismatch`, `MalformedCallProof`, plus the type errors from each pop.
+Hard-fails: `TaprootProofMismatch`, `MalformedTaprootProof`, plus the type errors from each pop.
 
 ### send
 

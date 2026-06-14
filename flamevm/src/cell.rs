@@ -1,4 +1,4 @@
-//! Cells, predicates, and call-proofs.
+//! Cells, predicates, and taproot-proofs.
 
 use bulletproofs::PedersenGens;
 use core::any::Any;
@@ -23,7 +23,7 @@ pub type CellID = [u8; 32];
 // ── Predicate ────────────────────────────────────────────────────
 
 /// Prover-side metadata attached to a [`Predicate`]. The witness
-/// helps construct call-proofs, signatures, and re-derive the
+/// helps construct taproot-proofs, signatures, and re-derive the
 /// predicate's key on the prover side; it never crosses the wire.
 ///
 /// Today the only impl is [`PredicateTree`] — the Taproot merkle
@@ -116,7 +116,7 @@ impl fmt::Debug for Predicate {
 /// merkle proof cannot tell program leaves apart from blinding leaves.
 #[derive(Clone, Debug)]
 pub enum PredicateLeaf {
-    /// A script program that, if matched by a `CallProof`, unlocks the cell.
+    /// A script program that, if matched by a `TaprootProof`, unlocks the cell.
     Program(Vec<u8>),
     /// A 32-byte random sibling that hides its program partner's position.
     Blinding([u8; 32]),
@@ -131,7 +131,7 @@ pub enum PredicateLeaf {
 /// the `blinding_key` seed passed to `new`, so the on-tree position of
 /// a program within its pair is uniformly random. The seed itself is
 /// not retained — once the leaves are built, the seed is no longer
-/// needed for [`point`](Self::point) or [`callproof_for`](Self::callproof_for).
+/// needed for [`point`](Self::point) or [`taproot_proof_for`](Self::taproot_proof_for).
 ///
 /// `point` caches `X + H(X, M) · B` so subsequent reads are O(1).
 /// `flamevm` reads it via `Predicate::to_point()` from the per-cell
@@ -205,7 +205,7 @@ impl Predicate {
     ///
     /// Used by prover-side code that needs the concrete witness:
     /// e.g. `predicate.witness_as::<PredicateTree>()` to construct
-    /// a `CallProof`.
+    /// a `TaprootProof`.
     pub fn witness_as<W: PredicateWitness>(&self) -> Option<&W> {
         self.witness.as_ref()?.as_any().downcast_ref::<W>()
     }
@@ -248,14 +248,14 @@ impl Predicate {
         PedersenGens::default().B_blinding.compress()
     }
 
-    /// Verifies a `CallProof` against this predicate. On success returns
+    /// Verifies a `TaprootProof` against this predicate. On success returns
     /// the unlocked program bytes (the leaf the proof opens). On failure
     /// (path mismatch, decompression failure, etc.) returns
-    /// `VMError::CallProofMismatch` — a hard error: cell-open
+    /// `VMError::TaprootProofMismatch` — a hard error: cell-open
     /// failures must not be recoverable.
-    pub fn verify_callproof<'a>(
+    pub fn verify_taproot_proof<'a>(
         &self,
-        cp: &'a CallProof,
+        cp: &'a TaprootProof,
     ) -> Result<&'a [u8], VMError> {
         // Reconstruct the tweaked point P' = X + H(X, M)·B from the proof
         // and require it to equal the predicate's opaque point.
@@ -265,10 +265,10 @@ impl Predicate {
         let x_point = cp
             .internal_key
             .decompress()
-            .ok_or(VMError::CallProofMismatch)?;
+            .ok_or(VMError::TaprootProofMismatch)?;
         let p_prime = x_point + RISTRETTO_BASEPOINT_TABLE * &h;
         if p_prime.compress() != self.to_point() {
-            return Err(VMError::CallProofMismatch);
+            return Err(VMError::TaprootProofMismatch);
         }
         Ok(&cp.program)
     }
@@ -280,7 +280,7 @@ impl PredicateTree {
     /// `internal_key = None` substitutes `Predicate::unspendable_key()`
     /// (the secondary Pedersen generator `B_blinding`), producing a
     /// program-only predicate that nobody can sign for — the only way to
-    /// satisfy it is via a `CallProof` against one of the embedded leaves.
+    /// satisfy it is via a `TaprootProof` against one of the embedded leaves.
     ///
     /// `blinding_key` seeds a deterministic per-program blinding factor
     /// so the same `(internal_key, programs, blinding_key)` triple always
@@ -314,7 +314,7 @@ impl PredicateTree {
 
     /// Convenience: builds a tree with the unspendable internal key
     /// (`Predicate::unspendable_key`), so the predicate can only be
-    /// satisfied via a `CallProof` against one of the embedded programs.
+    /// satisfied via a `TaprootProof` against one of the embedded programs.
     /// Equivalent to `PredicateTree::new(None, programs, blinding_key)`.
     pub fn scripts_only(
         programs: Vec<Vec<u8>>,
@@ -347,14 +347,14 @@ impl PredicateTree {
         merkle_root_of_leaves(&self.leaves)
     }
 
-    /// Builds a `CallProof` that opens the `program_index`-th program leaf.
+    /// Builds a `TaprootProof` that opens the `program_index`-th program leaf.
     /// Errors if `program_index` is beyond the number of programs.
     ///
     /// The returned proof's `neighbors` are leaf-to-root; `position` is a
     /// bit-packed string where bit `i` (LSB-first within byte) describes
     /// step `i` of the walk-up: `0` means "current hash on left / neighbor
     /// on right", `1` means "swap".
-    pub fn callproof_for(&self, program_index: usize) -> Result<CallProof, VMError> {
+    pub fn taproot_proof_for(&self, program_index: usize) -> Result<TaprootProof, VMError> {
         let leaf_index = self.program_leaf_index(program_index)?;
         let program = match &self.leaves[leaf_index] {
             PredicateLeaf::Program(p) => p.clone(),
@@ -381,7 +381,7 @@ impl PredicateTree {
         }
         neighbors.reverse();
         bits.reverse();
-        Ok(CallProof {
+        Ok(TaprootProof {
             internal_key: self.internal_key,
             neighbors,
             position: pack_position_bits(&bits),
@@ -464,7 +464,7 @@ fn pack_position_bits(bits: &[u8]) -> Vec<u8> {
     out
 }
 
-// ── CallProof ────────────────────────────────────────────────────
+// ── TaprootProof ────────────────────────────────────────────────────
 
 /// Taproot path proof + the leaf program being unlocked.
 ///
@@ -474,7 +474,7 @@ fn pack_position_bits(bits: &[u8]) -> Vec<u8> {
 /// 32-byte strings; the `position` is a bit-packed string where bit `i`
 /// indicates the side (0 = left, 1 = right) of the i-th neighbor.
 #[derive(Clone, Debug)]
-pub struct CallProof {
+pub struct TaprootProof {
     /// Internal key `X` of the Taproot construction.
     pub internal_key: CompressedRistretto,
     /// Sibling hashes along the merkle path, leaf-to-root.
@@ -647,7 +647,7 @@ fn leaf_hash(leaf: &PredicateLeaf) -> [u8; 32] {
 }
 
 /// Merkle leaf hash for a program leaf — also what the verifier
-/// computes from `CallProof::program` before walking up.
+/// computes from `TaprootProof::program` before walking up.
 fn program_leaf_hash(program: &[u8]) -> [u8; 32] {
     let mut t = Transcript::new(b"flamevm.merkle.leaf");
     t.append_message(b"program", program);
@@ -679,14 +679,14 @@ fn merkle_node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 /// position bitstring (bit i: `0` → current on left / neighbor on right,
 /// `1` → swap; LSB-first within byte). The position bitstring must
 /// cover all neighbors — more position bytes than required (up to byte
-/// alignment) is fine; fewer is a `MalformedCallProof`.
+/// alignment) is fine; fewer is a `MalformedTaprootProof`.
 fn merkle_walk_up(
     mut hash: [u8; 32],
     neighbors: &[[u8; 32]],
     position: &[u8],
 ) -> Result<[u8; 32], VMError> {
     if neighbors.len() > position.len().saturating_mul(8) {
-        return Err(VMError::MalformedCallProof);
+        return Err(VMError::MalformedTaprootProof);
     }
     for (i, neighbor) in neighbors.iter().enumerate() {
         let bit = get_bit(position, i);

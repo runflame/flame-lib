@@ -11,7 +11,7 @@ use readerwriter::{Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, 
 
 use crate::errors::VMError;
 use crate::tx::TxHeader;
-use crate::cell::{CallProof, Cell, CellID, Predicate};
+use crate::cell::{TaprootProof, Cell, CellID, Predicate};
 use crate::constraints::Commitment;
 use crate::fees::CheckedFee;
 use crate::token::{flavor_from_actor, flavor_from_predicate};
@@ -2202,8 +2202,8 @@ impl VM {
         Ok(values)
     }
 
-    // (CallProof is now constructed from distinct stack pieces; see
-    // `callproof_from_stack_pieces` below `op_open`. The earlier packed
+    // (TaprootProof is now constructed from distinct stack pieces; see
+    // `taproot_proof_from_stack_pieces` below `op_open`. The earlier packed
     // bag-of-bytes layout was replaced per Architect's response on todo
     /// Merlin message for `signcall`: binds the signature to the
     /// program bytes only. Programs add further context (anchor,
@@ -2260,7 +2260,7 @@ impl VM {
 
     /// _cell ik nbrs pos script gas bytes args… k_ **open** → _results… k'_
     ///
-    /// Verifies the call-proof, then enters the unlocked script in an
+    /// Verifies the taproot-proofs, then enters the unlocked script in an
     /// isolated `CellOpen` frame via [`enter_cell_open_frame`].
     fn op_open(&mut self) -> Result<(), VMError> {
         let k = self.pop_byte_count(usize::MAX)?;
@@ -2276,13 +2276,13 @@ impl VM {
         let internal_key = self.pop_value()?.to_point()?;
         let cell = self.pop_value()?.to_cell()?;
 
-        let cp = Self::callproof_from_stack_pieces(
+        let cp = Self::taproot_proof_from_stack_pieces(
             internal_key,
             &neighbors,
             &position,
             &prog,
         )?;
-        let _ = cell.predicate.verify_callproof(&cp)?;
+        let _ = cell.predicate.verify_taproot_proof(&cp)?;
         // `Script` keeps prover witnesses inline; `Opaque` streams bytes
         // (no parse) on the verifier. See ADR 0015.
         let code = prog.into_code()?;
@@ -2384,32 +2384,32 @@ impl VM {
         Ok((gas, bytes))
     }
 
-    /// Builds a `CallProof` from the four stack-popped pieces. `neighbors`
+    /// Builds a `TaprootProof` from the four stack-popped pieces. `neighbors`
     /// must be a list-style Dict of 32-byte Strings.
-    fn callproof_from_stack_pieces(
+    fn taproot_proof_from_stack_pieces(
         internal_key: Point,
         neighbors: &Dict,
         position: &String,
         program: &String,
-    ) -> Result<CallProof, VMError> {
+    ) -> Result<TaprootProof, VMError> {
         let mut n_vec = Vec::with_capacity(neighbors.len());
         for (i, (k, v)) in neighbors.entries().enumerate() {
             if *k != Int253::from(i as u64) {
-                return Err(VMError::MalformedCallProof);
+                return Err(VMError::MalformedTaprootProof);
             }
             match v {
                 Value::String(s) => {
                     if s.len() != 32 {
-                        return Err(VMError::MalformedCallProof);
+                        return Err(VMError::MalformedTaprootProof);
                     }
                     let mut h = [0u8; 32];
                     h.copy_from_slice(&s.to_bytes_vec());
                     n_vec.push(h);
                 }
-                _ => return Err(VMError::MalformedCallProof),
+                _ => return Err(VMError::MalformedTaprootProof),
             }
         }
-        Ok(CallProof {
+        Ok(TaprootProof {
             internal_key: internal_key.to_compressed(),
             neighbors: n_vec,
             position: position.to_bytes_vec(),

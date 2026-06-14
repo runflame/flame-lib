@@ -151,7 +151,7 @@ fn output_opcode_emits_to_txlog_without_pushing() {
 }
 
 #[test]
-fn open_with_valid_callproof_runs_program() {
+fn open_with_valid_taproot_proof_runs_program() {
     // Cell payload: 5. Inner program: drop, push:0, return — drains
     // the payload inside the isolated CellOpen frame and returns 0
     // items to parent (ADR 0013). On clean return parent's stack
@@ -165,7 +165,7 @@ fn open_with_valid_callproof_runs_program() {
         .push_int(1u64)                                // count
         .push_point(*pred_point.as_bytes())
         .cell();
-    program = push_callproof_to_program(program, &cp);
+    program = push_taproot_proof_to_program(program, &cp);
     let script = program
         .push_int(1024u64)                             // gas
         .push_int(1024u64)                             // bytes
@@ -183,11 +183,11 @@ fn open_with_valid_callproof_runs_program() {
 
 #[test]
 fn open_with_wrong_program_hard_fails() {
-    // Predicate commits to one leaf; callproof claims a different one.
+    // Predicate commits to one leaf; taproot_proof claims a different one.
     let real_program = Program::new().drop_().push_int(0u64).return_().to_bytecode();
     let fake_program = Program::new().nop().push_int(0u64).return_().to_bytecode();
     let (tree, _real_cp) = build_predicate_with_program(&real_program, 7);
-    let cp = CallProof {
+    let cp = TaprootProof {
         internal_key: tree.internal_key,
         neighbors: Vec::new(),
         position: Vec::new(),
@@ -200,7 +200,7 @@ fn open_with_wrong_program_hard_fails() {
         .push_int(1u64)
         .push_point(*pred_point.as_bytes())
         .cell();
-    program = push_callproof_to_program(program, &cp);
+    program = push_taproot_proof_to_program(program, &cp);
     let script = program
         .push_int(1024u64)
         .push_int(1024u64)
@@ -211,20 +211,20 @@ fn open_with_wrong_program_hard_fails() {
     vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
-        VMError::CallProofMismatch
+        VMError::TaprootProofMismatch
     ));
 }
 
-/// Prover-side: the unlock script pushed as the callproof's
+/// Prover-side: the unlock script pushed as the taproot_proof's
 /// `program` component can be a `String::Script(instrs)` carrying
-/// witnesses. `op_open` verifies the callproof against the cell's
+/// witnesses. `op_open` verifies the taproot_proof against the cell's
 /// predicate (the bytes must match the leaf stored in the
 /// predicate tree), then uses `program_str.to_instructions()` so
 /// the witness slots survive into the new Run. End-to-end via
 /// Prover::prove → Verifier::verify.
 ///
 /// Regression guard for the witness-erasing path that existed
-/// before `op_open` switched from re-parsing `verify_callproof`'s
+/// before `op_open` switched from re-parsing `verify_taproot_proof`'s
 /// returned bytes to using the stack `program_str` directly.
 #[test]
 fn open_preserves_alloc_witnesses_via_script_string() {
@@ -250,7 +250,7 @@ fn open_preserves_alloc_witnesses_via_script_string() {
         TEST_BLINDING_KEY,
     )
     .expect("scripts_only tree");
-    let cp = tree.callproof_for(0).expect("callproof for leaf 0");
+    let cp = tree.taproot_proof_for(0).expect("taproot_proof for leaf 0");
     let pred_point = tree.point;
 
     // Construct the input cell with an empty payload — the witness
@@ -334,7 +334,7 @@ fn open_passes_args_after_payload() {
         .push_int(1u64)                                // count
         .push_point(*pred_point.as_bytes())
         .cell();
-    program = push_callproof_to_program(program, &cp);
+    program = push_taproot_proof_to_program(program, &cp);
     let script = program
         .push_int(1024u64)                             // gas
         .push_int(1024u64)                             // bytes
@@ -393,7 +393,7 @@ fn scripts_only_predicate_opens_via_program_path() {
         TEST_BLINDING_KEY,
     )
     .unwrap();
-    let cp = tree.callproof_for(0).unwrap();
+    let cp = tree.taproot_proof_for(0).unwrap();
     let pred_point = tree.point;
 
     let mut p = Program::new()
@@ -401,7 +401,7 @@ fn scripts_only_predicate_opens_via_program_path() {
         .push_int(1u64)                                // count = 1
         .push_point(*pred_point.as_bytes())
         .cell();
-    p = push_callproof_to_program(p, &cp);
+    p = push_taproot_proof_to_program(p, &cp);
     let script = p
         .push_int(1024u64)                             // gas
         .push_int(1024u64)                             // bytes
@@ -443,7 +443,7 @@ fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
             .push_int(payload_count as u64)
             .push_point(*pred_point.as_bytes())
             .cell();
-        p = push_callproof_to_program(p, &cp);
+        p = push_taproot_proof_to_program(p, &cp);
         let script = p
             .push_int(1024u64)
             .push_int(1024u64)
@@ -469,7 +469,7 @@ fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
 
 #[test]
 fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
-    // Build a 3-leaf tree. Construct a CallProof claiming program[0]
+    // Build a 3-leaf tree. Construct a TaprootProof claiming program[0]
     // but with the path that opens program[1]. Verification must fail.
     let leaf = |drops: usize| -> Vec<u8> {
         let mut p = Program::new();
@@ -480,7 +480,7 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
     let (tree, valid_cp_for_1) =
         build_multi_leaf_predicate(programs.clone(), 1, 7);
     // Forge: use program[0]'s bytes but program[1]'s path/neighbors.
-    let forged = CallProof {
+    let forged = TaprootProof {
         internal_key: valid_cp_for_1.internal_key,
         neighbors: valid_cp_for_1.neighbors.clone(),
         position: valid_cp_for_1.position.clone(),
@@ -493,7 +493,7 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
         .push_int(1u64)
         .push_point(*pred_point.as_bytes())
         .cell();
-    p = push_callproof_to_program(p, &forged);
+    p = push_taproot_proof_to_program(p, &forged);
     let script = p
         .push_int(1024u64)
         .push_int(1024u64)
@@ -504,12 +504,12 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
     vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
-        VMError::CallProofMismatch
+        VMError::TaprootProofMismatch
     ));
 }
 
 #[test]
-fn callproof_for_out_of_range_index_errors() {
+fn taproot_proof_for_out_of_range_index_errors() {
     let secret = Scalar::from(1u64);
     let ik = (RISTRETTO_BASEPOINT_TABLE * &secret).compress();
     let tree = PredicateTree::new(
@@ -519,7 +519,7 @@ fn callproof_for_out_of_range_index_errors() {
     )
     .unwrap();
     assert!(matches!(
-        tree.callproof_for(5).unwrap_err(),
+        tree.taproot_proof_for(5).unwrap_err(),
         VMError::ProgramIndexOutOfRange
     ));
 }
@@ -953,7 +953,7 @@ fn external_tx_one_input_one_output_via_signtx() {
 fn external_tx_two_inputs_two_outputs_via_open() {
 
     // External tx consumes two distinct cells via `open` (each
-    // unlocked by a valid Taproot CallProof against its predicate
+    // unlocked by a valid Taproot TaprootProof against its predicate
     // tree), then emits two fresh output cells. No `signtx` /
     // `signcall` here, so `deferred_sigs` stays empty.
     //
@@ -984,7 +984,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     //   ┌─── consume cell 1 ─────────────────────────────────┐
     //   │ pushstr <cell1_bytes>                              │
     //   │ input                — pops String → pushes Cell1  │
-    //   │ <callproof1 pieces>                                │
+    //   │ <taproot_proof1 pieces>                                │
     //   │ push:0               — k = 0 args                  │
     //   │ open                 — verifies cp1, pours [11],   │
     //   │                       enters Run over `drop`;      │
@@ -993,7 +993,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     //   ┌─── consume cell 2 ─────────────────────────────────┐
     //   │ pushstr <cell2_bytes>                              │
     //   │ input                                              │
-    //   │ <callproof2 pieces>                                │
+    //   │ <taproot_proof2 pieces>                                │
     //   │ push:0                                             │
     //   │ open                                               │
     //   └────────────────────────────────────────────────────┘
@@ -1009,13 +1009,13 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     let mut p = Program::new()
         .push_str(String::from(cell1_bytes))
         .input();
-    p = push_callproof_to_program(p, &cp1);
+    p = push_taproot_proof_to_program(p, &cp1);
     p = p.push_int(1024u64).push_int(1024u64).push_int(0u64).open()
         .verify().drop_();   // verify pops success marker; drop discards count
 
     // Consume cell 2
     p = p.push_str(String::from(cell2_bytes)).input();
-    p = push_callproof_to_program(p, &cp2);
+    p = push_taproot_proof_to_program(p, &cp2);
     p = p.push_int(1024u64).push_int(1024u64).push_int(0u64).open()
         .verify().drop_();
 
@@ -1110,7 +1110,7 @@ fn op_open_selfid_errors_no_actor_context() {
         .push_int(1u64)                                // count
         .push_point(*pred_point.as_bytes())
         .cell();
-    p = push_callproof_to_program(p, &cp);
+    p = push_taproot_proof_to_program(p, &cp);
     let script = p
         .push_int(1024u64).push_int(1024u64).push_int(0u64)
         .open()
@@ -1135,7 +1135,7 @@ fn op_open_return_arity_mismatch_errors() {
         .push_int(0u64)                                // payload count = 0
         .push_point(*pred_point.as_bytes())
         .cell();
-    p = push_callproof_to_program(p, &cp);
+    p = push_taproot_proof_to_program(p, &cp);
     let script = p
         .push_int(1024u64).push_int(1024u64).push_int(0u64)
         .open()

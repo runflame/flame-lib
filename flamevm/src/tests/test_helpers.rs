@@ -274,11 +274,11 @@ pub(crate) fn hex_to_bytes(h: &str) -> Vec<u8> {
 pub(crate) const TEST_BLINDING_KEY: [u8; 32] = [0u8; 32];
 
 /// Helper: builds a single-leaf `PredicateTree` from a program and a
-/// known internal-key scalar, plus the `CallProof` that opens it.
+/// known internal-key scalar, plus the `TaprootProof` that opens it.
 pub(crate) fn build_predicate_with_program(
     program: &[u8],
     internal_secret: u64,
-) -> (PredicateTree, CallProof) {
+) -> (PredicateTree, TaprootProof) {
     let secret = Scalar::from(internal_secret);
     let x_point = RISTRETTO_BASEPOINT_TABLE * &secret;
     let internal_key = x_point.compress();
@@ -288,17 +288,17 @@ pub(crate) fn build_predicate_with_program(
         TEST_BLINDING_KEY,
     )
     .unwrap();
-    let cp = tree.callproof_for(0).unwrap();
+    let cp = tree.taproot_proof_for(0).unwrap();
     (tree, cp)
 }
 
 /// Helper: builds a `PredicateTree` with multiple programs and the
-/// `CallProof` that opens the `program_index`-th one.
+/// `TaprootProof` that opens the `program_index`-th one.
 pub(crate) fn build_multi_leaf_predicate(
     programs: Vec<Vec<u8>>,
     program_index: usize,
     internal_secret: u64,
-) -> (PredicateTree, CallProof) {
+) -> (PredicateTree, TaprootProof) {
     let secret = Scalar::from(internal_secret);
     let x_point = RISTRETTO_BASEPOINT_TABLE * &secret;
     let internal_key = x_point.compress();
@@ -308,7 +308,7 @@ pub(crate) fn build_multi_leaf_predicate(
         TEST_BLINDING_KEY,
     )
     .unwrap();
-    let cp = tree.callproof_for(program_index).unwrap();
+    let cp = tree.taproot_proof_for(program_index).unwrap();
     (tree, cp)
 }
 
@@ -640,7 +640,7 @@ pub(crate) fn build_confidential_nm_program(
 ) -> Program {
     let mut program = Program::new();
 
-    //                    callproof pieces + push:0 + open. ──
+    //                    taproot_proof pieces + push:0 + open. ──
     for inp in inputs {
         let (cell, cp) = build_input_cell(inp);
         // pushstr String::Cell(c) — prover-side witness carrier
@@ -648,8 +648,8 @@ pub(crate) fn build_confidential_nm_program(
         // The verifier-side equivalent is `String::from(cell.to_bytes())`.
         program = program.push_str(crate::String::cell(cell));
         program = program.input();
-        // callproof pieces.
-        program = push_callproof_to_program(program, &cp);
+        // taproot_proof pieces.
+        program = push_taproot_proof_to_program(program, &cp);
         // gas/bytes operands (generous), then push:0 args, open.
         // After open, the parent stack has [Token, k=1, success=1]:
         // verify pops the success marker (hard-fail if 0), drop
@@ -735,11 +735,11 @@ pub(crate) fn open_commitments_for_output(
     (q, f)
 }
 
-/// Like `push_callproof_pieces` but emits Instructions into a
+/// Like `push_taproot_proof_pieces` but emits Instructions into a
 /// Program (so the prover keeps witness-bearing variants).
-pub(crate) fn push_callproof_to_program(
+pub(crate) fn push_taproot_proof_to_program(
     mut program: Program,
-    cp: &CallProof,
+    cp: &TaprootProof,
 ) -> Program {
     program = program.push_point(*cp.internal_key.as_bytes());
     // Neighbors as a list-style Dict: for each neighbor, push
@@ -758,7 +758,7 @@ pub(crate) fn push_callproof_to_program(
     program
 }
 
-/// Build the input cell + the matching `CallProof` for an input
+/// Build the input cell + the matching `TaprootProof` for an input
 /// spec. Used by both `build_confidential_nm_program` (to
 /// produce the cell bytes pushed onto the stack) and
 /// `assert_nm_txlog` (to compute the expected `cell_id` for the
@@ -772,7 +772,7 @@ pub(crate) fn push_callproof_to_program(
 /// harness would only exercise the "all inputs locked under
 /// the same predicate" shape, which doesn't match real
 /// transactions where each input comes from its own keypair.
-pub(crate) fn build_input_cell(inp: &NMInputSpec) -> (Cell, CallProof) {
+pub(crate) fn build_input_cell(inp: &NMInputSpec) -> (Cell, TaprootProof) {
     let (q_open, f_open) = open_commitments(inp);
     let token = crate::Token::new(q_open, f_open);
     // Leaf script `push:1, return` — under ADR 0013 the opened cell
@@ -784,7 +784,7 @@ pub(crate) fn build_input_cell(inp: &NMInputSpec) -> (Cell, CallProof) {
         input_blinding_for(inp),
     )
     .expect("scripts_only tree builds");
-    let cp = tree.callproof_for(0).expect("callproof for leaf 0");
+    let cp = tree.taproot_proof_for(0).expect("taproot_proof for leaf 0");
     let pred_point = tree.point;
     let cell = Cell::new(
         Predicate::opaque(pred_point),
