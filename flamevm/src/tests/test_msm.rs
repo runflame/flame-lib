@@ -321,7 +321,7 @@ fn verify_msm_in_internal_context_rejected() {
 /// Builds an outer program that consumes a cell (to seed the anchor)
 /// then opens it via the script-leaf path, with `inner` as the leaf
 /// program. Returns a ScriptBuilder ready for `Prover::prove`.
-fn open_with_inner(inner: crate::program::ScriptBuilder) -> crate::program::ScriptBuilder {
+fn open_with_inner(inner: crate::script::ScriptBuilder) -> crate::script::ScriptBuilder {
     let inner_bytes = inner.to_bytecode();
     let tree = crate::cell::PredicateTree::scripts_only(
         vec![inner_bytes.clone()],

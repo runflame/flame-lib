@@ -19,7 +19,7 @@ fn shared_bp_gens() -> &'static BulletproofGens {
 }
 
 use crate::errors::VMError;
-use crate::program::ScriptBuilder;
+use crate::script::ScriptBuilder;
 use crate::tx::TxHeader;
 use crate::vm::{Delegate, TxResult, VM};
 

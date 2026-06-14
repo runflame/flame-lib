@@ -18,7 +18,7 @@ use crate::token::{flavor_from_actor, flavor_from_predicate};
 use crate::tx::TxEntry;
 use crate::{Token, ClearToken, Dict, Int253, Merlin, Point, String, Value};
 use crate::ops::Instruction;
-use crate::program::Script;
+use crate::script::Script;
 use crate::actor::{ActorID, ActorRegistry};
 use crate::send::Message;
 
@@ -562,7 +562,7 @@ impl VM {
     /// (with witnesses inline on the prover side).
     pub(crate) fn run<D: Delegate>(
         header: TxHeader,
-        program: crate::program::ScriptBuilder,
+        program: crate::script::ScriptBuilder,
         gas_limit: u64,
         mem_limit: u64,
         delegate: &mut D,

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::ActorRegistry;
 use crate::errors::VMError;
-use crate::program::ScriptBuilder;
+use crate::script::ScriptBuilder;
 use crate::prover::Prover;
 use crate::send::Message;
 use crate::verifier::Verifier;
