@@ -13,33 +13,33 @@ semantics live in `spec.md` and the ADRs.
 ## Layer overview
 
 ```
-                ┌─────────────────────────────────────────────┐
+                ┌──────────────────────────────────────────────┐
   execution     │  VM · CallFrame · CallKind · Code · Delegate │
                 │  Prover · Verifier · InternalDelegate        │
-                └───────────────┬─────────────────────────────┘
+                └───────────────┬──────────────────────────────┘
                                 │ drives
-                ┌───────────────▼─────────────────────────────┐
+                ┌───────────────▼──────────────────────────────┐
   program       │  Program · ProgramItem · Instruction         │
-                └───────────────┬─────────────────────────────┘
+                └───────────────┬──────────────────────────────┘
                                 │ operates on
-                ┌───────────────▼─────────────────────────────┐
+                ┌───────────────▼──────────────────────────────┐
   value         │  Value  ── the stack element union           │
-                └───────────────┬─────────────────────────────┘
-       ┌────────────────────────┼───────────────────────────────────┐
-  data │ Int253 String Dict Point Merlin                             │
-  linear│ Token WideToken ClearToken Cell                            │
-  cs   │ Variable Expression Constraint Commitment MultiscalarMul    │
-                └───────────────┬─────────────────────────────┘
+                └───────────────┬──────────────────────────────┘
+         ┌──────────────────────┼───────────────────────────────────────────┐
+  data   │ Int253 · String · Dict · Point · Merlin                          │
+  linear │ Token · WideToken · ClearToken · Cell                            │
+  cs     │ Variable · Expression · Constraint · Commitment · MultiscalarMul │
+         └──────────────────────┬───────────────────────────────────────────┘
                                 │ committed/produced by
-                ┌───────────────▼─────────────────────────────┐
+                ┌───────────────▼───────────────────────────────┐
   effects/tx    │ TxEntry · TxLog · TxID · TxResult · TxHeader  │
                 │ ExternalTx · UnsignedTx · InternalTx · Message│
-                └───────────────┬─────────────────────────────┘
+                └───────────────┬───────────────────────────────┘
                                 │ persisted via
-                ┌───────────────▼─────────────────────────────┐
-  storage       │ ActorID · Actor · ActorRegistry · VbytePool  │
-                │ Env                                          │
-                └─────────────────────────────────────────────┘
+                ┌───────────────▼─────────────────┐
+  storage       │ ActorID · Actor · ActorRegistry │
+                │ VbytePool · Env                 │
+                └─────────────────────────────────┘
   support       errors::VMError · fees::CheckedFee · Address · encoding fns
 ```
 
@@ -86,9 +86,9 @@ discipline.
 ```
 String ─┬─ Opaque(bytes)
         ├─ Scalar(Int253)
-        ├─ Point(Point) ───────► Point
+        ├─ Point(Point) ───────────► Point
         ├─ Commitment(Commitment) ─► Commitment
-        └─ Predicate(Predicate) ──► Predicate     (witness-bearing; verifier sees Opaque)
+        └─ Predicate(Predicate) ───► Predicate     (witness-bearing; verifier sees Opaque)
 
 Point ──┬─ Opaque(CompressedRistretto)
         ├─ Commitment(Box<Commitment>) ─► Commitment
@@ -99,11 +99,11 @@ Point ──┬─ Opaque(CompressedRistretto)
 
 ## 3. Linear token types (`token.rs`)
 
-| Type | Fields | Notes |
-|---|---|---|
-| `Token` | `qty: Commitment`, `flv: Commitment` | Confidential bearer asset (range-proven at construction). |
-| `WideToken` | `spacesuit::AllocatedValue` | Non-portable intermediate (qty may be negative). |
-| `ClearToken` | `qty: Int253`, `flv: Int253` | Cleartext token. |
+| Type         | Fields                               | Notes   |
+|--------------|--------------------------------------|---------|
+| `Token`      | `qty: Commitment`, `flv: Commitment` | Confidential bearer asset (range-proven at construction). |
+| `WideToken`  | `spacesuit::AllocatedValue`          | Non-portable intermediate (qty may be negative). |
+| `ClearToken` | `qty: Int253`, `flv: Int253`         | Cleartext token. |
 
 Free fn `flavor_from_actor(...)` derives a flavor scalar. All three are linear
 (non-copyable); `Token`/non-negative `ClearToken` are portable.
@@ -151,10 +151,10 @@ the proof system.
 
 ## 5. Cells & predicates (`cell.rs`)
 
-| Type | Fields / depends on |
-|---|---|
-| `Cell` | `predicate: Predicate`, `anchor: Anchor`, `payload: Vec<Value>` |
-| `Predicate` | `point: CompressedRistretto`, `witness: Option<Box<dyn PredicateWitness>>` |
+| Type                       | Fields / depends on |
+|----------------------------|---|
+| `Cell`                     | `predicate: Predicate`, `anchor: Anchor`, `payload: Vec<Value>` |
+| `Predicate`                | `point: CompressedRistretto`, `witness: Option<Box<dyn PredicateWitness>>` |
 | `PredicateWitness` (trait) | `to_point()`, `clone_witness()`, `as_any()` |
 | `PredicateTree` (impls trait) | `internal_key`, `leaves: Vec<PredicateLeaf>`, cached `point` |
 | `PredicateLeaf` | `Program(Vec<u8>)` · `Blinding([u8;32])` |
