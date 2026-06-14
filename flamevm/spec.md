@@ -37,7 +37,7 @@ Internal transactions do not have a pre-determined effect and therefore do not s
 
 Like external, internal transactions produce effects:
 
-1. `Receive(SendID)` (txlog variant `TxEntry::Receive`) — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating `SendID` (canonical 32-byte hash of the whole Send: anchor, target, caller, payload, gas, vbytes, refund predicate — analogous to `CellID` for cells) into the Internal TxID merkle root. Symmetric with `Input` for external transactions. The message **payload is delivered onto the recv frame's stack** in payload order before code runs — symmetric with `op_call` pushing its args; the dispatch selector (ADR 0020) rides as the topmost payload arg.
+1. `Receive(MessageID)` (txlog variant `TxEntry::Receive`) — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating `MessageID` (canonical 32-byte hash of the whole Send: anchor, target, caller, payload, gas, vbytes, refund predicate — analogous to `CellID` for cells) into the Internal TxID merkle root. Symmetric with `Input` for external transactions. The message **payload is delivered onto the recv frame's stack** in payload order before code runs — symmetric with `op_call` pushing its args; the dispatch selector (ADR 0020) rides as the topmost payload arg.
 2. Outputs — creation of new entries in the Utreexo.
 3. Sends — messages sent to actors that produce other internal transactions.
 4. Issuance and retirement — creation and removal of tokens to/from circulation.
@@ -351,7 +351,7 @@ left  = t.challenge_bytes(b"left",  32);
 right = t.challenge_bytes(b"right", 32);
 ```
 
-The `left` half is embedded in the new entity (cell anchor / SendID); the `right` half replaces `last_anchor`. Authors never see `left` and `right` separately — the VM picks them automatically at the consume site.
+The `left` half is embedded in the new entity (cell anchor / MessageID); the `right` half replaces `last_anchor`. Authors never see `left` and `right` separately — the VM picks them automatically at the consume site.
 
 **Sites that consume + split**: [`cell`](#cell), [`output`](#output), [`send`](#send). Each hard-fails `AnchorMissing` if no prior input claim has seeded the tx's anchor.
 
@@ -1147,7 +1147,7 @@ There is **no VM-level method selector** ([ADR 0020](../decisions/0020-no-method
 
 Splits the frame's `last_anchor` (see §Anchors): the `left` half becomes the message's `anchor`, the `right` half replaces `last_anchor`. Hard-fails `AnchorMissing` if no anchor has been claimed yet. Emits `TxEntry::Send(Message)` — the full `Message` lives in the entry, symmetric with `TxEntry::Output(Cell)`. There is no separate "sends queue"; the block builder reads `TxEntry::Send` records from the TxLog when constructing internal-tx deliveries. The originator's actor id (if any) becomes the message's `caller`.
 
-The send's identity is the canonical 32-byte `SendID = H(b"flamevm.send.id" ‖ Message.encode())` — `Message::id()`. The wire encoding `Message.encode()` writes the fields in fixed order:
+The send's identity is the canonical 32-byte `MessageID = H(b"flamevm.send.id" ‖ Message.encode())` — `Message::id()`. The wire encoding `Message.encode()` writes the fields in fixed order:
 
 1. `anchor` — 32 raw bytes.
 2. `target` — canonical `ActorID` (Hash or Constructor) via `ActorID::encode`, with the variant force-canonicalized so a Hash form and a Constructor form of the same actor produce identical bytes.
@@ -1157,7 +1157,7 @@ The send's identity is the canonical 32-byte `SendID = H(b"flamevm.send.id" ‖ 
 6. `vbytes` — little-endian u64.
 7. `payload` — little-endian u64 count, then each value's canonical `Value` encoding.
 
-The merkle leaf for `TxEntry::Send` commits to this single 32-byte SendID, just as `TxEntry::Output(Cell)`'s leaf commits to `Cell::id()`. Uniqueness is inherited from `anchor`: every distinct send carries a distinct anchor, hence a distinct SendID.
+The merkle leaf for `TxEntry::Send` commits to this single 32-byte MessageID, just as `TxEntry::Output(Cell)`'s leaf commits to `Cell::id()`. Uniqueness is inherited from `anchor`: every distinct send carries a distinct anchor, hence a distinct MessageID.
 
 Available in both contexts. Hard-fails `MalformedAddress` on wrong-size addr or refund, `NonPortableInSend` on non-portable args, `InvalidBitrange` on negative/overflowing allotments.
 

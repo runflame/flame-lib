@@ -477,7 +477,7 @@ fn load_followed_by_save_preserves_actor() {
     assert!(!reg.actor(&id).expect("present").is_checked_out());
 }
 
-// ── Receive (SendID committed into Internal TxID) ───────────────────
+// ── Receive (MessageID committed into Internal TxID) ───────────────────
 
 /// `VM::execute_internal` emits `TxEntry::Receive(send_id)` as the
 /// first effect after the Header so the Internal TxID commits to the
@@ -485,9 +485,9 @@ fn load_followed_by_save_preserves_actor() {
 /// transactions. Without this entry, an internal tx's TxID would say
 /// nothing about which Send produced it.
 ///
-/// SendID is the canonical hash of the entire Send (anchor, target,
+/// MessageID is the canonical hash of the entire Send (anchor, target,
 /// caller, method, payload, gas, vbytes, refund predicate) — not just
-/// the anchor — so the comparison rebuilds the expected SendID from
+/// the anchor — so the comparison rebuilds the expected MessageID from
 /// the originating `Message`.
 #[test]
 fn receive_committed_as_first_effect_after_header() {
@@ -522,7 +522,7 @@ fn receive_committed_as_first_effect_after_header() {
         crate::tx::TxEntry::Receive(send_id) => {
             assert_eq!(
                 *send_id, expected_send_id,
-                "Receive must carry the originating Message's SendID"
+                "Receive must carry the originating Message's MessageID"
             );
         }
         other => panic!("expected txlog[1] to be TxEntry::Receive, got {:?}", other),
@@ -563,6 +563,6 @@ fn receive_makes_internal_txid_bind_to_send_anchor() {
     let txid_b = run_with_anchor([0x02; 32]);
     assert_ne!(
         txid_a.0, txid_b.0,
-        "Internal TxID must distinguish runs by their triggering SendID",
+        "Internal TxID must distinguish runs by their triggering MessageID",
     );
 }

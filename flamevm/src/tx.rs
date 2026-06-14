@@ -11,7 +11,7 @@ use crate::actor::ActorRegistry;
 use crate::errors::VMError;
 use crate::script::ScriptBuilder;
 use crate::prover::Prover;
-use crate::send::Message;
+use crate::message::Message;
 use crate::verifier::Verifier;
 use crate::vm::{BlockContext, DeferredSig, VM};
 
@@ -264,7 +264,7 @@ pub enum TxEntry {
     /// the Utreexo proof outside the VM.
     Input(crate::cell::CellID),
 
-    /// Receive: the SendID consumed by an internal transaction. Emitted
+    /// Receive: the MessageID consumed by an internal transaction. Emitted
     /// by `VM::execute_internal` as the first effect after `Header`,
     /// committing the originating `Send`'s anchor into the Internal TxID
     /// merkle root. Without this entry, the Internal TxID would not
@@ -332,9 +332,9 @@ pub enum TxEntry {
     },
 
     /// Outbound asynchronous message scheduled by `op_send`. Carries
-    /// the full [`Message`](crate::send::Message) — its `anchor` is
+    /// the full [`Message`](crate::message::Message) — its `anchor` is
     /// the `left` half of a split of `last_anchor` at the send site,
-    /// and its `id()` is the canonical SendID (deterministic at
+    /// and its `id()` is the canonical MessageID (deterministic at
     /// broadcast time, identifies the future internal-tx delivery).
     ///
     /// The block builder reads `TxEntry::Send` entries directly from
@@ -342,7 +342,7 @@ pub enum TxEntry {
     /// embedded `Message` straight into `VM::execute_internal`.
     /// Symmetric with `TxEntry::Output(Cell)`: each effect that owns
     /// an addressable artifact embeds the artifact itself.
-    Send(crate::send::Message),
+    Send(crate::message::Message),
 }
 
 impl TxID {
@@ -411,7 +411,7 @@ impl MerkleItem for TxEntry {
                 t.append_message(b"setcode.code_root", &crate::actor::code_root(code));
             }
             TxEntry::Send(msg) => {
-                // Bind to the send's canonical 32-byte SendID hash,
+                // Bind to the send's canonical 32-byte MessageID hash,
                 // analogous to `Output(Cell)` committing only to
                 // `cell.id()`. `Message::id()` absorbs the message's
                 // canonical wire encoding under domain

@@ -1,4 +1,4 @@
-//! Outbound message sends and SendID identity.
+//! Outbound messages and MessageID identity.
 
 use merlin::Transcript;
 use readerwriter::{Encodable, WriteError, Writer};
@@ -11,7 +11,7 @@ use crate::vm::Anchor;
 
 /// Unique identity of a scheduled internal transaction (a queued `Send`).
 /// Uniqueness is inherited from the embedded `anchor`: each send consumes a
-/// unique-anchored split, so two distinct sends always carry distinct SendIDs.
+/// unique-anchored split, so two distinct sends always carry distinct MessageIDs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MessageID(pub [u8; 32]);
 
@@ -35,7 +35,7 @@ pub struct Message {
     /// or `Constructor` for transparent on-the-fly deployment per Q4).
     /// `id()` canonicalizes both forms via `to_canonical()` so a send
     /// targeted by hash and a send targeted by constructor bytes that
-    /// hash to the same id produce the same SendID.
+    /// hash to the same id produce the same MessageID.
     pub target: ActorID,
 
 
@@ -47,7 +47,7 @@ pub struct Message {
 
     /// Anchor ratcheted from the external tx's chain right before the
     /// `TxEntry::Send` was appended. Provides uniqueness for the
-    /// SendID hash. Also seeds the resulting internal tx's
+    /// MessageID hash. Also seeds the resulting internal tx's
     /// `last_anchor`.
     pub anchor: Anchor,
 
@@ -73,7 +73,7 @@ pub struct Message {
 
 impl Message {
     /// Unique ID identifying the message that spawns the internal transaction.
-    /// Note: SendID is not the same as TxID, which can only be determined after
+    /// Note: MessageID is not the same as TxID, which can only be determined after
     /// processing the message.
     pub fn id(&self) -> MessageID {
         let buf = self.encode_to_vec();
@@ -150,9 +150,9 @@ mod tests {
 
     #[test]
     fn sendid_canonical_actor_form() {
-        // SendID canonicalizes target via `to_canonical()` so the same
+        // MessageID canonicalizes target via `to_canonical()` so the same
         // actor accessed via `Hash` vs `Constructor` variant produces
-        // the same SendID.
+        // the same MessageID.
         let ctor = ActorID::Constructor(vec![0x42, 0x42, 0x42]);
         let hash_form = ActorID::Hash(ctor.to_hash());
         let mut m1 = fixture_message(Anchor([0x99; 32]));

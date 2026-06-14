@@ -20,7 +20,7 @@ use crate::{Token, ClearToken, Dict, Int253, Merlin, Point, String, Value};
 use crate::ops::Instruction;
 use crate::script::Script;
 use crate::actor::{ActorID, ActorRegistry};
-use crate::send::Message;
+use crate::message::Message;
 
 /// Bitcoin BIP-65 convention threshold for distinguishing
 /// `TxHeader::locktime` as a block height vs. a Unix timestamp:
@@ -632,7 +632,7 @@ impl VM {
         }
         let script = registry.load_code(&message.target)?;
         let mem_limit = registry.actor_vbytes(&message.target)?.saturating_mul(4);
-        // SendID is the canonical hash of the whole send (anchor,
+        // MessageID is the canonical hash of the whole send (anchor,
         // target, caller, method, payload, gas, vbytes, refund
         // predicate) — analogous to CellID for Output. Capture
         // before the move below.
@@ -659,7 +659,7 @@ impl VM {
             frame.stack.push(v);
         }
         let mut vm = Self::new(header, frame);
-        // Commit the triggering SendID into the Internal TxID merkle
+        // Commit the triggering MessageID into the Internal TxID merkle
         // root. Symmetric with `op_input` for external txs: the first
         // post-Header effect identifies *what consumed-once entity*
         // brought this tx into existence.
@@ -2457,7 +2457,7 @@ impl VM {
         // `TxEntry::Output(Cell)`. The block builder scans these
         // entries to construct internal-tx deliveries; no separate
         // queue.
-        let message = crate::send::Message {
+        let message = crate::message::Message {
             target,
             caller,
             anchor,
