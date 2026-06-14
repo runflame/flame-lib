@@ -254,6 +254,15 @@ pub(crate) fn msg_with_sel(actor: ActorID, sel: u64) -> Message {
     Message { payload: vec![Value::Int253(Int253::from(sel))], ..msg_to(actor) }
 }
 
+/// Deploys an actor whose code is `recv` (id derived from the code, a
+/// stand-in for the real constructor) and returns its id. The common
+/// Bucket-C fixture: deploy, then `deliver` and read the effect log.
+pub(crate) fn deploy_actor(reg: &mut MemRegistry, recv: Vec<u8>) -> ActorID {
+    let id = ActorID::Hash(ActorID::Constructor(recv.clone()).to_hash());
+    reg.deploy(id.clone(), recv, crate::empty_state(), 1_000_000, 0).expect("deploy");
+    id
+}
+
 /// A `call` to `target` with `k=0` args (plain single-action callee).
 /// Returns the builder *after* the `call` so the caller chains the
 /// result handling (`.drop_().drop_()` for the `[count, success]`).

@@ -14,13 +14,6 @@ use super::test_helpers::*;
 use crate::tx::TxEntry;
 use crate::empty_state;
 
-/// Deploys an actor whose code is `recv` and returns its id.
-fn deploy(reg: &mut MemRegistry, recv: Vec<u8>) -> ActorID {
-    let id = ActorID::Hash(ActorID::Constructor(recv.clone()).to_hash());
-    reg.deploy(id.clone(), recv, empty_state(), 1_000_000, 0).expect("deploy");
-    id
-}
-
 fn b() -> ScriptBuilder {
     ScriptBuilder::new()
 }
@@ -52,7 +45,7 @@ fn while_loop_emits_one_effect_per_iteration() {
         .drop_()
         .to_bytecode();
     let mut reg = MemRegistry::new();
-    let id = deploy(&mut reg, recv);
+    let id = deploy_actor(&mut reg, recv);
     let log = deliver(&mut reg, msg_to(id));
     assert_eq!(data_trace(&log), vec![b"x".to_vec(); 3], "one Data per loop iteration");
 }
@@ -64,7 +57,7 @@ fn break_exits_loop_after_first_iteration() {
         .build_loop(|p| log_str(p, "once").build_break())
         .to_bytecode();
     let mut reg = MemRegistry::new();
-    let id = deploy(&mut reg, recv);
+    let id = deploy_actor(&mut reg, recv);
     let log = deliver(&mut reg, msg_to(id));
     assert_eq!(data_trace(&log), vec![b"once".to_vec()], "break stops after one pass");
 }
@@ -82,7 +75,7 @@ fn continue_skips_rest_of_body_each_iteration() {
         .drop_()
         .to_bytecode();
     let mut reg = MemRegistry::new();
-    let id = deploy(&mut reg, recv);
+    let id = deploy_actor(&mut reg, recv);
     let log = deliver(&mut reg, msg_to(id));
     assert!(data_trace(&log).is_empty(), "continue skips the log every iteration");
 }
@@ -96,7 +89,7 @@ fn if_else_takes_branch_by_selector_arg() {
         .build_if_else(|p| log_str(p, "then"), |p| log_str(p, "else"))
         .to_bytecode();
     let mut reg = MemRegistry::new();
-    let id = deploy(&mut reg, recv);
+    let id = deploy_actor(&mut reg, recv);
 
     // Deliver with a truthy payload arg, then a falsy one.
     let truthy = Message { payload: vec![Value::Int253(Int253::from(1u64))], ..msg_to(id.clone()) };
@@ -114,14 +107,14 @@ fn call_chain_interleaves_callee_then_caller_effects() {
     // `call` itself emits nothing.
     let mut reg = MemRegistry::new();
     let b_recv = log_str(b(), "B").to_bytecode();
-    let b_id = deploy(&mut reg, b_recv);
+    let b_id = deploy_actor(&mut reg, b_recv);
 
     let a_recv = {
         let mut p = call_to(&b_id);
         p = p.drop_().drop_(); // discard B's [count, success]
         log_str(p, "A").to_bytecode()
     };
-    let a_id = deploy(&mut reg, a_recv);
+    let a_id = deploy_actor(&mut reg, a_recv);
 
     let log = deliver(&mut reg, msg_to(a_id));
     assert_eq!(data_trace(&log), vec![b"B".to_vec(), b"A".to_vec()], "callee then caller");
@@ -137,13 +130,13 @@ fn failed_subcall_effects_roll_back_but_caller_continues() {
     // control-flow case.
     let mut reg = MemRegistry::new();
     let b_recv = log_str(b(), "B").push_int(0u64).verify().to_bytecode();
-    let b_id = deploy(&mut reg, b_recv);
+    let b_id = deploy_actor(&mut reg, b_recv);
 
     let a_recv = {
         let p = call_to(&b_id).drop_(); // failed call pushes a single `0` marker
         log_str(p, "A").to_bytecode()
     };
-    let a_id = deploy(&mut reg, a_recv);
+    let a_id = deploy_actor(&mut reg, a_recv);
 
     let log = deliver(&mut reg, msg_to(a_id));
     assert_eq!(data_trace(&log), vec![b"A".to_vec()], "B's effect rolled back, A's survives");
