@@ -77,7 +77,7 @@ impl Message {
     /// processing the message.
     pub fn id(&self) -> MessageID {
         let buf = self.encode_to_vec();
-        let mut t = Transcript::new(b"flamevm.send.id");
+        let mut t = Transcript::new(b"flamevm.message.id");
         t.append_message(b"send", &buf);
         let mut h = [0u8; 32];
         t.challenge_bytes(b"id", &mut h);

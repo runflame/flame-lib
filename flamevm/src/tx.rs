@@ -415,7 +415,7 @@ impl MerkleItem for TxEntry {
                 // analogous to `Output(Cell)` committing only to
                 // `cell.id()`. `Message::id()` absorbs the message's
                 // canonical wire encoding under domain
-                // `flamevm.send.id`, so this single leaf commits to
+                // `flamevm.message.id`, so this single leaf commits to
                 // every parameter the future internal tx will be
                 // delivered with.
                 t.append_message(b"send", msg.id().as_bytes());
