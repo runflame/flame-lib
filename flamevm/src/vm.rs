@@ -638,21 +638,27 @@ impl VM {
         // before the move below.
         let send_id = *message.id().as_bytes();
         let anchor = message.anchor;
+        let payload = message.payload;
         let kind = CallKind::InternalRoot {
             actor: message.target,
             caller: message.caller,
         };
-        let mut vm = Self::new(
-            header,
-            CallFrame::from_bytecode(
-                script,
-                kind,
-                message.gas,
-                mem_limit,
-                message.vbytes,
-            )
-            .with_anchor(anchor),
-        );
+        let mut frame = CallFrame::from_bytecode(
+            script,
+            kind,
+            message.gas,
+            mem_limit,
+            message.vbytes,
+        )
+        .with_anchor(anchor);
+        // Deliver the message payload onto the recv's stack (in payload
+        // order) before dispatch runs — symmetric with `op_call`, which
+        // pushes its args. The dispatch selector (ADR 0020) rides as the
+        // topmost payload arg.
+        for v in payload {
+            frame.stack.push(v);
+        }
+        let mut vm = Self::new(header, frame);
         // Commit the triggering SendID into the Internal TxID merkle
         // root. Symmetric with `op_input` for external txs: the first
         // post-Header effect identifies *what consumed-once entity*

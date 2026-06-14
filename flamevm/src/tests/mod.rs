@@ -23,6 +23,7 @@ mod test_dispatch;
 mod test_fee;
 mod test_golden;
 mod test_hashing;
+mod test_integration;
 mod test_int253_ops;
 mod test_msm;
 mod test_proof_pipeline;

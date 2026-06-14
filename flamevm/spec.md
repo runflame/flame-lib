@@ -37,7 +37,7 @@ Internal transactions do not have a pre-determined effect and therefore do not s
 
 Like external, internal transactions produce effects:
 
-1. `Receive(SendID)` (txlog variant `TxEntry::Receive`) — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating `SendID` (canonical 32-byte hash of the whole Send: anchor, target, caller, payload, gas, vbytes, refund predicate — analogous to `CellID` for cells) into the Internal TxID merkle root. Symmetric with `Input` for external transactions.
+1. `Receive(SendID)` (txlog variant `TxEntry::Receive`) — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating `SendID` (canonical 32-byte hash of the whole Send: anchor, target, caller, payload, gas, vbytes, refund predicate — analogous to `CellID` for cells) into the Internal TxID merkle root. Symmetric with `Input` for external transactions. The message **payload is delivered onto the recv frame's stack** in payload order before code runs — symmetric with `op_call` pushing its args; the dispatch selector (ADR 0020) rides as the topmost payload arg.
 2. Outputs — creation of new entries in the Utreexo.
 3. Sends — messages sent to actors that produce other internal transactions.
 4. Issuance and retirement — creation and removal of tokens to/from circulation.

@@ -248,6 +248,36 @@ pub(crate) fn msg_to(actor: ActorID) -> Message {
     }
 }
 
+/// Like [`msg_to`] but carries a single top-of-stack selector arg
+/// (ADR 0020 dispatch convention).
+pub(crate) fn msg_with_sel(actor: ActorID, sel: u64) -> Message {
+    Message { payload: vec![Value::Int253(Int253::from(sel))], ..msg_to(actor) }
+}
+
+/// A `call` to `target` with `k=0` args (plain single-action callee).
+/// Returns the builder *after* the `call` so the caller chains the
+/// result handling (`.drop_().drop_()` for the `[count, success]`).
+pub(crate) fn call_to(target: &ActorID) -> ScriptBuilder {
+    ScriptBuilder::new()
+        .push_int(0u64) // k = 0
+        .push_int(50_000u64) // gas
+        .push_int(0u64) // bytes
+        .push_str(String::from(target.to_hash().to_vec()))
+        .call()
+}
+
+/// A `call` to `target` passing `sel` as the single (topmost) arg — the
+/// dispatch-selector convention for `dispatch_code` callees.
+pub(crate) fn call_with_sel(target: &ActorID, sel: u64) -> ScriptBuilder {
+    ScriptBuilder::new()
+        .push_int(sel) // selector arg (top)
+        .push_int(1u64) // k = 1
+        .push_int(50_000u64) // gas
+        .push_int(0u64) // bytes
+        .push_str(String::from(target.to_hash().to_vec()))
+        .call()
+}
+
 /// Builds an inline subprogram string-payload as a script that
 /// `pushstr`s the subprogram's bytes. Returns the prefix bytes
 /// (`0x19` + sub-varint length + payload).
