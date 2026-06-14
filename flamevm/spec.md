@@ -1122,7 +1122,7 @@ Verifies the Taproot proof against the cell's predicate:
 4. Pops `position` (String, bit-packed path), `neighbors` (list-Dict of 32-byte Strings, leaf-to-root), `internal_key` (Point).
 5. Pops `cell`.
 6. Constructs a `TaprootProof` and verifies `predicate.verify_taproot_proof` — checks the Merkle root and the tweaked-key relation `P = X + h(X, M)·B`.
-7. On success, creates a new isolated `CallKind::CellOpen { anchor: Anchor(cell.id()), predicate: cell.predicate, external_context }` frame with the popped `gas` / `bytes` allotments, pours the cell's payload then the `args` onto the new frame's stack, and enters the unlocked `script`. The tx's `last_anchor` is **not** touched — `op_open` is intra-tx and doesn't mint anything cross-tx. The `CellOpen.anchor` field is metadata (a reference to the opened cell's id), not a separate anchor slot.
+7. On success, creates a new isolated `CallKind::CellOpen { predicate: cell.predicate, external_context }` frame with the popped `gas` / `bytes` allotments, pours the cell's payload then the `args` onto the new frame's stack, and enters the unlocked `script`. The frame's starting anchor (the `CallFrame.anchor` field — todo #4, formerly carried in the variant) is the child-anchor split from the parent. The tx's `last_anchor` is set to that child-anchor on entry; `op_open` is intra-tx and doesn't mint anything cross-tx.
 
 The new frame has **no actor identity** by default — `op_load`/`op_save`/`op_call`/`op_send` all error from inside. The frame inherits CS access from the caller's context (external root → CS available; internal → not). Results return via `return k'`; leftover gas refunds to the parent.
 
@@ -1175,7 +1175,7 @@ Loads the callee's **code** via the registry — selector-agnostic; the code blo
 
 **Emits no txlog entry.** Calls are intra-tx control flow; the structural effects produced inside the callee (`Output`, `Send`, `ActorSave`, `Issue`, `Retire`, `Fee`, `Data`) are what the state machine reads. The `(External TxID, Internal TxID)` of a tx is a merkle root over effects only — see `design.md` §"TxLog records effects, not control flow".
 
-Creates an isolated `CallKind::ActorCall { actor, caller, anchor }` frame with the popped `gas` / `bytes` allotments. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
+Creates an isolated `CallKind::ActorCall { actor, caller }` frame (the frame's starting anchor lives in `CallFrame.anchor` — todo #4) with the popped `gas` / `bytes` allotments. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
 
 Returns via `return k'`. Hard-fails `RegistryUnavailable` outside an internal-tx execution.
 

@@ -15,7 +15,6 @@ fn vm_internal_with(
     let kind = CallKind::InternalRoot {
         actor,
         caller,
-        anchor,
     };
     VM::new(
         dummy_header(),
@@ -25,7 +24,8 @@ fn vm_internal_with(
             1_000_000,
             0,
             0,
-        ),
+        )
+        .with_anchor(anchor),
     )
 }
 

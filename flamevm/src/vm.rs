@@ -280,14 +280,12 @@ pub enum CallKind {
     InternalRoot {
         actor: ActorID,
         caller: Option<ActorID>,
-        anchor: Anchor,
     },
 
     /// Synchronous actor-to-actor call inside an internal tx.
     ActorCall {
         actor: ActorID,
         caller: ActorID,
-        anchor: Anchor,
     },
 
     /// `open` / `signcall` of a cell predicate. `external_context`
@@ -295,7 +293,6 @@ pub enum CallKind {
     /// `require_external` propagates correctly across the isolation
     /// boundary (ADR 0013).
     CellOpen {
-        anchor: Anchor,
         predicate: Predicate,
         external_context: bool,
     },
@@ -325,17 +322,6 @@ impl CallKind {
         }
     }
 
-    /// Returns the frame's anchor (cell-open anchor or call-entry
-    /// anchor). `op_anchor` reads this. `ExternalRoot` and
-    /// `ActorCall`-by-error have no anchor concept.
-    pub fn anchor(&self) -> Option<Anchor> {
-        match self {
-            Self::InternalRoot { anchor, .. }
-            | Self::ActorCall { anchor, .. }
-            | Self::CellOpen { anchor, .. } => Some(*anchor),
-            Self::ExternalRoot => None,
-        }
-    }
 }
 
 /// An isolated execution scope. Holds its own stack, run, gas budget, and
@@ -356,6 +342,13 @@ pub struct CallFrame {
 
     /// Identity / dispatch context for this frame.
     pub(crate) kind: CallKind,
+
+    /// This frame's starting anchor (todo #4 — previously stored in
+    /// every `CallKind` variant). Only the root internal frame uses it:
+    /// `VM::new` seeds `last_anchor` from it. Child frames (`op_call` /
+    /// cell-open) set `last_anchor` directly on entry, so theirs is
+    /// informational. `None` for `ExternalRoot` (seeded by `op_input`).
+    pub(crate) anchor: Option<Anchor>,
 
     /// Gas budget for this call.
     pub(crate) gas_limit: u64,
@@ -428,6 +421,13 @@ impl CallFrame {
         Self::from_code(Code::Bytes(bytecode), kind, gas_limit, mem_limit, newbytes)
     }
 
+    /// Sets this frame's starting anchor (todo #4). Chained at the
+    /// internal-root / call / cell-open construction sites.
+    pub(crate) fn with_anchor(mut self, anchor: Anchor) -> Self {
+        self.anchor = Some(anchor);
+        self
+    }
+
     pub(crate) fn from_code(
         code: Code,
         kind: CallKind,
@@ -441,6 +441,7 @@ impl CallFrame {
             cursor: 0,
             labels: Vec::new(),
             kind,
+            anchor: None,
             gas_limit,
             gas_used: 0,
             mem_limit,
@@ -642,10 +643,10 @@ impl VM {
         // predicate) — analogous to CellID for Output. Capture
         // before the move below.
         let send_id = *message.id().as_bytes();
+        let anchor = message.anchor;
         let kind = CallKind::InternalRoot {
             actor: message.target,
             caller: message.caller,
-            anchor: message.anchor,
         };
         let mut vm = Self::new(
             header,
@@ -655,7 +656,8 @@ impl VM {
                 message.gas,
                 mem_limit,
                 message.vbytes,
-            ),
+            )
+            .with_anchor(anchor),
         );
         // Commit the triggering SendID into the Internal TxID merkle
         // root. Symmetric with `op_input` for external txs: the first
@@ -698,7 +700,7 @@ impl VM {
         // Seed last_anchor from the root frame's kind: ExternalRoot →
         // None (op_input must seed); InternalRoot → Some(Message.anchor)
         // (already unique from prior tx's op_send split).
-        let last_anchor = initial_call.kind.anchor();
+        let last_anchor = initial_call.anchor;
         Self {
             header,
             last_anchor,
@@ -2358,14 +2360,14 @@ impl VM {
         let mut frame = CallFrame::from_code(
             code,
             CallKind::CellOpen {
-                anchor: child_anchor,
                 predicate: cell.predicate.clone(),
                 external_context,
             },
             gas,
             /*mem_limit=*/ bytes,
             /*newbytes=*/ bytes,
-        );
+        )
+        .with_anchor(child_anchor);
         for v in cell.payload {
             frame.stack.push(v);
         }
@@ -2533,12 +2535,12 @@ impl VM {
             CallKind::ActorCall {
                 actor: callee,
                 caller,
-                anchor: callee_anchor,
             },
             gas,
             mem_limit,
             vbytes,
-        );
+        )
+        .with_anchor(callee_anchor);
         for v in args {
             frame.stack.push(v);
         }

@@ -1158,7 +1158,6 @@ fn op_open_cs_blocked_when_external_context_false() {
     let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
     // alloc is 0x62 — external-only CS op. push:0 + alloc + return.
     let child_kind = CallKind::CellOpen {
-        anchor: Anchor([0u8; 32]),
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: false,
     };

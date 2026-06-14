@@ -142,7 +142,6 @@ fn bytes_pushes_actor_vbyte_balance() {
     let kind = CallKind::InternalRoot {
         actor: id.clone(),
         caller: None,
-        anchor: Anchor([0u8; 32]),
     };
     let mut vm = VM::new(
         dummy_header(),
@@ -152,7 +151,7 @@ fn bytes_pushes_actor_vbyte_balance() {
             1_000_000,
             0,
             0,
-        ),
+        ).with_anchor(Anchor([0u8; 32])),
     );
     vm.step_internal_with_registry(&mut reg).expect("ok");
     assert_int(&vm.current_call.stack[0], Int253::from(12_345u64));
@@ -173,11 +172,10 @@ fn bytes_without_registry_in_actor_frame_errors_registry_unavailable() {
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0xab; 32]),
         caller: None,
-        anchor: Anchor([0u8; 32]),
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(vec![crate::ops::Instruction::Bytes], kind, 1_000_000, 0, 0),
+        CallFrame::new(vec![crate::ops::Instruction::Bytes], kind, 1_000_000, 0, 0).with_anchor(Anchor([0u8; 32])),
     );
     let err = vm.step_internal().expect_err("bytes needs a registry");
     assert!(matches!(err, VMError::RegistryUnavailable));

@@ -39,7 +39,6 @@ fn vm_internal(actor: ActorID, script: Vec<u8>) -> VM {
     let kind = CallKind::InternalRoot {
         actor,
         caller: None,
-        anchor: Anchor([0u8; 32]),
     };
     VM::new(
         dummy_header(),
@@ -49,7 +48,7 @@ fn vm_internal(actor: ActorID, script: Vec<u8>) -> VM {
             1_000_000,
             0,
             0,
-        ),
+        ).with_anchor(Anchor([0u8; 32])),
     )
 }
 

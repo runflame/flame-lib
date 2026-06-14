@@ -21,7 +21,6 @@ fn vm_for_actor(actor: ActorID, script: Vec<u8>) -> VM {
     let kind = CallKind::InternalRoot {
         actor,
         caller: None,
-        anchor: Anchor([0u8; 32]),
     };
     VM::new(
         dummy_header(),
@@ -33,7 +32,7 @@ fn vm_for_actor(actor: ActorID, script: Vec<u8>) -> VM {
             1_000_000,
             0,
             0,
-        ),
+        ).with_anchor(Anchor([0u8; 32])),
     )
 }
 
@@ -248,7 +247,6 @@ fn call_grant_exceeding_caller_budget_is_out_of_gas() {
     let kind = CallKind::InternalRoot {
         actor: a,
         caller: None,
-        anchor: Anchor([0u8; 32]),
     };
     let mut vm = VM::new(
         dummy_header(),
@@ -258,7 +256,7 @@ fn call_grant_exceeding_caller_budget_is_out_of_gas() {
             100,
             0,
             0,
-        ),
+        ).with_anchor(Anchor([0u8; 32])),
     );
     let err = loop {
         match vm.step_internal_with_registry(&mut reg) {

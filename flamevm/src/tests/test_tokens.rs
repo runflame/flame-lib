@@ -262,7 +262,6 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
         .return_();
     let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
     let child_kind = CallKind::CellOpen {
-        anchor: Anchor([0u8; 32]),
         predicate: crate::Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
     };
@@ -345,7 +344,6 @@ fn issuepriv_in_internal_context_yields_failure_marker() {
     let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
     let script = Program::new().issuepriv().to_bytecode();
     let child_kind = CallKind::CellOpen {
-        anchor: Anchor([0u8; 32]),
         predicate: crate::Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: false, // → require_external() will error
     };

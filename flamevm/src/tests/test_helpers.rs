@@ -123,11 +123,10 @@ pub(crate) fn vm_with_script(script: Vec<u8>) -> VM {
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
         caller: None,
-        anchor: Anchor([0u8; 32]),
     };
     VM::new(
         dummy_header(),
-        CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), kind, 1_000_000, 0, 0),
+        CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), kind, 1_000_000, 0, 0).with_anchor(Anchor([0u8; 32])),
     )
 }
 
@@ -219,7 +218,6 @@ pub(crate) fn dispatch_code(arms: &[(u64, Vec<u8>)]) -> Vec<u8> {
 pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
     let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
     let child_kind = CallKind::CellOpen {
-        anchor: Anchor([0u8; 32]),
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
     };
@@ -325,11 +323,10 @@ pub(crate) fn vm_internal_with_actor(script: Vec<u8>, actor: ActorID) -> VM {
     let kind = CallKind::InternalRoot {
         actor,
         caller: None,
-        anchor: Anchor([0u8; 32]),
     };
     VM::new(
         dummy_header(),
-        CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), kind, 1_000_000, 0, 0),
+        CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), kind, 1_000_000, 0, 0).with_anchor(Anchor([0u8; 32])),
     )
 }
 

@@ -12,7 +12,6 @@ fn internal_kind() -> CallKind {
     CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
         caller: None,
-        anchor: Anchor([0u8; 32]),
     }
 }
 
@@ -27,13 +26,15 @@ fn assert_backends_agree(bytecode: &[u8]) {
             100_000,
             0,
             0,
-        ),
+        )
+        .with_anchor(Anchor([0u8; 32])),
     );
     let r_instrs = run_until_tx_done(&mut vm_instrs);
 
     let mut vm_bytes = VM::new(
         dummy_header(),
-        CallFrame::from_bytecode(bytecode.to_vec(), internal_kind(), 100_000, 0, 0),
+        CallFrame::from_bytecode(bytecode.to_vec(), internal_kind(), 100_000, 0, 0)
+            .with_anchor(Anchor([0u8; 32])),
     );
     let r_bytes = run_until_tx_done(&mut vm_bytes);
 

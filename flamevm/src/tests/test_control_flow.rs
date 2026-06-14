@@ -207,11 +207,10 @@ fn infinite_loop_exhausts_gas() {
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
         caller: None,
-        anchor: Anchor([0u8; 32]),
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(Program::parse(&script).unwrap().into_instructions(), kind, 1_000, 0, 0),
+        CallFrame::new(Program::parse(&script).unwrap().into_instructions(), kind, 1_000, 0, 0).with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
@@ -232,11 +231,10 @@ fn skip_scan_charges_gas() {
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
         caller: None,
-        anchor: Anchor([0u8; 32]),
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(Program::parse(&script).unwrap().into_instructions(), kind, 10, 0, 0),
+        CallFrame::new(Program::parse(&script).unwrap().into_instructions(), kind, 10, 0, 0).with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
@@ -262,7 +260,6 @@ fn mem_cap_bounds_cumulative_string_growth() {
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
         caller: None,
-        anchor: Anchor([0u8; 32]),
     };
     let mut vm = VM::new(
         dummy_header(),
@@ -272,7 +269,7 @@ fn mem_cap_bounds_cumulative_string_growth() {
             1_000,
             /*mem_limit=*/ 100,
             0,
-        ),
+        ).with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
@@ -288,7 +285,6 @@ fn mem_cap_trips_on_pushstr_append_and_tread() {
         let kind = CallKind::InternalRoot {
             actor: ActorID::Hash([0u8; 32]),
             caller: None,
-            anchor: Anchor([0u8; 32]),
         };
         let mut vm = VM::new(
             dummy_header(),
@@ -298,7 +294,7 @@ fn mem_cap_trips_on_pushstr_append_and_tread() {
                 10_000,
                 cap,
                 0,
-            ),
+            ).with_anchor(Anchor([0u8; 32])),
         );
         run_until_tx_done(&mut vm)
     };
@@ -401,7 +397,6 @@ fn return_transfers_values_to_parent() {
     let parent_frame =
         CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
     let child_kind = CallKind::CellOpen {
-        anchor: Anchor([0u8; 32]),
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
     };

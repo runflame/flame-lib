@@ -86,11 +86,10 @@ fn dirty_stack_at_call_exit_is_an_error() {
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
         caller: None,
-        anchor: Anchor([0u8; 32]),
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(Vec::new(), kind, 1000, 0, 0),
+        CallFrame::new(Vec::new(), kind, 1000, 0, 0).with_anchor(Anchor([0u8; 32])),
     );
     vm.current_call.stack.push(Value::Int253(Int253::from(7u64)));
     // First step: empty script → finish_call → dirty stack.
