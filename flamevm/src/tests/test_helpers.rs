@@ -171,6 +171,83 @@ pub(crate) fn run_until_tx_done(vm: &mut VM) -> Result<(), VMError> {
     Ok(())
 }
 
+// ── Self-checking opcode harness (Bucket B) ──────────────────────────
+//
+// These let opcode tests assert their result *inside the VM* via
+// `eq; verify`, so test bodies never reach into `vm.current_call.stack`
+// or build `CallFrame`/`CallKind`. The VM is the door; the script
+// checks itself.
+
+/// Asserts the **entire** post-`builder` stack equals `expected_top_first`
+/// (top element first), checked in-VM and consuming the whole stack: for
+/// each expected value it appends `push:v; eq; verify; drop; drop`
+/// (`eq` is non-consuming, so its two int operands are dropped after the
+/// boolean is `verify`'d). The tx must finish cleanly, so this also
+/// asserts there is no extra residue. Use when every stack slot is an
+/// `Int253`. A mismatch fails `verify`.
+pub(crate) fn assert_stack(mut builder: ScriptBuilder, expected_top_first: &[Int253]) {
+    for &v in expected_top_first {
+        builder = builder.push_int(v).eq().verify().drop_().drop_();
+    }
+    let mut vm = vm_with_script(builder.to_bytecode());
+    run_until_tx_done(&mut vm).expect("opcode self-check (eq; verify) passed");
+}
+
+/// `i64` convenience over [`assert_stack`].
+pub(crate) fn assert_stack_ints(builder: ScriptBuilder, expected_top_first: &[i64]) {
+    let v: Vec<Int253> = expected_top_first.iter().map(|&x| Int253::from(x)).collect();
+    assert_stack(builder, &v);
+}
+
+/// Asserts only the **top** of the post-`builder` stack equals
+/// `expected`, via `push:expected; eq; verify`. Tolerant of residue
+/// below the top (e.g. an opcode's non-int operands), so use it when the
+/// full stack isn't all ints. A mismatch fails `verify`.
+pub(crate) fn assert_top(builder: ScriptBuilder, expected: impl Into<Int253>) {
+    let mut vm = vm_with_script(builder.push_int(expected).eq().verify().to_bytecode());
+    run_to_end(&mut vm).expect("top-of-stack self-check (eq; verify) passed");
+}
+
+/// Runs `builder` and returns the hard-failure error — for tests that
+/// assert a specific `VMError` via `matches!` without touching the VM.
+pub(crate) fn run_err(builder: ScriptBuilder) -> VMError {
+    let mut vm = vm_with_script(builder.to_bytecode());
+    run_until_tx_done(&mut vm).expect_err("expected a hard failure")
+}
+
+// ── Integration delivery harness (Bucket C) ──────────────────────────
+
+/// Delivers `msg` to `reg` via `VM::execute_internal` and returns the
+/// resulting effect log (the public observable). Test bodies assert on
+/// `TxEntry`s, not on internal frame/stack state.
+pub(crate) fn deliver(reg: &mut MemRegistry, msg: Message) -> Vec<crate::tx::TxEntry> {
+    let block = BlockContext { height: 0 };
+    VM::execute_internal(dummy_header(), msg, reg, &block)
+        .expect("internal delivery ok")
+        .txlog
+}
+
+/// Like [`deliver`] but expects the delivery to hard-fail, returning the
+/// error.
+pub(crate) fn deliver_err(reg: &mut MemRegistry, msg: Message) -> VMError {
+    let block = BlockContext { height: 0 };
+    VM::execute_internal(dummy_header(), msg, reg, &block).expect_err("expected delivery failure")
+}
+
+/// Builds a minimal internal `Message` targeting `actor` with no
+/// payload — the common Bucket-C delivery fixture.
+pub(crate) fn msg_to(actor: ActorID) -> Message {
+    Message {
+        target: actor,
+        caller: None,
+        anchor: Anchor([0u8; 32]),
+        payload: Vec::new(),
+        gas: 1_000_000,
+        vbytes: 0,
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+    }
+}
+
 /// Builds an inline subprogram string-payload as a script that
 /// `pushstr`s the subprogram's bytes. Returns the prefix bytes
 /// (`0x19` + sub-varint length + payload).
