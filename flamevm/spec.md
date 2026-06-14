@@ -86,7 +86,7 @@ Ownership: every type on the stack is always owned. FlameVM does not allow refer
 
 Plain data types: integers, byte strings, Ristretto points. These can be copied and ported.
 
-Structured data types: dicts that are used as lists, dictionaries and enum variants. Dicts are as copyable/portable as the items they contain.
+Structured data types: dicts that are used as lists, dictionaries and enum variants. Dicts are **never copyable** and admit **only portable values** (see §Dict).
 
 Token types: WideToken, Token, ClearToken.
 
@@ -255,7 +255,7 @@ Dict is a versatile data structure for representing lists, dictionaries and even
 
 Keys are non-negative Ints because this way ordering is non-ambiguous. In case of strings we need to worry about keys of different length.
 
-Values are: any other types. Portability and copyability flags are dynamic and poisoning: once non-portable item is added, the struct becomes non-portable. Same for non-copyable.
+**Dicts are never copyable** (todo #5): `dup`/`getdup` of a Dict value always fails `TypeNotCopyable`. This avoids variable gas for duplication and removes the hazard of a Dict silently carrying a non-droppable linear value past a `drop`. The `dict` / `put` / `replace` opcodes admit **only portable values** — a non-portable item (`Cell`, `Merlin`, `Variable`, `Constraint`, `WideToken`, negative `ClearToken`, …) is rejected at insert with `NonPortableInDict`, exactly as cell payloads are gated. So a Dict is always portable (storable). Droppability still varies: a Dict holding a `Token` (portable but linear/non-droppable) is itself non-droppable, so it can't be `drop`ped — it must be dismantled or saved.
 
 Drilling down the nested dict preserving ownership with `get` and `put` instructions: 
 

@@ -139,6 +139,12 @@ pub enum VMError {
     #[error("Non-portable item in cell payload")]
     NonPortableInOutput,
 
+    /// This error occurs when a non-portable item is inserted into a Dict
+    /// (`dict` / `put` / `replace`). Dicts accept only portable values,
+    /// mirroring cell payloads — see spec §Dict.
+    #[error("Non-portable item in dict")]
+    NonPortableInDict,
+
     /// This error occurs when `signcall` sees a signature that is not 64 bytes.
     #[error("Bad signature byte length")]
     BadSignatureBytes,

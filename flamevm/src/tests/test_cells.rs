@@ -576,10 +576,10 @@ fn cell_opcode_rejects_cell_as_payload_item() {
 }
 
 #[test]
-fn output_rejects_dict_containing_a_cell() {
-    // Even if a script hides a cell inside a Dict and puts the Dict
-    // (otherwise portable) into the payload, the Dict's sticky
-    // portability flag rejects it.
+fn dict_build_rejects_a_cell() {
+    // A cell is non-portable; trying to hide it inside a Dict now fails
+    // at `dict` construction (todo #5) — earlier than the old output
+    // gate, so a poisoned dict can never even be built.
     let script = Program::new()
         .push_int(5u64)
         .push_int(1u64)
@@ -587,7 +587,7 @@ fn output_rejects_dict_containing_a_cell() {
         .cell()                            // cell A on stack
         .push_int(0u64)                    // key = 0
         .push_int(1u64)                    // 1 pair
-        .dict()                            // Dict { 0: cellA }
+        .dict()                            // Dict { 0: cellA } — rejected here
         .push_int(1u64)                    // outer count = 1
         .push_point([0xbb; 32])
         .output()
@@ -596,7 +596,7 @@ fn output_rejects_dict_containing_a_cell() {
     vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
-        VMError::NonPortableInOutput
+        VMError::NonPortableInDict
     ));
 }
 

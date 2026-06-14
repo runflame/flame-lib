@@ -1280,6 +1280,11 @@ impl VM {
         for _ in 0..n {
             let key = self.pop_value()?.to_int253()?;
             let value = self.pop_value()?;
+            // Dicts admit only portable values (spec §Dict), mirroring
+            // cell payloads.
+            if !value.is_portable() {
+                return Err(VMError::NonPortableInDict);
+            }
             if dict.insert_strict(key, value).is_err() {
                 return Err(VMError::DictKeyOccupied);
             }
@@ -1294,6 +1299,9 @@ impl VM {
         let v = self.pop_value()?;
         let k = self.pop_value()?.to_int253()?;
         let mut dict = self.pop_value()?.to_dict()?;
+        if !v.is_portable() {
+            return Err(VMError::NonPortableInDict);
+        }
         if dict.insert_strict(k, v).is_err() {
             return Err(VMError::DictKeyOccupied);
         }
@@ -1308,6 +1316,9 @@ impl VM {
         let v = self.pop_value()?;
         let k = self.pop_value()?.to_int253()?;
         let mut dict = self.pop_value()?.to_dict()?;
+        if !v.is_portable() {
+            return Err(VMError::NonPortableInDict);
+        }
         let prev = dict.insert(k, v);
         self.push_value(Value::Dict(dict));
         match prev {

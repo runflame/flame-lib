@@ -11,34 +11,26 @@ use crate::Value;
 /// per call. Iteration yields entries in ascending key order, which the
 /// wire encoder relies on for canonical output.
 ///
-/// Carries three **sticky** flags that summarize member types:
+/// Dicts are **never VM-copyable** (todo #5 / ADR-style: avoids
+/// variable gas for `dup`/`getdup` and the linear-leak hazard) and the
+/// `dict` / `put` / `replace` opcodes admit only **portable** values
+/// (mirroring cell payloads). The one remaining sticky flag is:
 ///
-/// - `copyable` — true iff every value ever inserted was copyable. Once
-///   a non-copyable value enters, the flag stays false even if the
-///   value is later removed. This is a safe over-approximation that
-///   matches the script's intuition that a poisoned dict stays poisoned.
-/// - `portable` — same shape, tracking whether any non-portable value
-///   has ever been inserted.
-/// - `droppable` — same shape, tracking whether any non-droppable
-///   value has ever been inserted. A non-empty dict whose only members
-///   are `Variable` / `Constraint` / zero-qty `ClearToken` etc. is
-///   still droppable even though it isn't copyable.
+/// - `droppable` — true iff every value ever inserted was droppable.
+///   Once a non-droppable value enters (a `Token` — portable but
+///   linear), the flag stays false even if later removed, so a
+///   token-bearing dict can't be silently `drop`ped.
 #[derive(Clone, Debug)]
 pub struct Dict {
     entries: BTreeMap<Int253, Value>,
-    copyable: bool,
-    portable: bool,
     droppable: bool,
 }
 
 impl Dict {
-    /// Creates an empty dictionary. An empty dict is copyable,
-    /// portable, and droppable (all vacuously).
+    /// Creates an empty dictionary. An empty dict is droppable (vacuously).
     pub fn new() -> Self {
         Dict {
             entries: BTreeMap::new(),
-            copyable: true,
-            portable: true,
             droppable: true,
         }
     }
@@ -65,7 +57,9 @@ impl Dict {
 
     /// Inserts a key-value pair. O(log n). If the key already exists,
     /// replaces the value and returns the prior one. Updates the sticky
-    /// copyable/portable flags from the new value.
+    /// droppable flag from the new value. Portability is gated by the
+    /// caller (the `dict`/`put`/`replace` opcodes), parallel to how
+    /// `op_cell` gates cell-payload portability.
     pub fn insert(&mut self, key: Int253, value: Value) -> Option<Value> {
         self.absorb_flags(&value);
         self.entries.insert(key, value)
@@ -107,16 +101,17 @@ impl Dict {
             .map(|(k, _)| *k)
     }
 
-    /// Returns true iff this dict can be safely duplicated (every member
-    /// ever inserted was copyable).
+    /// Dicts are never VM-copyable (avoids variable `dup`/`getdup` gas
+    /// and the linear-leak hazard — todo #5).
     pub fn is_copyable(&self) -> bool {
-        self.copyable
+        false
     }
 
-    /// Returns true iff this dict can be sealed into long-term storage
-    /// (every member ever inserted was portable).
+    /// Returns true iff this dict can be sealed into long-term storage.
+    /// Always true: the `dict`/`put`/`replace` opcodes reject
+    /// non-portable values at insert time (spec §Dict).
     pub fn is_portable(&self) -> bool {
-        self.portable
+        true
     }
 
     /// Returns true iff this dict can be silently discarded by `drop`
@@ -127,30 +122,12 @@ impl Dict {
         self.droppable
     }
 
-    /// VM-level clone — enforces stack-copyability discipline. Errors
-    /// with `TypeNotCopyable` if the sticky copyable flag is false
-    /// (some non-copyable member entered at some point). Used by the
-    /// `dup` family of stack opcodes.
-    ///
-    /// Distinct from the `Clone` impl, which is the Rust-level
-    /// data-duplication path (registry snapshotting / txlog entry
-    /// construction): linear-type values (Token, Cell, …) are rejected
-    /// here but cloned fine by `.clone()`.
+    /// VM-level clone — always fails: dicts are non-copyable (todo #5).
+    /// The `dup`/`getdup` family routes here, so a dict value can never
+    /// be duplicated on the stack. The Rust-level `Clone` impl is the
+    /// separate data-duplication path (registry snapshot / txlog entry).
     pub fn try_clone(&self) -> Result<Dict, VMError> {
-        if !self.copyable {
-            return Err(VMError::TypeNotCopyable);
-        }
-        let mut new = Dict::new();
-        for (k, v) in self.entries() {
-            // Every value is copyable by the flag invariant.
-            new.entries.insert(*k, v.try_clone()?);
-        }
-        // Preserve the flags (try_clone of an all-copyable dict produces
-        // another all-copyable dict).
-        new.copyable = self.copyable;
-        new.portable = self.portable;
-        new.droppable = self.droppable;
-        Ok(new)
+        Err(VMError::TypeNotCopyable)
     }
 
     /// Builds a dict from a list of values with implicit keys 0, 1, 2, ...
@@ -177,12 +154,6 @@ impl Dict {
     }
 
     fn absorb_flags(&mut self, v: &Value) {
-        if !v.is_copyable() {
-            self.copyable = false;
-        }
-        if !v.is_portable() {
-            self.portable = false;
-        }
         if !v.is_droppable() {
             self.droppable = false;
         }

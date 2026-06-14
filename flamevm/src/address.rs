@@ -87,13 +87,11 @@ impl Encodable for Address {
                 dst.encode(&mut dst_bytes)?;
                 write_value(w, &Value::String(String::from(dst_bytes)))?;
                 write_value(w, &Value::Int253(*method))?;
-                // `try_clone` is cheap on portable Dicts; a Dict
-                // with non-copyable entries (e.g. a linear Token
-                // inside a payload arg) errors at encode time.
-                let args_clone = args
-                    .try_clone()
-                    .map_err(|_| WriteError::InsufficientCapacity)?;
-                write_value(w, &Value::Dict(args_clone))?;
+                // Serialization is the Rust-level data path, so use
+                // `Clone`, not the VM-level `try_clone` (dicts are
+                // non-copyable on the stack — todo #5). Dict insert
+                // already guaranteed every arg is portable/encodable.
+                write_value(w, &Value::Dict(args.clone()))?;
                 write_value(w, &Value::Int253(Int253::from(*gas)))
             }
         }

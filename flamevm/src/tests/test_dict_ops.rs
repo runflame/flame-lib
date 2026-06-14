@@ -85,6 +85,23 @@ fn put_on_occupied_key_errors() {
 }
 
 #[test]
+fn put_rejects_non_portable() {
+    // `put`ting a Merlin (always non-portable) into a dict fails the
+    // portability gate (todo #5), mirroring cell-payload rejection.
+    let script = Program::new()
+        .push_int(0u64).dict()                         // {}
+        .push_int(0u64)                                // key
+        .push_str(String::from(Vec::<u8>::new())).transcript()  // → Merlin
+        .put()
+        .to_bytecode();
+    let mut vm = vm_with_script(script);
+    assert!(matches!(
+        run_to_end(&mut vm).unwrap_err(),
+        VMError::NonPortableInDict
+    ));
+}
+
+#[test]
 fn replace_existing_returns_prev() {
     // Build {5: 50}, then replace v at key 5 with 99.
     // Spec stack: dict k v → dict' {prev 1 | 0}

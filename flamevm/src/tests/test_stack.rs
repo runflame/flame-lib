@@ -237,22 +237,19 @@ fn roll_out_of_range_errors() {
 }
 
 #[test]
-fn dup_of_copyable_dict_succeeds() {
-    // {5: 50}, dup:0 — should copy the dict.
+fn dup_of_dict_errors_noncopyable() {
+    // {5: 50}, dup:0 — dicts are never VM-copyable (todo #5), so even an
+    // all-Int dict can't be duplicated on the stack.
     let mut vm = vm_with_script(
         Program::new()
             .push_int(50u64).push_int(5u64).push_int(1u64).dict()
             .dup_k(0)
             .to_bytecode(),
     );
-    run_to_end(&mut vm).unwrap();
-    assert_eq!(vm.current_call.stack.len(), 2);
-    for v in &vm.current_call.stack {
-        match v {
-            Value::Dict(d) => assert_eq!(d.len(), 1),
-            _ => panic!("expected Dict"),
-        }
-    }
+    assert!(matches!(
+        run_to_end(&mut vm).unwrap_err(),
+        VMError::TypeNotCopyable
+    ));
 }
 
 #[test]
