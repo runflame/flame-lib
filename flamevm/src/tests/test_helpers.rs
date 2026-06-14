@@ -19,7 +19,7 @@ pub use bulletproofs::PedersenGens;
 pub use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 pub use crate::{
     Prover, Verifier,
-    Program, ProgramItem,
+    ScriptBuilder, Script,
     Token, WideToken, Value,
     PredicateTree,
     Instruction,
@@ -126,7 +126,7 @@ pub(crate) fn vm_with_script(script: Vec<u8>) -> VM {
     };
     VM::new(
         dummy_header(),
-        CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), kind, 1_000_000, 0, 0).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(ScriptBuilder::parse(&script).expect("script parses").into_instructions(), kind, 1_000_000, 0, 0).with_anchor(Anchor([0u8; 32])),
     )
 }
 
@@ -191,7 +191,7 @@ pub(crate) fn dispatch_code(arms: &[(u64, Vec<u8>)]) -> Vec<u8> {
     // value `sel`; we drop them explicitly. A matched `jumpif` lands at
     // `label i` with `[S sel]` on the stack → the handler drops both.
     let n = arms.len() as u32;
-    let mut p = Program::new(); // selector S already on the stack
+    let mut p = ScriptBuilder::new(); // selector S already on the stack
     for (i, (sel, _)) in arms.iter().enumerate() {
         // [S] → push sel [S sel] → eq [S sel b] → jumpif (pops b);
         // no-match falls through to drop the arm value → [S].
@@ -221,7 +221,7 @@ pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
     };
-    let child = CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), child_kind, 500, 0, 0);
+    let child = CallFrame::new(ScriptBuilder::parse(&script).expect("script parses").into_instructions(), child_kind, 500, 0, 0);
     let mut vm = VM::new(dummy_header(), parent);
     let p = mem::replace(&mut vm.current_call, child);
     vm.call_stack.push(p);
@@ -326,7 +326,7 @@ pub(crate) fn vm_internal_with_actor(script: Vec<u8>, actor: ActorID) -> VM {
     };
     VM::new(
         dummy_header(),
-        CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), kind, 1_000_000, 0, 0).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(ScriptBuilder::parse(&script).expect("script parses").into_instructions(), kind, 1_000_000, 0, 0).with_anchor(Anchor([0u8; 32])),
     )
 }
 
@@ -353,7 +353,7 @@ pub(crate) fn drive_external(
 pub(crate) fn vm_external_with_script(script: Vec<u8>) -> VM {
     VM::new(
         dummy_header(),
-        CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), CallKind::ExternalRoot, 1_000_000, 0, 0),
+        CallFrame::new(ScriptBuilder::parse(&script).expect("script parses").into_instructions(), CallKind::ExternalRoot, 1_000_000, 0, 0),
     )
 }
 
@@ -405,7 +405,7 @@ pub(crate) fn decode_cell_dropping_ok(bytes: &[u8]) -> Result<(), VMError> {
 pub(crate) fn run_external_workflow(script: Vec<u8>) -> VM {
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(Program::parse(&script).expect("script parses").into_instructions(), CallKind::ExternalRoot, 1_000_000, 0, 0),
+        CallFrame::new(ScriptBuilder::parse(&script).expect("script parses").into_instructions(), CallKind::ExternalRoot, 1_000_000, 0, 0),
     );
     let mut delegate = StubDelegate::new();
     while vm.step_external(&mut delegate).expect("step_external ok") {}
@@ -459,7 +459,7 @@ impl Delegate for StubDelegate {
 /// Mirrors the encrypted-borrow test's pattern.
 pub(crate) fn run_external_steps<'g>(
     pc_gens: &'g PedersenGens,
-    program: Program,
+    program: ScriptBuilder,
     n_steps: usize,
 ) -> (VM, Prover<'g>) {
     let mut vm = VM::new(
@@ -501,7 +501,7 @@ pub(crate) fn make_signtx_script_with_cell(
         vec![Value::Int253(Int253::from(0u64))], // single Int253 payload
     );
     let cell_id = cell.id();
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_str(String::from(encode_cell_to_bytes(&cell)))
         .input()
         .signtx()    // pushes 1 Int253 (payload) + count 1
@@ -623,19 +623,19 @@ pub(crate) fn output_predicate_point(tag: u8) -> CompressedRistretto {
         .point
 }
 
-/// Builds the prover-side `Program` for the N→M script. The
+/// Builds the prover-side `ScriptBuilder` for the N→M script. The
 /// `inputs` and `outputs` specs must already balance per flavor
 /// (`mix` will fail at CS solve time otherwise — exercised
 /// separately by the negative tests).
 ///
-/// Returns the prover Program (witnesses inline) — the canonical
+/// Returns the prover ScriptBuilder (witnesses inline) — the canonical
 /// bytecode is recovered via `program.to_bytecode()` on the
 /// verifier side.
 pub(crate) fn build_confidential_nm_program(
     inputs: &[NMInputSpec],
     outputs: &[NMOutputSpec],
-) -> Program {
-    let mut program = Program::new();
+) -> ScriptBuilder {
+    let mut program = ScriptBuilder::new();
 
     //                    taproot_proof pieces + push:0 + open. ──
     for inp in inputs {
@@ -733,11 +733,11 @@ pub(crate) fn open_commitments_for_output(
 }
 
 /// Like `push_taproot_proof_pieces` but emits Instructions into a
-/// Program (so the prover keeps witness-bearing variants).
+/// ScriptBuilder (so the prover keeps witness-bearing variants).
 pub(crate) fn push_taproot_proof_to_program(
-    mut program: Program,
+    mut program: ScriptBuilder,
     cp: &TaprootProof,
-) -> Program {
+) -> ScriptBuilder {
     program = program.push_point(*cp.internal_key.as_bytes());
     // Neighbors as a list-style Dict: for each neighbor, push
     // (val, key); then push n, dict.

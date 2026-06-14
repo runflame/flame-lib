@@ -8,14 +8,14 @@ use super::test_helpers::*;
 #[test]
 fn verify_truthy_pops() {
     // push:1, verify — succeeds, stack empties.
-    let mut vm = vm_with_script(Program::new().push_int(1u64).verify().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().push_int(1u64).verify().to_bytecode());
     run_to_end(&mut vm).unwrap();
     assert!(vm.current_call.stack.is_empty());
 }
 
 #[test]
 fn verify_zero_fails() {
-    let mut vm = vm_with_script(Program::new().push_int(0u64).verify().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().push_int(0u64).verify().to_bytecode());
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::VerifyFailed
@@ -25,7 +25,7 @@ fn verify_zero_fails() {
 #[test]
 fn verify_requires_int() {
     // pushpoint, verify — top is Point not Int253.
-    let script = Program::new().push_point([0u8; 32]).verify().to_bytecode();
+    let script = ScriptBuilder::new().push_point([0u8; 32]).verify().to_bytecode();
     let mut vm = vm_with_script(script);
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
@@ -39,7 +39,7 @@ fn verify_requires_int() {
 fn jumpif_taken_skips_forward() {
     // push:1, jumpif L0, push:5, label L0 — true cond jumps past push:5.
     let mut vm = vm_with_script(
-        Program::new().push_int(1u64).jumpif(0).push_int(5u64).label(0).to_bytecode(),
+        ScriptBuilder::new().push_int(1u64).jumpif(0).push_int(5u64).label(0).to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert!(vm.current_call.stack.is_empty());
@@ -49,7 +49,7 @@ fn jumpif_taken_skips_forward() {
 fn jumpif_not_taken_falls_through() {
     // push:0, jumpif L0, push:5, label L0 — false cond runs push:5.
     let mut vm = vm_with_script(
-        Program::new().push_int(0u64).jumpif(0).push_int(5u64).label(0).to_bytecode(),
+        ScriptBuilder::new().push_int(0u64).jumpif(0).push_int(5u64).label(0).to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
@@ -60,7 +60,7 @@ fn jumpif_not_taken_falls_through() {
 fn jump_unconditional_skips_forward() {
     // jump L0, push:5, label L0 — push:5 never runs.
     let mut vm = vm_with_script(
-        Program::new().jump(0).push_int(5u64).label(0).to_bytecode(),
+        ScriptBuilder::new().jump(0).push_int(5u64).label(0).to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert!(vm.current_call.stack.is_empty());
@@ -69,7 +69,7 @@ fn jump_unconditional_skips_forward() {
 #[test]
 fn jump_to_missing_label_errors() {
     // jump L5 with no label 5 anywhere → scan hits end → LabelNotFound.
-    let mut vm = vm_with_script(Program::new().jump(5).to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().jump(5).to_bytecode());
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
         VMError::LabelNotFound
@@ -79,7 +79,7 @@ fn jump_to_missing_label_errors() {
 #[test]
 fn label_out_of_order_errors() {
     // label 1 before label 0 → out of sequence → LabelOutOfOrder.
-    let mut vm = vm_with_script(Program::new().label(1).to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().label(1).to_bytecode());
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
         VMError::LabelOutOfOrder
@@ -94,7 +94,7 @@ fn label_out_of_order_errors() {
 fn loop_revisits_inner_label() {
     // n=2; label TOP(0); label INNER(1); n -= 1; dup; jumpif TOP; drop.
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_int(2u64)
             .label(0) // TOP
             .label(1) // inner — re-visited each iteration
@@ -113,7 +113,7 @@ fn loop_revisits_inner_label() {
 #[test]
 fn build_if_runs_then_when_true() {
     let mut vm = vm_with_script(
-        Program::new().push_int(1u64).build_if(|p| p.push_int(9u64)).to_bytecode(),
+        ScriptBuilder::new().push_int(1u64).build_if(|p| p.push_int(9u64)).to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
@@ -123,7 +123,7 @@ fn build_if_runs_then_when_true() {
 #[test]
 fn build_if_skips_then_when_false() {
     let mut vm = vm_with_script(
-        Program::new().push_int(0u64).build_if(|p| p.push_int(9u64)).to_bytecode(),
+        ScriptBuilder::new().push_int(0u64).build_if(|p| p.push_int(9u64)).to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert!(vm.current_call.stack.is_empty());
@@ -132,7 +132,7 @@ fn build_if_skips_then_when_false() {
 #[test]
 fn build_if_else_picks_else_when_false() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_int(0u64)
             .build_if_else(|p| p.push_int(9u64), |p| p.push_int(8u64))
             .to_bytecode(),
@@ -145,7 +145,7 @@ fn build_if_else_picks_else_when_false() {
 #[test]
 fn build_if_else_picks_then_when_true() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_int(1u64)
             .build_if_else(|p| p.push_int(9u64), |p| p.push_int(8u64))
             .to_bytecode(),
@@ -159,7 +159,7 @@ fn build_if_else_picks_then_when_true() {
 fn build_while_counts_down_and_exits() {
     // while (n) { n -= 1 }, starting n=3 — terminates with a clean stack.
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_int(3u64)
             .build_while(|p| p.dup_k(0), |p| p.push_int(-1i64).add())
             .drop_()
@@ -172,7 +172,7 @@ fn build_while_counts_down_and_exits() {
 fn build_loop_break_runs_once() {
     // loop { push:7; break } — body runs once, break exits.
     let mut vm = vm_with_script(
-        Program::new().build_loop(|p| p.push_int(7u64).build_break()).to_bytecode(),
+        ScriptBuilder::new().build_loop(|p| p.push_int(7u64).build_break()).to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
@@ -185,7 +185,7 @@ fn build_continue_skips_rest_of_body() {
     // every iteration, so the loop exits with a clean stack. A dirty
     // stack (push:99 leaked) would fail the root clean-stack check.
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_int(2u64)
             .build_while(
                 |p| p.dup_k(0),
@@ -203,14 +203,14 @@ fn build_continue_skips_rest_of_body() {
 /// safety property that replaces "no loops" (ADR 0015).
 #[test]
 fn infinite_loop_exhausts_gas() {
-    let script = Program::new().build_loop(|p| p.nop()).to_bytecode();
+    let script = ScriptBuilder::new().build_loop(|p| p.nop()).to_bytecode();
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
         caller: None,
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(Program::parse(&script).unwrap().into_instructions(), kind, 1_000, 0, 0).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(ScriptBuilder::parse(&script).unwrap().into_instructions(), kind, 1_000, 0, 0).with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
@@ -223,7 +223,7 @@ fn infinite_loop_exhausts_gas() {
 #[test]
 fn skip_scan_charges_gas() {
     // jump L0, then 50 nops, label L0. Budget of 10 < 1 (jump) + 51 scans.
-    let mut p = Program::new().jump(0);
+    let mut p = ScriptBuilder::new().jump(0);
     for _ in 0..50 {
         p = p.nop();
     }
@@ -234,7 +234,7 @@ fn skip_scan_charges_gas() {
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(Program::parse(&script).unwrap().into_instructions(), kind, 10, 0, 0).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(ScriptBuilder::parse(&script).unwrap().into_instructions(), kind, 10, 0, 0).with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
@@ -250,7 +250,7 @@ fn skip_scan_charges_gas() {
 fn mem_cap_bounds_cumulative_string_growth() {
     // Two writezeros of 60 bytes each against a 100-byte cap: first
     // passes, second exceeds the cumulative budget.
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_str(String::from(Vec::new()))
         .push_int(60u64)
         .write_zeros()
@@ -264,7 +264,7 @@ fn mem_cap_bounds_cumulative_string_growth() {
     let mut vm = VM::new(
         dummy_header(),
         CallFrame::new(
-            Program::parse(&script).unwrap().into_instructions(),
+            ScriptBuilder::parse(&script).unwrap().into_instructions(),
             kind,
             1_000,
             /*mem_limit=*/ 100,
@@ -289,7 +289,7 @@ fn mem_cap_trips_on_pushstr_append_and_tread() {
         let mut vm = VM::new(
             dummy_header(),
             CallFrame::new(
-                Program::parse(&script).unwrap().into_instructions(),
+                ScriptBuilder::parse(&script).unwrap().into_instructions(),
                 kind,
                 10_000,
                 cap,
@@ -301,7 +301,7 @@ fn mem_cap_trips_on_pushstr_append_and_tread() {
 
     // pushstr: a 60-byte literal against a 50-byte cap.
     let s = run_capped(
-        Program::new().push_str(String::from(vec![7u8; 60])).to_bytecode(),
+        ScriptBuilder::new().push_str(String::from(vec![7u8; 60])).to_bytecode(),
         50,
     );
     assert!(matches!(s.unwrap_err(), VMError::MemLimitExceeded), "pushstr charges");
@@ -309,7 +309,7 @@ fn mem_cap_trips_on_pushstr_append_and_tread() {
     // append: 40 + 40 literals fit a 100 cap (80), the 40-byte append
     // pushes the high-water to 120.
     let s = run_capped(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(String::from(vec![1u8; 40]))
             .push_str(String::from(vec![2u8; 40]))
             .append()
@@ -320,7 +320,7 @@ fn mem_cap_trips_on_pushstr_append_and_tread() {
 
     // tread: a 200-byte challenge squeeze against a 100 cap.
     let s = run_capped(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(String::from(b"L".to_vec()))
             .transcript()
             .push_str(String::from(b"x".to_vec()))
@@ -338,7 +338,7 @@ fn mem_cap_trips_on_pushstr_append_and_tread() {
 fn return_zero_at_root_errors() {
     // push:0, return — root frame has no caller, so `return` errors even
     // with k=0. Scripts terminate cleanly by running off the end instead.
-    let mut vm = vm_with_script(Program::new().push_int(0u64).return_().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().push_int(0u64).return_().to_bytecode());
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
         VMError::ReturnAtRoot
@@ -349,7 +349,7 @@ fn return_zero_at_root_errors() {
 fn return_nonzero_at_root_errors() {
     // push:7, push:1, return — k=1 at root: nowhere for 7 to go.
     let mut vm = vm_with_script(
-        Program::new().push_int(7u64).push_int(1u64).return_().to_bytecode(),
+        ScriptBuilder::new().push_int(7u64).push_int(1u64).return_().to_bytecode(),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
@@ -363,7 +363,7 @@ fn return_with_dirty_leftover_errors() {
     // items below count → StackNotClean. Error is caught and translated
     // to a `0` failure marker on the parent.
     let mut vm = vm_with_nested_child_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_int(9u64).push_int(7u64).push_int(1u64).return_()
             .to_bytecode(),
     );
@@ -380,7 +380,7 @@ fn return_too_few_items_errors() {
     // remain → BadReturnArity. The `step` wrapper catches the error,
     // unwinds the child, and pushes `0` (failure marker) onto the parent.
     let mut vm = vm_with_nested_child_script(
-        Program::new().push_int(5u64).return_().to_bytecode(),
+        ScriptBuilder::new().push_int(5u64).return_().to_bytecode(),
     );
     while !vm.call_stack.is_empty() {
         vm.step_internal().expect("step ok — error swallowed into marker");
@@ -393,7 +393,7 @@ fn return_too_few_items_errors() {
 #[test]
 fn return_transfers_values_to_parent() {
     // Child script: push:7, push:1, return (k=1).
-    let child_script = Program::new().push_int(7u64).push_int(1u64).return_().to_bytecode();
+    let child_script = ScriptBuilder::new().push_int(7u64).push_int(1u64).return_().to_bytecode();
     let parent_frame =
         CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
     let child_kind = CallKind::CellOpen {
@@ -401,7 +401,7 @@ fn return_transfers_values_to_parent() {
         external_context: true,
     };
     let child_frame = CallFrame::new(
-        Program::parse(&child_script).expect("parse").into_instructions(),
+        ScriptBuilder::parse(&child_script).expect("parse").into_instructions(),
         child_kind, 500, 0, 0,
     );
     let mut vm = VM::new(dummy_header(), parent_frame);
@@ -426,7 +426,7 @@ fn return_transfers_values_to_parent() {
 fn type_pushes_int253_code() {
     // push:5, type — top is type code (0 for Int253), then 5.
     let mut vm = vm_with_script(
-        Program::new().push_int(5u64).type_().to_bytecode(),
+        ScriptBuilder::new().push_int(5u64).type_().to_bytecode(),
     );
     vm.step_internal().unwrap(); // push:5
     vm.step_internal().unwrap(); // type
@@ -446,7 +446,7 @@ fn type_pushes_string_code() {
 
 #[test]
 fn type_underflow_errors() {
-    let mut vm = vm_with_script(Program::new().type_().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().type_().to_bytecode());
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::StackUnderflow

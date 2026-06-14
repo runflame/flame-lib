@@ -11,7 +11,7 @@ use super::test_helpers::*;
 fn phase19_op_fee_records_txlog_and_pushes_debt() {
     let pc_gens = PedersenGens::default();
     // push:100, push:7, fee → 3 instructions.
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .push_int(100u64)
         .push_int(7u64)
         .fee();
@@ -37,7 +37,7 @@ fn phase19_op_fee_accumulates_total() {
     // After the first fee, a WideToken sits on the stack — the
     // second fee builds another one. The stack will hold both
     // before we inspect. We don't try to clean up.
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .push_int(30u64)
         .push_int(0u64)
         .fee()
@@ -70,7 +70,7 @@ fn phase19_op_fee_rejects_negative_qty() {
     script.push(0x00);
     // fee
     script.push(0x9b);
-    let program = crate::Program::parse(&script).expect("decode");
+    let program = crate::ScriptBuilder::parse(&script).expect("decode");
     // Run all 3 instructions; the third (fee) must error.
     let mut vm = VM::new(
         dummy_header(),
@@ -95,7 +95,7 @@ fn phase19_op_fee_rejects_qty_over_cap() {
     let pc_gens = PedersenGens::default();
     // MAX_FEE = 2^24. Push 2^24 + 1.
     let over = (1u64 << 24) + 1;
-    let program = Program::new().push_int(over).push_int(0u64).fee();
+    let program = ScriptBuilder::new().push_int(over).push_int(0u64).fee();
     let mut vm = VM::new(
         dummy_header(),
         CallFrame::new(
@@ -121,7 +121,7 @@ fn phase19_op_fee_rejects_qty_over_cap() {
 fn phase19_op_fee_rejects_aggregate_over_cap() {
     let pc_gens = PedersenGens::default();
     let half = (1u64 << 24) / 2; // 2^23
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .push_int(half)
         .push_int(0u64)
         .fee()

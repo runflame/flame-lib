@@ -23,7 +23,7 @@ fn send_script(
     vbytes: u64,
 ) -> Vec<u8> {
     // ADR 0020: the selector is just the topmost payload arg.
-    Program::new()
+    ScriptBuilder::new()
         .push_int(selector)                            // selector arg
         .push_int(1u64)                                // k = 1 arg
         .push_str(String::from(refund_bytes.to_vec())) // refund (32-byte)
@@ -43,7 +43,7 @@ fn vm_internal(actor: ActorID, script: Vec<u8>) -> VM {
     VM::new(
         dummy_header(),
         CallFrame::new(
-            Program::parse(&script).expect("parse").into_instructions(),
+            ScriptBuilder::parse(&script).expect("parse").into_instructions(),
             kind,
             1_000_000,
             0,
@@ -126,7 +126,7 @@ fn send_from_external_root_has_no_caller() {
     let mut vm = VM::new(
         dummy_header(),
         CallFrame::new(
-            Program::parse(&script).expect("parse").into_instructions(),
+            ScriptBuilder::parse(&script).expect("parse").into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
             0,
@@ -154,7 +154,7 @@ fn send_payload_in_txlog_differs_across_args() {
 
     // Helper that builds a script with 1 portable arg (an Int253).
     let one_arg_send = |arg: u64| {
-        Program::new()
+        ScriptBuilder::new()
             .push_int(arg)                                     // payload[0]
             .push_int(1u64)                                    // k = 1
             .push_str(String::from(refund.to_vec()))           // refund
@@ -209,7 +209,7 @@ fn external_txid_includes_send_entry() {
     let txid_with = crate::tx::TxID::from_log(&vm1.txlog);
 
     // Run a no-op tx (nop instead of send).
-    let mut vm2 = vm_internal(ActorID::Hash([0x33; 32]), Program::new().nop().to_bytecode());
+    let mut vm2 = vm_internal(ActorID::Hash([0x33; 32]), ScriptBuilder::new().nop().to_bytecode());
     while vm2.step_internal().expect("step") {}
     let txid_without = crate::tx::TxID::from_log(&vm2.txlog);
 
@@ -223,7 +223,7 @@ fn send_with_non_32_byte_addr_errors() {
     // Built via the public builder; the bad String comes from a
     // shorter byte slice. (No need for raw bytes — only the value
     // length matters.)
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(0u64)                              // k = 0
         .push_str(String::from(vec![0u8; 32]))       // refund (valid 32 bytes)
         .push_int(1u64)                              // gas
@@ -244,7 +244,7 @@ fn send_with_non_32_byte_addr_errors() {
 
 #[test]
 fn send_with_non_32_byte_refund_errors() {
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(0u64)                              // k = 0
         .push_str(String::from(vec![0u8; 16]))       // BAD refund: 16 bytes
         .push_int(1u64)                              // gas

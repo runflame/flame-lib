@@ -484,7 +484,7 @@ fn confidential_1_to_1_with_fee() {
     };
     let (q_out, f_out) = open_commitments_for_output(&out);
 
-    let mut program = Program::new();
+    let mut program = ScriptBuilder::new();
     // Consume the input cell — push the witness-bearing String::Cell
     // so the Token's open commitments survive into the CS.
     program = program.push_str(crate::String::cell(cell));
@@ -701,7 +701,7 @@ fn confidential_with_fee_undersupply_rejected() {
     // Same script shape as the positive fee test, just with
     // the unbalanced output qty.
     let out_pred = output_predicate_point(out.predicate_tag);
-    let mut program = Program::new();
+    let mut program = ScriptBuilder::new();
     program = program.push_str(crate::String::cell(cell));
     program = program.input();
     program = push_taproot_proof_to_program(program, &cp);

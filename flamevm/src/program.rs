@@ -1,4 +1,4 @@
-//! Fluent `Program` builder + `ProgramItem` wire-form wrapper.
+//! Fluent `ScriptBuilder` + the compiled `Script` value it produces.
 
 use std::collections::VecDeque;
 
@@ -14,7 +14,7 @@ use crate::string::String;
 /// methods (`alloc`, `add`, `eq`, `verify`, …) and call `to_bytecode()`
 /// / `to_witnesses()` to derive the prover/verifier views.
 #[derive(Clone, Debug, Default)]
-pub struct Program {
+pub struct ScriptBuilder {
     instructions: Vec<Instruction>,
     /// Build-time only: active loop scopes for `build_break` /
     /// `build_continue`. Balanced (pushed/popped) by `build_loop` /
@@ -31,16 +31,16 @@ struct LoopScope {
     end_jumps: Vec<usize>,
 }
 
-impl Program {
+impl ScriptBuilder {
     /// Constructs an empty program.
     pub fn new() -> Self {
         Self { instructions: Vec::new(), loop_scopes: Vec::new() }
     }
 
-    /// Parses a bytecode slice into a Program. Witness-bearing
+    /// Parses a bytecode slice into a ScriptBuilder. Witness-bearing
     /// instructions land as `Alloc(None)` etc. — useful for verifier
     /// inspection or for splicing existing bytecode into a fresh
-    /// prover-authored Program.
+    /// prover-authored ScriptBuilder.
     pub fn parse(bytes: &[u8]) -> Result<Self, VMError> {
         let mut r: &[u8] = bytes;
         let mut p = Self::new();
@@ -56,12 +56,19 @@ impl Program {
         &self.instructions
     }
 
-    /// Consumes the Program and returns the underlying
+    /// Consumes the ScriptBuilder and returns the underlying
     /// `Vec<Instruction>` — what the VM walks. The Run constructor
     /// takes this directly; both prover and verifier feed the VM
     /// through this single path.
     pub fn into_instructions(self) -> Vec<Instruction> {
         self.instructions
+    }
+
+    /// Finishes the builder into an immutable [`Script`] (transparent /
+    /// witness-bearing form). The verifier-side opaque form comes from
+    /// decoding bytecode, not from a builder.
+    pub fn into_script(self) -> Script {
+        Script::Transparent(self.instructions)
     }
 
     /// Appends an arbitrary `Instruction`. Used by the fluent builder
@@ -115,13 +122,13 @@ impl Program {
     }
 
     /// `pushstr` (0x19) carrying a witness-bearing sub-script. The
-    /// prover pushes the inner Program's instructions (witness
+    /// prover pushes the inner ScriptBuilder's instructions (witness
     /// slots intact) wrapped in `String::Script`; downstream
     /// `op_open` / `op_signcall` walk those
     /// instructions directly. Verifier-side bytecode encodes to
     /// the compiled bytes of `inner.to_bytecode()`, so both sides
     /// see the same wire form.
-    pub fn push_script(mut self, inner: Program) -> Self {
+    pub fn push_script(mut self, inner: ScriptBuilder) -> Self {
         self.instructions.push(Instruction::PushStr(String::script(
             inner.into_instructions(),
         )));
@@ -130,7 +137,7 @@ impl Program {
 
     /// `pushpoint` (0x1a) from raw 32 bytes (the verifier-style
     /// `Point::Opaque`). For witness-bearing points use
-    /// [`Program::push_point_typed`].
+    /// [`ScriptBuilder::push_point_typed`].
     pub fn push_point(mut self, bytes: [u8; 32]) -> Self {
         self.instructions
             .push(Instruction::PushPoint(Point::from_bytes(bytes)));
@@ -490,61 +497,48 @@ impl Program {
     pub fn newbytes(mut self) -> Self { self.instructions.push(Instruction::Newbytes); self }
 }
 
-// ── ProgramItem ─────────────────────────────────────────────────────
+// ── Script ──────────────────────────────────────────────────────────
 
-/// A view of a program:
+/// A compiled script — the immutable value/exec form a [`ScriptBuilder`]
+/// produces and a [`CallFrame`](crate::vm) runs. Two representations of
+/// the same bytecode (todo #1–3 — unifies the former `Code` and
+/// `ProgramItem`):
 ///
-/// - `Bytecode(Vec<u8>)` — verifier's view (opaque bytes).
-/// - `Program(Program)` — prover's view (typed instructions plus
-///   witness-bearing variants).
+/// - `Transparent(Vec<Instruction>)` — prover's view; carries
+///   witness-bearing instructions, ready to execute without re-decoding.
+/// - `Opaque(Vec<u8>)` — verifier / actor view; raw bytecode decoded one
+///   instruction at a time, never materializing a `Vec<Instruction>`.
 ///
-/// Both encode to the same bytecode; only the in-memory shape differs.
+/// Both yield identical canonical bytecode via [`to_bytecode`](Self::to_bytecode).
 #[derive(Clone, Debug)]
-pub enum ProgramItem {
-    /// Verifier's opaque bytecode form.
-    Bytecode(Vec<u8>),
-    /// Prover's witness-bearing form.
-    Program(Program),
+pub enum Script {
+    /// Prover's pre-decoded, witness-bearing instructions.
+    Transparent(Vec<Instruction>),
+    /// Verifier's raw bytecode, decoded on demand.
+    Opaque(Vec<u8>),
 }
 
-impl ProgramItem {
-    /// Returns the canonical bytecode for this item. Allocates only if
-    /// the variant is `Program(_)`.
+impl Script {
+    /// Canonical bytecode. Allocates only for the `Transparent` case.
     pub fn to_bytecode(&self) -> Vec<u8> {
         match self {
-            ProgramItem::Bytecode(b) => b.clone(),
-            ProgramItem::Program(p) => p.to_bytecode(),
+            Script::Opaque(b) => b.clone(),
+            Script::Transparent(instrs) => {
+                let mut out = Vec::new();
+                for instr in instrs {
+                    instr.encode(&mut out).expect("Vec writer never fails");
+                }
+                out
+            }
         }
     }
 
-    /// Downcasts to a `Program`; errors `TypeNotProgram` for the
-    /// bytecode case. Used by prover-side Delegate's `new_run`.
-    pub fn into_program(self) -> Result<Program, VMError> {
+    /// Decodes to the instruction list (re-parsing the `Opaque` case,
+    /// dropping any witnesses it never carried).
+    pub fn into_instructions(self) -> Result<Vec<Instruction>, VMError> {
         match self {
-            ProgramItem::Program(p) => Ok(p),
-            ProgramItem::Bytecode(_) => Err(VMError::UnexpectedEndOfScript),
+            Script::Transparent(instrs) => Ok(instrs),
+            Script::Opaque(b) => Ok(ScriptBuilder::parse(&b)?.into_instructions()),
         }
-    }
-
-    /// Downcasts to opaque bytecode; errors for the `Program` case
-    /// (with `UnexpectedEndOfScript` as the closest existing code).
-    /// Used by verifier-side Delegate's `new_run`.
-    pub fn into_bytecode(self) -> Result<Vec<u8>, VMError> {
-        match self {
-            ProgramItem::Bytecode(b) => Ok(b),
-            ProgramItem::Program(p) => Ok(p.to_bytecode()),
-        }
-    }
-}
-
-impl From<Program> for ProgramItem {
-    fn from(p: Program) -> Self {
-        ProgramItem::Program(p)
-    }
-}
-
-impl From<Vec<u8>> for ProgramItem {
-    fn from(b: Vec<u8>) -> Self {
-        ProgramItem::Bytecode(b)
     }
 }

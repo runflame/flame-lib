@@ -8,7 +8,7 @@ use super::test_helpers::*;
 fn instruction_alloc_witness_roundtrip() {
     // Alloc(Some(7)) encodes to exactly one byte; its witness is
     // tracked separately via the queue.
-    let p = Program::new()
+    let p = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(None)
         .alloc(Some(Int253::from(3u64)));
@@ -24,7 +24,7 @@ fn instruction_alloc_witness_roundtrip() {
 #[test]
 fn program_builder_emits_expected_bytecode() {
     // alloc(7) alloc(3) add alloc(10) eq verify
-    let p = Program::new()
+    let p = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
         .add()
@@ -47,7 +47,7 @@ fn program_builder_emits_expected_bytecode() {
 #[test]
 fn prove_then_verify_alloc_arithmetic_equality() {
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
         .add()
@@ -83,7 +83,7 @@ let proof = proof.expect("proof set");
 #[test]
 fn prove_succeeds_but_verify_fails_on_tampered_proof() {
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
         .add()
@@ -129,7 +129,7 @@ fn prove_fails_for_unsatisfiable_equality() {
     // (the constraint is unsatisfiable but the prover constructs
     // *something*); the verifier MUST reject.
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
         .add()
@@ -166,10 +166,10 @@ fn alloc_pushes_expression_with_witness() {
     // Build a single-alloc program and stop after the alloc to
     // inspect the produced Expression.
     let pc_gens = PedersenGens::default();
-    let program = Program::new().alloc(Some(Int253::from(42u64)));
+    let program = ScriptBuilder::new().alloc(Some(Int253::from(42u64)));
     let mut prover = Prover::new(&pc_gens);
     // We bypass the public `Prover::prove` so we can inspect VM
-    // state mid-flight. Build a Run::Queue from the Program so the
+    // state mid-flight. Build a Run::Queue from the ScriptBuilder so the
     // Alloc instruction's witness survives dispatch.
     let kind = CallKind::ExternalRoot;
     let mut vm = VM::new(
@@ -199,7 +199,7 @@ fn alloc_pushes_expression_with_witness() {
 fn prove_then_verify_alloc_multiplication() {
     // alloc(4) alloc(5) mul alloc(20) eq verify
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(4u64)))
         .alloc(Some(Int253::from(5u64)))
         .mul()
@@ -234,7 +234,7 @@ let proof = proof.expect("proof set");
 fn prove_then_verify_alloc_with_negation() {
     // alloc(5) neg alloc(-5) eq verify  →  -5 == -5
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(5u64)))
         .neg()
         .alloc(Some(Int253::from(-5i64)))
@@ -276,7 +276,7 @@ fn alloc_without_witness_works_in_verifier_path() {
     // Concrete sub-test: just confirm the verifier walks an alloc
     // opcode without erroring on the witness-missing path.
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(0u64)))
         .alloc(Some(Int253::from(0u64)))
         .eq()
@@ -312,12 +312,12 @@ fn shared_bp_gens_is_singleton() {
     // singleton, but we confirm both can prove a trivial program
     // (i.e., the singleton is reachable from both instances).
     let pc_gens = PedersenGens::default();
-    let program1 = Program::new()
+    let program1 = ScriptBuilder::new()
         .alloc(Some(Int253::from(1u64)))
         .alloc(Some(Int253::from(1u64)))
         .eq()
         .verify();
-    let program2 = Program::new()
+    let program2 = ScriptBuilder::new()
         .alloc(Some(Int253::from(2u64)))
         .alloc(Some(Int253::from(2u64)))
         .eq()
@@ -336,7 +336,7 @@ fn phase18_txid_deterministic_for_equal_inputs() {
     let pc_gens = PedersenGens::default();
     let header = dummy_header();
     let mk_program = || {
-        Program::new()
+        ScriptBuilder::new()
             .alloc(Some(Int253::from(7u64)))
             .alloc(Some(Int253::from(3u64)))
             .add()
@@ -360,7 +360,7 @@ fn phase18_txid_deterministic_for_equal_inputs() {
 fn phase18_txid_changes_when_header_changes() {
     let pc_gens = PedersenGens::default();
     let mk_program = || {
-        Program::new()
+        ScriptBuilder::new()
             .alloc(Some(Int253::from(7u64)))
             .alloc(Some(Int253::from(3u64)))
             .add()
@@ -399,7 +399,7 @@ fn phase18_txid_changes_when_header_changes() {
 fn phase18_prove_verify_roundtrip_binds_txid() {
     let pc_gens = PedersenGens::default();
     let header = dummy_header();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
         .add()
@@ -443,7 +443,7 @@ fn phase18_verifier_rejects_proof_under_different_header() {
         version: 1,
         locktime: 99, // different!
     };
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
         .add()
@@ -476,7 +476,7 @@ fn phase18_verifier_rejects_proof_under_different_header() {
 fn phase21_txresult_populated_for_trivial_program() {
     let pc_gens = PedersenGens::default();
     let header = TxHeader { version: 7, locktime: 13 };
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(5u64)))
         .alloc(Some(Int253::from(5u64)))
         .eq()
@@ -532,7 +532,7 @@ fn phase21_total_fee_flows_through_to_txresult() {
     let pc_gens = PedersenGens::default();
     // Build script directly to avoid the non-droppable WideToken
     // (we step through manually).
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .push_int(123u64)
         .push_int(0u64)
         .fee();
@@ -564,7 +564,7 @@ fn phase21_txlog_ordering_in_txresult() {
     // Use execute_external (the simple delegate path) — same
     // TxResult shape, easier setup. Build a script that pushes a
     // string and logs it twice.
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_str(String::from(b"a".to_vec())).log()
         .push_str(String::from(b"b".to_vec())).log()
         .to_bytecode();
@@ -602,7 +602,7 @@ fn phase21_deferred_sigs_in_txresult() {
     let pc_gens = PedersenGens::default();
     let (vk, sk) = signing_keypair(7);
     let (script, cell_id) = make_signtx_script_with_cell(vk);
-    let program = crate::Program::parse(&script).expect("decode");
+    let program = crate::ScriptBuilder::parse(&script).expect("decode");
     let prover_result =
         Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove ok");

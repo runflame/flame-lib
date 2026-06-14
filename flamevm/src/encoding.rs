@@ -304,7 +304,7 @@ fn read_full_int(r: &mut impl Reader, negative: bool) -> Result<Int253, ReadErro
 /// encoding (32-byte compressed point or sign-magnitude int) — the
 /// wire form is byte-identical to what an Opaque String wrapping the
 /// same bytes would produce. The witness data itself is discarded;
-/// the prover ferries it via the in-memory Program (and pushes it
+/// the prover ferries it via the in-memory ScriptBuilder (and pushes it
 /// onto the stack as a witness-bearing String when needed).
 pub fn write_string(w: &mut impl Writer, s: &String) -> Result<(), WriteError> {
     // Borrow the bytes for the common `Opaque` case; only witness

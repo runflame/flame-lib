@@ -7,7 +7,7 @@ use super::test_helpers::*;
 #[test]
 fn abs_of_negative_pushes_magnitude_and_sign() {
     let mut vm = vm_with_script(
-        Program::new().push_int(-9i64).abs().to_bytecode(),
+        ScriptBuilder::new().push_int(-9i64).abs().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     // Stack: [magnitude=9, sign=1] (sign on top)
@@ -18,7 +18,7 @@ fn abs_of_negative_pushes_magnitude_and_sign() {
 #[test]
 fn abs_of_positive_pushes_sign_zero() {
     let mut vm = vm_with_script(
-        Program::new().push_int(9u64).abs().to_bytecode(),
+        ScriptBuilder::new().push_int(9u64).abs().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(9u64));
@@ -28,7 +28,7 @@ fn abs_of_positive_pushes_sign_zero() {
 #[test]
 fn abs_of_zero_is_sign_zero() {
     let mut vm = vm_with_script(
-        Program::new().push_int(0u64).abs().to_bytecode(),
+        ScriptBuilder::new().push_int(0u64).abs().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(0u64));
@@ -38,7 +38,7 @@ fn abs_of_zero_is_sign_zero() {
 #[test]
 fn eq_pushes_one_for_equal_ints() {
     let mut vm = vm_with_script(
-        Program::new().push_int(7u64).push_int(7u64).eq().to_bytecode(),
+        ScriptBuilder::new().push_int(7u64).push_int(7u64).eq().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     // Stack: [7, 7, 1]
@@ -49,7 +49,7 @@ fn eq_pushes_one_for_equal_ints() {
 #[test]
 fn eq_pushes_zero_for_distinct_ints() {
     let mut vm = vm_with_script(
-        Program::new().push_int(7u64).push_int(8u64).eq().to_bytecode(),
+        ScriptBuilder::new().push_int(7u64).push_int(8u64).eq().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[2], Int253::from(0u64));
@@ -59,7 +59,7 @@ fn eq_pushes_zero_for_distinct_ints() {
 fn eq_cross_type_is_zero() {
     // pushpoint, push:0, eq — different variants → 0
     let mut vm = vm_with_script(
-        Program::new().push_point([0u8; 32]).push_int(0u64).eq().to_bytecode(),
+        ScriptBuilder::new().push_point([0u8; 32]).push_int(0u64).eq().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(vm.current_call.stack.last().unwrap(), Int253::from(0u64));
@@ -68,7 +68,7 @@ fn eq_cross_type_is_zero() {
 #[test]
 fn eq_underflow_errors() {
     let mut vm = vm_with_script(
-        Program::new().push_int(5u64).eq().to_bytecode(),
+        ScriptBuilder::new().push_int(5u64).eq().to_bytecode(),
     );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
@@ -80,7 +80,7 @@ fn eq_underflow_errors() {
 fn eq_noncomparable_linear_type_errors() {
     // Two ClearTokens of same flavor — same variant, but linear.
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_int(7u64).pushtoken()
             .push_int(7u64).pushtoken()
             .eq()
@@ -96,7 +96,7 @@ fn eq_noncomparable_linear_type_errors() {
 fn eq_two_dicts_is_not_comparable() {
     // Two empty dicts; eq must err.
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_int(0u64).dict()
             .push_int(0u64).dict()
             .eq()
@@ -111,7 +111,7 @@ fn eq_two_dicts_is_not_comparable() {
 #[test]
 fn neg_flips_sign() {
     let mut vm = vm_with_script(
-        Program::new().push_int(5u64).neg().to_bytecode(),
+        ScriptBuilder::new().push_int(5u64).neg().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(-5i64));
@@ -120,7 +120,7 @@ fn neg_flips_sign() {
 #[test]
 fn neg_of_zero_stays_positive() {
     let mut vm = vm_with_script(
-        Program::new().push_int(0u64).neg().to_bytecode(),
+        ScriptBuilder::new().push_int(0u64).neg().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(0u64));
@@ -129,7 +129,7 @@ fn neg_of_zero_stays_positive() {
 #[test]
 fn add_basic() {
     let mut vm = vm_with_script(
-        Program::new().push_int(7u64).push_int(3u64).add().to_bytecode(),
+        ScriptBuilder::new().push_int(7u64).push_int(3u64).add().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(10u64));
@@ -139,7 +139,7 @@ fn add_basic() {
 fn add_with_negative() {
     // -7 + 3 = -4
     let mut vm = vm_with_script(
-        Program::new().push_int(-7i64).push_int(3u64).add().to_bytecode(),
+        ScriptBuilder::new().push_int(-7i64).push_int(3u64).add().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(-4i64));
@@ -148,7 +148,7 @@ fn add_with_negative() {
 #[test]
 fn mul_basic() {
     let mut vm = vm_with_script(
-        Program::new().push_int(7u64).push_int(3u64).mul().to_bytecode(),
+        ScriptBuilder::new().push_int(7u64).push_int(3u64).mul().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(21u64));
@@ -158,7 +158,7 @@ fn mul_basic() {
 fn mul_sign_xor() {
     // -6 * 7 = -42
     let mut vm = vm_with_script(
-        Program::new().push_int(-6i64).push_int(7u64).mul().to_bytecode(),
+        ScriptBuilder::new().push_int(-6i64).push_int(7u64).mul().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(-42i64));
@@ -168,7 +168,7 @@ fn mul_sign_xor() {
 fn add_requires_int_operands() {
     // pushpoint, push:1, add — left operand not Int253.
     let mut vm = vm_with_script(
-        Program::new().push_point([0u8; 32]).push_int(1u64).add().to_bytecode(),
+        ScriptBuilder::new().push_point([0u8; 32]).push_int(1u64).add().to_bytecode(),
     );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
@@ -180,7 +180,7 @@ fn add_requires_int_operands() {
 fn divmod_basic() {
     // 13 / 5 → d=2, r=3
     let mut vm = vm_with_script(
-        Program::new().push_int(13u64).push_int(5u64).divmod().to_bytecode(),
+        ScriptBuilder::new().push_int(13u64).push_int(5u64).divmod().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(2u64));
@@ -191,7 +191,7 @@ fn divmod_basic() {
 fn divmod_negative_dividend() {
     // -13 / 5 → d=-2, r=-3
     let mut vm = vm_with_script(
-        Program::new().push_int(-13i64).push_int(5u64).divmod().to_bytecode(),
+        ScriptBuilder::new().push_int(-13i64).push_int(5u64).divmod().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(-2i64));
@@ -201,7 +201,7 @@ fn divmod_negative_dividend() {
 #[test]
 fn divmod_by_zero_errors() {
     let mut vm = vm_with_script(
-        Program::new().push_int(7u64).push_int(0u64).divmod().to_bytecode(),
+        ScriptBuilder::new().push_int(7u64).push_int(0u64).divmod().to_bytecode(),
     );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
@@ -218,7 +218,7 @@ fn divmod_full_width_magnitude_succeeds() {
     huge[16] = 1; // 2^128
     let huge_int = Int253::from_bytes(huge).unwrap();
     let mut vm = vm_with_script(
-        Program::new().push_int(huge_int).push_int(1u64).divmod().to_bytecode(),
+        ScriptBuilder::new().push_int(huge_int).push_int(1u64).divmod().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], huge_int);
@@ -228,7 +228,7 @@ fn divmod_full_width_magnitude_succeeds() {
 #[test]
 fn mod252_empty_string_is_zero() {
     let mut vm = vm_with_script(
-        Program::new().push_str(String::from(Vec::<u8>::new())).mod252().to_bytecode(),
+        ScriptBuilder::new().push_str(String::from(Vec::<u8>::new())).mod252().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(0u64));
@@ -238,7 +238,7 @@ fn mod252_empty_string_is_zero() {
 fn mod252_short_string_is_le_value() {
     // [0x07, 0x00, 0x01] LE = 7 + 0*256 + 1*65536 = 65543
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(String::from(vec![0x07, 0x00, 0x01]))
             .mod252()
             .to_bytecode(),
@@ -251,7 +251,7 @@ fn mod252_short_string_is_le_value() {
 fn mod252_64_bytes_reduces() {
     // 64 bytes of 0xff — should equal 2^512 - 1 reduced mod ℓ.
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(String::from(vec![0xffu8; 64]))
             .mod252()
             .to_bytecode(),
@@ -265,7 +265,7 @@ fn mod252_64_bytes_reduces() {
 fn mod252_too_long_errors() {
     // 65-byte string
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(String::from(vec![0u8; 65]))
             .mod252()
             .to_bytecode(),
@@ -279,7 +279,7 @@ fn mod252_too_long_errors() {
 #[test]
 fn not_zero_to_one() {
     let mut vm = vm_with_script(
-        Program::new().push_int(0u64).not().to_bytecode(),
+        ScriptBuilder::new().push_int(0u64).not().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(1u64));
@@ -288,7 +288,7 @@ fn not_zero_to_one() {
 #[test]
 fn not_nonzero_to_zero() {
     let mut vm = vm_with_script(
-        Program::new().push_int(5u64).not().to_bytecode(),
+        ScriptBuilder::new().push_int(5u64).not().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(0u64));
@@ -299,7 +299,7 @@ fn and_truth_table() {
     let cases: &[(u64, u64, u64)] = &[(1, 1, 1), (1, 0, 0), (0, 1, 0), (0, 0, 0)];
     for &(a, b, expected) in cases {
         let mut vm = vm_with_script(
-            Program::new().push_int(a).push_int(b).and().to_bytecode(),
+            ScriptBuilder::new().push_int(a).push_int(b).and().to_bytecode(),
         );
         run_to_end(&mut vm).unwrap();
         assert_int(&vm.current_call.stack[0], Int253::from(expected));
@@ -311,7 +311,7 @@ fn or_truth_table() {
     let cases: &[(u64, u64, u64)] = &[(0, 0, 0), (1, 0, 1), (0, 1, 1)];
     for &(a, b, expected) in cases {
         let mut vm = vm_with_script(
-            Program::new().push_int(a).push_int(b).or().to_bytecode(),
+            ScriptBuilder::new().push_int(a).push_int(b).or().to_bytecode(),
         );
         run_to_end(&mut vm).unwrap();
         assert_int(&vm.current_call.stack[0], Int253::from(expected));
@@ -321,7 +321,7 @@ fn or_truth_table() {
 #[test]
 fn size_of_string() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(String::from(b"abc".to_vec()))
             .size()
             .to_bytecode(),
@@ -334,7 +334,7 @@ fn size_of_string() {
 #[test]
 fn size_of_int_errors() {
     let mut vm = vm_with_script(
-        Program::new().push_int(5u64).size().to_bytecode(),
+        ScriptBuilder::new().push_int(5u64).size().to_bytecode(),
     );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
@@ -344,7 +344,7 @@ fn size_of_int_errors() {
 
 #[test]
 fn size_underflow_errors() {
-    let mut vm = vm_with_script(Program::new().size().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().size().to_bytecode());
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::StackUnderflow

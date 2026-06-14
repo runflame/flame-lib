@@ -17,7 +17,7 @@ use super::test_helpers::*;
 #[test]
 fn op_add_point_point_lifts_to_msm() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_point([0x55; 32])
             .push_point([0x66; 32])
             .add()
@@ -34,7 +34,7 @@ fn op_add_point_point_lifts_to_msm() {
 #[test]
 fn op_mul_int_point_lifts_to_msm() {
     let mut vm = vm_with_script(
-        Program::new().push_int(3u64).push_point([0x55; 32]).mul().to_bytecode(),
+        ScriptBuilder::new().push_int(3u64).push_point([0x55; 32]).mul().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[0] {
@@ -47,7 +47,7 @@ fn op_mul_int_point_lifts_to_msm() {
 #[test]
 fn op_mul_point_int_lifts_to_msm() {
     let mut vm = vm_with_script(
-        Program::new().push_point([0x55; 32]).push_int(3u64).mul().to_bytecode(),
+        ScriptBuilder::new().push_point([0x55; 32]).push_int(3u64).mul().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert!(matches!(vm.current_call.stack[0], Value::MultiscalarMul(_)));
@@ -57,7 +57,7 @@ fn op_mul_point_int_lifts_to_msm() {
 #[test]
 fn op_neg_point_lifts_to_msm() {
     let mut vm = vm_with_script(
-        Program::new().push_point([0x55; 32]).neg().to_bytecode(),
+        ScriptBuilder::new().push_point([0x55; 32]).neg().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[0] {
@@ -70,7 +70,7 @@ fn op_neg_point_lifts_to_msm() {
 #[test]
 fn op_add_msm_msm_concatenates() {
     // Build two MSMs (each of size 2 via point+point), then add them.
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_point([0x11; 32]).push_point([0x22; 32]).add()   // MSM_A
         .push_point([0x33; 32]).push_point([0x44; 32]).add()   // MSM_B
         .add()                                                  // MSM_A + MSM_B
@@ -86,7 +86,7 @@ fn op_add_msm_msm_concatenates() {
 /// `msm * int` scales all coefficients (`len` unchanged).
 #[test]
 fn op_mul_msm_int_scales() {
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_point([0x11; 32]).push_point([0x22; 32]).add()   // MSM size 2
         .push_int(7u64).mul()                                   // scaled MSM
         .to_bytecode();
@@ -101,7 +101,7 @@ fn op_mul_msm_int_scales() {
 /// `point + msm` and `msm + point` both append (commutative).
 #[test]
 fn op_add_msm_point_appends_either_order() {
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_point([0x11; 32]).push_point([0x22; 32]).add()   // MSM size 2
         .push_point([0x33; 32]).add()                           // MSM + point
         .to_bytecode();
@@ -118,7 +118,7 @@ fn op_add_msm_point_appends_either_order() {
 #[test]
 fn op_mul_point_point_rejected() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_point([0x55; 32]).push_point([0x66; 32]).mul()
             .to_bytecode(),
     );
@@ -131,7 +131,7 @@ fn op_mul_point_point_rejected() {
 /// `msm * msm` is also quadratic in group elements → hard fail.
 #[test]
 fn op_mul_msm_msm_rejected() {
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_point([0x11; 32]).push_point([0x22; 32]).add()
         .push_point([0x33; 32]).push_point([0x44; 32]).add()
         .mul()
@@ -149,7 +149,7 @@ fn op_mul_msm_msm_rejected() {
 #[test]
 fn msm_dup_rejects() {
     let mut vm = vm_with_script(
-        Program::new().push_point([0x55; 32]).neg().dup_k(0).to_bytecode(),
+        ScriptBuilder::new().push_point([0x55; 32]).neg().dup_k(0).to_bytecode(),
     );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
@@ -162,7 +162,7 @@ fn msm_dup_rejects() {
 #[test]
 fn msm_drop_succeeds() {
     let mut vm = vm_with_script(
-        Program::new().push_point([0x55; 32]).neg().drop_().to_bytecode(),
+        ScriptBuilder::new().push_point([0x55; 32]).neg().drop_().to_bytecode(),
     );
     run_to_end(&mut vm).expect("MSM is droppable (pure computation)");
     assert!(vm.current_call.stack.is_empty());
@@ -171,7 +171,7 @@ fn msm_drop_succeeds() {
 /// MSM is non-portable: cannot be sealed into a cell payload.
 #[test]
 fn msm_in_cell_payload_rejected() {
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_point([0x55; 32]).neg()                  // → MSM
         .push_int(1u64)                                // count = 1
         .push_point([0xaa; 32])                        // predicate
@@ -198,7 +198,7 @@ fn verify_msm_identity_succeeds_end_to_end() {
     let pc_gens = PedersenGens::default();
     let g_bytes = *curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED.as_bytes();
     // push:0  pushpoint(G)  mul  verify
-    let prog = Program::new()
+    let prog = ScriptBuilder::new()
         .push_int(0u64)
         .push_point(g_bytes)
         .mul()
@@ -231,7 +231,7 @@ fn verify_msm_negation_sum_identity_succeeds() {
     let g_bytes = *g.as_bytes();
     // pushpoint(G)  pushpoint(G)  neg  add  verify
     // Stack after neg: [G_msm(-1)] then push G → [MSM(-1,G), G]; add → MSM with terms [(-1,G), (1,G)].
-    let prog = Program::new()
+    let prog = ScriptBuilder::new()
         .push_point(g_bytes)
         .neg()                                     // → MSM(-1, G)
         .push_point(g_bytes)
@@ -255,7 +255,7 @@ fn verify_msm_nonidentity_rejected_at_batch() {
     let g = curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED;
     let g_bytes = *g.as_bytes();
     // push:1  pushpoint(G)  mul  verify
-    let prog = Program::new()
+    let prog = ScriptBuilder::new()
         .push_int(1u64)
         .push_point(g_bytes)
         .mul()
@@ -289,7 +289,7 @@ fn verify_msm_invalid_point_rejected_at_batch() {
     // push:0  pushpoint(bad)  mul  verify — even with coefficient 0,
     // the batched MSM decompresses each point before scaling, so a
     // bad point fails the whole batch.
-    let prog = Program::new()
+    let prog = ScriptBuilder::new()
         .push_int(0u64)
         .push_point(bad)
         .mul()
@@ -308,7 +308,7 @@ fn verify_msm_invalid_point_rejected_at_batch() {
 #[test]
 fn verify_msm_in_internal_context_rejected() {
     let mut vm = vm_with_script(
-        Program::new().push_point([0x55; 32]).neg().verify().to_bytecode(),
+        ScriptBuilder::new().push_point([0x55; 32]).neg().verify().to_bytecode(),
     );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
@@ -320,8 +320,8 @@ fn verify_msm_in_internal_context_rejected() {
 
 /// Builds an outer program that consumes a cell (to seed the anchor)
 /// then opens it via the script-leaf path, with `inner` as the leaf
-/// program. Returns a Program ready for `Prover::prove`.
-fn open_with_inner(inner: crate::program::Program) -> crate::program::Program {
+/// program. Returns a ScriptBuilder ready for `Prover::prove`.
+fn open_with_inner(inner: crate::program::ScriptBuilder) -> crate::program::ScriptBuilder {
     let inner_bytes = inner.to_bytecode();
     let tree = crate::cell::PredicateTree::scripts_only(
         vec![inner_bytes.clone()],
@@ -332,7 +332,7 @@ fn open_with_inner(inner: crate::program::Program) -> crate::program::Program {
     let cell = Cell::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![]);
     let cell_bytes = encode_cell_to_bytes(&cell);
 
-    let mut outer = Program::new()
+    let mut outer = ScriptBuilder::new()
         .push_str(String::from(cell_bytes))
         .input()
         .push_point(*cp.internal_key.as_bytes());
@@ -369,7 +369,7 @@ fn failed_call_msm_does_not_pollute_parent_batch() {
     // Inner cell-open script: append a NON-identity MSM (1·G) to the
     // child frame's batch, then deliberately fail via `verify(0)` so
     // the whole frame is rolled back into a `0` marker on the parent.
-    let inner = Program::new()
+    let inner = ScriptBuilder::new()
         .push_int(1u64)
         .push_point(g_bytes)
         .mul()
@@ -417,7 +417,7 @@ fn clean_call_msm_propagates_to_parent_batch() {
     let g_bytes = *curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED.as_bytes();
 
     // Inner: append 1·G to batch, then return cleanly.
-    let inner = Program::new()
+    let inner = ScriptBuilder::new()
         .push_int(1u64)
         .push_point(g_bytes)
         .mul()

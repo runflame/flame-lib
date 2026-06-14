@@ -548,7 +548,7 @@ impl Instruction {
 
     /// Returns this instruction's contribution to the prover's witness
     /// queue — `Some(w)` for variants that own a witness slot, `None`
-    /// otherwise. Walked by `Program::to_witnesses`.
+    /// otherwise. Walked by `ScriptBuilder::to_witnesses`.
     pub fn witness(&self) -> Option<Option<Int253>> {
         match self {
             Instruction::Alloc(w) => Some(*w),

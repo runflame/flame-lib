@@ -8,7 +8,7 @@ use super::test_helpers::*;
 fn op_scalar_pushes_constant_expression() {
     // Pre-load a 32-byte String on the stack, dispatch `scalar`,
     // confirm the result is Expression::Constant.
-    let mut vm = vm_external_with_script(Program::new().scalar().to_bytecode());
+    let mut vm = vm_external_with_script(ScriptBuilder::new().scalar().to_bytecode());
     let s = String::scalar(Int253::from(99u64));
     vm.push_value(Value::String(s));
     let mut delegate = StubDelegate::new();
@@ -27,7 +27,7 @@ fn op_commit_pushes_variable() {
     // Pre-load a witness-bearing String::Commitment, dispatch
     // `commit`, confirm the result is a Variable with the open
     // commitment preserved.
-    let mut vm = vm_external_with_script(Program::new().commit().to_bytecode());
+    let mut vm = vm_external_with_script(ScriptBuilder::new().commit().to_bytecode());
     let c = crate::Commitment::unblinded(Int253::from(42u64));
     vm.push_value(Value::String(String::commitment(c.clone())));
     let mut delegate = StubDelegate::new();
@@ -50,10 +50,10 @@ fn prove_then_verify_with_commit_expr_eq() {
     let pc_gens = PedersenGens::default();
     let witness_int = Int253::from(42u64);
     // Use a blinding factor that we'll need to encode into the
-    // Program as a witness-bearing String.
+    // ScriptBuilder as a witness-bearing String.
     let blinding = curve25519_dalek::scalar::Scalar::from(7u64);
     let c = crate::Commitment::blinded_with_factor(witness_int, blinding);
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         // Push the witness-bearing Commitment String. The bytecode
         // will encode it as 32 bytes (the point); the prover's
         // Run::Queue preserves the witness; the verifier walks
@@ -104,7 +104,7 @@ fn op_decrypt_succeeds_on_matching_witness() {
     );
     let token = crate::Token::new(qty_commit, flv_commit);
 
-    let mut vm = vm_external_with_script(Program::new().decrypt().to_bytecode());
+    let mut vm = vm_external_with_script(ScriptBuilder::new().decrypt().to_bytecode());
     vm.push_value(Value::Token(token));
     vm.push_value(Value::Int253(f));
     vm.push_value(Value::Int253(f_blind));
@@ -177,21 +177,21 @@ fn op_decrypt_rejects_wrong_witness() {
 
 #[test]
 fn scalar_in_internal_context_errors_external_only() {
-    let mut vm = vm_with_script(Program::new().scalar().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().scalar().to_bytecode());
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::ExternalOnly));
 }
 
 #[test]
 fn commit_in_internal_context_errors_external_only() {
-    let mut vm = vm_with_script(Program::new().commit().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().commit().to_bytecode());
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::ExternalOnly));
 }
 
 #[test]
 fn decrypt_in_internal_context_errors_external_only() {
-    let mut vm = vm_with_script(Program::new().decrypt().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().decrypt().to_bytecode());
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::ExternalOnly));
 }

@@ -40,7 +40,7 @@ pub use fees::{CheckedFee, MAX_FEE};
 pub use int253::Int253;
 pub use msm::MultiscalarMul;
 pub use ops::Instruction;
-pub use program::{Program, ProgramItem};
+pub use program::{ScriptBuilder, Script};
 pub use prover::Prover;
 pub use string::String;
 pub use token::{flavor_from_actor, ClearToken, Token, WideToken};

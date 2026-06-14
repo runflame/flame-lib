@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::ActorRegistry;
 use crate::errors::VMError;
-use crate::program::Program;
+use crate::program::ScriptBuilder;
 use crate::prover::Prover;
 use crate::send::Message;
 use crate::verifier::Verifier;
@@ -151,7 +151,7 @@ impl UnsignedTx {
     }
 }
 
-impl Program {
+impl ScriptBuilder {
     /// Lifecycle step 1: build an unsigned external transaction by
     /// running the witness-bearing program through the prover.
     /// Bulletproof generators are managed inside the crate.

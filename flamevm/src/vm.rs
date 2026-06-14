@@ -18,6 +18,7 @@ use crate::token::{flavor_from_actor, flavor_from_predicate};
 use crate::tx::TxEntry;
 use crate::{Token, ClearToken, Dict, Int253, Merlin, Point, String, Value};
 use crate::ops::Instruction;
+use crate::program::Script;
 use crate::actor::{ActorID, ActorRegistry};
 use crate::send::Message;
 
@@ -160,28 +161,21 @@ const MAX_CALL_DEPTH: usize = 64;
 /// instructions; the verifier and internal actor execution hold raw
 /// bytecode and decode one instruction at a time — never materializing a
 /// `Vec<Instruction>`. See ADR 0015.
-pub(crate) enum Code {
-    /// Pre-decoded instructions (prover witnesses inline; `String::Script`).
-    Instrs(Vec<Instruction>),
-    /// Raw bytecode, decoded on demand (verifier; `String::Opaque`).
-    Bytes(Vec<u8>),
-}
-
 impl CallFrame {
     // The frame's code + cursor + lazy label table (fields `code` /
     // `cursor` / `labels`) are walked directly by these methods — exactly
-    // one stream per frame, no Run nesting. `Code::Bytes` decodes on
+    // one stream per frame, no Run nesting. `Script::Opaque` decodes on
     // demand and never builds a `Vec<Instruction>`. See ADR 0015.
 
     /// Returns the next instruction; `Ok(None)` at end of program. For
-    /// `Code::Bytes` this decodes one instruction at the cursor and
+    /// `Script::Opaque` this decodes one instruction at the cursor and
     /// advances by its encoded length.
     pub(crate) fn next_instruction(
         &mut self,
     ) -> Result<Option<Instruction>, VMError> {
         let cursor = self.cursor;
         match &self.code {
-            Code::Instrs(instrs) => {
+            Script::Transparent(instrs) => {
                 if cursor >= instrs.len() {
                     return Ok(None);
                 }
@@ -189,7 +183,7 @@ impl CallFrame {
                 self.cursor = cursor + 1;
                 Ok(Some(instr))
             }
-            Code::Bytes(bytes) => {
+            Script::Opaque(bytes) => {
                 if cursor >= bytes.len() {
                     return Ok(None);
                 }
@@ -208,8 +202,8 @@ impl CallFrame {
     #[cfg(test)]
     pub(crate) fn is_finished(&self) -> bool {
         match &self.code {
-            Code::Instrs(instrs) => self.cursor >= instrs.len(),
-            Code::Bytes(bytes) => self.cursor >= bytes.len(),
+            Script::Transparent(instrs) => self.cursor >= instrs.len(),
+            Script::Opaque(bytes) => self.cursor >= bytes.len(),
         }
     }
 
@@ -332,7 +326,7 @@ pub struct CallFrame {
     pub(crate) stack: Vec<Value>,
 
     /// The frame's executable code (decoded instructions or raw bytecode).
-    code: Code,
+    code: Script,
     /// Cursor into `code`: instruction index for `Instrs`, byte offset for
     /// `Bytes`.
     cursor: usize,
@@ -406,7 +400,7 @@ impl CallFrame {
         mem_limit: u64,
         newbytes: u64,
     ) -> Self {
-        Self::from_code(Code::Instrs(instructions), kind, gas_limit, mem_limit, newbytes)
+        Self::from_code(Script::Transparent(instructions), kind, gas_limit, mem_limit, newbytes)
     }
 
     /// Builds a CallFrame that decodes raw `bytecode` on demand — no
@@ -418,7 +412,7 @@ impl CallFrame {
         mem_limit: u64,
         newbytes: u64,
     ) -> Self {
-        Self::from_code(Code::Bytes(bytecode), kind, gas_limit, mem_limit, newbytes)
+        Self::from_code(Script::Opaque(bytecode), kind, gas_limit, mem_limit, newbytes)
     }
 
     /// Sets this frame's starting anchor (todo #4). Chained at the
@@ -429,7 +423,7 @@ impl CallFrame {
     }
 
     pub(crate) fn from_code(
-        code: Code,
+        code: Script,
         kind: CallKind,
         gas_limit: u64,
         mem_limit: u64,
@@ -478,7 +472,7 @@ pub struct TxResult {
     pub vbytes_used: u64,
 
     /// Canonical bytecode of the executed script. The prover supplies
-    /// this from the `Program`; the verifier echoes back the bytecode
+    /// this from the `ScriptBuilder`; the verifier echoes back the bytecode
     /// it received. Useful when downstream code wants to re-hash or
     /// re-broadcast without re-encoding.
     pub bytecode: Vec<u8>,
@@ -540,7 +534,7 @@ pub(crate) struct VM {
 impl VM {
     /// Executes an external transaction script with the given delegate,
     /// then calls `delegate.finalize`. Crate-internal: the public path
-    /// is `Program::build_tx` / `ExternalTx::verify`.
+    /// is `ScriptBuilder::build_tx` / `ExternalTx::verify`.
     #[cfg(test)]
     pub(crate) fn execute_external<D: Delegate>(
         header: TxHeader,
@@ -564,11 +558,11 @@ impl VM {
     }
 
     /// Runs an external-root program through the VM without finalizing
-    /// the delegate. Used by `Prover` / `Verifier` which take a Program
+    /// the delegate. Used by `Prover` / `Verifier` which take a ScriptBuilder
     /// (with witnesses inline on the prover side).
     pub(crate) fn run<D: Delegate>(
         header: TxHeader,
-        program: crate::program::Program,
+        program: crate::program::ScriptBuilder,
         gas_limit: u64,
         mem_limit: u64,
         delegate: &mut D,
@@ -2298,7 +2292,7 @@ impl VM {
         let _ = cell.predicate.verify_taproot_proof(&cp)?;
         // `Script` keeps prover witnesses inline; `Opaque` streams bytes
         // (no parse) on the verifier. See ADR 0015.
-        let code = prog.into_code()?;
+        let code = prog.into_script()?;
         // Split parent's anchor for the callee + stash post-call.
         let child_anchor = self.split_anchor_for_call()?;
         self.enter_cell_open_frame(cell, code, gas, bytes, args, child_anchor)?;
@@ -2332,7 +2326,7 @@ impl VM {
             signature: sig,
         });
 
-        let code = prog_str.into_code()?;
+        let code = prog_str.into_script()?;
         let child_anchor = self.split_anchor_for_call()?;
         self.enter_cell_open_frame(cell, code, gas, bytes, args, child_anchor)?;
         Ok(())
@@ -2347,7 +2341,7 @@ impl VM {
     fn enter_cell_open_frame(
         &mut self,
         cell: Cell,
-        code: Code,
+        code: Script,
         gas: u64,
         bytes: u64,
         args: Vec<Value>,

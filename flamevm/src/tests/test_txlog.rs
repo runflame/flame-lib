@@ -7,7 +7,7 @@ use super::test_helpers::*;
 #[test]
 fn log_opcode_emits_txentry_data() {
     // pushstr "hello", log → txlog has Header + TxEntry::Data(b"hello").
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_str(String::from(b"hello".to_vec()))
         .log()
         .to_bytecode();
@@ -25,7 +25,7 @@ fn log_opcode_emits_txentry_data() {
 #[test]
 fn log_opcode_requires_string() {
     // push:5, log — top is Int253 not String.
-    let mut vm = vm_with_script(Program::new().push_int(5u64).log().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().push_int(5u64).log().to_bytecode());
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::TypeNotString));
 }

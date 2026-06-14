@@ -10,7 +10,7 @@ use super::test_helpers::*;
 #[test]
 fn eq_external_strings_peek_compare_not_cs_lift() {
     let pc_gens = PedersenGens::default();
-    let prog = Program::new()
+    let prog = ScriptBuilder::new()
         .push_str(String::from(b"abcd".to_vec()))
         .push_str(String::from(b"abcd".to_vec()))
         .eq();
@@ -31,7 +31,7 @@ fn eq_external_strings_peek_compare_not_cs_lift() {
 fn range_proof_accepts_in_range_value() {
     // alloc(42) push:64 range — 42 fits in 64 bits.
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(42u64)))
         .push_int(64u64)
         .range()
@@ -64,7 +64,7 @@ fn range_proof_rejects_out_of_range_value() {
     // prover-side range_proof gadget rejects the witness or the
     // verifier rejects the proof.
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(512u64)))
         .push_int(8u64)
         .range()
@@ -110,7 +110,7 @@ fn range_bit_count_zero_rejected() {
     // push:0 — zero-bit range proof is degenerate, rejected at the
     // opcode level.
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(0u64)))
         .push_int(0u64)
         .range()
@@ -132,7 +132,7 @@ fn range_bit_count_zero_rejected() {
 fn range_bit_count_above_64_rejected() {
     // push:65 — bit count exceeds BitRange::max() (64).
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(1u64)))
         .push_int(65u64)
         .range()
@@ -155,7 +155,7 @@ fn constraint_and_overload_combines_two_constraints() {
     // (alloc(7) == alloc(7)) AND (alloc(3) == alloc(3))
     //   → Constraint composition — verify succeeds (both true).
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         // Constraint 1: alloc(7) == alloc(7) — pushes Constraint
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(7u64)))
@@ -189,7 +189,7 @@ fn constraint_or_overload_combines_two_constraints() {
     // (alloc(7) == alloc(8)) OR (alloc(3) == alloc(3))
     //   → first is false, second is true; OR yields true. Verify ok.
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(8u64)))
         .eq()
@@ -219,7 +219,7 @@ fn constraint_or_overload_combines_two_constraints() {
 fn constraint_not_overload_negates_constraint() {
     // NOT (alloc(7) == alloc(8))  → NOT false → true.
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(8u64)))
         .eq()
@@ -247,7 +247,7 @@ fn constraint_and_with_false_branch_rejected() {
     // (alloc(7) == alloc(7)) AND (alloc(3) == alloc(99))
     //   → first true, second false; AND is false. Verifier rejects.
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(7u64)))
         .eq()
@@ -278,7 +278,7 @@ fn constraint_and_with_false_branch_rejected() {
 fn range_in_internal_context_errors_external_only() {
     // Internal context dispatches `range` to ExternalOnly.
     let mut vm = vm_with_script(
-        Program::new().push_int(1u64).push_int(64u64).range().to_bytecode(),
+        ScriptBuilder::new().push_int(1u64).push_int(64u64).range().to_bytecode(),
     );
     // Push an Expression manually so dispatch_internal hits range.
     // Actually we can't construct an Expression in internal context
@@ -295,7 +295,7 @@ fn range_in_internal_context_errors_external_only() {
 /// itself (`input` then `open`) so the script runs under a real
 /// `last_anchor`. The outer program returns the inner's failure
 /// or success marker on the stack for the caller's continuation.
-fn open_with_inner(inner: Program) -> Program {
+fn open_with_inner(inner: ScriptBuilder) -> ScriptBuilder {
     let inner_bytes = inner.to_bytecode();
     let tree = PredicateTree::scripts_only(
         vec![inner_bytes.clone()],
@@ -307,7 +307,7 @@ fn open_with_inner(inner: Program) -> Program {
     let cell = Cell::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![]);
     let cell_bytes = encode_cell_to_bytes(&cell);
 
-    let mut outer = Program::new()
+    let mut outer = ScriptBuilder::new()
         .push_str(String::from(cell_bytes))
         .input()
         .push_point(*cp.internal_key.as_bytes());
@@ -341,7 +341,7 @@ fn failed_call_unsat_cs_does_not_pollute_parent_proof() {
     // Child: introduces an UNSATISFIABLE constraint (7 + 3 == 99),
     // then deliberately fails via `verify(0)` so the whole frame
     // is rolled back into a `0` marker on the parent.
-    let inner = Program::new()
+    let inner = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
         .add()
@@ -390,7 +390,7 @@ fn failed_call_unsat_cs_does_not_pollute_parent_proof() {
 fn clean_call_cs_alloc_propagates_to_parent_proof() {
     let pc_gens = PedersenGens::default();
     // Child: adds an UNSATISFIABLE constraint and returns cleanly.
-    let inner = Program::new()
+    let inner = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
         .add()
@@ -449,7 +449,7 @@ fn failed_call_rolls_back_every_state_lane() {
     let pc_gens = PedersenGens::default();
     let g_bytes = *RISTRETTO_BASEPOINT_COMPRESSED.as_bytes();
 
-    let inner = Program::new()
+    let inner = ScriptBuilder::new()
         // ── lane 1: TxLog (Output) ──────────────────────────────
         .push_int(42u64)
         .push_int(1u64)

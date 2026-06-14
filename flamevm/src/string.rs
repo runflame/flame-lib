@@ -166,7 +166,7 @@ impl String {
 
     /// Downcasts to a `Vec<Instruction>` — the runtime form the VM
     /// walks. `Script` returns witnesses inline (prover side);
-    /// `Opaque` parses via `Program::parse` (verifier side); 32-byte
+    /// `Opaque` parses via `ScriptBuilder::parse` (verifier side); 32-byte
     /// point/scalar variants are not executable bytecode and error.
     ///
     /// Used by `op_open` / `op_signcall` to enter a predicate
@@ -176,19 +176,19 @@ impl String {
         match self {
             String::Script(instrs) => Ok(instrs),
             String::Opaque(data) => Ok(
-                crate::program::Program::parse(&data)?.into_instructions(),
+                crate::program::ScriptBuilder::parse(&data)?.into_instructions(),
             ),
             _ => Err(VMError::TypeNotString),
         }
     }
 
-    /// Like [`to_instructions`], but returns the executable [`Code`]:
-    /// `Script` keeps prover witnesses inline; `Opaque` becomes raw
+    /// Like [`to_instructions`], but returns the executable [`Script`]:
+    /// `Transparent` keeps prover witnesses inline; `Opaque` becomes raw
     /// bytecode the verifier decodes on demand (no parse). See ADR 0015.
-    pub(crate) fn into_code(self) -> Result<crate::vm::Code, VMError> {
+    pub(crate) fn into_script(self) -> Result<crate::program::Script, VMError> {
         match self {
-            String::Script(instrs) => Ok(crate::vm::Code::Instrs(instrs)),
-            String::Opaque(data) => Ok(crate::vm::Code::Bytes(data)),
+            String::Script(instrs) => Ok(crate::program::Script::Transparent(instrs)),
+            String::Opaque(data) => Ok(crate::program::Script::Opaque(data)),
             _ => Err(VMError::TypeNotString),
         }
     }

@@ -7,7 +7,7 @@ use super::test_helpers::*;
 #[test]
 fn signtx_pours_payload_and_records_txbound_sig() {
     // Build cell with payload [5, 7], then signtx.
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(5u64)
         .push_int(7u64)
         .push_int(2u64)                       // payload count
@@ -36,10 +36,10 @@ fn signtx_pours_payload_and_records_txbound_sig() {
 fn signcall_records_explicit_sig_and_runs_program() {
     // Inner script `drop, push:0, return` drains the payload and
     // exits the isolated CellOpen frame (ADR 0013).
-    let prog = Program::new().drop_().push_int(0u64).return_().to_bytecode();
+    let prog = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
     let sig_bytes = [0u8; 64];
 
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(5u64)                                  // payload [5]
         .push_int(1u64)                                  // payload count
         .push_point([0xaa; 32])
@@ -80,9 +80,9 @@ fn signcall_message_binds_only_to_program_not_to_cell() {
     // identical deferred-sig messages — confirms architect's
     // intent that signcall binds only to the program.
     fn run_signcall(predicate_byte: u8) -> DeferredSig {
-        let prog = Program::new().drop_().push_int(0u64).return_().to_bytecode();
+        let prog = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
         let sig = [0u8; 64];
-        let script = Program::new()
+        let script = ScriptBuilder::new()
             .push_int(5u64)
             .push_int(1u64)
             .push_point([predicate_byte; 32])
@@ -115,8 +115,8 @@ fn signcall_message_binds_only_to_program_not_to_cell() {
 fn signcall_rejects_wrong_signature_length() {
     // payload(5), count(1), predicate, cell, prog, bad-sig, gas/bytes,
     // m=0, signcall. signcall pops bad sig and errors before frame.
-    let prog = Program::new().drop_().push_int(0u64).return_().to_bytecode();
-    let script = Program::new()
+    let prog = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
+    let script = ScriptBuilder::new()
         .push_int(5u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
@@ -216,7 +216,7 @@ fn phase20_single_txbound_verifies_with_multisig() {
     let pc_gens = PedersenGens::default();
     let (vk, sk) = signing_keypair(101);
     let (script, cell_id) = make_signtx_script_with_cell(vk);
-    let program = crate::Program::parse(&script).expect("decode");
+    let program = crate::ScriptBuilder::parse(&script).expect("decode");
     let prover_result =
         Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove ok");
@@ -253,7 +253,7 @@ fn phase20_single_txbound_verifies_with_multisig() {
     .expect("verify ok");
 }
 
-/// Facade roundtrip: `Program::build_tx → signing_instructions →
+/// Facade roundtrip: `ScriptBuilder::build_tx → signing_instructions →
 /// sign_multi → UnsignedTx::sign → ExternalTx::verify`. Exercises the
 /// public lifecycle API end-to-end (steps 1–3) over the same single-
 /// signtx scenario as `phase20_*`.
@@ -262,7 +262,7 @@ fn facade_build_sign_verify_roundtrip() {
     use musig::Multisignature;
     let (vk, sk) = signing_keypair(101);
     let (script, _cid) = make_signtx_script_with_cell(vk);
-    let program = crate::Program::parse(&script).expect("decode");
+    let program = crate::ScriptBuilder::parse(&script).expect("decode");
     let limits = crate::Limits { gas: 1_000_000, mem: 0 };
 
     let unsigned = program.build_tx(dummy_header(), limits).expect("build_tx");
@@ -318,7 +318,7 @@ fn phase20_two_txbound_verifies_with_multisig() {
 
     // Script: input cell1, signtx (drop payload+count), input cell2,
     // signtx (drop payload+count).
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .push_str(String::from(cell1_bytes))
         .input()
         .signtx()
@@ -368,7 +368,7 @@ fn phase20_missing_signature_when_txbound_present() {
     let pc_gens = PedersenGens::default();
     let (vk, _sk) = signing_keypair(7);
     let (script, _cell_id) = make_signtx_script_with_cell(vk);
-    let program = crate::Program::parse(&script).expect("decode");
+    let program = crate::ScriptBuilder::parse(&script).expect("decode");
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove ok");
     let crate::vm::TxResult { bytecode, proof, .. } = _pp;
@@ -395,7 +395,7 @@ fn phase20_spurious_signature_when_no_txbound() {
     let pc_gens = PedersenGens::default();
     // Trivial program: alloc + alloc + add + alloc + eq + verify
     // — no input, no signtx, no TxBound deferred sigs.
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
         .add()
@@ -439,7 +439,7 @@ fn phase20_tampered_signature_rejected() {
     // Sign with a *different* secret — vk doesn't correspond.
     let sk_wrong = Scalar::from(999u64);
     let (script, cell_id) = make_signtx_script_with_cell(vk);
-    let program = crate::Program::parse(&script).expect("decode");
+    let program = crate::ScriptBuilder::parse(&script).expect("decode");
     let prover_result =
         Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove ok");
@@ -474,7 +474,7 @@ fn phase20_tampered_signature_rejected() {
 #[test]
 fn phase20_no_txbound_no_signature_roundtrip() {
     let pc_gens = PedersenGens::default();
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
         .add()
@@ -507,7 +507,7 @@ fn phase20_signature_over_wrong_txid_rejected() {
     let pc_gens = PedersenGens::default();
     let (vk, sk) = signing_keypair(101);
     let (script, cell_id) = make_signtx_script_with_cell(vk);
-    let program = crate::Program::parse(&script).expect("decode");
+    let program = crate::ScriptBuilder::parse(&script).expect("decode");
     let header_prove = TxHeader { version: 1, locktime: 0 };
     let prover_result =
         Prover::prove(&pc_gens, program, header_prove, 1_000_000, 0)
@@ -542,9 +542,9 @@ fn phase20_signature_over_wrong_txid_rejected() {
 /// failure marker on the parent's stack.
 #[test]
 fn signcall_selfid_errors_no_actor_context() {
-    let prog = Program::new().selfid().to_bytecode();
+    let prog = ScriptBuilder::new().selfid().to_bytecode();
     let sig_bytes = [0u8; 64];
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(5u64)
         .push_int(1u64)
         .push_point([0xaa; 32])

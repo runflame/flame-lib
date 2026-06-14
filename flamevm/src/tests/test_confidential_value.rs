@@ -20,7 +20,7 @@ fn encrypted_borrow_produces_widetoken_and_token_pair() {
     let flv_blind = curve25519_dalek::scalar::Scalar::from(13u64);
     let qty_commit = crate::Commitment::blinded_with_factor(qty_int, qty_blind);
     let flv_commit = crate::Commitment::blinded_with_factor(flv_int, flv_blind);
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .push_str(String::commitment(qty_commit))
         .commit()
         .push_str(String::commitment(flv_commit))
@@ -59,7 +59,7 @@ fn mix_with_single_in_single_out_balances() {
     // same (qty, flv). Effectively a no-op shuffle that exercises
     // the cloak gadget's range proof on the output.
     //
-    // Program:
+    // ScriptBuilder:
     //   pushstr(qty_commit) commit            // builds Variable
     //   pushstr(flv_commit) commit            // builds Variable
     //   borrow                                // stack: [-T, +T]
@@ -81,9 +81,9 @@ fn mix_with_single_in_single_out_balances() {
     let flv_commit = crate::Commitment::blinded_with_factor(flv_int, flv_blind);
     let token = crate::Token::new(qty_commit.clone(), flv_commit.clone());
 
-    // Build a Program that supplies the output's commitment pair
+    // Build a ScriptBuilder that supplies the output's commitment pair
     // and runs mix. We pre-push the Token via the harness.
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         // Output commitments (pushed deepest first per op_mix):
         // first qty, then flv. Mix pops them in reverse: first
         // pop flv (top), then qty.
@@ -128,7 +128,7 @@ fn cleartext_borrow_unaffected_by_overload() {
     // remains the existing Phase-8 behavior because top-two aren't
     // Variables (the new dispatch peek doesn't catch them).
     let mut vm = vm_with_script(
-        Program::new().push_int(5u64).push_int(7u64).borrow().to_bytecode(),
+        ScriptBuilder::new().push_int(5u64).push_int(7u64).borrow().to_bytecode(),
     );
     run_to_end(&mut vm).expect("cleartext borrow ok");
     assert_eq!(vm.current_call.stack.len(), 2);

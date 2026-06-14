@@ -34,7 +34,7 @@ fn cell_opcode_requires_seeded_anchor() {
     // push:7 (payload), push:1 (count), pushpoint(some), cell —
     // run from an ExternalRoot frame whose last_anchor is `None`
     // (no prior `op_input` to seed it). `op_cell` must hard-fail.
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(7u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
@@ -48,7 +48,7 @@ fn cell_opcode_requires_seeded_anchor() {
 #[test]
 fn cell_opcode_builds_a_cell_and_ratchets_anchor() {
     // Seed an anchor, then build a cell.
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(7u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
@@ -78,7 +78,7 @@ fn cell_opcode_rejects_non_portable_payload() {
     // ClearToken is still considered non-portable when we push it
     // because is_portable returns true for zero-qty.
     // Instead test with a `Merlin` (always non-portable).
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_str(String::from(Vec::<u8>::new())) // empty label
         .transcript()                                  // → Merlin (non-portable)
         .push_int(1u64)                            // count
@@ -96,7 +96,7 @@ fn cell_opcode_rejects_non_portable_payload() {
 #[test]
 fn cell_is_noncopyable_and_nondroppable() {
     // build cell, then dup → TypeNotCopyable
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(7u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
@@ -111,7 +111,7 @@ fn cell_is_noncopyable_and_nondroppable() {
     ));
 
     // build cell, then drop → TypeNotDroppable
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(7u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
@@ -128,7 +128,7 @@ fn cell_is_noncopyable_and_nondroppable() {
 
 #[test]
 fn output_opcode_emits_to_txlog_without_pushing() {
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(7u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
@@ -156,11 +156,11 @@ fn open_with_valid_taproot_proof_runs_program() {
     // the payload inside the isolated CellOpen frame and returns 0
     // items to parent (ADR 0013). On clean return parent's stack
     // gets [count=0, success=1].
-    let inner_program = Program::new().drop_().push_int(0u64).return_().to_bytecode();
+    let inner_program = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
     let (tree, cp) = build_predicate_with_program(&inner_program, 7);
     let pred_point = tree.point;
 
-    let mut program = Program::new()
+    let mut program = ScriptBuilder::new()
         .push_int(5u64)                                // payload
         .push_int(1u64)                                // count
         .push_point(*pred_point.as_bytes())
@@ -184,8 +184,8 @@ fn open_with_valid_taproot_proof_runs_program() {
 #[test]
 fn open_with_wrong_program_hard_fails() {
     // Predicate commits to one leaf; taproot_proof claims a different one.
-    let real_program = Program::new().drop_().push_int(0u64).return_().to_bytecode();
-    let fake_program = Program::new().nop().push_int(0u64).return_().to_bytecode();
+    let real_program = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
+    let fake_program = ScriptBuilder::new().nop().push_int(0u64).return_().to_bytecode();
     let (tree, _real_cp) = build_predicate_with_program(&real_program, 7);
     let cp = TaprootProof {
         internal_key: tree.internal_key,
@@ -195,7 +195,7 @@ fn open_with_wrong_program_hard_fails() {
     };
     let pred_point = tree.point;
 
-    let mut program = Program::new()
+    let mut program = ScriptBuilder::new()
         .push_int(5u64)
         .push_int(1u64)
         .push_point(*pred_point.as_bytes())
@@ -231,7 +231,7 @@ fn open_preserves_alloc_witnesses_via_script_string() {
     // Inner unlock script with `alloc(Some(_))` witnesses. Ends with
     // `push:0, return` so the isolated CellOpen frame exits cleanly
     // after `verify` drains the constraint (ADR 0013).
-    let inner = Program::new()
+    let inner = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
         .add()
@@ -262,7 +262,7 @@ fn open_preserves_alloc_witnesses_via_script_string() {
     );
     let cell_bytes = encode_cell_to_bytes(&cell);
 
-    // Outer Program:
+    // Outer ScriptBuilder:
     //   pushstr <cell_bytes>; input;
     //   pushpoint <internal_key>;
     //   for each neighbor: pushstr <h>; push:i;     // N neighbors
@@ -270,7 +270,7 @@ fn open_preserves_alloc_witnesses_via_script_string() {
     //   pushstr <position>;
     //   push_script(inner);                          // witness-bearing
     //   push:0; open
-    let mut outer = Program::new()
+    let mut outer = ScriptBuilder::new()
         .push_str(String::from(cell_bytes))
         .input()
         .push_point(*cp.internal_key.as_bytes());
@@ -321,7 +321,7 @@ fn open_passes_args_after_payload() {
     // Cell payload: [10]. args: [20, 30]. Inside the isolated CellOpen
     // frame the stack starts as [10, 20, 30] (payload then args). The
     // leaf drops all three and exits via `return 0`.
-    let inner_program = Program::new()
+    let inner_program = ScriptBuilder::new()
         .drop_().drop_().drop_()
         .push_int(0u64)
         .return_()
@@ -329,7 +329,7 @@ fn open_passes_args_after_payload() {
     let (tree, cp) = build_predicate_with_program(&inner_program, 11);
     let pred_point = tree.point;
 
-    let mut program = Program::new()
+    let mut program = ScriptBuilder::new()
         .push_int(10u64)                               // payload
         .push_int(1u64)                                // count
         .push_point(*pred_point.as_bytes())
@@ -387,7 +387,7 @@ fn scripts_only_predicate_opens_via_program_path() {
     // it, and unlock via `open` with the script-path proof. Leaf
     // `drop, push:0, return` drains the 1-item payload and exits the
     // isolated frame (ADR 0013).
-    let program = Program::new().drop_().push_int(0u64).return_().to_bytecode();
+    let program = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
     let tree = PredicateTree::scripts_only(
         vec![program.clone()],
         TEST_BLINDING_KEY,
@@ -396,7 +396,7 @@ fn scripts_only_predicate_opens_via_program_path() {
     let cp = tree.taproot_proof_for(0).unwrap();
     let pred_point = tree.point;
 
-    let mut p = Program::new()
+    let mut p = ScriptBuilder::new()
         .push_int(5u64)                                // payload
         .push_int(1u64)                                // count = 1
         .push_point(*pred_point.as_bytes())
@@ -422,7 +422,7 @@ fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
     // Three programs; each drops its payload then `push:0, return` —
     // exit the isolated CellOpen frame with zero results.
     let leaf = |drops: usize| -> Vec<u8> {
-        let mut p = Program::new();
+        let mut p = ScriptBuilder::new();
         for _ in 0..drops { p = p.drop_(); }
         p.push_int(0u64).return_().to_bytecode()
     };
@@ -435,7 +435,7 @@ fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
         // payload = i+1 copies of `5` (so program of length i+1
         // can drop them all and end with empty stack)
         let payload_count = i + 1;
-        let mut p = Program::new();
+        let mut p = ScriptBuilder::new();
         for _ in 0..payload_count {
             p = p.push_int(5u64);
         }
@@ -472,7 +472,7 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
     // Build a 3-leaf tree. Construct a TaprootProof claiming program[0]
     // but with the path that opens program[1]. Verification must fail.
     let leaf = |drops: usize| -> Vec<u8> {
-        let mut p = Program::new();
+        let mut p = ScriptBuilder::new();
         for _ in 0..drops { p = p.drop_(); }
         p.push_int(0u64).return_().to_bytecode()
     };
@@ -488,7 +488,7 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
     };
     let pred_point = tree.point;
 
-    let mut p = Program::new()
+    let mut p = ScriptBuilder::new()
         .push_int(5u64)
         .push_int(1u64)
         .push_point(*pred_point.as_bytes())
@@ -538,7 +538,7 @@ fn output_rejects_cell_as_payload_item() {
     // Build cell A on stack. Then try: count=1, predicate_point, output
     //   — the output op pops pred + count + 1 payload item (cell A)
     //     and `pop_n_portable` must reject cell A.
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(5u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
@@ -558,7 +558,7 @@ fn output_rejects_cell_as_payload_item() {
 #[test]
 fn cell_opcode_rejects_cell_as_payload_item() {
     // Symmetric protection on the `cell` construction op.
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(5u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
@@ -580,7 +580,7 @@ fn dict_build_rejects_a_cell() {
     // A cell is non-portable; trying to hide it inside a Dict now fails
     // at `dict` construction (todo #5) — earlier than the old output
     // gate, so a poisoned dict can never even be built.
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(5u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
@@ -743,7 +743,7 @@ fn input_in_internal_context_errors_external_only() {
     // Drive `0x90` through `step_internal` — dispatch must surface
     // `ExternalOnly` because internal transactions cannot consume
     // Utreexo entries.
-    let mut vm = vm_with_script(Program::new().input().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().input().to_bytecode());
     // Even with a well-formed string on the stack, internal context
     // rejects the opcode before any decoding happens.
     let cell_bytes = encode_cell_to_bytes(&fixture_cell());
@@ -813,7 +813,7 @@ fn input_via_step_external_dispatch() {
     let expected_id = cell.id();
     let bytes = encode_cell_to_bytes(&cell);
 
-    let mut vm = vm_external_with_script(Program::new().input().to_bytecode());
+    let mut vm = vm_external_with_script(ScriptBuilder::new().input().to_bytecode());
     vm.push_value(Value::String(crate::String::from(bytes)));
 
     let mut delegate = StubDelegate::new();
@@ -871,7 +871,7 @@ fn external_tx_one_input_one_output_via_signtx() {
     //   pushpoint <P_out>     [..1]               → [..1, Point]
     //   output                [..Point]           → []  (Output effect emitted)
     let out_pred_bytes = [0xbb; 32];
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_str(String::from(input_bytes))
         .input()
         .signtx()
@@ -960,7 +960,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     // Each input cell's program is `drop` — it consumes the single
     // payload item the cell-open pours onto the stack.
 
-    let prog = Program::new().drop_().push_int(0u64).return_().to_bytecode();
+    let prog = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
 
     let (tree1, cp1) = build_predicate_with_program(&prog, 11);
     let cell1 = Cell::new(
@@ -1006,7 +1006,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     let out1_pred_bytes = [0xc1; 32];
     let out2_pred_bytes = [0xc2; 32];
     // Consume cell 1
-    let mut p = Program::new()
+    let mut p = ScriptBuilder::new()
         .push_str(String::from(cell1_bytes))
         .input();
     p = push_taproot_proof_to_program(p, &cp1);
@@ -1102,10 +1102,10 @@ fn external_tx_two_inputs_two_outputs_via_open() {
 fn op_open_selfid_errors_no_actor_context() {
     // `selfid` errors before reaching a return — that's fine, the
     // child-frame error is caught and converted to a marker.
-    let inner = Program::new().selfid().to_bytecode();
+    let inner = ScriptBuilder::new().selfid().to_bytecode();
     let (tree, cp) = build_predicate_with_program(&inner, 5);
     let pred_point = tree.point;
-    let mut p = Program::new()
+    let mut p = ScriptBuilder::new()
         .push_int(5u64)                                // payload
         .push_int(1u64)                                // count
         .push_point(*pred_point.as_bytes())
@@ -1128,10 +1128,10 @@ fn op_open_selfid_errors_no_actor_context() {
 #[test]
 fn op_open_return_arity_mismatch_errors() {
     // push:1, return — pops k=1 from stack, then stack.len()(0) < 1.
-    let inner = Program::new().push_int(1u64).return_().to_bytecode();
+    let inner = ScriptBuilder::new().push_int(1u64).return_().to_bytecode();
     let (tree, cp) = build_predicate_with_program(&inner, 0);
     let pred_point = tree.point;
-    let mut p = Program::new()
+    let mut p = ScriptBuilder::new()
         .push_int(0u64)                                // payload count = 0
         .push_point(*pred_point.as_bytes())
         .cell();

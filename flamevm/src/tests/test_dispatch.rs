@@ -16,7 +16,7 @@ fn internal_empty_script_finishes() {
 #[test]
 fn internal_nop_script_finishes() {
     let mut reg = StubRegistry {
-        script: Program::new().nop().nop().nop().to_bytecode(),
+        script: ScriptBuilder::new().nop().nop().nop().to_bytecode(),
     };
     let block = BlockContext { height: 0 };
     let result =
@@ -37,7 +37,7 @@ fn internal_unknown_opcode_errors() {
 #[test]
 fn callframe_advances_through_instructions() {
     // Bytecode: push:5, drop, nop. Three Instructions, then end.
-    let instrs = Program::parse(&[0x05, 0x1c, 0x1d]).unwrap().into_instructions();
+    let instrs = ScriptBuilder::parse(&[0x05, 0x1c, 0x1d]).unwrap().into_instructions();
     let mut frame = CallFrame::new(instrs, CallKind::ExternalRoot, 0, 0, 0);
     use crate::ops::Instruction;
     assert!(matches!(
@@ -106,7 +106,7 @@ fn dispatch_falls_through_to_int_path_when_no_constraint_on_top() {
     // overload when both operands are Int253. push:1 push:1 and
     // → push:1.
     let mut vm = vm_with_script(
-        Program::new().push_int(1u64).push_int(1u64).and().to_bytecode(),
+        ScriptBuilder::new().push_int(1u64).push_int(1u64).and().to_bytecode(),
     );
     run_to_end(&mut vm).expect("int and ok");
     assert_eq!(vm.current_call.stack.len(), 1);

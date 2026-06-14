@@ -11,7 +11,7 @@ fn s(bytes: &[u8]) -> String { String::from(bytes.to_vec()) }
 #[test]
 fn read_bits_n_zero_succeeds_and_yields_zero() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xaa, 0xbb]))
             .push_int(0u64)
             .read_bits()
@@ -28,7 +28,7 @@ fn read_bits_n_zero_succeeds_and_yields_zero() {
 fn read_bits_partial_byte_masks_high_bits() {
     // Source byte: 0b1111_1111 = 0xff. Read 5 bits LSB-first → low 5 bits = 0b11111 = 31.
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xff, 0x00]))
             .push_int(5u64)
             .read_bits()
@@ -44,7 +44,7 @@ fn read_bits_partial_byte_masks_high_bits() {
 fn read_bits_too_short_preserves_string() {
     // n=16 requires 2 bytes; only 1 available.
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xaa]))
             .push_int(16u64)
             .read_bits()
@@ -59,7 +59,7 @@ fn read_bits_too_short_preserves_string() {
 #[test]
 fn read_bits_n_257_hard_fails() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0u8; 33]))
             .push_int(257u64)
             .read_bits()
@@ -86,7 +86,7 @@ fn read_bits_magnitude_at_ell_soft_fails() {
     // canonical — `from_canonical_bytes` rejects. With n=256 and
     // sign bit = 0, bytes are the encoding of ℓ.
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&ELL_LE))
             .push_int(256u64)
             .read_bits()
@@ -105,7 +105,7 @@ fn read_bits_magnitude_above_ell_soft_fails() {
     let mut bytes = ELL_LE;
     bytes[0] = bytes[0].wrapping_add(1);
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&bytes))
             .push_int(256u64)
             .read_bits()
@@ -122,7 +122,7 @@ fn read_bits_negative_zero_soft_fails() {
     let mut bytes = [0u8; 32];
     bytes[31] = 0x80;
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&bytes))
             .push_int(256u64)
             .read_bits()
@@ -148,7 +148,7 @@ fn read_bits_roundtrip_nonneg_at_various_n() {
         let value = Int253::from(v);
         let bytes = writebits_bytes(&value, n);
         let mut vm = vm_with_script(
-            Program::new()
+            ScriptBuilder::new()
                 .push_str(s(&bytes))
                 .push_int(n as u64)
                 .read_bits()
@@ -166,7 +166,7 @@ fn read_bits_roundtrip_negative_at_n_256() {
     let value = Int253::from_parts(true, Scalar::from(12345u64));
     let bytes = value.to_bytes();
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&bytes))
             .push_int(256u64)
             .read_bits()
@@ -181,7 +181,7 @@ fn read_bits_roundtrip_negative_at_n_256() {
 fn read_int_positive_roundtrip() {
     let value = Int253::from(1u64);
     let mut vm = vm_with_script(
-        Program::new().push_str(s(&value.to_bytes())).read_int().to_bytecode(),
+        ScriptBuilder::new().push_str(s(&value.to_bytes())).read_int().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[1], value);
@@ -192,7 +192,7 @@ fn read_int_positive_roundtrip() {
 fn read_int_negative_roundtrip() {
     let value = Int253::from_parts(true, Scalar::from(1u64));
     let mut vm = vm_with_script(
-        Program::new().push_str(s(&value.to_bytes())).read_int().to_bytecode(),
+        ScriptBuilder::new().push_str(s(&value.to_bytes())).read_int().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[1], value);
@@ -202,7 +202,7 @@ fn read_int_negative_roundtrip() {
 fn read_int_zero_roundtrip() {
     let value = Int253::ZERO;
     let mut vm = vm_with_script(
-        Program::new().push_str(s(&value.to_bytes())).read_int().to_bytecode(),
+        ScriptBuilder::new().push_str(s(&value.to_bytes())).read_int().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[1], value);
@@ -214,7 +214,7 @@ fn read_int_large_magnitude_roundtrip() {
     let mut ell_minus_1 = ELL_LE;
     ell_minus_1[0] = 0xec;
     let mut vm = vm_with_script(
-        Program::new().push_str(s(&ell_minus_1)).read_int().to_bytecode(),
+        ScriptBuilder::new().push_str(s(&ell_minus_1)).read_int().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[1] {
@@ -227,7 +227,7 @@ fn read_int_large_magnitude_roundtrip() {
 #[test]
 fn read_int_too_short_preserves_string() {
     let mut vm = vm_with_script(
-        Program::new().push_str(s(&[0xaa; 31])).read_int().to_bytecode(),
+        ScriptBuilder::new().push_str(s(&[0xaa; 31])).read_int().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
@@ -240,7 +240,7 @@ fn read_int_negative_zero_soft_fails() {
     let mut bytes = [0u8; 32];
     bytes[31] = 0x80;
     let mut vm = vm_with_script(
-        Program::new().push_str(s(&bytes)).read_int().to_bytecode(),
+        ScriptBuilder::new().push_str(s(&bytes)).read_int().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &bytes);
@@ -250,7 +250,7 @@ fn read_int_negative_zero_soft_fails() {
 #[test]
 fn read_str_success() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[1, 2, 3, 4, 5]))
             .push_int(2u64)
             .read_str()
@@ -265,7 +265,7 @@ fn read_str_success() {
 #[test]
 fn read_str_too_short_preserves() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[1]))
             .push_int(5u64)
             .read_str()
@@ -281,7 +281,7 @@ fn read_point_success() {
     let mut bytes = vec![0x55u8; 32];
     bytes.push(0xaa);
     let mut vm = vm_with_script(
-        Program::new().push_str(s(&bytes)).read_point().to_bytecode(),
+        ScriptBuilder::new().push_str(s(&bytes)).read_point().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[0xaa]);
@@ -295,7 +295,7 @@ fn read_point_success() {
 #[test]
 fn read_point_too_short() {
     let mut vm = vm_with_script(
-        Program::new().push_str(s(&[0; 31])).read_point().to_bytecode(),
+        ScriptBuilder::new().push_str(s(&[0; 31])).read_point().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[1], Int253::from(0u64));
@@ -304,7 +304,7 @@ fn read_point_too_short() {
 #[test]
 fn write_bits_full_byte() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xaa]))
             .push_int(0xabu64)
             .push_int(8u64)
@@ -319,7 +319,7 @@ fn write_bits_full_byte() {
 fn write_bits_non_aligned_hard_fails() {
     // n=5 is not a multiple of 8 → hard-fail with BitCountOutOfRange.
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[]))
             .push_int(0xffu64)
             .push_int(5u64)
@@ -335,7 +335,7 @@ fn write_bits_non_aligned_hard_fails() {
 #[test]
 fn write_bits_n_zero_is_noop() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xaa]))
             .push_int(7u64)
             .push_int(0u64)
@@ -349,7 +349,7 @@ fn write_bits_n_zero_is_noop() {
 #[test]
 fn write_bits_n_257_hard_fails() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[]))
             .push_int(7u64)
             .push_int(257u64)
@@ -373,7 +373,7 @@ fn write_then_read_bits_roundtrip_nonneg() {
         // writebits requires n to be a multiple of 8.
         let value = Int253::from(v);
         let mut vm = vm_with_script(
-            Program::new()
+            ScriptBuilder::new()
                 .push_str(s(&[]))
                 .push_int(v)
                 .push_int(n as u64)
@@ -395,7 +395,7 @@ fn write_then_read_bits_roundtrip_negative_n_256() {
     let value = Int253::from_parts(true, Scalar::from(12345u64));
     let bytes = value.to_bytes();
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[]))
             .push_str(s(&bytes))
             .append()
@@ -426,7 +426,7 @@ fn write_then_read_int_roundtrip_signs_and_extremes() {
         let bytes = v.to_bytes();
         // pushstr(empty), pushstr(bytes), append, readint
         let mut vm = vm_with_script(
-            Program::new()
+            ScriptBuilder::new()
                 .push_str(s(&[]))
                 .push_str(s(&bytes))
                 .append()
@@ -451,7 +451,7 @@ fn write_then_read_int_roundtrip_signs_and_extremes() {
 #[test]
 fn write_zeros_appends_n_zero_bytes() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xaa]))
             .push_int(3u64)
             .write_zeros()
@@ -464,7 +464,7 @@ fn write_zeros_appends_n_zero_bytes() {
 #[test]
 fn bit_not_inverts() {
     let mut vm = vm_with_script(
-        Program::new().push_str(s(&[0x00, 0xff, 0xa5])).bit_not().to_bytecode(),
+        ScriptBuilder::new().push_str(s(&[0x00, 0xff, 0xa5])).bit_not().to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[0xff, 0x00, 0x5a]);
@@ -473,7 +473,7 @@ fn bit_not_inverts() {
 #[test]
 fn bit_or_basic() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xa0, 0x0f]))
             .push_str(s(&[0x05, 0xf0]))
             .bit_or()
@@ -486,7 +486,7 @@ fn bit_or_basic() {
 #[test]
 fn bit_and_basic() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xff, 0xf0]))
             .push_str(s(&[0xa5, 0xa5]))
             .bit_and()
@@ -499,7 +499,7 @@ fn bit_and_basic() {
 #[test]
 fn bit_xor_basic() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xff, 0x00]))
             .push_str(s(&[0xa5, 0xa5]))
             .bit_xor()
@@ -512,7 +512,7 @@ fn bit_xor_basic() {
 #[test]
 fn bit_or_size_mismatch_errors() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xa0]))
             .push_str(s(&[0x05, 0xf0]))
             .bit_or()
@@ -527,7 +527,7 @@ fn bit_or_size_mismatch_errors() {
 #[test]
 fn shift_left_by_byte() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xa0, 0xb1, 0xc2, 0xd3]))
             .push_int(8u64)
             .shift_left()
@@ -541,7 +541,7 @@ fn shift_left_by_byte() {
 #[test]
 fn shift_left_by_4_bits_left_pads_removed() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xab]))
             .push_int(4u64)
             .shift_left()
@@ -555,7 +555,7 @@ fn shift_left_by_4_bits_left_pads_removed() {
 #[test]
 fn shift_left_zero_is_noop() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xab, 0xcd]))
             .push_int(0u64)
             .shift_left()
@@ -569,7 +569,7 @@ fn shift_left_zero_is_noop() {
 #[test]
 fn shift_right_by_byte() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xa0, 0xb1, 0xc2, 0xd3]))
             .push_int(8u64)
             .shift_right()
@@ -583,7 +583,7 @@ fn shift_right_by_byte() {
 #[test]
 fn shift_right_by_4_bits_right_pads_removed() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xab]))
             .push_int(4u64)
             .shift_right()
@@ -597,7 +597,7 @@ fn shift_right_by_4_bits_right_pads_removed() {
 #[test]
 fn shift_too_large_errors() {
     let mut vm = vm_with_script(
-        Program::new()
+        ScriptBuilder::new()
             .push_str(s(&[0xab]))
             .push_int(257u64)                   // > 256
             .shift_left()

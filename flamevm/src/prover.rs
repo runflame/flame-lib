@@ -19,7 +19,7 @@ fn shared_bp_gens() -> &'static BulletproofGens {
 }
 
 use crate::errors::VMError;
-use crate::program::Program;
+use crate::program::ScriptBuilder;
 use crate::tx::TxHeader;
 use crate::vm::{Delegate, TxResult, VM};
 
@@ -70,7 +70,7 @@ impl<'g> Prover<'g> {
     /// same bytes), `txid` / `txlog` / `total_fee` etc. populated.
     pub fn prove(
         pc_gens: &'g PedersenGens,
-        program: Program,
+        program: ScriptBuilder,
         header: TxHeader,
         gas_limit: u64,
         mem_limit: u64,
@@ -78,7 +78,7 @@ impl<'g> Prover<'g> {
         let mut prover = Prover::new(pc_gens);
         // Run the VM but receive the result without the proof set —
         // we'll fold it in after the R1CS prove. `VM::run` consumes
-        // the witness-bearing Program and stores its bytecode form on
+        // the witness-bearing ScriptBuilder and stores its bytecode form on
         // the returned TxResult.
         let mut result = VM::run(
             header,

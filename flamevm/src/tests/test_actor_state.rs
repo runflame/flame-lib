@@ -29,7 +29,7 @@ fn vm_for(actor: ActorID, script: Vec<u8>) -> VM {
     VM::new(
         dummy_header(),
         CallFrame::new(
-            Program::parse(&script)
+            ScriptBuilder::parse(&script)
                 .expect("script parses")
                 .into_instructions(),
             kind,
@@ -46,7 +46,7 @@ fn vm_for(actor: ActorID, script: Vec<u8>) -> VM {
 #[test]
 fn facade_internal_execute_tx_roundtrip() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
     let mut env = MemEnv { registry: reg, height: 0 };
     let msg = crate::Message {
         target: id,
@@ -74,7 +74,7 @@ fn facade_internal_execute_tx_roundtrip() {
 #[test]
 fn second_constructor_send_does_not_redeploy() {
     let mut reg = MemRegistry::new();
-    let code = Program::new().nop().to_bytecode();
+    let code = ScriptBuilder::new().nop().to_bytecode();
     let target = ActorID::Constructor(code.clone());
     let canonical = ActorID::Hash(target.to_hash());
     let mk = |vbytes| Message {
@@ -99,7 +99,7 @@ fn second_constructor_send_does_not_redeploy() {
 #[test]
 fn constructor_send_with_zero_vbytes_deploys() {
     let mut reg = MemRegistry::new();
-    let code = Program::new().nop().to_bytecode();
+    let code = ScriptBuilder::new().nop().to_bytecode();
     let target = ActorID::Constructor(code.clone());
     let msg = Message {
         target: target.clone(),
@@ -119,12 +119,12 @@ fn constructor_send_with_zero_vbytes_deploys() {
 #[test]
 fn load_checks_out_state() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
 
     // Script: just `load`. Step once and inspect; don't run to
     // end (end-of-frame is checked clean-stack, which a bare
     // `load` would violate).
-    let script = Program::new().load().to_bytecode();
+    let script = ScriptBuilder::new().load().to_bytecode();
     let mut vm = vm_for(id.clone(), script);
     vm.step_internal_with_registry(&mut reg).expect("load step");
 
@@ -142,10 +142,10 @@ fn load_checks_out_state() {
 #[test]
 fn load_then_save_round_trips() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
 
     // Script: `load; save`.
-    let script = Program::new().load().save().to_bytecode();
+    let script = ScriptBuilder::new().load().save().to_bytecode();
     let mut vm = vm_for(id.clone(), script);
     while vm.step_internal_with_registry(&mut reg).expect("step") {}
 
@@ -163,7 +163,7 @@ fn load_in_external_root_errors_actor_context() {
     let mut vm = VM::new(
         dummy_header(),
         CallFrame::new(
-            Program::new().load().into_instructions(),
+            ScriptBuilder::new().load().into_instructions(),
             kind,
             1000,
             0,
@@ -177,8 +177,8 @@ fn load_in_external_root_errors_actor_context() {
 #[test]
 fn load_without_registry_errors_registry_unavailable() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
-    let mut vm = vm_for(id, Program::new().load().to_bytecode());
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
+    let mut vm = vm_for(id, ScriptBuilder::new().load().to_bytecode());
     // step_internal (no registry) hits the RegistryUnavailable
     // guard inside op_load.
     let err = vm.step_internal().expect_err("must error");
@@ -188,11 +188,11 @@ fn load_without_registry_errors_registry_unavailable() {
 #[test]
 fn second_load_errors_actor_empty() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
 
     // Script: `load; load`. The second load finds the actor empty
     // (state already checked out) → ActorEmpty.
-    let script = Program::new().load().load().to_bytecode();
+    let script = ScriptBuilder::new().load().load().to_bytecode();
     let mut vm = vm_for(id, script);
     assert!(vm.step_internal_with_registry(&mut reg).expect("first"));
     let err = vm.step_internal_with_registry(&mut reg).expect_err("must error");
@@ -202,11 +202,11 @@ fn second_load_errors_actor_empty() {
 #[test]
 fn load_against_checked_out_actor_errors() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
     // Simulate a sibling frame having checked out the state.
     reg.actor_mut(&id).expect("present").state = None;
 
-    let mut vm = vm_for(id, Program::new().load().to_bytecode());
+    let mut vm = vm_for(id, ScriptBuilder::new().load().to_bytecode());
     let err = vm.step_internal_with_registry(&mut reg).expect_err("must error");
     assert!(matches!(err, VMError::ActorEmpty));
 }
@@ -214,7 +214,7 @@ fn load_against_checked_out_actor_errors() {
 #[test]
 fn load_against_frozen_actor_errors() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
     // Force-freeze the actor.
     {
         let a = reg.actor_mut(&id).expect("present");
@@ -222,7 +222,7 @@ fn load_against_frozen_actor_errors() {
         a.frozen_since = Some(10);
     }
 
-    let mut vm = vm_for(id, Program::new().load().to_bytecode());
+    let mut vm = vm_for(id, ScriptBuilder::new().load().to_bytecode());
     let err = vm.step_internal_with_registry(&mut reg).expect_err("must error");
     assert!(matches!(err, VMError::ActorFrozen));
 }
@@ -230,11 +230,11 @@ fn load_against_frozen_actor_errors() {
 #[test]
 fn save_without_load_errors() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
 
     // Script: push:0, dict, save. Save runs without a prior
     // load → SaveWithoutLoad error.
-    let script = Program::new().push_int(0u64).dict().save().to_bytecode();
+    let script = ScriptBuilder::new().push_int(0u64).dict().save().to_bytecode();
     let mut vm = vm_for(id, script);
     // 2 instructions before save: pushint8(0), dict.
     for i in 0..2 {
@@ -256,13 +256,13 @@ fn save_accepts_arbitrary_portable_dict_shape() {
     // 0x00 — scripts that ignore the convention just won't be
     // dispatchable, but that's their choice.)
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, Program::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
     // Check the state out (as a prior op_load would) so save can move
     // a fresh Dict back in.
     reg.actor_mut(&id).expect("present").state = None;
 
     // Script: push:0; dict; save. Empty Dict, no wrapper shape.
-    let script = Program::new().push_int(0u64).dict().save().to_bytecode();
+    let script = ScriptBuilder::new().push_int(0u64).dict().save().to_bytecode();
     let mut vm = vm_for(id, script);
     for _ in 0..3 {
         vm.step_internal_with_registry(&mut reg).expect("step ok");
@@ -283,7 +283,7 @@ fn load_then_dismantle_self_destructs_and_queues_vbytes() {
     let mut reg = MemRegistry::new();
     let id = deploy_with_recv(
         &mut reg,
-        Program::new().load().drop_().to_bytecode(),
+        ScriptBuilder::new().load().drop_().to_bytecode(),
         10_000,
         0,
     );
@@ -319,7 +319,7 @@ fn token_survives_load_save_roundtrip_exactly_once() {
         Value::ClearToken(crate::ClearToken::new(Int253::from(5u64), Int253::from(9u64))),
     );
     let state = Value::Dict(d);
-    let recv = Program::new().load().save().to_bytecode();
+    let recv = ScriptBuilder::new().load().save().to_bytecode();
     let id = ActorID::Hash(ActorID::Constructor(recv.clone()).to_hash());
     reg.deploy(id.clone(), recv, state, 10_000, 0).expect("deploy");
 
@@ -357,7 +357,7 @@ fn token_survives_load_save_roundtrip_exactly_once() {
 #[test]
 fn constructor_send_deploys_then_runs() {
     let mut reg = MemRegistry::new();
-    let code = Program::new().nop().to_bytecode();
+    let code = ScriptBuilder::new().nop().to_bytecode();
     let target = ActorID::Constructor(code.clone());
     let canonical = ActorID::Hash(target.to_hash());
     assert!(!reg.exists(&target));
@@ -398,7 +398,7 @@ fn dismantle_token_bearing_state_requires_retire() {
     // `TypeNotDroppable` (a zero-qty ClearToken shell would be
     // droppable). recv = `load; drop`.
     let mut reg = MemRegistry::new();
-    let recv = Program::new().load().drop_().to_bytecode();
+    let recv = ScriptBuilder::new().load().drop_().to_bytecode();
     // Token-bearing state: any Value — here a Dict holding a live ClearToken.
     let mut state_dict = Dict::new();
     state_dict.insert(
@@ -430,7 +430,7 @@ fn load_without_discharge_errors_stack_not_clean() {
     // Dict is left on the stack at frame end → StackNotClean (rolled
     // back). A missing `save` is never a silent self-destruct.
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, Program::new().load().to_bytecode(), 10_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().load().to_bytecode(), 10_000, 0);
     let block = BlockContext { height: 100 };
     let msg = Message {
         target: id.clone(),
@@ -455,7 +455,7 @@ fn load_followed_by_save_preserves_actor() {
     // recv = `load; save` — full pair. No self-destruct.
     let id = deploy_with_recv(
         &mut reg,
-        Program::new().load().save().to_bytecode(),
+        ScriptBuilder::new().load().save().to_bytecode(),
         10_000,
         0,
     );
@@ -496,7 +496,7 @@ fn receive_committed_as_first_effect_after_header() {
     // execute_internal still pushes Header + Receive into the txlog.
     let id = deploy_with_recv(
         &mut reg,
-        Program::new().nop().to_bytecode(),
+        ScriptBuilder::new().nop().to_bytecode(),
         10_000,
         0,
     );
@@ -541,7 +541,7 @@ fn receive_makes_internal_txid_bind_to_send_anchor() {
         let mut reg = MemRegistry::new();
         let id = deploy_with_recv(
             &mut reg,
-            Program::new().nop().to_bytecode(),
+            ScriptBuilder::new().nop().to_bytecode(),
             10_000,
             0,
         );

@@ -101,7 +101,7 @@ fn cleartoken_negated_flips_qty_sign() {
 fn amount_on_cleartoken_pushes_qty_and_flv() {
     // Pre-load a ClearToken on the stack, run `amount`, verify the
     // shape `cleartoken(qty,flv) → cleartoken qty flv`.
-    let mut vm = vm_with_script(Program::new().amount().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().amount().to_bytecode());
     vm.push_value(Value::ClearToken(ClearToken::new(
         Int253::from(11u64),
         Int253::from(22u64),
@@ -124,7 +124,7 @@ fn amount_on_cleartoken_pushes_qty_and_flv() {
 
 #[test]
 fn amount_on_token_pushes_points() {
-    let mut vm = vm_with_script(Program::new().amount().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().amount().to_bytecode());
     vm.push_value(Value::Token(make_cleartext_token(33, 44)));
     vm.step_internal().expect("step ok");
     assert_eq!(vm.current_call.stack.len(), 3);
@@ -144,7 +144,7 @@ fn amount_on_token_pushes_points() {
 
 #[test]
 fn amount_on_non_token_errors_typenottoken() {
-    let mut vm = vm_with_script(Program::new().amount().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().amount().to_bytecode());
     vm.push_value(Value::Int253(Int253::from(5u64)));
     let err = vm.step_internal().unwrap_err();
     assert!(matches!(err, VMError::TypeNotToken));
@@ -158,7 +158,7 @@ fn issuepub_clear_path_emits_txlog_and_returns_cleartoken() {
     // Run under InternalRoot with a known actor identity so
     // `op_issuepub` can resolve a flavor.
     let actor = ActorID::Hash([0x55; 32]);
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(7u64)
         .push_str(String::from(b"gold".to_vec()))
         .issuepub()
@@ -196,7 +196,7 @@ fn issuepub_with_point_qty_errors_typenotint253() {
     // the new design (spec.md §issuepub), the confidential variant
     // lives in `issuepriv`, not in dispatch-peek on this opcode.
     let actor = ActorID::Hash([0x55; 32]);
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_point([0u8; 32])
         .push_str(String::from(b"gold".to_vec()))
         .issuepub()
@@ -209,7 +209,7 @@ fn issuepub_with_point_qty_errors_typenotint253() {
 #[test]
 fn issuepub_at_external_root_errors_actor_context() {
     // ExternalRoot has no actor identity.
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(7u64)
         .push_str(String::from(b"gold".to_vec()))
         .issuepub()
@@ -217,7 +217,7 @@ fn issuepub_at_external_root_errors_actor_context() {
     let mut vm = VM::new(
         dummy_header(),
         CallFrame::new(
-            Program::parse(&script).expect("parse").into_instructions(),
+            ScriptBuilder::parse(&script).expect("parse").into_instructions(),
             CallKind::ExternalRoot, 1_000_000, 0, 0,
         ),
     );
@@ -253,7 +253,7 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
     // commitment that `Prover::commit_variable` rejects with
     // `WitnessMissing`. Same pattern as the encrypted-borrow test.
     use curve25519_dalek::ristretto::CompressedRistretto;
-    let program = Program::new()
+    let program = ScriptBuilder::new()
         .push_str(crate::String::commitment(qty_commit.clone()))
         .commit()
         .push_str(tag_str.clone())
@@ -318,11 +318,11 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
 fn issuepriv_at_external_root_errors_predicate_context() {
     // ExternalRoot has no enclosing predicate — error propagates at
     // root frame (call_stack is empty).
-    let script = Program::new().issuepriv().to_bytecode();
+    let script = ScriptBuilder::new().issuepriv().to_bytecode();
     let mut vm = VM::new(
         dummy_header(),
         CallFrame::new(
-            Program::parse(&script).expect("parse").into_instructions(),
+            ScriptBuilder::parse(&script).expect("parse").into_instructions(),
             CallKind::ExternalRoot, 1_000_000, 0, 0,
         ),
     );
@@ -342,13 +342,13 @@ fn issuepriv_in_internal_context_yields_failure_marker() {
     use crate::vm::{Anchor, CallFrame, CallKind, VM};
     use curve25519_dalek::ristretto::CompressedRistretto;
     let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
-    let script = Program::new().issuepriv().to_bytecode();
+    let script = ScriptBuilder::new().issuepriv().to_bytecode();
     let child_kind = CallKind::CellOpen {
         predicate: crate::Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: false, // → require_external() will error
     };
     let child = CallFrame::new(
-        Program::parse(&script).expect("parse").into_instructions(),
+        ScriptBuilder::parse(&script).expect("parse").into_instructions(),
         child_kind,
         500,
         0,
@@ -391,7 +391,7 @@ fn issuepriv_prove_then_verify_end_to_end() {
     //   issuepriv: Variable + tag → Token  (TxEntry::IssuePriv)
     //   retire:    Token → ø                 (TxEntry::Retire)
     //   push:0 return: exit with 0 results
-    let inner = Program::new()
+    let inner = ScriptBuilder::new()
         .commit()
         .push_str(tag_str.clone())
         .issuepriv()
@@ -425,7 +425,7 @@ fn issuepriv_prove_then_verify_end_to_end() {
     //   gas=1024; bytes=1024;
     //   pushstr(qty_witness); k=1; open;
     //   verify; drop  (consume the success + count markers)
-    let mut outer = Program::new()
+    let mut outer = ScriptBuilder::new()
         .push_str(crate::String::from(cell_bytes))
         .input()
         .push_point(*cp.internal_key.as_bytes());
@@ -495,7 +495,7 @@ fn issuepriv_with_int_qty_yields_failure_marker() {
     // issuepriv requires a Variable; an Int253 qty errors
     // `TypeNotVariable`. Failure-marker pattern (same reason as
     // `issuepriv_in_internal_context_yields_failure_marker`).
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_int(7u64)
         .push_str(crate::String::from(b"gold".to_vec()))
         .issuepriv()
@@ -512,7 +512,7 @@ fn issuepriv_with_int_qty_yields_failure_marker() {
 #[test]
 fn retire_cleartoken_emits_txlog() {
     // Pre-load a ClearToken, run `retire`.
-    let mut vm = vm_with_script(Program::new().retire().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().retire().to_bytecode());
     vm.push_value(Value::ClearToken(ClearToken::new(
         Int253::from(11u64),
         Int253::from(22u64),
@@ -538,7 +538,7 @@ fn retire_token_emits_txlog_with_commitment_points() {
     let token = make_cleartext_token(11, 22);
     let q_pt = token.qty.to_point();
     let f_pt = token.flv.to_point();
-    let mut vm = vm_with_script(Program::new().retire().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().retire().to_bytecode());
     vm.push_value(Value::Token(token));
     vm.step_internal().expect("retire ok");
     // Header at index 0, Retire at index 1.
@@ -554,7 +554,7 @@ fn retire_token_emits_txlog_with_commitment_points() {
 
 #[test]
 fn retire_non_token_errors_typenottoken() {
-    let mut vm = vm_with_script(Program::new().retire().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().retire().to_bytecode());
     vm.push_value(Value::Int253(Int253::from(5u64)));
     let err = vm.step_internal().unwrap_err();
     assert!(matches!(err, VMError::TypeNotToken));
@@ -564,7 +564,7 @@ fn retire_non_token_errors_typenottoken() {
 fn borrow_clear_path_returns_neg_pos_pair() {
     // Stack: [qty=5, flv=7] then `borrow` → [neg5, pos5].
     let mut vm = vm_with_script(
-        Program::new().push_int(5u64).push_int(7u64).borrow().to_bytecode(),
+        ScriptBuilder::new().push_int(5u64).push_int(7u64).borrow().to_bytecode(),
     );
     run_to_end(&mut vm).expect("borrow ok");
     assert_eq!(vm.current_call.stack.len(), 2);
@@ -590,7 +590,7 @@ fn borrow_clear_path_returns_neg_pos_pair() {
 fn borrow_with_point_errors_tokenrequirescs() {
     // pushpoint, push:7, borrow → Point qty → CS required.
     let mut vm = vm_with_script(
-        Program::new().push_point([0u8; 32]).push_int(7u64).borrow().to_bytecode(),
+        ScriptBuilder::new().push_point([0u8; 32]).push_int(7u64).borrow().to_bytecode(),
     );
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::TokenRequiresCS));
@@ -599,7 +599,7 @@ fn borrow_with_point_errors_tokenrequirescs() {
 #[test]
 fn merge_same_flavor_combines_qtys() {
     // Push two cleartokens with same flavor, merge → (merged, 1).
-    let mut vm = vm_with_script(Program::new().merge().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().merge().to_bytecode());
     vm.push_value(Value::ClearToken(ClearToken::new(
         Int253::from(3u64),
         Int253::from(7u64),
@@ -620,7 +620,7 @@ fn merge_same_flavor_combines_qtys() {
 
 #[test]
 fn merge_flavor_mismatch_soft_fails() {
-    let mut vm = vm_with_script(Program::new().merge().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().merge().to_bytecode());
     vm.push_value(Value::ClearToken(ClearToken::new(
         Int253::from(3u64),
         Int253::from(7u64),
@@ -638,7 +638,7 @@ fn merge_flavor_mismatch_soft_fails() {
 #[test]
 fn split_within_qty_returns_two_cleartokens() {
     // ClearToken(10, 7), push:3, split.
-    let mut vm = vm_with_script(Program::new().push_int(3u64).split().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().push_int(3u64).split().to_bytecode());
     vm.push_value(Value::ClearToken(ClearToken::new(
         Int253::from(10u64),
         Int253::from(7u64),
@@ -662,7 +662,7 @@ fn split_within_qty_returns_two_cleartokens() {
 
 #[test]
 fn split_above_qty_hard_fails() {
-    let mut vm = vm_with_script(Program::new().push_int(9u64).split().to_bytecode());
+    let mut vm = vm_with_script(ScriptBuilder::new().push_int(9u64).split().to_bytecode());
     vm.push_value(Value::ClearToken(ClearToken::new(
         Int253::from(2u64),
         Int253::from(7u64),
@@ -675,7 +675,7 @@ fn split_above_qty_hard_fails() {
 fn issuepubflv_pushes_correct_flavor() {
     // pushstr <32-byte cid>, pushstr "gold", issuepubflv.
     let actor_bytes = [0xab; 32];
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_str(String::from(actor_bytes.to_vec()))
         .push_str(String::from(b"gold".to_vec()))
         .issuepubflv()
@@ -692,7 +692,7 @@ fn issuepubflv_pushes_correct_flavor() {
 
 #[test]
 fn issuepubflv_rejects_non_32_byte_cid() {
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_str(String::from(vec![0xab; 16]))     // bad 16-byte cid
         .push_str(String::from(b"gold".to_vec()))
         .issuepubflv()
@@ -706,7 +706,7 @@ fn issuepubflv_rejects_non_32_byte_cid() {
 fn issueprivflv_pushes_correct_flavor() {
     // pushstr <32-byte predicate point>, pushstr "gold", issueprivflv.
     let pred_bytes = [0xcd; 32];
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_str(String::from(pred_bytes.to_vec()))
         .push_str(String::from(b"gold".to_vec()))
         .issueprivflv()
@@ -726,7 +726,7 @@ fn issueprivflv_pushes_correct_flavor() {
 
 #[test]
 fn issueprivflv_rejects_non_32_byte_predicate() {
-    let script = Program::new()
+    let script = ScriptBuilder::new()
         .push_str(String::from(vec![0xcd; 16]))     // bad 16-byte predicate
         .push_str(String::from(b"gold".to_vec()))
         .issueprivflv()

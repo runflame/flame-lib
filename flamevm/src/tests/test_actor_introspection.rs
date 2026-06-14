@@ -19,7 +19,7 @@ fn vm_internal_with(
     VM::new(
         dummy_header(),
         CallFrame::new(
-            Program::parse(&script).expect("parse").into_instructions(),
+            ScriptBuilder::parse(&script).expect("parse").into_instructions(),
             kind,
             1_000_000,
             0,
@@ -34,7 +34,7 @@ fn vm_external(script: Vec<u8>) -> VM {
     VM::new(
         dummy_header(),
         CallFrame::new(
-            Program::parse(&script).expect("parse").into_instructions(),
+            ScriptBuilder::parse(&script).expect("parse").into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
             0,
@@ -50,7 +50,7 @@ fn selfid_in_internal_root_pushes_hash_string() {
         id.clone(),
         None,
         Anchor([0u8; 32]),
-        Program::new().selfid().to_bytecode(),
+        ScriptBuilder::new().selfid().to_bytecode(),
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
@@ -61,7 +61,7 @@ fn selfid_in_internal_root_pushes_hash_string() {
 
 #[test]
 fn selfid_in_external_root_errors_actor_context() {
-    let mut vm = vm_external(Program::new().selfid().to_bytecode());
+    let mut vm = vm_external(ScriptBuilder::new().selfid().to_bytecode());
     let err = vm.step_internal().expect_err("must error");
     assert!(matches!(err, VMError::OpcodeRequiresActorContext));
 }
@@ -77,7 +77,7 @@ fn selfid_in_constructor_form_uses_canonical_hash_seed() {
         ctor,
         None,
         Anchor([0u8; 32]),
-        Program::new().selfid().to_bytecode(),
+        ScriptBuilder::new().selfid().to_bytecode(),
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
@@ -94,7 +94,7 @@ fn anchor_in_internal_root_pushes_frame_anchor() {
         id,
         None,
         anc,
-        Program::new().anchor().to_bytecode(),
+        ScriptBuilder::new().anchor().to_bytecode(),
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
@@ -109,7 +109,7 @@ fn anchor_in_external_root_errors_anchor_missing() {
     // fresh ExternalRoot with no prior `input`, the slot is `None`
     // and the opcode hard-fails `AnchorMissing` (same rule as the
     // consume sites).
-    let mut vm = vm_external(Program::new().anchor().to_bytecode());
+    let mut vm = vm_external(ScriptBuilder::new().anchor().to_bytecode());
     let err = vm.step_internal().expect_err("must error");
     assert!(matches!(err, VMError::AnchorMissing));
 }
@@ -121,7 +121,7 @@ fn callerid_with_some_caller_pushes_hash_string() {
         ActorID::Hash([0x44; 32]),
         Some(caller),
         Anchor([0u8; 32]),
-        Program::new().callerid().to_bytecode(),
+        ScriptBuilder::new().callerid().to_bytecode(),
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
@@ -137,7 +137,7 @@ fn callerid_with_none_caller_pushes_zero_string() {
         ActorID::Hash([0x44; 32]),
         None,
         Anchor([0u8; 32]),
-        Program::new().callerid().to_bytecode(),
+        ScriptBuilder::new().callerid().to_bytecode(),
     );
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
@@ -148,7 +148,7 @@ fn callerid_with_none_caller_pushes_zero_string() {
 
 #[test]
 fn callerid_in_external_root_errors_actor_context() {
-    let mut vm = vm_external(Program::new().callerid().to_bytecode());
+    let mut vm = vm_external(ScriptBuilder::new().callerid().to_bytecode());
     let err = vm.step_internal().expect_err("must error");
     assert!(matches!(err, VMError::OpcodeRequiresActorContext));
 }
