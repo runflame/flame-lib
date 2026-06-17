@@ -3,6 +3,7 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
+use crate::Limits;
 
 #[test]
 fn signtx_pours_payload_and_records_txbound_sig() {
@@ -216,7 +217,7 @@ fn phase20_single_txbound_verifies_with_multisig() {
     let pc_gens = PedersenGens::default();
     let (vk, sk) = signing_keypair(101);
     let (script, cell_id) = make_signtx_script_with_cell(vk);
-    let program = crate::ScriptBuilder::parse(&script).expect("decode");
+    let program = ScriptBuilder::parse(&script).expect("decode");
     let prover_result =
         Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove ok");
@@ -262,8 +263,8 @@ fn facade_build_sign_verify_roundtrip() {
     use musig::Multisignature;
     let (vk, sk) = signing_keypair(101);
     let (script, _cid) = make_signtx_script_with_cell(vk);
-    let program = crate::ScriptBuilder::parse(&script).expect("decode");
-    let limits = crate::Limits { gas: 1_000_000, mem: 0 };
+    let program = ScriptBuilder::parse(&script).expect("decode");
+    let limits = Limits { gas: 1_000_000, mem: 0 };
 
     let unsigned = program.build_tx(dummy_header(), limits).expect("build_tx");
     let si = unsigned.signing_instructions();
@@ -368,10 +369,10 @@ fn phase20_missing_signature_when_txbound_present() {
     let pc_gens = PedersenGens::default();
     let (vk, _sk) = signing_keypair(7);
     let (script, _cell_id) = make_signtx_script_with_cell(vk);
-    let program = crate::ScriptBuilder::parse(&script).expect("decode");
+    let program = ScriptBuilder::parse(&script).expect("decode");
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove ok");
-    let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+    let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     let err = Verifier::verify(
@@ -404,7 +405,7 @@ fn phase20_spurious_signature_when_no_txbound() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove ok");
-    let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+    let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
     // Hand a real-looking signature anyway. Even a syntactically
     // valid signature must be rejected when the VM emitted no
@@ -439,7 +440,7 @@ fn phase20_tampered_signature_rejected() {
     // Sign with a *different* secret — vk doesn't correspond.
     let sk_wrong = Scalar::from(999u64);
     let (script, cell_id) = make_signtx_script_with_cell(vk);
-    let program = crate::ScriptBuilder::parse(&script).expect("decode");
+    let program = ScriptBuilder::parse(&script).expect("decode");
     let prover_result =
         Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove ok");
@@ -483,7 +484,7 @@ fn phase20_no_txbound_no_signature_roundtrip() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove ok");
-    let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+    let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -507,7 +508,7 @@ fn phase20_signature_over_wrong_txid_rejected() {
     let pc_gens = PedersenGens::default();
     let (vk, sk) = signing_keypair(101);
     let (script, cell_id) = make_signtx_script_with_cell(vk);
-    let program = crate::ScriptBuilder::parse(&script).expect("decode");
+    let program = ScriptBuilder::parse(&script).expect("decode");
     let header_prove = TxHeader { version: 1, locktime: 0 };
     let prover_result =
         Prover::prove(&pc_gens, program, header_prove, 1_000_000, 0)

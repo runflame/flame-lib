@@ -16,6 +16,7 @@ fn shared_bp_gens() -> &'static BulletproofGens {
     BP_GENS.get_or_init(|| BulletproofGens::new(1024, 1))
 }
 
+use crate::constraints::Commitment;
 use crate::errors::VMError;
 use crate::tx::TxHeader;
 use crate::vm::{Delegate, DeferredSig, TxResult, VM};
@@ -179,7 +180,7 @@ impl Delegate for Verifier {
 
     fn commit_variable(
         &mut self,
-        commitment: &crate::Commitment,
+        commitment: &Commitment,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError> {
         // Verifier-side: only the closed point is known. Call
         // `cs.commit(point)` — bulletproofs allocates a CS variable

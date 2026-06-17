@@ -15,9 +15,9 @@ fn log_opcode_emits_txentry_data() {
     run_to_end(&mut vm).expect("log ok");
     assert!(vm.current_call.stack.is_empty());
     assert_eq!(vm.txlog.len(), 2);
-    assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+    assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
     match &vm.txlog[1] {
-        crate::tx::TxEntry::Data(bytes) => assert_eq!(bytes, b"hello"),
+        TxEntry::Data(bytes) => assert_eq!(bytes, b"hello"),
         _ => panic!("expected Data entry"),
     }
 }

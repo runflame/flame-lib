@@ -529,7 +529,7 @@ impl Cell {
         let mut buf = Vec::new();
         for v in &self.payload {
             buf.clear();
-            crate::encoding::write_value(&mut buf, v)
+            write_value(&mut buf, v)
                 .expect("portable payload value must have a canonical encoder");
             t.append_message(b"payload.item", &buf);
         }

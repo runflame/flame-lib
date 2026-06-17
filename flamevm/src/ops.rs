@@ -4,6 +4,8 @@
 use curve25519_dalek::scalar::Scalar;
 use readerwriter::{Encodable, Reader, WriteError, Writer};
 
+use crate::crypto::Point;
+use crate::encoding::{read_subvarint, write_subvarint};
 use crate::errors::VMError;
 use crate::int253::Int253;
 use crate::string::String;
@@ -163,7 +165,7 @@ const OP_VERSION: u8 = 0xf1;
 pub enum Instruction {
     PushInt(Int253),       // ø push → int
     PushStr(String),       // ø pushstr → str
-    PushPoint(crate::crypto::Point), // ø pushpoint → point (witness-bearing on prover)
+    PushPoint(Point), // ø pushpoint → point (witness-bearing on prover)
     PushToken,             // flv pushtoken → token
     Drop,                  // x drop → ø
     Nop,                   // ø nop → ø
@@ -268,7 +270,7 @@ impl Encodable for Instruction {
             Instruction::PushInt(i) => encode_push_int(i, w),
             Instruction::PushStr(s) => {
                 op(w, OP_PUSHSTR)?;
-                crate::encoding::write_subvarint(w, s.len() as u64)?;
+                write_subvarint(w, s.len() as u64)?;
                 // Use `bytes_view` so witness-bearing variants
                 // (Commitment / Scalar / Predicate) serialize to
                 // their canonical opaque bytes. `as_bytes` would
@@ -358,15 +360,15 @@ impl Encodable for Instruction {
             Instruction::Fee => op(w, OP_FEE),
             Instruction::Label(n) => {
                 op(w, OP_LABEL)?;
-                crate::encoding::write_subvarint(w, *n as u64)
+                write_subvarint(w, *n as u64)
             }
             Instruction::Jump(n) => {
                 op(w, OP_JUMP)?;
-                crate::encoding::write_subvarint(w, *n as u64)
+                write_subvarint(w, *n as u64)
             }
             Instruction::JumpIf(n) => {
                 op(w, OP_JUMPIF)?;
-                crate::encoding::write_subvarint(w, *n as u64)
+                write_subvarint(w, *n as u64)
             }
             Instruction::Return => op(w, OP_RETURN),
             Instruction::Type => op(w, OP_TYPE),
@@ -429,7 +431,7 @@ impl Instruction {
             OP_PUSHINT128_NEG => parse_pushint_n(reader, 16, true),
             OP_PUSHINT_FULL => parse_pushint_full(reader),
             OP_PUSHSTR => {
-                let len = crate::encoding::read_subvarint(reader)
+                let len = read_subvarint(reader)
                     .map_err(|_| VMError::UnexpectedEndOfScript)? as usize;
                 // Bound the claimed length against remaining input BEFORE
                 // allocating — a tiny length prefix must not force a giant
@@ -447,7 +449,7 @@ impl Instruction {
                 reader
                     .read(&mut buf)
                     .map_err(|_| VMError::UnexpectedEndOfScript)?;
-                Ok(Instruction::PushPoint(crate::crypto::Point::from_bytes(buf)))
+                Ok(Instruction::PushPoint(Point::from_bytes(buf)))
             }
             OP_PUSHTOKEN => Ok(Instruction::PushToken),
             OP_DROP => Ok(Instruction::Drop),
@@ -565,7 +567,7 @@ fn parse_label_op(
     reader: &mut impl Reader,
     build: fn(u32) -> Instruction,
 ) -> Result<Instruction, VMError> {
-    let n = crate::encoding::read_subvarint(reader)
+    let n = read_subvarint(reader)
         .map_err(|_| VMError::UnexpectedEndOfScript)?;
     if n > u32::MAX as u64 {
         return Err(VMError::LabelOutOfOrder);

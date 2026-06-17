@@ -18,8 +18,8 @@ fn encrypted_borrow_produces_widetoken_and_token_pair() {
     let flv_int = Int253::from(7u64);
     let qty_blind = curve25519_dalek::scalar::Scalar::from(11u64);
     let flv_blind = curve25519_dalek::scalar::Scalar::from(13u64);
-    let qty_commit = crate::Commitment::blinded_with_factor(qty_int, qty_blind);
-    let flv_commit = crate::Commitment::blinded_with_factor(flv_int, flv_blind);
+    let qty_commit = Commitment::blinded_with_factor(qty_int, qty_blind);
+    let flv_commit = Commitment::blinded_with_factor(flv_int, flv_blind);
     let program = ScriptBuilder::new()
         .push_str(String::commitment(qty_commit))
         .commit()
@@ -77,9 +77,9 @@ fn mix_with_single_in_single_out_balances() {
     let flv_int = Int253::from(7u64);
     let qty_blind = curve25519_dalek::scalar::Scalar::from(11u64);
     let flv_blind = curve25519_dalek::scalar::Scalar::from(13u64);
-    let qty_commit = crate::Commitment::blinded_with_factor(qty_int, qty_blind);
-    let flv_commit = crate::Commitment::blinded_with_factor(flv_int, flv_blind);
-    let token = crate::Token::new(qty_commit.clone(), flv_commit.clone());
+    let qty_commit = Commitment::blinded_with_factor(qty_int, qty_blind);
+    let flv_commit = Commitment::blinded_with_factor(flv_int, flv_blind);
+    let token = Token::new(qty_commit.clone(), flv_commit.clone());
 
     // Build a ScriptBuilder that supplies the output's commitment pair
     // and runs mix. We pre-push the Token via the harness.

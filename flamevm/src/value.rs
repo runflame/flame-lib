@@ -7,6 +7,7 @@ use crate::Point;
 use crate::String;
 use crate::{ClearToken, Token, WideToken};
 use crate::{Constraint, Expression, Variable};
+use crate::MultiscalarMul;
 
 #[rustfmt::skip]
 impl Value {
@@ -54,7 +55,7 @@ impl Value {
             Value::Int253(v) => Ok(Value::Int253(-v)),
             Value::Expression(e) => Ok(Value::Expression(-e)),
             Value::Point(p) => Ok(Value::MultiscalarMul(
-                crate::msm::MultiscalarMul::term(
+                MultiscalarMul::term(
                     -curve25519_dalek::scalar::Scalar::ONE,
                     p.to_compressed(),
                 ),
@@ -68,7 +69,6 @@ impl Value {
     /// produce a `MultiscalarMul`; otherwise lifts to Expression
     /// (caller must be in external context).
     pub fn add(self, other: Value, can_constrain: bool) -> Result<Value, VMError> {
-        use crate::msm::MultiscalarMul;
         match (self, other) {
             (Value::Int253(x), Value::Int253(y)) => Ok(Value::Int253(x + y)),
             // Point + Point → MSM with two unit-scalar terms.
@@ -160,7 +160,7 @@ pub enum Value {
     Constraint(Constraint),
     /// Deferred multi-scalar multiplication; consumed by `verify`
     /// which adds it to the same batch as Schnorr/Musig sigs.
-    MultiscalarMul(crate::msm::MultiscalarMul),
+    MultiscalarMul(MultiscalarMul),
 }
 
 impl Value {

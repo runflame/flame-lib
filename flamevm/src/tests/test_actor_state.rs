@@ -4,7 +4,7 @@
 
 use super::test_helpers::*;
 
-use crate::{empty_state, ActorID, Dict, Env, Int253};
+use crate::{empty_state, ActorID, Dict, Env, Int253, Limits, VBYTE_MATURITY_BLOCKS};
 
 /// Builds an empty state with a single `recv` method that runs the
 /// caller-supplied bytes. Returns (state, id).
@@ -48,17 +48,17 @@ fn facade_internal_execute_tx_roundtrip() {
     let mut reg = MemRegistry::new();
     let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
     let mut env = MemEnv { registry: reg, height: 0 };
-    let msg = crate::Message {
+    let msg = Message {
         target: id,
         caller: None,
         anchor: Anchor([1u8; 32]),
         payload: Vec::new(),
         gas: 1_000,
         vbytes: 0,
-        refund_predicate: crate::Predicate::opaque(crate::Predicate::unspendable_key()),
+        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     };
     let itx = msg
-        .execute_tx(crate::Limits { gas: 1_000_000, mem: 0 }, &env)
+        .execute_tx(Limits { gas: 1_000_000, mem: 0 }, &env)
         .expect("execute_tx");
     // Header + Receive are emitted before the recv body runs.
     assert!(itx.log().entries().len() >= 2, "header + receive at minimum");
@@ -269,7 +269,7 @@ fn save_accepts_arbitrary_portable_dict_shape() {
     }
     // Save succeeded; an ActorSave entry is in the txlog.
     let save_count = vm.txlog.iter()
-        .filter(|e| matches!(e, crate::tx::TxEntry::ActorSave { .. }))
+        .filter(|e| matches!(e, TxEntry::ActorSave { .. }))
         .count();
     assert_eq!(save_count, 1);
 }
@@ -302,7 +302,7 @@ fn load_then_dismantle_self_destructs_and_queues_vbytes() {
     VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("ok");
 
     assert!(!reg.exists(&id), "dismantled state self-destructs the actor");
-    let release_at = 100 + crate::VBYTE_MATURITY_BLOCKS;
+    let release_at = 100 + VBYTE_MATURITY_BLOCKS;
     assert_eq!(reg.vbyte_pool().maturing.get(&release_at).copied().unwrap_or(0), 10_000);
 }
 
@@ -316,7 +316,7 @@ fn token_survives_load_save_roundtrip_exactly_once() {
     let mut d = Dict::new();
     d.insert(
         Int253::from(0u64),
-        Value::ClearToken(crate::ClearToken::new(Int253::from(5u64), Int253::from(9u64))),
+        Value::ClearToken(ClearToken::new(Int253::from(5u64), Int253::from(9u64))),
     );
     let state = Value::Dict(d);
     let recv = ScriptBuilder::new().load().save().to_bytecode();
@@ -403,7 +403,7 @@ fn dismantle_token_bearing_state_requires_retire() {
     let mut state_dict = Dict::new();
     state_dict.insert(
         Int253::from(0u64),
-        Value::ClearToken(crate::ClearToken::new(Int253::from(5u64), Int253::from(9u64))),
+        Value::ClearToken(ClearToken::new(Int253::from(5u64), Int253::from(9u64))),
     );
     let state = Value::Dict(state_dict);
     let id = ActorID::Hash([0x09; 32]);
@@ -517,9 +517,9 @@ fn receive_committed_as_first_effect_after_header() {
 
     // txlog[0] = Header, txlog[1] = Receive(send_id).
     assert!(result.txlog.len() >= 2, "txlog too short: {}", result.txlog.len());
-    assert!(matches!(result.txlog[0], crate::tx::TxEntry::Header(_)));
+    assert!(matches!(result.txlog[0], TxEntry::Header(_)));
     match &result.txlog[1] {
-        crate::tx::TxEntry::Receive(send_id) => {
+        TxEntry::Receive(send_id) => {
             assert_eq!(
                 *send_id, expected_send_id,
                 "Receive must carry the originating Message's MessageID"
@@ -537,7 +537,7 @@ fn receive_committed_as_first_effect_after_header() {
 /// distinct sends in any state-machine indexer.
 #[test]
 fn receive_makes_internal_txid_bind_to_send_anchor() {
-    fn run_with_anchor(anchor_bytes: [u8; 32]) -> crate::tx::TxID {
+    fn run_with_anchor(anchor_bytes: [u8; 32]) -> TxID {
         let mut reg = MemRegistry::new();
         let id = deploy_with_recv(
             &mut reg,

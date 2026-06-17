@@ -40,10 +40,12 @@ use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
 pub use readerwriter::{ReadError, Reader, WriteError, Writer};
 
+use crate::constraints::Commitment;
 use crate::crypto::Point;
 use crate::dict::Dict;
 use crate::int253::Int253;
 use crate::string::String;
+use crate::token::{ClearToken, Token};
 use crate::value::Value;
 
 // ── Tag constants ─────────────────────────────────────────────────
@@ -505,16 +507,16 @@ fn read_value_with_depth(
         TOKEN_TAG => {
             let qty_bytes = r.read_u8x32()?;
             let flv_bytes = r.read_u8x32()?;
-            let qty = crate::Commitment::Closed(CompressedRistretto(qty_bytes));
-            let flv = crate::Commitment::Closed(CompressedRistretto(flv_bytes));
-            Ok(Some(Value::Token(crate::Token::new(qty, flv))))
+            let qty = Commitment::Closed(CompressedRistretto(qty_bytes));
+            let flv = Commitment::Closed(CompressedRistretto(flv_bytes));
+            Ok(Some(Value::Token(Token::new(qty, flv))))
         }
         // ClearToken (portable when non-negative): tag + cleartext qty
         // + flv as compact `Int253`s.
         CLEAR_TOKEN_TAG => {
             let qty = read_int253(r)?;
             let flv = read_int253(r)?;
-            Ok(Some(Value::ClearToken(crate::ClearToken::new(qty, flv))))
+            Ok(Some(Value::ClearToken(ClearToken::new(qty, flv))))
         }
         // WideToken is non-portable (confidential, may be negative) and
         // never crosses the wire.
@@ -737,7 +739,7 @@ mod tests {
         // re-encode → bytes equal. Decoded Token holds Closed
         // commitments; original holds Open ones, so we compare bytes
         // and structural shape rather than struct equality.
-        let original = Value::Token(crate::Token::cleartext(
+        let original = Value::Token(Token::cleartext(
             Int253::from(123u64),
             Int253::from(7u64),
         ));
@@ -752,8 +754,8 @@ mod tests {
         let decoded = read_value(&mut r).expect("decodes").expect("token tag");
         match &decoded {
             Value::Token(t) => {
-                let expected_qty = crate::Commitment::unblinded(Int253::from(123u64));
-                let expected_flv = crate::Commitment::unblinded(Int253::from(7u64));
+                let expected_qty = Commitment::unblinded(Int253::from(123u64));
+                let expected_flv = Commitment::unblinded(Int253::from(7u64));
                 assert_eq!(t.qty.to_point(), expected_qty.to_point());
                 assert_eq!(t.flv.to_point(), expected_flv.to_point());
             }
@@ -782,7 +784,7 @@ mod tests {
 
     #[test]
     fn cleartoken_encode_decode_roundtrip() {
-        let original = Value::ClearToken(crate::ClearToken::new(
+        let original = Value::ClearToken(ClearToken::new(
             Int253::from(5u64),
             Int253::from(7u64),
         ));

@@ -63,7 +63,7 @@ fn prove_then_verify_alloc_arithmetic_equality() {
         0,
     )
     .expect("prove succeeds");
-let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+let TxResult { bytecode, proof, .. } = _pp;
 let proof = proof.expect("proof set");
 
     // Verifier walks the same bytecode and accepts the proof.
@@ -98,7 +98,7 @@ fn prove_succeeds_but_verify_fails_on_tampered_proof() {
         0,
     )
     .expect("prove succeeds");
-let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+let TxResult { bytecode, proof, .. } = _pp;
 let proof = proof.expect("proof set");
 
     // Flip a byte deep in the proof body.
@@ -144,7 +144,7 @@ fn prove_fails_for_unsatisfiable_equality() {
         0,
     )
     .expect("prover doesn't refuse construction");
-let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+let TxResult { bytecode, proof, .. } = _pp;
 let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();
@@ -187,7 +187,7 @@ fn alloc_pushes_expression_with_witness() {
 
     assert_eq!(vm.current_call.stack.len(), 1);
     match &vm.current_call.stack[0] {
-        Value::Expression(crate::Expression::LinearCombination(terms, witness)) => {
+        Value::Expression(Expression::LinearCombination(terms, witness)) => {
             assert_eq!(terms.len(), 1);
             assert_eq!(*witness, Some(Int253::from(42u64)));
         }
@@ -214,7 +214,7 @@ fn prove_then_verify_alloc_multiplication() {
         0,
     )
     .expect("prove succeeds");
-let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+let TxResult { bytecode, proof, .. } = _pp;
 let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();
@@ -248,7 +248,7 @@ fn prove_then_verify_alloc_with_negation() {
         0,
     )
     .expect("prove succeeds");
-let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+let TxResult { bytecode, proof, .. } = _pp;
 let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();
@@ -289,7 +289,7 @@ fn alloc_without_witness_works_in_verifier_path() {
         0,
     )
     .expect("prove succeeds");
-let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+let TxResult { bytecode, proof, .. } = _pp;
 let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();
@@ -452,7 +452,7 @@ fn phase18_verifier_rejects_proof_under_different_header() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, prove_header, 1_000_000, 0)
             .expect("prove ok");
-    let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+    let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     let err = Verifier::verify(
@@ -487,7 +487,7 @@ fn phase21_txresult_populated_for_trivial_program() {
     // Txlog has Header at [0].
     assert!(matches!(
         prover_result.txlog[0],
-        crate::tx::TxEntry::Header(_)
+        TxEntry::Header(_)
     ));
     // total_fee = 0 (no fee opcodes); gas/vbytes = 0 (resource
     // accounting not wired yet); bytecode populated; proof Some;
@@ -498,7 +498,7 @@ fn phase21_txresult_populated_for_trivial_program() {
     assert!(!prover_result.bytecode.is_empty());
     assert!(prover_result.proof.is_some());
     assert!(prover_result.deferred_sigs.is_empty());
-    assert!(!prover_result.txlog.iter().any(|e| matches!(e, crate::tx::TxEntry::Send(_))));
+    assert!(!prover_result.txlog.iter().any(|e| matches!(e, TxEntry::Send(_))));
     // Verifier side: same TxID and txlog; proof is None (consumed).
     let prover_txid = prover_result.txid;
     let TxResult { bytecode, proof, .. } = prover_result;
@@ -580,14 +580,14 @@ fn phase21_txlog_ordering_in_txresult() {
     assert_eq!(result.txlog.len(), 3, "Header + 2 Data entries");
     assert!(matches!(
         result.txlog[0],
-        crate::tx::TxEntry::Header(_)
+        TxEntry::Header(_)
     ));
     match &result.txlog[1] {
-        crate::tx::TxEntry::Data(b) => assert_eq!(b, b"a"),
+        TxEntry::Data(b) => assert_eq!(b, b"a"),
         _ => panic!("txlog[1] must be Data(a)"),
     }
     match &result.txlog[2] {
-        crate::tx::TxEntry::Data(b) => assert_eq!(b, b"b"),
+        TxEntry::Data(b) => assert_eq!(b, b"b"),
         _ => panic!("txlog[2] must be Data(b)"),
     }
 }
@@ -602,7 +602,7 @@ fn phase21_deferred_sigs_in_txresult() {
     let pc_gens = PedersenGens::default();
     let (vk, sk) = signing_keypair(7);
     let (script, cell_id) = make_signtx_script_with_cell(vk);
-    let program = crate::ScriptBuilder::parse(&script).expect("decode");
+    let program = ScriptBuilder::parse(&script).expect("decode");
     let prover_result =
         Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove ok");

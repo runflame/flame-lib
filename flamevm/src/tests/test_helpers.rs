@@ -21,7 +21,7 @@ pub use crate::{
     Prover, Verifier,
     ScriptBuilder, Script,
     Token, WideToken, Value,
-    PredicateTree,
+    PredicateTree, VbytePool,
     Instruction,
     CheckedFee, MAX_FEE,
     CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,
@@ -60,7 +60,7 @@ impl ActorRegistry for StubRegistry {
     fn save_state(
         &mut self,
         _id: &ActorID,
-        _state: crate::Value,
+        _state: Value,
     ) -> Result<(), VMError> {
         unimplemented!("StubRegistry::save_state — use MemRegistry for state-touching tests")
     }
@@ -77,7 +77,7 @@ impl ActorRegistry for StubRegistry {
         &mut self,
         _id: ActorID,
         _code: Vec<u8>,
-        _state: crate::Value,
+        _state: Value,
         _vbytes: u64,
         _height: u64,
     ) -> Result<(), VMError> {
@@ -94,7 +94,7 @@ impl ActorRegistry for StubRegistry {
     fn tick_block(&mut self, _height: u64) -> Vec<ActorID> {
         Vec::new()
     }
-    fn vbyte_pool(&self) -> &crate::VbytePool {
+    fn vbyte_pool(&self) -> &VbytePool {
         unimplemented!("StubRegistry::vbyte_pool — use MemRegistry")
     }
 }
@@ -220,7 +220,7 @@ pub(crate) fn run_err(builder: ScriptBuilder) -> VMError {
 /// Delivers `msg` to `reg` via `VM::execute_internal` and returns the
 /// resulting effect log (the public observable). Test bodies assert on
 /// `TxEntry`s, not on internal frame/stack state.
-pub(crate) fn deliver(reg: &mut MemRegistry, msg: Message) -> Vec<crate::tx::TxEntry> {
+pub(crate) fn deliver(reg: &mut MemRegistry, msg: Message) -> Vec<TxEntry> {
     let block = BlockContext { height: 0 };
     VM::execute_internal(dummy_header(), msg, reg, &block)
         .expect("internal delivery ok")
@@ -259,7 +259,7 @@ pub(crate) fn msg_with_sel(actor: ActorID, sel: u64) -> Message {
 /// Bucket-C fixture: deploy, then `deliver` and read the effect log.
 pub(crate) fn deploy_actor(reg: &mut MemRegistry, recv: Vec<u8>) -> ActorID {
     let id = ActorID::Hash(ActorID::Constructor(recv.clone()).to_hash());
-    reg.deploy(id.clone(), recv, crate::empty_state(), 1_000_000, 0).expect("deploy");
+    reg.deploy(id.clone(), recv, empty_state(), 1_000_000, 0).expect("deploy");
     id
 }
 
@@ -489,7 +489,7 @@ pub(crate) fn fixture_cell() -> Cell {
     let anchor = Anchor([0x42; 32]);
     let payload = vec![
         Value::Int253(Int253::from(7u64)),
-        Value::String(crate::String::from(b"hello".to_vec())),
+        Value::String(String::from(b"hello".to_vec())),
     ];
     Cell::new(predicate, anchor, payload)
 }
@@ -561,7 +561,7 @@ impl Delegate for StubDelegate {
 
     fn commit_variable(
         &mut self,
-        _commitment: &crate::Commitment,
+        _commitment: &Commitment,
     ) -> Result<(CompressedRistretto, bulletproofs::r1cs::Variable), VMError> {
         unreachable!("StubDelegate::commit_variable should not be called in Phase-10 tests");
     }
@@ -610,7 +610,7 @@ pub(crate) fn signing_keypair(secret: u64) -> (CompressedRistretto, Scalar) {
 /// bytes and the consumed cell's id.
 pub(crate) fn make_signtx_script_with_cell(
     vk: CompressedRistretto,
-) -> (Vec<u8>, crate::cell::CellID) {
+) -> (Vec<u8>, CellID) {
     let cell = Cell::new(
         Predicate::opaque(vk),
         Anchor([0x42; 32]),
@@ -636,16 +636,16 @@ pub(crate) fn make_open_token(
     flv_value: u64,
     qty_blind: u64,
     flv_blind: u64,
-) -> crate::Token {
-    let q = crate::Commitment::blinded_with_factor(
+) -> Token {
+    let q = Commitment::blinded_with_factor(
         Int253::from(qty_value),
         Scalar::from(qty_blind),
     );
-    let f = crate::Commitment::blinded_with_factor(
+    let f = Commitment::blinded_with_factor(
         Int253::from(flv_value),
         Scalar::from(flv_blind),
     );
-    crate::Token::new(q, f)
+    Token::new(q, f)
 }
 
 //
@@ -759,7 +759,7 @@ pub(crate) fn build_confidential_nm_program(
         // pushstr String::Cell(c) — prover-side witness carrier
         // (Token's open commitments ride along into op_input).
         // The verifier-side equivalent is `String::from(cell.to_bytes())`.
-        program = program.push_str(crate::String::cell(cell));
+        program = program.push_str(String::cell(cell));
         program = program.input();
         // taproot_proof pieces.
         program = push_taproot_proof_to_program(program, &cp);
@@ -780,8 +780,8 @@ pub(crate) fn build_confidential_nm_program(
     for out in outputs {
         let (q_open, f_open) = open_commitments_for_output(out);
         program = program
-            .push_str(crate::String::commitment(q_open))
-            .push_str(crate::String::commitment(f_open));
+            .push_str(String::commitment(q_open))
+            .push_str(String::commitment(f_open));
     }
 
     //
@@ -821,12 +821,12 @@ pub(crate) fn build_confidential_nm_program(
 /// Build the Open `(qty, flv)` commitments for an input spec.
 pub(crate) fn open_commitments(
     inp: &NMInputSpec,
-) -> (crate::Commitment, crate::Commitment) {
-    let q = crate::Commitment::blinded_with_factor(
+) -> (Commitment, Commitment) {
+    let q = Commitment::blinded_with_factor(
         Int253::from(inp.qty),
         Scalar::from(inp.qty_blind),
     );
-    let f = crate::Commitment::blinded_with_factor(
+    let f = Commitment::blinded_with_factor(
         Int253::from(inp.flv),
         Scalar::from(inp.flv_blind),
     );
@@ -836,12 +836,12 @@ pub(crate) fn open_commitments(
 /// Build the Open `(qty, flv)` commitments for an output spec.
 pub(crate) fn open_commitments_for_output(
     out: &NMOutputSpec,
-) -> (crate::Commitment, crate::Commitment) {
-    let q = crate::Commitment::blinded_with_factor(
+) -> (Commitment, Commitment) {
+    let q = Commitment::blinded_with_factor(
         Int253::from(out.qty),
         Scalar::from(out.qty_blind),
     );
-    let f = crate::Commitment::blinded_with_factor(
+    let f = Commitment::blinded_with_factor(
         Int253::from(out.flv),
         Scalar::from(out.flv_blind),
     );
@@ -859,15 +859,15 @@ pub(crate) fn push_taproot_proof_to_program(
     // (val, key); then push n, dict.
     for (i, h) in cp.neighbors.iter().enumerate() {
         program = program
-            .push_str(crate::String::from(h.to_vec()))
+            .push_str(String::from(h.to_vec()))
             .push_int(i as u64);
     }
     program = program
         .push_int(cp.neighbors.len() as u64)
         .dict();
     program = program
-        .push_str(crate::String::from(cp.position.clone()))
-        .push_str(crate::String::from(cp.program.clone()));
+        .push_str(String::from(cp.position.clone()))
+        .push_str(String::from(cp.program.clone()));
     program
 }
 
@@ -887,7 +887,7 @@ pub(crate) fn push_taproot_proof_to_program(
 /// transactions where each input comes from its own keypair.
 pub(crate) fn build_input_cell(inp: &NMInputSpec) -> (Cell, TaprootProof) {
     let (q_open, f_open) = open_commitments(inp);
-    let token = crate::Token::new(q_open, f_open);
+    let token = Token::new(q_open, f_open);
     // Leaf script `push:1, return` — under ADR 0013 the opened cell
     // runs in an isolated frame, so the leaf must explicitly return
     // its single-Token payload to the caller.
@@ -940,14 +940,14 @@ pub(crate) fn assert_nm_txlog(
         "txlog length must be Header + N inputs + M outputs"
     );
     // Header at index 0.
-    assert!(matches!(result.txlog[0], crate::tx::TxEntry::Header(_)));
+    assert!(matches!(result.txlog[0], TxEntry::Header(_)));
     // Inputs at [1..=N], in spec order. The cell_id check is
     // load-bearing — it pins down predicate + anchor + payload
     // bytes all at once.
     for (i, inp) in inputs.iter().enumerate() {
         let expected_id = build_input_cell(inp).0.id();
         match &result.txlog[1 + i] {
-            crate::tx::TxEntry::Input(id) => assert_eq!(
+            TxEntry::Input(id) => assert_eq!(
                 *id, expected_id,
                 "txlog[{}] input cell_id mismatch", 1 + i
             ),
@@ -985,7 +985,7 @@ pub(crate) fn assert_nm_txlog(
         let (q_open, f_open) = open_commitments_for_output(out);
         let idx = 1 + inputs.len() + j;
         match &result.txlog[idx] {
-            crate::tx::TxEntry::Output(c) => {
+            TxEntry::Output(c) => {
                 assert_eq!(
                     c.predicate.to_point(),
                     expected_pred,
@@ -1041,7 +1041,7 @@ pub(crate) fn assert_nm_txlog(
         "confidential N→M matrix tests must not emit deferred sigs"
     );
     assert!(
-        !result.txlog.iter().any(|e| matches!(e, crate::tx::TxEntry::Send(_))),
+        !result.txlog.iter().any(|e| matches!(e, TxEntry::Send(_))),
         "confidential N→M matrix tests must not emit sends"
     );
 }

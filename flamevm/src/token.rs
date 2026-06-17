@@ -5,7 +5,7 @@ use merlin::Transcript;
 
 use crate::constraints::Commitment;
 use crate::actor::ActorID;
-use crate::{Int253, String};
+use crate::{Int253, Predicate, String};
 
 // ── Token ────────────────────────────────────────────────────────
 
@@ -203,7 +203,7 @@ pub fn flavor_from_actor(actor: &ActorID, tag: &String) -> Int253 {
 /// vs `b"actor"`), so actor- and predicate-issued flavors can never collide
 /// even when their 32-byte identities are numerically equal.
 pub fn flavor_from_predicate(
-    predicate: &crate::cell::Predicate,
+    predicate: &Predicate,
     tag: &String,
 ) -> Int253 {
     let mut t = Transcript::new(b"flamevm.issuepriv.flavor");

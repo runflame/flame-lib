@@ -22,7 +22,7 @@ fn input_string_cell_preserves_open_commitments() {
         vec![Value::Token(token)],
     );
     let mut vm = vm_external_with_script(Vec::new());
-    vm.push_value(Value::String(crate::String::cell(cell)));
+    vm.push_value(Value::String(String::cell(cell)));
     vm.op_input().expect("input ok");
     match &vm.current_call.stack[0] {
         Value::Cell(c) => match &c.payload[0] {
@@ -54,7 +54,7 @@ fn input_string_opaque_yields_closed_commitments() {
     );
     let cell_bytes = cell.to_bytes();
     let mut vm = vm_external_with_script(Vec::new());
-    vm.push_value(Value::String(crate::String::from(cell_bytes)));
+    vm.push_value(Value::String(String::from(cell_bytes)));
     vm.op_input().expect("input ok");
     match &vm.current_call.stack[0] {
         Value::Cell(c) => match &c.payload[0] {
@@ -94,7 +94,7 @@ fn input_string_cell_and_opaque_yield_same_cell_id() {
     let cell_bytes = cell2.to_bytes();
 
     let mut vm_p = vm_external_with_script(Vec::new());
-    vm_p.push_value(Value::String(crate::String::cell(cell1)));
+    vm_p.push_value(Value::String(String::cell(cell1)));
     vm_p.op_input().expect("input ok");
     let id_p = match &vm_p.current_call.stack[0] {
         Value::Cell(c) => c.id(),
@@ -102,7 +102,7 @@ fn input_string_cell_and_opaque_yield_same_cell_id() {
     };
 
     let mut vm_v = vm_external_with_script(Vec::new());
-    vm_v.push_value(Value::String(crate::String::from(cell_bytes)));
+    vm_v.push_value(Value::String(String::from(cell_bytes)));
     vm_v.op_input().expect("input ok");
     let id_v = match &vm_v.current_call.stack[0] {
         Value::Cell(c) => c.id(),
@@ -123,7 +123,7 @@ fn string_cell_clone_preserves_cell() {
         vec![Value::Token(token)],
     );
     let id = cell.id();
-    let s = crate::String::cell(cell);
+    let s = String::cell(cell);
     let cloned = s.clone();
     // The clone serializes to identical canonical bytes.
     assert_eq!(s.to_bytes_vec(), cloned.to_bytes_vec());

@@ -487,7 +487,7 @@ fn confidential_1_to_1_with_fee() {
     let mut program = ScriptBuilder::new();
     // Consume the input cell — push the witness-bearing String::Cell
     // so the Token's open commitments survive into the CS.
-    program = program.push_str(crate::String::cell(cell));
+    program = program.push_str(String::cell(cell));
     program = program.input();
     program = push_taproot_proof_to_program(program, &cp);
     program = program
@@ -503,8 +503,8 @@ fn confidential_1_to_1_with_fee() {
     // Clone so the post-prove assertion can still read the
     // expected points off the local Open commitments.
     program = program
-        .push_str(crate::String::commitment(q_out.clone()))
-        .push_str(crate::String::commitment(f_out.clone()));
+        .push_str(String::commitment(q_out.clone()))
+        .push_str(String::commitment(f_out.clone()));
     // mix: m=2 (real Token + fee WideToken), n=1 (output).
     program = program.push_int(2u64).push_int(1u64).mix();
     // Emit the output cell.
@@ -525,18 +525,18 @@ fn confidential_1_to_1_with_fee() {
     assert_eq!(prover_result.txlog.len(), 4);
     assert!(matches!(
         prover_result.txlog[0],
-        crate::tx::TxEntry::Header(_)
+        TxEntry::Header(_)
     ));
     match &prover_result.txlog[1] {
-        crate::tx::TxEntry::Input(id) => assert_eq!(*id, expected_input_id),
+        TxEntry::Input(id) => assert_eq!(*id, expected_input_id),
         _ => panic!("txlog[1] must be Input"),
     }
     match &prover_result.txlog[2] {
-        crate::tx::TxEntry::Fee(q) => assert_eq!(*q, 3),
+        TxEntry::Fee(q) => assert_eq!(*q, 3),
         _ => panic!("txlog[2] must be Fee(3)"),
     }
     match &prover_result.txlog[3] {
-        crate::tx::TxEntry::Output(c) => {
+        TxEntry::Output(c) => {
             assert_eq!(c.predicate.to_point(), out_pred);
             let token = match &c.payload[0] {
                 Value::Token(t) => t,
@@ -702,7 +702,7 @@ fn confidential_with_fee_undersupply_rejected() {
     // the unbalanced output qty.
     let out_pred = output_predicate_point(out.predicate_tag);
     let mut program = ScriptBuilder::new();
-    program = program.push_str(crate::String::cell(cell));
+    program = program.push_str(String::cell(cell));
     program = program.input();
     program = push_taproot_proof_to_program(program, &cp);
     program = program
@@ -714,8 +714,8 @@ fn confidential_with_fee_undersupply_rejected() {
         .drop_();
     program = program.push_int(3u64).push_int(0u64).fee();
     program = program
-        .push_str(crate::String::commitment(q_out))
-        .push_str(crate::String::commitment(f_out));
+        .push_str(String::commitment(q_out))
+        .push_str(String::commitment(f_out));
     program = program.push_int(2u64).push_int(1u64).mix();
     program = program
         .push_int(1u64)

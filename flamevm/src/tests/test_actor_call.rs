@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::{empty_state, ActorID, ActorRegistry, Int253};
+use crate::{empty_state, state_root, ActorID, ActorRegistry, Int253};
 
 /// Helper: deploys an actor whose `recv` method runs `script`.
 /// Derives the actor's id from the script bytes (treats `script`
@@ -173,8 +173,8 @@ fn reentrant_call_succeeds_when_state_not_held() {
     // A.recv (method 0): call B, drop B's [count, success].
     let a_recv = {
         let mut p = ScriptBuilder::parse(&call_script(&b_id, 200_000)).expect("parse");
-        p.push_instr(crate::ops::Instruction::Drop);
-        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(Instruction::Drop);
+        p.push_instr(Instruction::Drop);
         p.to_bytecode()
     };
     // A's code: a dispatch blob — method 0 → a_recv, method 1 → a_method1.
@@ -185,8 +185,8 @@ fn reentrant_call_succeeds_when_state_not_held() {
     // B.recv: call A.method1, drop A's [count, success].
     let b_recv = {
         let mut p = ScriptBuilder::parse(&call_with_selector(&a_id, 1, 100_000)).expect("parse");
-        p.push_instr(crate::ops::Instruction::Drop);
-        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(Instruction::Drop);
+        p.push_instr(Instruction::Drop);
         p.to_bytecode()
     };
     // B has only recv (method 0) → its code is the recv script directly.
@@ -198,7 +198,7 @@ fn reentrant_call_succeeds_when_state_not_held() {
 
     // A.method1 ran via the re-entry → its Data entry is in the txlog.
     let logged = vm.txlog.iter().any(|e| -> bool {
-        matches!(e, crate::tx::TxEntry::Data(_))
+        matches!(e, TxEntry::Data(_))
     });
     assert!(logged, "re-entrant A.method1 must have run (and logged)");
 }
@@ -218,14 +218,14 @@ fn sibling_calls_to_same_actor_allowed_after_return() {
     // root finish_call.
     let a_script = {
         let mut p = ScriptBuilder::parse(&call_script(&b, 5_000)).expect("parse");
-        p.push_instr(crate::ops::Instruction::Drop);
-        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(Instruction::Drop);
+        p.push_instr(Instruction::Drop);
         let second = ScriptBuilder::parse(&call_script(&b, 5_000)).expect("parse");
         for i in second.into_instructions() {
             p.push_instr(i);
         }
-        p.push_instr(crate::ops::Instruction::Drop);
-        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(Instruction::Drop);
+        p.push_instr(Instruction::Drop);
         p.to_bytecode()
     };
     let a = deploy_recv(&mut reg, a_script.clone(), 100_000);
@@ -279,8 +279,8 @@ fn call_refunds_leftover_gas_to_caller() {
     let b = deploy_recv(&mut reg, b_recv, 1_000);
     let a_script = {
         let mut p = ScriptBuilder::parse(&call_script(&b, 5_000)).expect("parse");
-        p.push_instr(crate::ops::Instruction::Drop);
-        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(Instruction::Drop);
+        p.push_instr(Instruction::Drop);
         p.to_bytecode()
     };
     let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
@@ -313,8 +313,8 @@ fn reentrant_view_of_mid_update_state_is_blocked() {
     let a_recv = {
         let mut p = ScriptBuilder::new().load().to_bytecode();
         let mut q = ScriptBuilder::parse(&call_script(&b_id, 200_000)).expect("parse");
-        q.push_instr(crate::ops::Instruction::Drop);
-        q.push_instr(crate::ops::Instruction::Drop);
+        q.push_instr(Instruction::Drop);
+        q.push_instr(Instruction::Drop);
         p.extend_from_slice(&q.to_bytecode());
         p.extend_from_slice(&ScriptBuilder::new().save().to_bytecode());
         p
@@ -326,7 +326,7 @@ fn reentrant_view_of_mid_update_state_is_blocked() {
     // marker, drop it once; B exits cleanly.
     let b_recv = {
         let mut p = ScriptBuilder::parse(&call_with_selector(&a_id, 1, 100_000)).expect("parse");
-        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(Instruction::Drop);
         p.to_bytecode()
     };
     reg.deploy(b_id.clone(), b_recv, empty_state(), 1_000_000, 0).expect("deploy B");
@@ -339,7 +339,7 @@ fn reentrant_view_of_mid_update_state_is_blocked() {
     let a_saves = vm
         .txlog
         .iter()
-        .filter(|e| matches!(e, crate::tx::TxEntry::ActorSave { .. }))
+        .filter(|e| matches!(e, TxEntry::ActorSave { .. }))
         .count();
     assert_eq!(a_saves, 1, "only A.recv's save; the view re-entry was blocked");
 }
@@ -353,8 +353,8 @@ fn call_depth_is_capped() {
     // recv: call SELF (no state load → re-entry permitted), drop markers.
     let recv = {
         let mut p = ScriptBuilder::parse(&call_script(&id, 900_000)).expect("parse");
-        p.push_instr(crate::ops::Instruction::Drop);
-        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(Instruction::Drop);
+        p.push_instr(Instruction::Drop);
         p.to_bytecode()
     };
     reg.deploy(id.clone(), recv.clone(), empty_state(), 1_000_000, 0).expect("deploy");
@@ -417,18 +417,18 @@ fn setcode_upgrade_end_to_end() {
 
     // Driver R: call A.0, call A.1 (upgrade), call A.0 — drop markers.
     let mut driver = ScriptBuilder::parse(&call_with_selector(&a_id, 0, 100_000)).expect("parse");
-    driver.push_instr(crate::ops::Instruction::Drop);
-    driver.push_instr(crate::ops::Instruction::Drop);
+    driver.push_instr(Instruction::Drop);
+    driver.push_instr(Instruction::Drop);
     for instr in ScriptBuilder::parse(&call_with_selector(&a_id, 1, 100_000)).expect("parse").into_instructions() {
         driver.push_instr(instr);
     }
-    driver.push_instr(crate::ops::Instruction::Drop);
-    driver.push_instr(crate::ops::Instruction::Drop);
+    driver.push_instr(Instruction::Drop);
+    driver.push_instr(Instruction::Drop);
     for instr in ScriptBuilder::parse(&call_with_selector(&a_id, 0, 100_000)).expect("parse").into_instructions() {
         driver.push_instr(instr);
     }
-    driver.push_instr(crate::ops::Instruction::Drop);
-    driver.push_instr(crate::ops::Instruction::Drop);
+    driver.push_instr(Instruction::Drop);
+    driver.push_instr(Instruction::Drop);
     let script = driver.to_bytecode();
 
     let r_id = ActorID::Hash([0xd1; 32]);
@@ -440,13 +440,13 @@ fn setcode_upgrade_end_to_end() {
         .txlog
         .iter()
         .filter_map(|e| match e {
-            crate::tx::TxEntry::Data(d) => Some(d.as_slice()),
+            TxEntry::Data(d) => Some(d.as_slice()),
             _ => None,
         })
         .collect();
     assert_eq!(datas, vec![b"v1".as_slice(), b"v2".as_slice()], "old code then NEW code ran");
     assert!(
-        vm.txlog.iter().any(|e| matches!(e, crate::tx::TxEntry::SetCode { .. })),
+        vm.txlog.iter().any(|e| matches!(e, TxEntry::SetCode { .. })),
         "SetCode effect recorded"
     );
     assert_eq!(reg.actor(&a_id).unwrap().code, c2, "registry holds the new code");
@@ -463,7 +463,7 @@ fn failed_call_burns_full_grant() {
     // A: call B with a 5_000 grant, drop the single failure marker.
     let a_script = {
         let mut p = ScriptBuilder::parse(&call_script(&b, 5_000)).expect("parse");
-        p.push_instr(crate::ops::Instruction::Drop);
+        p.push_instr(Instruction::Drop);
         p.to_bytecode()
     };
     let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
@@ -616,7 +616,7 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
         .verify()
         .to_bytecode();
     let x_id = deploy_recv(&mut reg, evil_recv, 10_000);
-    let root_before = crate::state_root(reg.actor(&x_id).expect("X exists").state.as_ref().expect("present"));
+    let root_before = state_root(reg.actor(&x_id).expect("X exists").state.as_ref().expect("present"));
 
     let a_recv = ScriptBuilder::new()
         .push_int(0u64)
@@ -644,7 +644,7 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
     // F1 invariants:
     let x = reg.actor(&x_id).expect("X must still exist after rollback");
     assert_eq!(
-        crate::state_root(x.state.as_ref().expect("present")),
+        state_root(x.state.as_ref().expect("present")),
         root_before,
         "X's state must be the rolled-back pre-call root",
     );
@@ -659,7 +659,7 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
         .txlog
         .iter()
         .filter(|e| matches!(e,
-            crate::tx::TxEntry::ActorSave { actor, .. } if actor == &x_id
+            TxEntry::ActorSave { actor, .. } if actor == &x_id
         ))
         .count();
     assert_eq!(
@@ -692,7 +692,7 @@ fn f3_save_failure_rolls_back_and_preserves_actor() {
         .save()                                // NonPortableInState → frame fails
         .to_bytecode();
     let x_id = deploy_recv(&mut reg, evil_recv, 10_000);
-    let root_before = crate::state_root(reg.actor(&x_id).expect("X exists").state.as_ref().expect("present"));
+    let root_before = state_root(reg.actor(&x_id).expect("X exists").state.as_ref().expect("present"));
 
     let a_recv = ScriptBuilder::new()
         .push_int(0u64)
@@ -720,7 +720,7 @@ fn f3_save_failure_rolls_back_and_preserves_actor() {
     let x = reg
         .actor(&x_id)
         .expect("X must survive — save failure no longer destroys");
-    assert_eq!(crate::state_root(x.state.as_ref().expect("present")), root_before);
+    assert_eq!(state_root(x.state.as_ref().expect("present")), root_before);
     assert!(!reg.actor(&x_id).map_or(false, |a| a.is_checked_out()));
 }
 
@@ -739,22 +739,22 @@ fn save_emits_actorsave_with_full_state() {
     let recv = ScriptBuilder::new().load().save().to_bytecode();
     let id = ActorID::Hash([0xab; 32]);
     let state = empty_state();
-    let expected_root = crate::state_root(&state);
+    let expected_root = state_root(&state);
     reg.deploy(id.clone(), recv.clone(), state, 10_000, 0).expect("deploy");
 
     let mut vm = vm_for_actor(id.clone(), recv);
     while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
 
     let save = vm.txlog.iter().find_map(|e| match e {
-        crate::tx::TxEntry::ActorSave { actor, state } =>
-            Some((actor.clone(), crate::state_root(state))),
+        TxEntry::ActorSave { actor, state } =>
+            Some((actor.clone(), state_root(state))),
         _ => None,
     }).expect("ActorSave entry present");
     assert_eq!(save.0, id);
     // The state is whatever was loaded then re-saved — same root.
     assert_eq!(save.1, expected_root, "state.root() matches deployed state");
     let save_count = vm.txlog.iter()
-        .filter(|e| matches!(e, crate::tx::TxEntry::ActorSave { .. }))
+        .filter(|e| matches!(e, TxEntry::ActorSave { .. }))
         .count();
     assert_eq!(save_count, 1);
 }

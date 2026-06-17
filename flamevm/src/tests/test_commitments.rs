@@ -15,7 +15,7 @@ fn op_scalar_pushes_constant_expression() {
     vm.step_external(&mut delegate).expect("scalar ok");
     assert_eq!(vm.current_call.stack.len(), 1);
     match &vm.current_call.stack[0] {
-        Value::Expression(crate::Expression::Constant(i)) => {
+        Value::Expression(Expression::Constant(i)) => {
             assert_eq!(*i, Int253::from(99u64));
         }
         _ => panic!("expected Expression::Constant"),
@@ -28,7 +28,7 @@ fn op_commit_pushes_variable() {
     // `commit`, confirm the result is a Variable with the open
     // commitment preserved.
     let mut vm = vm_external_with_script(ScriptBuilder::new().commit().to_bytecode());
-    let c = crate::Commitment::unblinded(Int253::from(42u64));
+    let c = Commitment::unblinded(Int253::from(42u64));
     vm.push_value(Value::String(String::commitment(c.clone())));
     let mut delegate = StubDelegate::new();
     vm.step_external(&mut delegate).expect("commit ok");
@@ -52,7 +52,7 @@ fn prove_then_verify_with_commit_expr_eq() {
     // Use a blinding factor that we'll need to encode into the
     // ScriptBuilder as a witness-bearing String.
     let blinding = curve25519_dalek::scalar::Scalar::from(7u64);
-    let c = crate::Commitment::blinded_with_factor(witness_int, blinding);
+    let c = Commitment::blinded_with_factor(witness_int, blinding);
     let program = ScriptBuilder::new()
         // Push the witness-bearing Commitment String. The bytecode
         // will encode it as 32 bytes (the point); the prover's
@@ -68,7 +68,7 @@ fn prove_then_verify_with_commit_expr_eq() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove succeeds");
-    let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+    let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -94,15 +94,15 @@ fn op_decrypt_succeeds_on_matching_witness() {
     let f = Int253::from(7u64);
     let q_blind = Int253::from(11u64);
     let f_blind = Int253::from(13u64);
-    let qty_commit = crate::Commitment::blinded_with_factor(
+    let qty_commit = Commitment::blinded_with_factor(
         q,
         curve25519_dalek::scalar::Scalar::from(11u64),
     );
-    let flv_commit = crate::Commitment::blinded_with_factor(
+    let flv_commit = Commitment::blinded_with_factor(
         f,
         curve25519_dalek::scalar::Scalar::from(13u64),
     );
-    let token = crate::Token::new(qty_commit, flv_commit);
+    let token = Token::new(qty_commit, flv_commit);
 
     let mut vm = vm_external_with_script(ScriptBuilder::new().decrypt().to_bytecode());
     vm.push_value(Value::Token(token));
@@ -141,15 +141,15 @@ fn op_decrypt_rejects_wrong_witness() {
     // `BatchSignatureVerificationFailed` by `Verifier::verify`.
     let q = Int253::from(100u64);
     let f = Int253::from(7u64);
-    let qty_commit = crate::Commitment::blinded_with_factor(
+    let qty_commit = Commitment::blinded_with_factor(
         q,
         curve25519_dalek::scalar::Scalar::from(11u64),
     );
-    let flv_commit = crate::Commitment::blinded_with_factor(
+    let flv_commit = Commitment::blinded_with_factor(
         f,
         curve25519_dalek::scalar::Scalar::from(13u64),
     );
-    let token = crate::Token::new(qty_commit, flv_commit);
+    let token = Token::new(qty_commit, flv_commit);
     let mut vm = vm_external_with_script(vec![0x9a]);
     vm.push_value(Value::Token(token));
     vm.push_value(Value::Int253(f));

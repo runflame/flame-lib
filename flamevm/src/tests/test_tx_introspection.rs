@@ -13,7 +13,7 @@ use crate::{empty_state, ActorID, Int253};
 /// budgets. Used by every test in this file that doesn't need a
 /// registry.
 fn vm_with_header_and_budgets(
-    header: crate::tx::TxHeader,
+    header: TxHeader,
     script: Vec<u8>,
     gas_limit: u64,
     mem_limit: u64,
@@ -35,7 +35,7 @@ fn vm_with_header_and_budgets(
 #[test]
 fn timelock_below_threshold_pushes_value_and_flag_zero() {
     // A block-height locktime — under BIP-65 the flag must be 0.
-    let header = crate::tx::TxHeader { version: 1, locktime: 800_000 };
+    let header = TxHeader { version: 1, locktime: 800_000 };
     let mut vm = vm_with_header_and_budgets(header, ScriptBuilder::new().timelock().to_bytecode(), 1_000_000, 0);
     run_to_end(&mut vm).unwrap();
     // Stack (bottom→top): [locktime, flag].
@@ -45,7 +45,7 @@ fn timelock_below_threshold_pushes_value_and_flag_zero() {
 
 #[test]
 fn timelock_at_or_above_threshold_pushes_flag_one() {
-    let header = crate::tx::TxHeader {
+    let header = TxHeader {
         version: 1,
         locktime: LOCKTIME_TIMESTAMP_THRESHOLD,
     };
@@ -59,7 +59,7 @@ fn timelock_at_or_above_threshold_pushes_flag_one() {
 
 #[test]
 fn version_pushes_tx_header_version() {
-    let header = crate::tx::TxHeader { version: 42, locktime: 0 };
+    let header = TxHeader { version: 42, locktime: 0 };
     let mut vm = vm_with_header_and_budgets(header, ScriptBuilder::new().version().to_bytecode(), 1_000_000, 0);
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(42u64));
@@ -146,7 +146,7 @@ fn bytes_pushes_actor_vbyte_balance() {
     let mut vm = VM::new(
         dummy_header(),
         CallFrame::new(
-            vec![crate::ops::Instruction::Bytes],
+            vec![Instruction::Bytes],
             kind,
             1_000_000,
             0,
@@ -175,7 +175,7 @@ fn bytes_without_registry_in_actor_frame_errors_registry_unavailable() {
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(vec![crate::ops::Instruction::Bytes], kind, 1_000_000, 0, 0).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(vec![Instruction::Bytes], kind, 1_000_000, 0, 0).with_anchor(Anchor([0u8; 32])),
     );
     let err = vm.step_internal().expect_err("bytes needs a registry");
     assert!(matches!(err, VMError::RegistryUnavailable));

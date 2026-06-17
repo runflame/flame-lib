@@ -12,7 +12,8 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::tx::{TxEntry, TxHeader, TxID};
+use crate::tx::{TxEntry, TxHeader, TxID, TxLog};
+use crate::{code_root, state_root};
 
 const REGEN: bool = false;
 
@@ -47,8 +48,8 @@ fn golden_consensus_hashes() {
             TxEntry::SetCode { actor: actor.clone(), code: vec![0x1d] },
         ])
     );
-    let state_root = format!("{:?}", crate::state_root(&Value::Int253(Int253::from(42u64))));
-    let code_root = format!("{:?}", crate::code_root(&[0x1d]));
+    let state_root = format!("{:?}", state_root(&Value::Int253(Int253::from(42u64))));
+    let code_root = format!("{:?}", code_root(&[0x1d]));
     let ctor_id = format!("{:?}", ActorID::Constructor(vec![1, 2, 3]).to_hash());
 
     if REGEN {
@@ -86,7 +87,7 @@ fn golden_txlog_wire_encoding() {
     use curve25519_dalek::ristretto::CompressedRistretto as CR;
     use readerwriter::Encodable;
     let actor = ActorID::Hash([0x07; 32]);
-    let log = crate::tx::TxLog::from(vec![
+    let log = TxLog::from(vec![
         TxEntry::Header(h(1, 7)),
         TxEntry::Data(vec![0xab, 0xcd]),
         TxEntry::Input([0x11; 32]),

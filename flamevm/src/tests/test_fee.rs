@@ -21,8 +21,8 @@ fn phase19_op_fee_records_txlog_and_pushes_debt() {
     assert!(matches!(vm.current_call.stack[0], Value::WideToken(_)));
     // Txlog: Header at 0, Fee(100) at 1.
     assert_eq!(vm.txlog.len(), 2);
-    assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
-    assert!(matches!(vm.txlog[1], crate::tx::TxEntry::Fee(100)));
+    assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
+    assert!(matches!(vm.txlog[1], TxEntry::Fee(100)));
     // total_fee accumulator updated.
     assert_eq!(vm.total_fee.total(), 100);
 }
@@ -49,8 +49,8 @@ fn phase19_op_fee_accumulates_total() {
     assert_eq!(vm.current_call.stack.len(), 2);
     // Txlog: Header + Fee(30) + Fee(70).
     assert_eq!(vm.txlog.len(), 3);
-    assert!(matches!(vm.txlog[1], crate::tx::TxEntry::Fee(30)));
-    assert!(matches!(vm.txlog[2], crate::tx::TxEntry::Fee(70)));
+    assert!(matches!(vm.txlog[1], TxEntry::Fee(30)));
+    assert!(matches!(vm.txlog[2], TxEntry::Fee(70)));
     // Accumulator carries the sum.
     assert_eq!(vm.total_fee.total(), 100);
 }
@@ -70,7 +70,7 @@ fn phase19_op_fee_rejects_negative_qty() {
     script.push(0x00);
     // fee
     script.push(0x9b);
-    let program = crate::ScriptBuilder::parse(&script).expect("decode");
+    let program = ScriptBuilder::parse(&script).expect("decode");
     // Run all 3 instructions; the third (fee) must error.
     let mut vm = VM::new(
         dummy_header(),

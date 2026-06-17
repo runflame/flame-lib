@@ -7,13 +7,16 @@ use musig::Signature;
 use readerwriter::{Encodable, WriteError, Writer};
 use serde::{Deserialize, Serialize};
 
-use crate::actor::ActorRegistry;
+use crate::actor::{code_root, state_root, ActorID, ActorRegistry};
+use crate::cell::{Cell, CellID};
+use crate::encoding::{write_int253, write_value};
 use crate::errors::VMError;
 use crate::script::ScriptBuilder;
 use crate::prover::Prover;
 use crate::message::Message;
 use crate::verifier::Verifier;
 use crate::vm::{BlockContext, DeferredSig, VM};
+use crate::{Int253, Value};
 
 /// Header metadata for the transaction
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -111,7 +114,7 @@ pub struct SigningInstructions {
     pub txid: TxID,
     /// The tx-bound `(verification_key, cell_id)` authorizations, in
     /// `signtx` order — the multi-message context to sign.
-    pub items: Vec<(CompressedRistretto, crate::cell::CellID)>,
+    pub items: Vec<(CompressedRistretto, CellID)>,
 }
 
 /// A built-but-unsigned external transaction (lifecycle step 1→2).
@@ -121,7 +124,7 @@ pub struct UnsignedTx {
     proof: R1CSProof,
     log: TxLog,
     metrics: TxMetrics,
-    txbound_items: Vec<(CompressedRistretto, crate::cell::CellID)>,
+    txbound_items: Vec<(CompressedRistretto, CellID)>,
 }
 
 impl UnsignedTx {
@@ -262,7 +265,7 @@ pub enum TxEntry {
     /// Commits the cell that the transaction has consumed without re-storing
     /// the payload — the existence of the cell is independently asserted by
     /// the Utreexo proof outside the VM.
-    Input(crate::cell::CellID),
+    Input(CellID),
 
     /// Receive: the MessageID consumed by an internal transaction. Emitted
     /// by `VM::execute_internal` as the first effect after `Header`,
@@ -275,13 +278,13 @@ pub enum TxEntry {
     Receive([u8; 32]),
 
     /// Output: a newly sealed cell, emitted by the `output` opcode.
-    Output(crate::Cell),
+    Output(Cell),
 
     /// Cleartext issuance (emitted by `op_issuepub`). Carries the
     /// cleartext `(qty, flv)` pair as `Int253`s — public on the wire,
     /// directly auditable. Flavor is `flavor_from_actor(actor, tag)`
     /// for the actor that ran `issuepub`.
-    IssuePub(crate::Int253, crate::Int253),
+    IssuePub(Int253, Int253),
 
     /// Confidential issuance (emitted by `op_issuepriv`). Carries
     /// `(qty_point, flv_point)` — the live Pedersen commitment to the
@@ -318,8 +321,8 @@ pub enum TxEntry {
     /// canonical state root, not the full bytes, just as
     /// `Output(Cell)`'s leaf commits to `cell.id()`.
     ActorSave {
-        actor: crate::actor::ActorID,
-        state: crate::Value,
+        actor: ActorID,
+        state: Value,
     },
 
     /// Actor-code replacement recorded by `setcode`. Carries the full
@@ -327,12 +330,12 @@ pub enum TxEntry {
     /// to `(actor.to_hash(), code_root(&code))`. Symmetric with
     /// `ActorSave`. See ADR 0018.
     SetCode {
-        actor: crate::actor::ActorID,
+        actor: ActorID,
         code: Vec<u8>,
     },
 
     /// Outbound asynchronous message scheduled by `op_send`. Carries
-    /// the full [`Message`](crate::message::Message) — its `anchor` is
+    /// the full [`Message`](Message) — its `anchor` is
     /// the `left` half of a split of `last_anchor` at the send site,
     /// and its `id()` is the canonical MessageID (deterministic at
     /// broadcast time, identifies the future internal-tx delivery).
@@ -342,7 +345,7 @@ pub enum TxEntry {
     /// embedded `Message` straight into `VM::execute_internal`.
     /// Symmetric with `TxEntry::Output(Cell)`: each effect that owns
     /// an addressable artifact embeds the artifact itself.
-    Send(crate::message::Message),
+    Send(Message),
 }
 
 impl TxID {
@@ -404,11 +407,11 @@ impl MerkleItem for TxEntry {
                 // only to the root, matching Output's Cell-as-id
                 // pattern.
                 t.append_message(b"save.actor", &actor.to_hash());
-                t.append_message(b"save.post_state_root", &crate::actor::state_root(state));
+                t.append_message(b"save.post_state_root", &state_root(state));
             }
             TxEntry::SetCode { actor, code } => {
                 t.append_message(b"setcode.actor", &actor.to_hash());
-                t.append_message(b"setcode.code_root", &crate::actor::code_root(code));
+                t.append_message(b"setcode.code_root", &code_root(code));
             }
             TxEntry::Send(msg) => {
                 // Bind to the send's canonical 32-byte MessageID hash,
@@ -475,8 +478,8 @@ impl Encodable for TxEntry {
             }
             TxEntry::IssuePub(qty, flv) => {
                 w.write_u8(b"txentry.tag", Self::TAG_ISSUE_PUB)?;
-                crate::encoding::write_int253(w, qty)?;
-                crate::encoding::write_int253(w, flv)
+                write_int253(w, qty)?;
+                write_int253(w, flv)
             }
             TxEntry::IssuePriv(qty_pt, flv_pt) => {
                 w.write_u8(b"txentry.tag", Self::TAG_ISSUE_PRIV)?;
@@ -495,7 +498,7 @@ impl Encodable for TxEntry {
             TxEntry::ActorSave { actor, state } => {
                 w.write_u8(b"txentry.tag", Self::TAG_ACTOR_SAVE)?;
                 actor.to_canonical().encode(w)?;
-                crate::encoding::write_value(w, state)
+                write_value(w, state)
             }
             TxEntry::SetCode { actor, code } => {
                 w.write_u8(b"txentry.tag", Self::TAG_SET_CODE)?;

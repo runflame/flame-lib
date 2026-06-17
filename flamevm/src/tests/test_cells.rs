@@ -3,6 +3,7 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
+use crate::encoding::{write_list_prefix, write_value};
 
 /// `Cell::decode` must reject an oversized payload-count prefix before
 /// allocating — a tiny hostile input claiming billions of payload items
@@ -143,9 +144,9 @@ fn output_opcode_emits_to_txlog_without_pushing() {
     // emitted at VM::new so TxID::from_log binds to
     // version + locktime alongside the effects.
     assert_eq!(vm.txlog.len(), 2);
-    assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+    assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
     match &vm.txlog[1] {
-        crate::tx::TxEntry::Output(_) => {}
+        TxEntry::Output(_) => {}
         _ => panic!("expected Output entry"),
     }
 }
@@ -622,7 +623,7 @@ fn cell_decode_rejects_wrong_outer_count() {
     // Simpler: replace the *whole* string with a list-Dict of count 0,
     // which is canonical but wrong arity.
     bytes.clear();
-    crate::encoding::write_list_prefix(&mut bytes, 0)
+    write_list_prefix(&mut bytes, 0)
         .expect("write prefix");
     let err = decode_cell_dropping_ok(&bytes).unwrap_err();
     assert!(matches!(err, VMError::MalformedCellEncoding));
@@ -633,19 +634,19 @@ fn cell_decode_rejects_wrong_anchor_length() {
     // Build an outer list-Dict of 3 entries by hand: Point predicate,
     // a String of wrong (31-byte) anchor, then an empty payload list.
     let mut bytes = Vec::new();
-    crate::encoding::write_list_prefix(&mut bytes, 3)
+    write_list_prefix(&mut bytes, 3)
         .expect("write outer prefix");
-    crate::encoding::write_value(
+    write_value(
         &mut bytes,
         &Value::Point(Point::from_bytes([0xaa; 32])),
     )
     .expect("write point");
-    crate::encoding::write_value(
+    write_value(
         &mut bytes,
-        &Value::String(crate::String::from(vec![0u8; 31])),
+        &Value::String(String::from(vec![0u8; 31])),
     )
     .expect("write short anchor");
-    crate::encoding::write_list_prefix(&mut bytes, 0)
+    write_list_prefix(&mut bytes, 0)
         .expect("write payload prefix");
     let err = decode_cell_dropping_ok(&bytes).unwrap_err();
     assert!(matches!(err, VMError::MalformedCellEncoding));
@@ -655,19 +656,19 @@ fn cell_decode_rejects_wrong_anchor_length() {
 fn cell_decode_rejects_predicate_not_a_point() {
     // First entry is a String where a Point is expected.
     let mut bytes = Vec::new();
-    crate::encoding::write_list_prefix(&mut bytes, 3)
+    write_list_prefix(&mut bytes, 3)
         .expect("write outer prefix");
-    crate::encoding::write_value(
+    write_value(
         &mut bytes,
-        &Value::String(crate::String::from(vec![0u8; 32])),
+        &Value::String(String::from(vec![0u8; 32])),
     )
     .expect("write wrong predicate");
-    crate::encoding::write_value(
+    write_value(
         &mut bytes,
-        &Value::String(crate::String::from(vec![0u8; 32])),
+        &Value::String(String::from(vec![0u8; 32])),
     )
     .expect("write anchor");
-    crate::encoding::write_list_prefix(&mut bytes, 0)
+    write_list_prefix(&mut bytes, 0)
         .expect("write payload prefix");
     let err = decode_cell_dropping_ok(&bytes).unwrap_err();
     assert!(matches!(err, VMError::MalformedCellEncoding));
@@ -681,7 +682,7 @@ fn input_pushes_cell_seeds_anchor_and_emits_txlog() {
 
     // Build an ExternalRoot VM with the wire bytes on the stack as a String.
     let mut vm = vm_external_with_script(Vec::new());
-    vm.push_value(Value::String(crate::String::from(bytes)));
+    vm.push_value(Value::String(String::from(bytes)));
     vm.op_input().expect("input succeeds");
 
     // Top of stack is the decoded Cell.
@@ -699,9 +700,9 @@ fn input_pushes_cell_seeds_anchor_and_emits_txlog() {
 
     // Txlog has Header + one Input entry committing the cell id.
     assert_eq!(vm.txlog.len(), 2);
-    assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+    assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
     match &vm.txlog[1] {
-        crate::tx::TxEntry::Input(id) => assert_eq!(*id, expected_id),
+        TxEntry::Input(id) => assert_eq!(*id, expected_id),
         _ => panic!("expected TxEntry::Input"),
     }
 }
@@ -719,7 +720,7 @@ fn input_requires_string_on_top() {
 fn input_rejects_malformed_bytes() {
     // Random non-canonical bytes on the stack.
     let mut vm = vm_external_with_script(Vec::new());
-    vm.push_value(Value::String(crate::String::from(vec![0xffu8; 8])));
+    vm.push_value(Value::String(String::from(vec![0xffu8; 8])));
     let err = vm.op_input().unwrap_err();
     assert!(matches!(err, VMError::MalformedCellEncoding));
 }
@@ -733,7 +734,7 @@ fn input_rejects_trailing_bytes_after_cell() {
     bytes.push(0x00); // trailing garbage
 
     let mut vm = vm_external_with_script(Vec::new());
-    vm.push_value(Value::String(crate::String::from(bytes)));
+    vm.push_value(Value::String(String::from(bytes)));
     let err = vm.op_input().unwrap_err();
     assert!(matches!(err, VMError::MalformedCellEncoding));
 }
@@ -747,7 +748,7 @@ fn input_in_internal_context_errors_external_only() {
     // Even with a well-formed string on the stack, internal context
     // rejects the opcode before any decoding happens.
     let cell_bytes = encode_cell_to_bytes(&fixture_cell());
-    vm.push_value(Value::String(crate::String::from(cell_bytes)));
+    vm.push_value(Value::String(String::from(cell_bytes)));
     let err = vm.step_internal().unwrap_err();
     assert!(matches!(err, VMError::ExternalOnly));
 }
@@ -765,7 +766,7 @@ fn input_then_output_anchor_chain() {
     let mut vm = vm_external_with_script(Vec::new());
 
     // Step 1: feed cell bytes into op_input.
-    vm.push_value(Value::String(crate::String::from(bytes)));
+    vm.push_value(Value::String(String::from(bytes)));
     vm.op_input().expect("input ok");
     // Stack: [Cell]. last_anchor: Some(cell.id()).
     assert_eq!(
@@ -787,13 +788,13 @@ fn input_then_output_anchor_chain() {
 
     // Txlog now has: Header, Input(consumed_id), Output(new_cell).
     assert_eq!(vm.txlog.len(), 3);
-    assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+    assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
     match &vm.txlog[1] {
-        crate::tx::TxEntry::Input(_) => {}
+        TxEntry::Input(_) => {}
         _ => panic!("second entry must be Input"),
     }
     match &vm.txlog[2] {
-        crate::tx::TxEntry::Output(_) => {}
+        TxEntry::Output(_) => {}
         _ => panic!("third entry must be Output"),
     }
     // last_anchor advanced again past the output cell.
@@ -814,7 +815,7 @@ fn input_via_step_external_dispatch() {
     let bytes = encode_cell_to_bytes(&cell);
 
     let mut vm = vm_external_with_script(ScriptBuilder::new().input().to_bytecode());
-    vm.push_value(Value::String(crate::String::from(bytes)));
+    vm.push_value(Value::String(String::from(bytes)));
 
     let mut delegate = StubDelegate::new();
     let cont = vm.step_external(&mut delegate).expect("step ok");
@@ -826,9 +827,9 @@ fn input_via_step_external_dispatch() {
         other => panic!("expected Cell, got {}", value_kind(other)),
     }
     assert_eq!(vm.txlog.len(), 2);
-    assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+    assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
     match &vm.txlog[1] {
-        crate::tx::TxEntry::Input(id) => assert_eq!(*id, expected_id),
+        TxEntry::Input(id) => assert_eq!(*id, expected_id),
         _ => panic!("expected TxEntry::Input"),
     }
 }
@@ -899,13 +900,13 @@ fn external_tx_one_input_one_output_via_signtx() {
     // 4b. Txlog: Header(index 0), Input(cell_in_id) at 1,
     //     Output(cell_out) at 2.
     assert_eq!(vm.txlog.len(), 3, "expected Header + Input + Output txlog");
-    assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+    assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
     match &vm.txlog[1] {
-        crate::tx::TxEntry::Input(id) => assert_eq!(*id, input_id),
+        TxEntry::Input(id) => assert_eq!(*id, input_id),
         _ => panic!("txlog[1] must be Input"),
     }
     let output_cell_anchor = match &vm.txlog[2] {
-        crate::tx::TxEntry::Output(c) => {
+        TxEntry::Output(c) => {
             // Output payload was [Int253(42)].
             assert_eq!(c.payload.len(), 1);
             match &c.payload[0] {
@@ -1033,19 +1034,19 @@ fn external_tx_two_inputs_two_outputs_via_open() {
 
     // Txlog: Header, 2 × Input, 2 × Output, in that order.
     assert_eq!(vm.txlog.len(), 5, "expected Header + 2 inputs + 2 outputs");
-    assert!(matches!(vm.txlog[0], crate::tx::TxEntry::Header(_)));
+    assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
     match &vm.txlog[1] {
-        crate::tx::TxEntry::Input(id) => assert_eq!(*id, cell1_id),
+        TxEntry::Input(id) => assert_eq!(*id, cell1_id),
         _ => panic!("txlog[1] must be Input(cell1)"),
     }
     match &vm.txlog[2] {
-        crate::tx::TxEntry::Input(id) => assert_eq!(*id, cell2_id),
+        TxEntry::Input(id) => assert_eq!(*id, cell2_id),
         _ => panic!("txlog[2] must be Input(cell2)"),
     }
     let (out1, out2) = match (&vm.txlog[3], &vm.txlog[4]) {
         (
-            crate::tx::TxEntry::Output(o1),
-            crate::tx::TxEntry::Output(o2),
+            TxEntry::Output(o1),
+            TxEntry::Output(o2),
         ) => (o1, o2),
         _ => panic!("txlog[3..5] must be Output entries"),
     };
@@ -1162,7 +1163,7 @@ fn op_open_cs_blocked_when_external_context_false() {
         external_context: false,
     };
     let child = CallFrame::new(
-        vec![crate::ops::Instruction::Alloc(None)],
+        vec![Instruction::Alloc(None)],
         child_kind,
         500,
         0,

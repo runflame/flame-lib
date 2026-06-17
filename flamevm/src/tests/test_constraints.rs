@@ -43,7 +43,7 @@ fn range_proof_accepts_in_range_value() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove succeeds");
-    let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+    let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -169,7 +169,7 @@ fn constraint_and_overload_combines_two_constraints() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove succeeds");
-    let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+    let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -200,7 +200,7 @@ fn constraint_or_overload_combines_two_constraints() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove succeeds");
-    let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+    let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -227,7 +227,7 @@ fn constraint_not_overload_negates_constraint() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove succeeds");
-    let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+    let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -258,7 +258,7 @@ fn constraint_and_with_false_branch_rejected() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
             .expect("prove succeeds (constructs proof of unsatisfiable constraint)");
-    let crate::vm::TxResult { bytecode, proof, .. } = _pp;
+    let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     let err = Verifier::verify(
@@ -513,8 +513,8 @@ fn failed_call_rolls_back_every_state_lane() {
         result.txlog.len(),
         result.txlog,
     );
-    assert!(matches!(result.txlog[0], crate::tx::TxEntry::Header(_)));
-    assert!(matches!(result.txlog[1], crate::tx::TxEntry::Input(_)));
+    assert!(matches!(result.txlog[0], TxEntry::Header(_)));
+    assert!(matches!(result.txlog[1], TxEntry::Input(_)));
 
     // ── deferred_sigs assertion: signtx's TxBound was rolled back ──
     assert!(

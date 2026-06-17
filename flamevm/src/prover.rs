@@ -18,6 +18,7 @@ fn shared_bp_gens() -> &'static BulletproofGens {
     BP_GENS.get_or_init(|| BulletproofGens::new(1024, 1))
 }
 
+use crate::constraints::Commitment;
 use crate::errors::VMError;
 use crate::script::ScriptBuilder;
 use crate::tx::TxHeader;
@@ -112,7 +113,7 @@ impl<'g> Delegate for Prover<'g> {
 
     fn commit_variable(
         &mut self,
-        commitment: &crate::Commitment,
+        commitment: &Commitment,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError> {
         // Prover-side: extract the witness (value + blinding) from the
         // open commitment and call `cs.commit(value, blinding)`. The

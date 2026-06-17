@@ -15,12 +15,16 @@ use crate::cell::{TaprootProof, Cell, CellID, Predicate};
 use crate::constraints::Commitment;
 use crate::fees::CheckedFee;
 use crate::token::{flavor_from_actor, flavor_from_predicate};
-use crate::tx::TxEntry;
-use crate::{Token, ClearToken, Dict, Int253, Merlin, Point, String, Value};
+use crate::tx::{TxEntry, TxID};
+use crate::{
+    ClearToken, Constraint, Dict, Expression, Int253, Merlin, Point, String, Token, Value, Variable,
+    WideToken,
+};
 use crate::ops::Instruction;
-use crate::script::Script;
-use crate::actor::{ActorID, ActorRegistry};
+use crate::script::{Script, ScriptBuilder};
+use crate::actor::{empty_state, ActorID, ActorRegistry};
 use crate::message::Message;
+use crate::string::array32;
 
 /// Bitcoin BIP-65 convention threshold for distinguishing
 /// `TxHeader::locktime` as a block height vs. a Unix timestamp:
@@ -455,7 +459,7 @@ impl CallFrame {
 /// `Prover::prove` and `Verifier::verify`.
 pub struct TxResult {
     /// Canonical 32-byte transaction id.
-    pub txid: crate::tx::TxID,
+    pub txid: TxID,
 
     /// Full txlog including the `Header` entry at index 0.
     pub txlog: Vec<TxEntry>,
@@ -562,7 +566,7 @@ impl VM {
     /// (with witnesses inline on the prover side).
     pub(crate) fn run<D: Delegate>(
         header: TxHeader,
-        program: crate::script::ScriptBuilder,
+        program: ScriptBuilder,
         gas_limit: u64,
         mem_limit: u64,
         delegate: &mut D,
@@ -624,7 +628,7 @@ impl VM {
                 registry.deploy(
                     message.target.clone(),
                     bytes.clone(),
-                    crate::actor::empty_state(),
+                    empty_state(),
                     message.vbytes,
                     block.height,
                 )?;
@@ -751,7 +755,7 @@ impl VM {
     ) -> TxResult {
         let txlog = mem::take(&mut self.txlog);
         let deferred_sigs = mem::take(&mut self.deferred_sigs);
-        let txid = crate::tx::TxID::from_log(&txlog);
+        let txid = TxID::from_log(&txlog);
         TxResult {
             txid,
             txlog,
@@ -1685,7 +1689,7 @@ impl VM {
         if self.is_external() && cs_involved {
             let b = self.pop_value()?.to_expression()?;
             let a = self.pop_value()?.to_expression()?;
-            self.push_value(Value::Constraint(crate::Constraint::eq(a, b)));
+            self.push_value(Value::Constraint(Constraint::eq(a, b)));
         } else {
             let eq = self.current_call.stack[n - 1]
                 .try_eq(&self.current_call.stack[n - 2])?;
@@ -1953,7 +1957,7 @@ impl VM {
 
     fn pop_string_32(&mut self) -> Result<[u8; 32], VMError> {
         let s = self.pop_value()?.to_string()?;
-        crate::string::array32(&s.to_bytes()).ok_or(VMError::MalformedAddress)
+        array32(&s.to_bytes()).ok_or(VMError::MalformedAddress)
     }
 
     fn op_nop(&mut self) -> Result<(), VMError> {
@@ -2065,7 +2069,7 @@ impl VM {
             qty_var.commitment.to_point(),
             flv_commit.to_point(),
         ));
-        self.push_value(Value::Token(crate::Token::new(
+        self.push_value(Value::Token(Token::new(
             qty_var.commitment,
             flv_commit,
         )));
@@ -2166,7 +2170,7 @@ impl VM {
     fn op_issuepubflv(&mut self) -> Result<(), VMError> {
         let tag = self.pop_value()?.to_string()?;
         let cid = self.pop_value()?.to_string()?;
-        let bytes = crate::string::array32(&cid.to_bytes()).ok_or(VMError::IndexOutOfRange)?;
+        let bytes = array32(&cid.to_bytes()).ok_or(VMError::IndexOutOfRange)?;
         let flv = flavor_from_actor(&ActorID::Hash(bytes), &tag);
         self.push_value(Value::Int253(flv));
         Ok(())
@@ -2184,8 +2188,8 @@ impl VM {
     fn op_issueprivflv(&mut self) -> Result<(), VMError> {
         let tag = self.pop_value()?.to_string()?;
         let pred = self.pop_value()?.to_string()?;
-        let bytes = crate::string::array32(&pred.to_bytes()).ok_or(VMError::IndexOutOfRange)?;
-        let predicate = crate::Predicate::opaque(
+        let bytes = array32(&pred.to_bytes()).ok_or(VMError::IndexOutOfRange)?;
+        let predicate = Predicate::opaque(
             curve25519_dalek::ristretto::CompressedRistretto(bytes),
         );
         let flv = flavor_from_predicate(&predicate, &tag);
@@ -2457,7 +2461,7 @@ impl VM {
         // `TxEntry::Output(Cell)`. The block builder scans these
         // entries to construct internal-tx deliveries; no separate
         // queue.
-        let message = crate::message::Message {
+        let message = Message {
             target,
             caller,
             anchor,
@@ -2742,7 +2746,7 @@ impl VM {
             .cs()
             .allocate(witness_scalar)
             .map_err(VMError::R1CSError)?;
-        let expr = crate::Expression::LinearCombination(
+        let expr = Expression::LinearCombination(
             vec![(r1cs_var, curve25519_dalek::scalar::Scalar::ONE)],
             witness,
         );
@@ -2759,7 +2763,7 @@ impl VM {
         let var = self.pop_value()?.to_variable()?;
         let (_point, r1cs_var) = delegate.commit_variable(&var.commitment)?;
         let witness = var.commitment.assignment();
-        let expr = crate::Expression::LinearCombination(
+        let expr = Expression::LinearCombination(
             vec![(r1cs_var, Scalar::ONE)],
             witness,
         );
@@ -2788,7 +2792,7 @@ impl VM {
         let expr = self.pop_value()?.to_expression()?;
 
         match &expr {
-            crate::Expression::Constant(value) => {
+            Expression::Constant(value) => {
                 // Cleartext: the value must fit in [0, 2^n). Negative
                 // or too-large constants are caught here without
                 // touching the CS.
@@ -2798,7 +2802,7 @@ impl VM {
                 self.push_value(Value::Expression(expr));
                 Ok(())
             }
-            crate::Expression::LinearCombination(terms, assignment) => {
+            Expression::LinearCombination(terms, assignment) => {
                 let lc: LC = terms.iter().cloned().collect();
                 // Convert the witness (if present) to spacesuit's
                 // SignedInteger. Non-negative Int253s up to u64::MAX
@@ -2826,7 +2830,7 @@ impl VM {
         self.require_external()?;
         let s = self.pop_value()?.to_string()?;
         let int = s.to_scalar()?;
-        self.push_value(Value::Expression(crate::Expression::constant(int)));
+        self.push_value(Value::Expression(Expression::constant(int)));
         Ok(())
     }
 
@@ -2835,7 +2839,7 @@ impl VM {
         self.require_external()?;
         let s = self.pop_value()?.to_string()?;
         let commitment = s.to_commitment()?;
-        let var = crate::Variable { commitment };
+        let var = Variable { commitment };
         self.push_value(Value::Variable(var));
         Ok(())
     }
@@ -2846,8 +2850,8 @@ impl VM {
     /// allocation — and pushes the `WideToken` / `Token` pair.
     fn op_borrow_encrypted_inner<D: Delegate>(
         &mut self,
-        qty: crate::Variable,
-        flv: crate::Variable,
+        qty: Variable,
+        flv: Variable,
         delegate: &mut D,
     ) -> Result<(), VMError> {
         use bulletproofs::r1cs::ConstraintSystem;
@@ -2883,7 +2887,7 @@ impl VM {
         // Build the WideToken (negative half) and the Token (positive
         // half). The Token carries the prover's open commitments
         // unchanged so downstream `mix` / `cloak` can re-commit them.
-        let wide = crate::WideToken(spacesuit::AllocatedValue {
+        let wide = WideToken(spacesuit::AllocatedValue {
             q: neg_qty_var,
             f: flv_var,
             assignment: match (neg_qty_assignment, flv_assignment) {
@@ -2891,7 +2895,7 @@ impl VM {
                 _ => None,
             },
         });
-        let token = crate::Token::new(qty.commitment, flv.commitment);
+        let token = Token::new(qty.commitment, flv.commitment);
         self.push_value(Value::WideToken(wide));
         self.push_value(Value::Token(token));
         Ok(())
@@ -2921,7 +2925,7 @@ impl VM {
             q: -spacesuit::SignedInteger::from(qty_u64),
             f: flv_scalar,
         });
-        let wide = crate::WideToken(spacesuit::AllocatedValue {
+        let wide = WideToken(spacesuit::AllocatedValue {
             q: q_var,
             f: f_var,
             assignment,
@@ -2959,7 +2963,7 @@ impl VM {
                 })
             }
             Value::ClearToken(c) => {
-                let token = crate::Token::cleartext(c.qty(), c.flv());
+                let token = Token::cleartext(c.qty(), c.flv());
                 self.value_to_allocated(Value::Token(token), delegate)
             }
             _ => Err(VMError::TypeNotToken),
@@ -2997,7 +3001,7 @@ impl VM {
             let qty_str = self.pop_value()?.to_string()?;
             let flv_commit = flv_str.to_commitment()?;
             let qty_commit = qty_str.to_commitment()?;
-            let token = crate::Token::new(qty_commit, flv_commit);
+            let token = Token::new(qty_commit, flv_commit);
             // Build the AllocatedValue against the CS.
             let allocated = self.value_to_allocated(
                 Value::Token(token.clone()),
