@@ -1,0 +1,5 @@
+[alias]
+t = "test --workspace"
+c = "check --workspace --all-targets"
+b = "bench --no-run"
+l = "clippy --workspace --all-targets -- -D warnings"
