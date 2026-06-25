@@ -17,6 +17,11 @@ pub trait MusigContext {
     /// Length of the number of pubkeys in the context
     fn len(&self) -> usize;
 
+    /// Returns true when the context contains no pubkeys.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Returns the pubkey for the index i
     fn key(&self, index: usize) -> VerificationKey;
 }
@@ -69,7 +74,7 @@ impl Multikey {
         for (i, X) in pubkeys.iter().enumerate() {
             let a = Multikey::compute_factor(&prf, i);
             let X = X.as_point().decompress().ok_or(MusigError::InvalidPoint)?;
-            aggregated_key = aggregated_key + a * X;
+            aggregated_key += a * X;
         }
 
         Ok(Multikey {
@@ -122,7 +127,7 @@ impl Multikey {
         let mut aggregated_key = Scalar::ZERO;
         for (i, x) in privkeys.iter().enumerate() {
             let a = Multikey::compute_factor(&prf, i);
-            aggregated_key = aggregated_key + a * x;
+            aggregated_key += a * x;
         }
 
         aggregated_key
@@ -144,7 +149,7 @@ impl MusigContext for Multikey {
         // Make a_i, the per-party factor. a_i = H(<L>, X_i).
         // The list of pubkeys, <L>, has already been committed to self.transcript.
         let a_i = match &self.prf {
-            Some(t) => Multikey::compute_factor(&t, i),
+            Some(t) => Multikey::compute_factor(t, i),
             None => Scalar::ONE,
         };
 

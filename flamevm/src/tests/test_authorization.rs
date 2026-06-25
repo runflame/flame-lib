@@ -283,7 +283,7 @@ fn facade_build_sign_verify_roundtrip() {
     // Outer-API coverage: metrics and log are populated by the build.
     let m = unsigned.metrics();
     assert!(m.gas_used > 0, "per-instruction metering reported via TxMetrics");
-    assert!(unsigned.log().entries().len() >= 1, "log readable via outer API");
+    assert!(!unsigned.log().entries().is_empty(), "log readable via outer API");
 
     let tx = unsigned.sign(sig);
     let txlog = tx.verify(limits).expect("verify ok");

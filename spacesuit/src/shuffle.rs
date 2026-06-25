@@ -203,7 +203,7 @@ mod tests {
             scalar_shuffle(cs, input_vars.clone(), output_vars.clone())
         })?;
 
-        Ok(verifier.verify(&proof, &pc_gens, &bp_gens)?)
+        verifier.verify(&proof, &pc_gens, &bp_gens)
     }
 
     // Helper functions to make the tests easier to read
@@ -326,7 +326,7 @@ mod tests {
         assert!(value_shuffle(&mut verifier, input_vars, output_vars).is_ok());
 
         // Verifier verifies proof
-        Ok(verifier.verify(&proof, &pc_gens, &bp_gens)?)
+        verifier.verify(&proof, &pc_gens, &bp_gens)
     }
 
     #[test]
@@ -410,6 +410,6 @@ mod tests {
         assert!(padded_shuffle(&mut verifier, input_vars, output_vars).is_ok());
 
         // Verifier verifies proof
-        Ok(verifier.verify(&proof, &pc_gens, &bp_gens)?)
+        verifier.verify(&proof, &pc_gens, &bp_gens)
     }
 }

@@ -294,9 +294,9 @@ impl From<SignedInteger> for Int253 {
     }
 }
 
-impl Into<Scalar> for Int253 {
-    fn into(self) -> Scalar {
-        self.to_scalar_mod_order()
+impl From<Int253> for Scalar {
+    fn from(value: Int253) -> Scalar {
+        value.to_scalar_mod_order()
     }
 }
 

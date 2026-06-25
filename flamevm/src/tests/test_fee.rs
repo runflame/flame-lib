@@ -62,14 +62,10 @@ fn phase19_op_fee_accumulates_total() {
 fn phase19_op_fee_rejects_negative_qty() {
     let pc_gens = PedersenGens::default();
     // Build script directly so we can push a negative Int253.
-    let mut script = Vec::new();
     // pushint8 neg 50 (qty = -50) — minimal (negative, no narrower form)
-    script.push(0x11);
-    script.push(50);
     // push:0 (flv = 0) — canonical zero (pushint8 pos 0 is non-minimal)
-    script.push(0x00);
     // fee
-    script.push(0x9b);
+    let script = vec![0x11, 50, 0x00, 0x9b];
     let program = ScriptBuilder::parse(&script).expect("decode");
     // Run all 3 instructions; the third (fee) must error.
     let mut vm = VM::new(
@@ -163,11 +159,8 @@ fn phase19_op_fee_rejects_aggregate_over_cap() {
 /// needs Bulletproofs to allocate the WideToken's CS variables.
 #[test]
 fn phase19_op_fee_rejects_internal_context() {
-    let mut script = Vec::new();
     // qty=1, flv=0, fee
-    script.push(0x01); // push:1
-    script.push(0x00); // push:0
-    script.push(0x9b); // fee
+    let script = vec![0x01, 0x00, 0x9b];
     let mut vm = vm_with_script(script);
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::ExternalOnly));
@@ -197,4 +190,3 @@ fn phase19_fee_qty_changes_txid() {
     let id_b = TxID::from_log(&log_b);
     assert_ne!(id_a, id_b, "fee qty must affect TxID");
 }
-

@@ -19,14 +19,14 @@ impl BitRange {
     }
 }
 
-impl Into<usize> for BitRange {
-    fn into(self) -> usize {
-        self.0
+impl From<BitRange> for usize {
+    fn from(bit_range: BitRange) -> usize {
+        bit_range.0
     }
 }
 
-impl Into<u8> for BitRange {
-    fn into(self) -> u8 {
-        self.0 as u8
+impl From<BitRange> for u8 {
+    fn from(bit_range: BitRange) -> u8 {
+        bit_range.0 as u8
     }
 }

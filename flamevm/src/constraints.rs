@@ -96,7 +96,7 @@ impl Constraint {
             cs.constrain(expr);
             Ok(())
         })
-        .map_err(|e| VMError::R1CSError(e))
+        .map_err(VMError::R1CSError)
     }
 
     /// Creates an equality constraint.
@@ -145,6 +145,7 @@ impl Constraint {
     /// Creates a logical inverse of the constraint.
     ///
     /// Guaranteed optimization: inverts cleartext constraints in place.
+    #[allow(clippy::should_implement_trait)]
     pub fn not(c: Constraint) -> Self {
         match c {
             Constraint::Cleartext(b) => Constraint::Cleartext(!b),
@@ -203,9 +204,9 @@ impl SecretConstraint {
                         let y = Scalar::conditional_select(
                             &Scalar::ZERO,
                             &Scalar::ONE,
-                            is_zero.into(),
+                            is_zero,
                         );
-                        let w = Scalar::conditional_select(&x, &Scalar::ONE, is_zero.into());
+                        let w = Scalar::conditional_select(&x, &Scalar::ONE, is_zero);
                         let w = w.invert();
                         (Some((x, y)), Some((x, w)), Some(y))
                     }
@@ -317,7 +318,7 @@ impl Expression {
                 Expression::LinearCombination(mut right_terms, right_assignment),
             ) => {
                 for (_, n) in right_terms.iter_mut() {
-                    *n = *n * l.to_scalar_mod_order();
+                    *n *= l.to_scalar_mod_order();
                 }
                 Expression::LinearCombination(right_terms, right_assignment.map(|r| r * l))
             }
@@ -326,7 +327,7 @@ impl Expression {
                 Expression::Constant(r),
             ) => {
                 for (_, n) in left_terms.iter_mut() {
-                    *n = *n * r.to_scalar_mod_order();
+                    *n *= r.to_scalar_mod_order();
                 }
                 Expression::LinearCombination(left_terms, left_assignment.map(|l| l * r))
             }
@@ -429,9 +430,9 @@ impl From<CompressedRistretto> for Commitment {
     }
 }
 
-impl Into<CompressedRistretto> for Commitment {
-    fn into(self) -> CompressedRistretto {
-        self.to_point()
+impl From<Commitment> for CompressedRistretto {
+    fn from(commitment: Commitment) -> CompressedRistretto {
+        commitment.to_point()
     }
 }
 

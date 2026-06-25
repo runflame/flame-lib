@@ -364,14 +364,9 @@ fn call_depth_is_capped() {
     // Tolerate either a clean finish or a propagated error — the point
     // is that there is no unbounded recursion.
     let mut steps = 0;
-    loop {
-        match vm.step_internal_with_registry(&mut reg) {
-            Ok(true) => {
-                steps += 1;
-                assert!(steps < 5_000_000, "must terminate via depth cap");
-            }
-            _ => break,
-        }
+    while let Ok(true) = vm.step_internal_with_registry(&mut reg) {
+        steps += 1;
+        assert!(steps < 5_000_000, "must terminate via depth cap");
     }
 }
 
@@ -499,11 +494,8 @@ fn call_depth_caps_at_exactly_max() {
     reg.deploy(id.clone(), recv.clone(), empty_state(), 1_000_000, 0).expect("deploy");
     let mut vm = vm_for_actor(id.clone(), recv);
     let mut max_depth = 0;
-    loop {
-        match vm.step_internal_with_registry(&mut reg) {
-            Ok(true) => max_depth = max_depth.max(vm.call_stack.len()),
-            _ => break,
-        }
+    while let Ok(true) = vm.step_internal_with_registry(&mut reg) {
+        max_depth = max_depth.max(vm.call_stack.len());
     }
     assert_eq!(max_depth, MAX_CALL_DEPTH, "cap binds exactly at the constant");
 }
@@ -583,7 +575,7 @@ fn f1_failed_subcall_load_does_not_destroy_actor() {
     // tx-end `commit_tx_destructions` would have destroyed X.
     assert!(reg.exists(&x_id), "X must still exist after the failed sub-call");
     assert!(
-        !reg.actor(&x_id).map_or(false, |a| a.is_checked_out()),
+        !reg.actor(&x_id).is_some_and(|a| a.is_checked_out()),
         "X's load-mark must be cleared by the call-frame rollback",
     );
 }
@@ -648,7 +640,7 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
         root_before,
         "X's state must be the rolled-back pre-call root",
     );
-    assert!(!reg.actor(&x_id).map_or(false, |a| a.is_checked_out()));
+    assert!(!reg.actor(&x_id).is_some_and(|a| a.is_checked_out()));
 
     // F2 / Phase-36 invariant: no ActorSave entry for X in the
     // txlog. The failed sub-call's ActorSave was truncated by
@@ -721,7 +713,7 @@ fn f3_save_failure_rolls_back_and_preserves_actor() {
         .actor(&x_id)
         .expect("X must survive — save failure no longer destroys");
     assert_eq!(state_root(x.state.as_ref().expect("present")), root_before);
-    assert!(!reg.actor(&x_id).map_or(false, |a| a.is_checked_out()));
+    assert!(!reg.actor(&x_id).is_some_and(|a| a.is_checked_out()));
 }
 
 #[test]

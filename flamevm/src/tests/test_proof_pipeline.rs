@@ -16,9 +16,9 @@ fn instruction_alloc_witness_roundtrip() {
     assert_eq!(bytecode, vec![0x62, 0x62, 0x62]);
     let witnesses: Vec<_> = p.to_witnesses().into();
     assert_eq!(witnesses.len(), 3);
-    assert!(matches!(witnesses[0], Some(_)));
-    assert!(matches!(witnesses[1], None));
-    assert!(matches!(witnesses[2], Some(_)));
+    assert!(witnesses[0].is_some());
+    assert!(witnesses[1].is_none());
+    assert!(witnesses[2].is_some());
 }
 
 #[test]
@@ -640,4 +640,3 @@ fn phase21_deferred_sigs_in_txresult() {
         _ => panic!("expected TxBound"),
     }
 }
-

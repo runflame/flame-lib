@@ -26,7 +26,7 @@ impl NonceCommitment {
         NoncePrecommitment(precommitment)
     }
 
-    pub(super) fn sum(commitments: &Vec<Self>) -> RistrettoPoint {
+    pub(super) fn sum(commitments: &[Self]) -> RistrettoPoint {
         commitments.iter().map(|R_i| R_i.0).sum()
     }
 }
@@ -80,7 +80,7 @@ impl CounterpartyPrecommitted {
         }
 
         Ok(CounterpartyCommitted {
-            commitment: commitment,
+            commitment,
             position: self.position,
             pubkey: self.pubkey,
         })

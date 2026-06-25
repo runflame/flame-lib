@@ -356,7 +356,7 @@ pub(crate) fn assert_str(v: &Value, expected: &[u8]) {
 pub(crate) fn writebits_bytes(value: &Int253, n_bits: usize) -> Vec<u8> {
     assert!(n_bits <= 256);
     let int_bytes = value.to_bytes();
-    let n_bytes = (n_bits + 7) / 8;
+    let n_bytes = n_bits.div_ceil(8);
     let mut out = int_bytes[..n_bytes].to_vec();
     let tail = n_bits % 8;
     if tail != 0 && n_bytes > 0 {
@@ -916,8 +916,8 @@ pub(crate) fn build_input_cell(inp: &NMInputSpec) -> (Cell, TaprootProof) {
 /// per-cell variation.
 pub(crate) fn input_blinding_for(inp: &NMInputSpec) -> [u8; 32] {
     let mut k = TEST_BLINDING_KEY;
-    for i in 0..32 {
-        k[i] ^= inp.anchor[i];
+    for (i, byte) in k.iter_mut().enumerate() {
+        *byte ^= inp.anchor[i];
     }
     k
 }
@@ -1090,4 +1090,3 @@ pub(crate) fn run_confidential_nm(
     assert_nm_txlog(&result, inputs, outputs);
     result
 }
-

@@ -68,6 +68,7 @@ impl Dict {
     /// Inserts a key-value pair, failing if the key is already occupied.
     /// Returns the rejected value on conflict so the caller can decide
     /// whether to discard or surface it.
+    #[allow(clippy::result_large_err)]
     pub fn insert_strict(&mut self, key: Int253, value: Value) -> Result<(), Value> {
         if self.entries.contains_key(&key) {
             return Err(value);
@@ -157,6 +158,12 @@ impl Dict {
         if !v.is_droppable() {
             self.droppable = false;
         }
+    }
+}
+
+impl Default for Dict {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

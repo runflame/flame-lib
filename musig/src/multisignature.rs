@@ -83,7 +83,7 @@ impl Multisignature for Signature {
         for (i, x_i) in privkeys.enumerate() {
             let mut t = transcript.clone();
             let c_i = context.challenge(i, &mut t);
-            s = s + c_i * x_i.borrow();
+            s += c_i * x_i.borrow();
         }
 
         Ok(Signature { s, R })

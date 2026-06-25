@@ -101,6 +101,6 @@ mod tests {
         assert!(range_proof(&mut verifier, var.into(), None, bit_width).is_ok());
 
         // Verifier verifies proof
-        Ok(verifier.verify(&proof, &pc_gens, &bp_gens)?)
+        verifier.verify(&proof, &pc_gens, &bp_gens)
     }
 }

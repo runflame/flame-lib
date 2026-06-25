@@ -32,12 +32,12 @@ impl From<u64> for SignedInteger {
     }
 }
 
-impl Into<Scalar> for SignedInteger {
-    fn into(self) -> Scalar {
-        if self.0 < 0 {
-            Scalar::ZERO - Scalar::from((-self.0) as u64)
+impl From<SignedInteger> for Scalar {
+    fn from(value: SignedInteger) -> Scalar {
+        if value.0 < 0 {
+            Scalar::ZERO - Scalar::from((-value.0) as u64)
         } else {
-            Scalar::from(self.0 as u64)
+            Scalar::from(value.0 as u64)
         }
     }
 }
@@ -46,7 +46,7 @@ impl Add for SignedInteger {
     type Output = Option<SignedInteger>;
 
     fn add(self, rhs: SignedInteger) -> Option<SignedInteger> {
-        let max = u64::max_value() as i128;
+        let max = u64::MAX as i128;
         let s = self.0 + rhs.0;
         if s <= max && s >= -max {
             Some(SignedInteger(s))
@@ -61,7 +61,7 @@ impl Mul for SignedInteger {
 
     fn mul(self, rhs: SignedInteger) -> Option<SignedInteger> {
         self.0.checked_mul(rhs.0).and_then(|p| {
-            let max = u64::max_value() as i128;
+            let max = u64::MAX as i128;
             if p <= max && p >= -max {
                 Some(SignedInteger(p))
             } else {
@@ -91,39 +91,39 @@ mod tests {
 
     #[test]
     fn add_overflow() {
-        let a = SignedInteger::from(u64::max_value());
+        let a = SignedInteger::from(u64::MAX);
         let b = SignedInteger::from(0u64);
-        assert_eq!((a + b).unwrap(), SignedInteger::from(u64::max_value()));
+        assert_eq!((a + b).unwrap(), SignedInteger::from(u64::MAX));
 
-        let a = SignedInteger::from(u64::max_value());
+        let a = SignedInteger::from(u64::MAX);
         let b = SignedInteger::from(1u64);
         assert_eq!(a + b, None);
     }
 
     #[test]
     fn mul_overflow() {
-        let a = SignedInteger::from(u64::max_value());
+        let a = SignedInteger::from(u64::MAX);
         let b = SignedInteger::from(1u64);
-        assert_eq!((a * b).unwrap(), SignedInteger::from(u64::max_value()));
+        assert_eq!((a * b).unwrap(), SignedInteger::from(u64::MAX));
 
-        let a = SignedInteger::from(u64::max_value());
+        let a = SignedInteger::from(u64::MAX);
         let b = -SignedInteger::from(1u64);
-        assert_eq!((a * b).unwrap(), -SignedInteger::from(u64::max_value()));
+        assert_eq!((a * b).unwrap(), -SignedInteger::from(u64::MAX));
 
-        let a = SignedInteger::from(u64::max_value());
+        let a = SignedInteger::from(u64::MAX);
         let b = SignedInteger::from(2u64);
         assert_eq!(a * b, None);
 
-        let a = SignedInteger::from(u64::max_value());
+        let a = SignedInteger::from(u64::MAX);
         let b = -SignedInteger::from(2u64);
         assert_eq!(a * b, None);
 
-        let a = SignedInteger::from(u64::max_value());
-        let b = SignedInteger::from(u64::max_value());
+        let a = SignedInteger::from(u64::MAX);
+        let b = SignedInteger::from(u64::MAX);
         assert_eq!(a * b, None);
 
-        let a = SignedInteger::from(u64::max_value());
-        let b = -SignedInteger::from(u64::max_value());
+        let a = SignedInteger::from(u64::MAX);
+        let b = -SignedInteger::from(u64::MAX);
         assert_eq!(a * b, None);
     }
 }
