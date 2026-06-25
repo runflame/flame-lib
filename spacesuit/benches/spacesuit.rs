@@ -69,10 +69,10 @@ fn create_spacesuit_proof_helper(n: usize, c: &mut Criterion) {
         let pc_gens = PedersenGens::default();
 
         let mut rng = thread_rng();
-        let (min, max) = (0u64, std::u64::MAX / 2);
+        let range = 0u64..u64::MAX / 2;
         let inputs: Vec<Value> = (0..n)
             .map(|_| Value {
-                q: rng.gen_range(min, max).into(),
+                q: rng.gen_range(range.clone()).into(),
                 f: Scalar::random(&mut rng),
             })
             .collect();
@@ -116,10 +116,10 @@ fn verify_spacesuit_proof_helper(n: usize, c: &mut Criterion) {
         let pc_gens = PedersenGens::default();
 
         let mut rng = thread_rng();
-        let (min, max) = (0u64, std::u64::MAX / 2);
+        let range = 0u64..u64::MAX / 2;
         let inputs: Vec<Value> = (0..n)
             .map(|_| Value {
-                q: rng.gen_range(min, max).into(),
+                q: rng.gen_range(range.clone()).into(),
                 f: Scalar::random(&mut rng),
             })
             .collect();

@@ -36,7 +36,7 @@ pub struct MerkleRootBuilder<M: MerkleItem> {
 
 impl fmt::Debug for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Hash({})", hex::encode(&self.0))
+        write!(f, "Hash({})", hex::encode(self.0))
         // Without hex crate we'd do this, but it outputs comma-separated numbers: [aa, 11, 5a, ...]
         // write!(f, "{:x?}", &self.0)
     }
@@ -195,8 +195,8 @@ impl<M: MerkleItem> Hasher<M> {
     /// Computes hash of the inner node in a merkle tree (that contains left/right child nodes).
     pub fn intermediate(&self, left: &Hash, right: &Hash) -> Hash {
         let mut t = self.t.clone();
-        t.append_message(b"L", &left);
-        t.append_message(b"R", &right);
+        t.append_message(b"L", left);
+        t.append_message(b"R", right);
         let mut hash = Hash::default();
         t.challenge_bytes(b"merkle.node", &mut hash);
         hash
@@ -221,7 +221,7 @@ pub type Position = u64;
 /// Left/right position of the neighbor is determined by the appropriate bit in `position`.
 /// (Lowest bit=1 means the first neighbor is to the left of the node.)
 /// `path` is None if this proof is for a newly added item that has no merkle path yet.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
 pub struct Path {
     /// Position of the item under this path.
     ///
@@ -274,15 +274,6 @@ impl Side {
     }
 }
 
-impl Default for Path {
-    fn default() -> Path {
-        Path {
-            position: 0,
-            neighbors: Vec::new(),
-        }
-    }
-}
-
 impl Path {
     /// Iterates over elements of the path.
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = (Side, &Hash)> + ExactSizeIterator {
@@ -312,7 +303,6 @@ impl Path {
             list: &[M],
             index: usize,
             path: &mut Path,
-            hasher: &Hasher<M>,
             builder: &mut MerkleRootBuilder<M>,
         ) {
             if list.len() < 2 {
@@ -322,14 +312,14 @@ impl Path {
             let k = list.len().next_power_of_two() / 2;
             // Note: path.position is not necessarily the same as the global index.
             // See documentation for `Path::position`.
-            path.position = path.position << 1;
+            path.position <<= 1;
             if index >= k {
-                path.position = path.position | 1;
+                path.position |= 1;
                 path.neighbors.insert(0, root(&list[..k], builder));
-                fill_neighbors(&list[k..], index - k, path, hasher, builder);
+                fill_neighbors(&list[k..], index - k, path, builder);
             } else {
                 path.neighbors.insert(0, root(&list[k..], builder));
-                fill_neighbors(&list[..k], index, path, hasher, builder);
+                fill_neighbors(&list[..k], index, path, builder);
             }
         }
         if item_index > list.len() {
@@ -340,7 +330,7 @@ impl Path {
             roots: Vec::new(),
         };
         let mut path = Path::default();
-        fill_neighbors(list, item_index, &mut path, hasher, &mut builder);
+        fill_neighbors(list, item_index, &mut path, &mut builder);
         Some(path)
     }
 
@@ -355,7 +345,7 @@ impl Path {
 
     /// Verifies that this path matches a given merkle root.
     pub fn verify_root<M: MerkleItem>(&self, root: &Hash, item: &M, hasher: &Hasher<M>) -> bool {
-        self.compute_root(item, hasher).ct_eq(&root).unwrap_u8() == 1
+        self.compute_root(item, hasher).ct_eq(root).unwrap_u8() == 1
     }
 }
 

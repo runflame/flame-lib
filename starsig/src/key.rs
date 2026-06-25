@@ -65,8 +65,8 @@ impl From<CompressedRistretto> for VerificationKey {
     }
 }
 
-impl Into<CompressedRistretto> for VerificationKey {
-    fn into(self) -> CompressedRistretto {
-        self.into_point()
+impl From<VerificationKey> for CompressedRistretto {
+    fn from(key: VerificationKey) -> CompressedRistretto {
+        key.into_point()
     }
 }
