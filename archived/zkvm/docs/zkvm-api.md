@@ -9,7 +9,7 @@ The [`Prover`](../src/prover.rs) and [`Verifier`](../src/verifier.rs) are two en
 
 `Prover` is an API for _creating_ a transaction object `Tx` out of a stream of `Instruction`s:
 `VM` executes the instructions, producing a serialized program bytecode, aggregated transaction signature
-and a zero-knowledge R1CS proof for the [Cloak protocol](../../spacesuit/spec.md) and custom statements expressed by instructions.
+and a zero-knowledge R1CS proof for the [Cloak protocol](../../../spacesuit/spec.md) and custom statements expressed by instructions.
 
 `Verifier` is an API for _verifying_ a transaction object `Tx`: it parses the bytecode, executes it, verifies the aggregated transaction signature and the R1CS proof, producing a `VerifiedTx` as a result. Verification logic is described by the [ZkVM specification](zkvm-spec.md).
 
@@ -65,10 +65,10 @@ The VM extracts the `Output` object from the `Input` and converts it to a [Contr
 Scalar witness represents either:
 
 * a [scalar](zkvm-spec.md#scalar), or
-* a [signed integer](../../spacesuit/spec.md#signed-integer)
+* a [signed integer](../../../spacesuit/spec.md#signed-integer)
 
 Arithmetic operations on scalar witnesses _preserve integers until overflow_. If an addition/multiplication of two integers overflows the range of `±(2^64-1)`, the result is promoted to a scalar modulo Ristretto group order.
 
-[Range proof](../../spacesuit/spec.md#range-proof) gadget in Cloak requires a witness to be an integer (and also checks that it is non-negative) and does not attempt to carve 64 bits out of a scalar.
+[Range proof](../../../spacesuit/spec.md#range-proof) gadget in Cloak requires a witness to be an integer (and also checks that it is non-negative) and does not attempt to carve 64 bits out of a scalar.
 For safety, integer overflows immediately promote the integer to a scalar: any higher-level protocol that wishes to operate on integer quantities must ensure that they never overflow.
 

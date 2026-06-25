@@ -12,7 +12,7 @@ implemented with [Ristretto](https://ristretto.group) and [Merlin transcripts](h
 * Single signature verification.
 * Batch signature verification.
 * Compatible with [Musig](../musig) API.
-* Compatible with [Keytree](../keytree) key derivation API.
+* Compatible with [Keytree](../archived/keytree) key derivation API.
 * VRF (aka “HMAC verifiable by a public key”) is in development.
 
 ## Authors

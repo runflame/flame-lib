@@ -287,7 +287,7 @@ Constraints only have an effect if added to the constraint system using the [`ve
 
 ### Value type
 
-A value is a [linear type](#linear-types) representing a pair of *quantity* and *flavor* (see [quantity](../../spacesuit/spec.md#quantity) and [flavor](../../spacesuit/spec.md#flavor) in the [Cloak specification](../../spacesuit/spec.md)).
+A value is a [linear type](#linear-types) representing a pair of *quantity* and *flavor* (see [quantity](../../../spacesuit/spec.md#quantity) and [flavor](../../../spacesuit/spec.md#flavor) in the [Cloak specification](../../../spacesuit/spec.md)).
 Both quantity and flavor are represented as [variables](#variable-type).
 Quantity is guaranteed to be in a 64-bit range (`[0..2^64-1]`).
 
@@ -717,7 +717,7 @@ its shape is uniquely determined by the number of leaves.
 Instruction [`signtx`](#signtx) unlocks a contract if its [predicate](#predicate)
 correctly signs the [transaction ID](#transaction-id). The contract‘s predicate
 is added to the array of deferred [verification keys](#verification-key) (alongside with associated [contract ID](#contract-id)) that
-are later used in a [multi-message signature](../../musig/docs/musig-spec.md#multi-message-signature) protocol to verify a multi-signature over a [transaction ID](#transaction-id) and the associated [contract IDs](#contract-id).
+are later used in a [multi-message signature](../../../musig/docs/musig-spec.md#multi-message-signature) protocol to verify a multi-signature over a [transaction ID](#transaction-id) and the associated [contract IDs](#contract-id).
 
 1. Instantiate the [transcript](#transcript) `T` for transaction signature:
     ```
@@ -727,7 +727,7 @@ are later used in a [multi-message signature](../../musig/docs/musig-spec.md#mul
     ```
     T.append("txid", txid)
     ```
-3. Perform the [multi-message signature protocol](../../musig/docs/musig-spec.md#multi-message-signature) using the transcript `T` and the pairs of verification keys and contract IDs as submessages.
+3. Perform the [multi-message signature protocol](../../../musig/docs/musig-spec.md#multi-message-signature) using the transcript `T` and the pairs of verification keys and contract IDs as submessages.
 4. Add the verifier's statement to the list of [deferred point operations](#deferred-point-operations).
 
 
@@ -1153,7 +1153,7 @@ Fails if `ex1` and `ex2` are not both [expression types](#expression-type).
 _expr_ **range** → _expr_
 
 1. Pops an [expression](#expression-type) `expr`.
-2. Adds an 64-bit range proof for `expr` to the [constraint system](#constraint-system) (see [Cloak protocol](../../spacesuit/spec.md) for the range proof definition).
+2. Adds an 64-bit range proof for `expr` to the [constraint system](#constraint-system) (see [Cloak protocol](../../../spacesuit/spec.md) for the range proof definition).
 3. Pushes `expr` back to the stack.
 
 Fails if `expr` is not an [expression type](#expression-type).
@@ -1272,7 +1272,7 @@ _qty flv metadata pred_ **issue** → _contract_
     flv == flavor·B
     ```
 7. Adds a 64-bit range proof for the `qty` to the [constraint system](#constraint-system)
-   (see [Cloak protocol](../../spacesuit/spec.md) for the range proof definition).
+   (see [Cloak protocol](../../../spacesuit/spec.md) for the range proof definition).
 8. Adds an [issue entry](#issue-entry) to the [transaction log](#transaction-log).
 9. Creates a [contract](#contract-type) with the value as the only [payload](#contract-payload),
    protected by the predicate `pred`, consuming [VM’s last anchor](#vm-state)
@@ -1294,7 +1294,7 @@ _qty flv_ **borrow** → _–V +V_
 1. Pops [variable](#variable-type) `flv` and commits it to the constraint system.
 2. Pops [variable](#variable-type) `qty` and commits it to the constraint system.
 3. Creates a [value](#value-type) `+V` with variables `qty` and `flv` for quantity and flavor, respectively.
-4. Adds a 64-bit range proof for `qty` variable to the [constraint system](#constraint-system) (see [Cloak protocol](../../spacesuit/spec.md) for the range proof definition).
+4. Adds a 64-bit range proof for `qty` variable to the [constraint system](#constraint-system) (see [Cloak protocol](../../../spacesuit/spec.md) for the range proof definition).
 5. Creates [wide value](#wide-value-type) `–V`, allocating a low-level variable `qty2` for the negated quantity and reusing the flavor variable `flv`.
 6. Adds a constraint `qty2 == -qty` to the constraint system.
 7. Pushes `–V`, then `+V` to the stack.
@@ -1322,7 +1322,7 @@ Merges and splits `m` [wide values](#wide-value-type) into `n` [values](#value-t
 
 1. Pops `2·n` [points](#point) as pairs of _flavor_ and _quantity_ for each output value, flavor is popped first in each pair.
 2. Pops `m` [wide values](#wide-value-type) as input values.
-3. Creates constraints and 64-bit range proofs for quantities per [Cloak protocol](../../spacesuit/spec.md).
+3. Creates constraints and 64-bit range proofs for quantities per [Cloak protocol](../../../spacesuit/spec.md).
 4. Pushes `n` [values](#value-type) to the stack, placing them in the **reverse** order as their corresponding commitments:
    ```
    A B C → cloak → C B A
@@ -1481,7 +1481,7 @@ _contract(predicate, payload) prog sig_ **signid** → _items..._
     R = sig[ 0..32]
     s = sig[32..64]
     ```
-8. Perform the [signature protocol](../../musig/docs/musig-spec.md#single-message-signature) using the transcript `T`, public key `P = predicate` and the values `R` and `s`:
+8. Perform the [signature protocol](../../../musig/docs/musig-spec.md#single-message-signature) using the transcript `T`, public key `P = predicate` and the values `R` and `s`:
     ```
     (s = dlog(R) + e·dlog(P))
     s·B  ==  R + c·P
@@ -1521,7 +1521,7 @@ _contract(predicate, payload) prog sig_ **signtag** → _items... tag_
     R = sig[ 0..32]
     s = sig[32..64]
     ```
-9. Perform the [signature protocol](../../musig/docs/musig-spec.md#single-message-signature) using the transcript `T`, public key `P = predicate` and the values `R` and `s`:
+9. Perform the [signature protocol](../../../musig/docs/musig-spec.md#single-message-signature) using the transcript `T`, public key `P = predicate` and the values `R` and `s`:
     ```
     (s = dlog(R) + e·dlog(P))
     s·B  ==  R + c·P

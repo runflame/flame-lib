@@ -20,4 +20,4 @@ tokio-util = {version = "0.3.1", features=["codec"]}
 bytes = "0.5.4"
 aes-siv = { version = "0.7", features = ["pmac"] }
 rand = "0.8"
-readerwriter = {path = "../readerwriter", features=["bytes"]}
+readerwriter = {path = "../../readerwriter", features=["bytes"]}
