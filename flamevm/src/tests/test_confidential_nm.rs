@@ -497,8 +497,8 @@ fn confidential_1_to_1_with_fee() {
         .open()
         .verify()          // assert success marker
         .drop_();          // discard count
-    // Fee opcode: pushes WideToken(-3, 0).
-    program = program.push_int(3u64).push_int(0u64).fee();
+    // Fee opcode: pushes WideToken(-3, FLAME_FLAVOR).
+    program = program.push_int(3u64).fee();
     // Output commitment Strings (witness-bearing prover-side).
     // Clone so the post-prove assertion can still read the
     // expected points off the local Open commitments.
@@ -712,7 +712,7 @@ fn confidential_with_fee_undersupply_rejected() {
         .open()
         .verify()
         .drop_();
-    program = program.push_int(3u64).push_int(0u64).fee();
+    program = program.push_int(3u64).fee();
     program = program
         .push_str(String::commitment(q_out))
         .push_str(String::commitment(f_out));
@@ -749,4 +749,3 @@ fn confidential_with_fee_undersupply_rejected() {
         }
     }
 }
-

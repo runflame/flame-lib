@@ -232,7 +232,7 @@ pub enum Instruction {
     Mix,                   // tokens… cmts… m n mix → tokens
     Decrypt,               // T f' f q' q decrypt → CT
     Verify,                // x verify → ø
-    Fee,                   // qty flv fee → -WT
+    Fee,                   // qty fee → -WT
     Label(u32),            // ø label:n → ø  (operand: label number)
     Jump(u32),             // ø jump:n → ø   (unconditional)
     JumpIf(u32),           // x jumpif:n → ø (jump iff x ≠ 0)

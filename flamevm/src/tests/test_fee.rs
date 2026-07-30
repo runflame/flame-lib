@@ -6,19 +6,22 @@ use super::test_helpers::*;
 
 /// `op_fee` records a `TxEntry::Fee(qty)` and pushes a `WideToken`
 /// debt onto the stack. We can't reach a clean exit (WideToken is
-/// non-droppable), so step through 3 instructions and inspect.
+/// non-droppable), so step through 2 instructions and inspect.
 #[test]
 fn phase19_op_fee_records_txlog_and_pushes_debt() {
     let pc_gens = PedersenGens::default();
-    // push:100, push:7, fee → 3 instructions.
-    let program = ScriptBuilder::new()
-        .push_int(100u64)
-        .push_int(7u64)
-        .fee();
-    let (vm, _prover) = run_external_steps(&pc_gens, program, 3);
+    // push:100, fee → 2 instructions.
+    let program = ScriptBuilder::new().push_int(100u64).fee();
+    let (vm, _prover) = run_external_steps(&pc_gens, program, 2);
     // Stack now holds the WideToken debt.
     assert_eq!(vm.current_call.stack.len(), 1);
-    assert!(matches!(vm.current_call.stack[0], Value::WideToken(_)));
+    let Value::WideToken(wide) = &vm.current_call.stack[0] else {
+        panic!("fee must push a WideToken");
+    };
+    assert_eq!(
+        wide.allocated().assignment.expect("prover assignment").f,
+        FLAME_FLAVOR.to_scalar_mod_order(),
+    );
     // Txlog: Header at 0, Fee(100) at 1.
     assert_eq!(vm.txlog.len(), 2);
     assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
@@ -28,8 +31,8 @@ fn phase19_op_fee_records_txlog_and_pushes_debt() {
 }
 
 /// Two `op_fee` calls accumulate into `total_fee` and produce
-/// two `TxEntry::Fee` entries. Step through 7 instructions:
-/// push, push, fee, push, push, fee — and stop before the
+/// two `TxEntry::Fee` entries. Step through 4 instructions:
+/// push, fee, push, fee — and stop before the
 /// (impossible) clean exit.
 #[test]
 fn phase19_op_fee_accumulates_total() {
@@ -39,12 +42,10 @@ fn phase19_op_fee_accumulates_total() {
     // before we inspect. We don't try to clean up.
     let program = ScriptBuilder::new()
         .push_int(30u64)
-        .push_int(0u64)
         .fee()
         .push_int(70u64)
-        .push_int(0u64)
         .fee();
-    let (vm, _prover) = run_external_steps(&pc_gens, program, 6);
+    let (vm, _prover) = run_external_steps(&pc_gens, program, 4);
     // 2 WideTokens stacked.
     assert_eq!(vm.current_call.stack.len(), 2);
     // Txlog: Header + Fee(30) + Fee(70).
@@ -66,12 +67,10 @@ fn phase19_op_fee_rejects_negative_qty() {
     // pushint8 neg 50 (qty = -50) — minimal (negative, no narrower form)
     script.push(0x11);
     script.push(50);
-    // push:0 (flv = 0) — canonical zero (pushint8 pos 0 is non-minimal)
-    script.push(0x00);
     // fee
     script.push(0x9b);
     let program = ScriptBuilder::parse(&script).expect("decode");
-    // Run all 3 instructions; the third (fee) must error.
+    // Run both instructions; fee must error.
     let mut vm = VM::new(
         dummy_header(),
         CallFrame::new(
@@ -84,7 +83,6 @@ fn phase19_op_fee_rejects_negative_qty() {
     );
     let mut prover = Prover::new(&pc_gens);
     vm.step_external(&mut prover).expect("push qty");
-    vm.step_external(&mut prover).expect("push flv");
     let err = vm.step_external(&mut prover).unwrap_err();
     assert!(matches!(err, VMError::FeeQtyNegative));
 }
@@ -95,7 +93,7 @@ fn phase19_op_fee_rejects_qty_over_cap() {
     let pc_gens = PedersenGens::default();
     // MAX_FEE = 2^24. Push 2^24 + 1.
     let over = (1u64 << 24) + 1;
-    let program = ScriptBuilder::new().push_int(over).push_int(0u64).fee();
+    let program = ScriptBuilder::new().push_int(over).fee();
     let mut vm = VM::new(
         dummy_header(),
         CallFrame::new(
@@ -108,7 +106,6 @@ fn phase19_op_fee_rejects_qty_over_cap() {
     );
     let mut prover = Prover::new(&pc_gens);
     vm.step_external(&mut prover).expect("push qty");
-    vm.step_external(&mut prover).expect("push flv");
     let err = vm.step_external(&mut prover).unwrap_err();
     assert!(matches!(err, VMError::FeeTooHigh));
 }
@@ -123,13 +120,10 @@ fn phase19_op_fee_rejects_aggregate_over_cap() {
     let half = (1u64 << 24) / 2; // 2^23
     let program = ScriptBuilder::new()
         .push_int(half)
-        .push_int(0u64)
         .fee()
         .push_int(half)
-        .push_int(0u64)
         .fee()
         .push_int(2u64)
-        .push_int(0u64)
         .fee();
     let mut vm = VM::new(
         dummy_header(),
@@ -143,18 +137,17 @@ fn phase19_op_fee_rejects_aggregate_over_cap() {
     );
     let mut prover = Prover::new(&pc_gens);
     // First fee — running total becomes half (2^23).
-    for _ in 0..3 {
-        vm.step_external(&mut prover).expect("first triple");
+    for _ in 0..2 {
+        vm.step_external(&mut prover).expect("first fee");
     }
     // Second fee — running total becomes MAX_FEE.
-    for _ in 0..3 {
-        vm.step_external(&mut prover).expect("second triple");
+    for _ in 0..2 {
+        vm.step_external(&mut prover).expect("second fee");
     }
     assert_eq!(vm.total_fee.total(), 1u64 << 24);
-    // Third triple: push, push, fee — the fee must error
+    // Third pair: push, fee — the fee must error
     // FeeTooHigh on aggregate overflow.
     vm.step_external(&mut prover).expect("push qty 3");
-    vm.step_external(&mut prover).expect("push flv 3");
     let err = vm.step_external(&mut prover).unwrap_err();
     assert!(matches!(err, VMError::FeeTooHigh));
 }
@@ -164,9 +157,8 @@ fn phase19_op_fee_rejects_aggregate_over_cap() {
 #[test]
 fn phase19_op_fee_rejects_internal_context() {
     let mut script = Vec::new();
-    // qty=1, flv=0, fee
+    // qty=1, fee
     script.push(0x01); // push:1
-    script.push(0x00); // push:0
     script.push(0x9b); // fee
     let mut vm = vm_with_script(script);
     let err = run_to_end(&mut vm).unwrap_err();
@@ -197,4 +189,3 @@ fn phase19_fee_qty_changes_txid() {
     let id_b = TxID::from_log(&log_b);
     assert_ne!(id_a, id_b, "fee qty must affect TxID");
 }
-

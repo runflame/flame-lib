@@ -23,7 +23,7 @@ pub use crate::{
     Token, WideToken, Value,
     PredicateTree, VbytePool,
     Instruction,
-    CheckedFee, MAX_FEE,
+    CheckedFee, FLAME_FLAVOR, MAX_FEE,
     CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,
 };
 
@@ -1090,4 +1090,3 @@ pub(crate) fn run_confidential_nm(
     assert_nm_txlog(&result, inputs, outputs);
     result
 }
-

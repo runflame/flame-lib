@@ -452,7 +452,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 98 | [split](#split) | | a q → a' b | Split quantity `q` off a cleartoken. |
 | 99 | [mix](#mix) | ext. | tokens… cmts… m n → tokens | Cloak: prove `m` input tokens balance `n` output commitments per flavor. |
 | 9a | [decrypt](#decrypt) | ext. | T f' f q' q → CT | Open an encrypted Token to a ClearToken using cleartext openings. |
-| 9b | [fee](#fee) | ext. | qty flv → −WT | Pay tx fee; push the balancing WideToken debt to net out via `mix`. |
+| 9b | [fee](#fee) | ext. | qty → −WT | Pay tx fee in the native Flame flavor; push the balancing WideToken debt to net out via `mix`. |
 |    | **Control flow** | | | |
 | a0 | [verify](#verify) | | x → ø | Assert: hard-fail if int is zero, enforce a Constraint, or batch an MSM. |
 | a1 | [label](#label) | | ø → ø | Mark a jump target (operand: label number); labels number 0,1,2… in order. |
@@ -1001,9 +1001,9 @@ _x_ → ø
 
 ### fee
 
-_qty flv_ → _−WT_
+_qty_ → _−WT_
 
-Pops `qty: Int253` (non-negative, `≤ MAX_FEE = 2²⁴`) and `flv: Int253`. The `2²⁴` cap is chosen so fee-rate arithmetic stays within `u64`: even a `2⁴⁰`-byte (~1 TB) transaction leaves 24 bits of headroom. Emits `TxEntry::Fee(qty as u64)` and bumps the per-tx [`CheckedFee`](#fees) accumulator (also capped at `MAX_FEE`). Allocates a fresh `WideToken` debt with `q = −qty`, `f = flv` (both cleartext-constrained) and pushes it. The script must balance the debt against real tokens, typically via [`mix`](#mix).
+Pops `qty: Int253` (non-negative, `≤ MAX_FEE = 2²⁴`). Fees always use the canonical native flavor `FLAME_FLAVOR = Int253::ZERO`. The `2²⁴` cap is chosen so fee-rate arithmetic stays within `u64`: even a `2⁴⁰`-byte (~1 TB) transaction leaves 24 bits of headroom. Emits `TxEntry::Fee(qty as u64)` and bumps the per-tx [`CheckedFee`](#fees) accumulator (also capped at `MAX_FEE`). Allocates a fresh `WideToken` debt with `q = −qty`, `f = FLAME_FLAVOR` (both cleartext-constrained) and pushes it. The script must balance the debt against native Flame tokens, typically via [`mix`](#mix).
 
 Hard-fails: `FeeQtyNegative`, `FeeTooHigh` (per-arg or aggregate overflow), `TypeNotInt253`, `ExternalOnly`. The blinded-fee branch is reserved for a future phase.
 

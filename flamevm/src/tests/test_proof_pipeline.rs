@@ -534,7 +534,6 @@ fn phase21_total_fee_flows_through_to_txresult() {
     // (we step through manually).
     let program = ScriptBuilder::new()
         .push_int(123u64)
-        .push_int(0u64)
         .fee();
     let mut vm = VM::new(
         dummy_header(),
@@ -547,7 +546,7 @@ fn phase21_total_fee_flows_through_to_txresult() {
         ),
     );
     let mut prover = Prover::new(&pc_gens);
-    for _ in 0..3 {
+    for _ in 0..2 {
         vm.step_external(&mut prover).expect("step ok");
     }
     // Inspect VM's total_fee directly (the Phase-21 TxResult
@@ -640,4 +639,3 @@ fn phase21_deferred_sigs_in_txresult() {
         _ => panic!("expected TxBound"),
     }
 }
-

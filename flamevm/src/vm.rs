@@ -13,7 +13,7 @@ use crate::errors::VMError;
 use crate::tx::TxHeader;
 use crate::cell::{TaprootProof, Cell, CellID, Predicate};
 use crate::constraints::Commitment;
-use crate::fees::CheckedFee;
+use crate::fees::{CheckedFee, FLAME_FLAVOR};
 use crate::token::{flavor_from_actor, flavor_from_predicate};
 use crate::tx::{TxEntry, TxID};
 use crate::{
@@ -2902,14 +2902,13 @@ impl VM {
         Ok(())
     }
 
-    /// _qty flv_ **fee** → _widetoken_
+    /// _qty_ **fee** → _widetoken_
     ///
     /// External-only. Records `TxEntry::Fee(qty)`, allocates a WideToken
-    /// debt with `q = -qty`, `f = flv`, pushes it.
+    /// debt with `q = -qty` and the native Flame flavor, then pushes it.
     fn op_fee<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         self.require_external()?;
         use bulletproofs::r1cs::ConstraintSystem;
-        let flv = self.pop_value()?.to_int253()?;
         let qty = self.pop_value()?.to_int253()?;
         if qty.is_negative() {
             return Err(VMError::FeeQtyNegative);
@@ -2917,7 +2916,7 @@ impl VM {
         let qty_u64 = qty.to_u64().ok_or(VMError::FeeTooHigh)?;
         self.total_fee.add(qty_u64)?;
         let qty_scalar: curve25519_dalek::scalar::Scalar = qty.into();
-        let flv_scalar: curve25519_dalek::scalar::Scalar = flv.into();
+        let flv_scalar: curve25519_dalek::scalar::Scalar = FLAME_FLAVOR.into();
         let q_var = delegate.cs().allocate(Some(-qty_scalar)).map_err(VMError::R1CSError)?;
         delegate.cs().constrain(q_var + qty_scalar);
         let f_var = delegate.cs().allocate(Some(flv_scalar)).map_err(VMError::R1CSError)?;

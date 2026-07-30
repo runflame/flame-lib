@@ -36,7 +36,7 @@ pub use constraints::{
 pub use crypto::{Merlin, Point};
 pub use dict::Dict;
 pub use errors::VMError;
-pub use fees::{CheckedFee, MAX_FEE};
+pub use fees::{CheckedFee, FLAME_FLAVOR, MAX_FEE};
 pub use int253::Int253;
 pub use msm::MultiscalarMul;
 pub use ops::Instruction;
