@@ -1,0 +1,7 @@
+[package]
+name = "btc-integration"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+corepc-client = "0.16.0"
