@@ -1161,7 +1161,7 @@ impl VM {
         Ok(idx)
     }
 
-    /// `0x1b` `pushtoken` — `flv → token`. Pops an `Int253` flavor from
+    /// `pushtoken` — `flv → token`. Pops an `Int253` flavor from
     /// the stack and pushes a zero-qty `ClearToken { qty: 0, flv }`. This
     /// is the canonical "empty bearer of a flavor" used as a starting
     /// point for issuance / borrow flows.
@@ -1171,7 +1171,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x1c` `drop` — pops the top and discards it if droppable.
+    /// `drop` — pops the top and discards it if droppable.
     fn op_drop(&mut self) -> Result<(), VMError> {
         let v = self.pop_value()?;
         if !v.is_droppable() {
@@ -1183,14 +1183,14 @@ impl VM {
         Ok(())
     }
 
-    /// `0x1e` `dup` — pops `k`, then copies the now-`k`-th item from top
+    /// `dup` — pops `k`, then copies the now-`k`-th item from top
     /// onto the top.
     fn op_dup(&mut self) -> Result<(), VMError> {
         let k = self.pop_value()?.to_int253()?;
         self.op_dup_k(self.int253_to_stack_index(k)?)
     }
 
-    /// `0x20..=0x2f` `dup:k` — copies `stack[top - k]` onto the top.
+    /// `dup:k` — copies `stack[top - k]` onto the top.
     /// Requires the source value to be copyable.
     fn op_dup_k(&mut self, k: usize) -> Result<(), VMError> {
         let stack = &self.current_call.stack;
@@ -1203,14 +1203,14 @@ impl VM {
         Ok(())
     }
 
-    /// `0x1f` `roll` — pops `k`, then moves the `k`-th item from top to
+    /// `roll` — pops `k`, then moves the `k`-th item from top to
     /// the top.
     fn op_roll(&mut self) -> Result<(), VMError> {
         let k = self.pop_value()?.to_int253()?;
         self.op_roll_k(self.int253_to_stack_index(k)?)
     }
 
-    /// `0x30..=0x3f` `roll:k` — removes `stack[top - k]` and pushes it
+    /// `roll:k` — removes `stack[top - k]` and pushes it
     /// back as the new top. `roll:0` is a no-op.
     fn op_roll_k(&mut self, k: usize) -> Result<(), VMError> {
         let stack = &mut self.current_call.stack;
@@ -1223,7 +1223,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x80` `transcript` — `label → merlin`. Pops a label string,
+    /// `transcript` — `label → merlin`. Pops a label string,
     /// creates a fresh Merlin transcript bound to it.
     fn op_transcript(&mut self) -> Result<(), VMError> {
         let label = self.pop_value()?.to_string()?;
@@ -1231,7 +1231,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x81` `twrite` — `merlin label str → merlin`. Pops `str` (top),
+    /// `twrite` — `merlin label str → merlin`. Pops `str` (top),
     /// `label`, and the merlin; absorbs `(label, str)` into the
     /// transcript; pushes merlin back.
     fn op_twrite(&mut self) -> Result<(), VMError> {
@@ -1243,7 +1243,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x82` `tread` — `merlin label n → merlin str`. Squeezes `n`
+    /// `tread` — `merlin label n → merlin str`. Squeezes `n`
     /// bytes of challenge from the transcript under `label`; pushes the
     /// merlin back, then the new String.
     fn op_tread(&mut self) -> Result<(), VMError> {
@@ -1257,10 +1257,9 @@ impl VM {
         Ok(())
     }
 
-    /// Pops a String, pushes its hash digest. Generic over the digest
-    /// `H`; dispatch fixes the concrete hash per opcode: `sha256` (`0x83`),
-    /// `sha512` (`0x6d`), `sha3` (`0x6e`, FIPS-202), `keccak256` (`0x4e`,
-    /// pre-FIPS Keccak, Ethereum-compatible).
+    /// Pops a String and pushes its hash digest. Dispatch selects
+    /// `sha256`, `sha512`, `sha3` (FIPS-202), or `keccak256`
+    /// (pre-FIPS Keccak, Ethereum-compatible).
     fn op_hash<H: sha2::Digest>(&mut self) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
         let digest = H::digest(s.to_bytes());
@@ -1268,7 +1267,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x6f` `log` — `str → ø`. Pops a String, emits
+    /// `log` — `str → ø`. Pops a String, emits
     /// `TxEntry::Data(bytes)` into the txlog. Witness-bearing String
     /// variants serialize via `to_bytes` so prover and verifier emit
     /// the same canonical bytes.
@@ -1278,7 +1277,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x60` `dict` — `... val key val key n → dict`. Pops `n`, then `n`
+    /// `dict` — `... val key val key n → dict`. Pops `n`, then `n`
     /// key/value pairs (key on top of each pair). Duplicate keys error.
     fn op_dict(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
@@ -1299,7 +1298,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x61` `put` — `dict k v → dict'`. Strict insert; fails on
+    /// `put` — `dict k v → dict'`. Strict insert; fails on
     /// occupied key.
     fn op_put(&mut self) -> Result<(), VMError> {
         let v = self.pop_value()?;
@@ -1315,7 +1314,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x62` `replace` — `dict k v → dict' {prev 1 | 0}`. Overwrites
+    /// `replace` — `dict k v → dict' {prev 1 | 0}`. Overwrites
     /// the slot, returning the prior value (if any) as an optional.
     /// Stack order matches `put`: `v` on top, `k` below.
     fn op_replace(&mut self) -> Result<(), VMError> {
@@ -1339,7 +1338,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x63` `get` — `dict k → dict' k v`. Removes and returns the
+    /// `get` — `dict k → dict' k v`. Removes and returns the
     /// value at `k`. Fails if the key is missing.
     fn op_get(&mut self) -> Result<(), VMError> {
         let k = self.pop_value()?.to_int253()?;
@@ -1351,7 +1350,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x64` `getopt` — `dict k → dict' {v 1 | 0}`. Like `get`, but
+    /// `getopt` — `dict k → dict' {v 1 | 0}`. Like `get`, but
     /// soft-fails (pushes `0`) when the key is missing.
     fn op_getopt(&mut self) -> Result<(), VMError> {
         let k = self.pop_value()?.to_int253()?;
@@ -1362,7 +1361,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x65` `getdup` — `dict k → dict {v 1 | 0}`. Copies the value
+    /// `getdup` — `dict k → dict {v 1 | 0}`. Copies the value
     /// without consuming it. Soft-fails with `0` on missing key; hard
     /// errors if the value exists but isn't copyable.
     fn op_getdup(&mut self) -> Result<(), VMError> {
@@ -1388,7 +1387,7 @@ impl VM {
         }
     }
 
-    /// `0x66` `first` — `dict → dict {k 1 | 0}`. Pushes the smallest key
+    /// `first` — `dict → dict {k 1 | 0}`. Pushes the smallest key
     /// alongside a flag, or `0` if the dict is empty.
     fn op_first(&mut self) -> Result<(), VMError> {
         let dict = self.pop_value()?.to_dict()?;
@@ -1398,7 +1397,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x67` `last` — `dict → dict {k 1 | 0}`. Mirror of `first`.
+    /// `last` — `dict → dict {k 1 | 0}`. Mirror of `first`.
     fn op_last(&mut self) -> Result<(), VMError> {
         let dict = self.pop_value()?.to_dict()?;
         let k = dict.last_key();
@@ -1407,7 +1406,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x68` `next` — `dict k → dict {k' 1 | 0}`. Smallest key strictly
+    /// `next` — `dict k → dict {k' 1 | 0}`. Smallest key strictly
     /// greater than `k`, or `0` if no such key exists.
     fn op_next(&mut self) -> Result<(), VMError> {
         let k = self.pop_value()?.to_int253()?;
@@ -1477,7 +1476,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x41` `readint` — `s → s' x 1 | s 0`. Reads the canonical
+    /// `readint` — `s → s' x 1 | s 0`. Reads the canonical
     /// 32-byte `Int253` (bit 255 = sign, bits 0..254 = magnitude) from
     /// the front of `s`. Equivalent to `readbits(s, 256)`. Soft-fails
     /// on insufficient bytes, magnitude ≥ ℓ, or negative zero.
@@ -1503,7 +1502,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x42` `readstr` — `s n → s' s'' 1 | s 0`. Splits off the first
+    /// `readstr` — `s n → s' s'' 1 | s 0`. Splits off the first
     /// `n` bytes of `s` as a new String.
     fn op_read_str(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
@@ -1519,7 +1518,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x43` `readpoint` — `s → s' point 1 | s 0`. Splits off the first
+    /// `readpoint` — `s → s' point 1 | s 0`. Splits off the first
     /// 32 bytes of `s` as a `Point` (decompressability not validated
     /// here; later opcodes that consume the point may reject it).
     fn op_read_point(&mut self) -> Result<(), VMError> {
@@ -1558,7 +1557,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x45` `writeint` — `s x → s'`. Appends the canonical 32-byte
+    /// `writeint` — `s x → s'`. Appends the canonical 32-byte
     /// `Int253` representation of `x` to `s` (bit 255 carries the sign;
     /// bits 0..254 carry the magnitude). Equivalent to
     /// `writebits(s, x, 256)`.
@@ -1570,7 +1569,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x46` `append` — `s s' → s''`. Concatenates two strings.
+    /// `append` — `s s' → s''`. Concatenates two strings.
     fn op_append(&mut self) -> Result<(), VMError> {
         let s2 = self.pop_value()?.to_string()?;
         let s1 = self.pop_value()?.to_string()?;
@@ -1595,7 +1594,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x47` `writezeros` — `s n → s'`. Appends `n` zero bytes.
+    /// `writezeros` — `s n → s'`. Appends `n` zero bytes.
     fn op_write_zeros(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
         self.charge_mem(n)?;
@@ -1605,14 +1604,14 @@ impl VM {
         Ok(())
     }
 
-    /// `0x48` `bitnot` — `s → s'`. Inverts every bit.
+    /// `bitnot` — `s → s'`. Inverts every bit.
     fn op_bit_not(&mut self) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
         self.push_value(Value::String(s.bit_not()));
         Ok(())
     }
 
-    /// `0x49` `bitor` — `a b → c`. Bitwise OR. Fails if sizes differ.
+    /// `bitor` — `a b → c`. Bitwise OR. Fails if sizes differ.
     fn op_bit_or(&mut self) -> Result<(), VMError> {
         let b = self.pop_value()?.to_string()?;
         let a = self.pop_value()?.to_string()?;
@@ -1621,7 +1620,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x4a` `bitand` — `a b → c`. Bitwise AND. Fails on size mismatch.
+    /// `bitand` — `a b → c`. Bitwise AND. Fails on size mismatch.
     fn op_bit_and(&mut self) -> Result<(), VMError> {
         let b = self.pop_value()?.to_string()?;
         let a = self.pop_value()?.to_string()?;
@@ -1630,7 +1629,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x4b` `bitxor` — `a b → c`. Bitwise XOR. Fails on size mismatch.
+    /// `bitxor` — `a b → c`. Bitwise XOR. Fails on size mismatch.
     fn op_bit_xor(&mut self) -> Result<(), VMError> {
         let b = self.pop_value()?.to_string()?;
         let a = self.pop_value()?.to_string()?;
@@ -1639,7 +1638,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x4c` `shiftleft` — `a n → b c`. Shifts `a` left by `n ≤ 256`
+    /// `shiftleft` — `a n → b c`. Shifts `a` left by `n ≤ 256`
     /// bits; pushes the shifted string and the removed bits (zero-padded
     /// on the left).
     fn op_shift_left(&mut self) -> Result<(), VMError> {
@@ -1651,7 +1650,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x4d` `shiftright` — `a n → b c`. Mirror of `shiftleft`; removed
+    /// `shiftright` — `a n → b c`. Mirror of `shiftleft`; removed
     /// bits are zero-padded on the right.
     fn op_shift_right(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(256)?;
@@ -1662,7 +1661,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x50` `abs` — pops an `Int253`, pushes its magnitude (positive
+    /// `abs` — pops an `Int253`, pushes its magnitude (positive
     /// `Int253`), then pushes the original sign as `Int253` (`0` for
     /// non-negative, `1` for negative). Top of stack ends up holding
     /// the sign bit.
@@ -1758,7 +1757,7 @@ impl VM {
         }
     }
 
-    /// `0x55` `divmod` — `x z → d r`. Truncated division: `sign(d) =
+    /// `divmod` — `x z → d r`. Truncated division: `sign(d) =
     /// sign(x) XOR sign(z)`, `sign(r) = sign(x)`. Errors on zero divisor.
     fn op_divmod(&mut self) -> Result<(), VMError> {
         let z = self.pop_value()?.to_int253()?;
@@ -1769,7 +1768,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x56` `mod252` — pops a `String` of 0..=64 bytes, interprets it
+    /// `mod252` — pops a `String` of 0..=64 bytes, interprets it
     /// as a little-endian unsigned integer, reduces it modulo ℓ, and
     /// pushes the result as a non-negative `Int253`.
     fn op_mod252(&mut self) -> Result<(), VMError> {
@@ -1810,7 +1809,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x5f` `size` — peeks the top value and pushes its length as an
+    /// `size` — peeks the top value and pushes its length as an
     /// `Int253` (String byte count, Dict entry count). Other types
     /// error with `TypeHasNoLength`.
     fn op_size(&mut self) -> Result<(), VMError> {
@@ -1828,7 +1827,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x79 verify` — pop one and assert truthiness.
+    /// `verify` — pop one and assert truthiness.
     ///
     /// - `Int253`: errors `VerifyFailed` if zero, else pops.
     /// - `Constraint`: hands the constraint to the CS so the proof
@@ -1942,7 +1941,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x7f` `type` — peeks the top value and pushes its type code as an
+    /// `type` — peeks the top value and pushes its type code as an
     /// `Int253`. The original value remains on the stack underneath.
     fn op_type(&mut self) -> Result<(), VMError> {
         let code = self
@@ -2756,7 +2755,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x5d expr` — `var → expr`. Pops a `Variable`, calls
+    /// `expr` — `var → expr`. Pops a `Variable`, calls
     /// `delegate.commit_variable` to allocate a CS-side variable for
     /// the commitment, pushes a one-term Expression.
     fn op_expr<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
@@ -2823,7 +2822,7 @@ impl VM {
         }
     }
 
-    /// `0x5a scalar` — `string → expr`. Pops a String, downcasts to
+    /// `scalar` — `string → expr`. Pops a String, downcasts to
     /// `Int253` via `String::to_scalar`, pushes `Expression::Constant`.
     /// For `String::Opaque(bytes)`, the bytes are parsed as a
     /// canonical sign-magnitude Int253. For `String::Scalar(i)`, the
@@ -2846,7 +2845,7 @@ impl VM {
         Ok(())
     }
 
-    /// Encrypted-branch body for `0x73 borrow`. Caller has already
+    /// Encrypted branch of `borrow`. The caller has already
     /// popped `(qty, flv)` and verified both are `Variable`; this
     /// just runs the CS plumbing — range-proof + additive-inverse
     /// allocation — and pushes the `WideToken` / `Token` pair.
@@ -3031,7 +3030,7 @@ impl VM {
         Ok(())
     }
 
-    /// `0x77 decrypt` — `token f f' q q' → cleartoken`. Reveals a
+    /// `decrypt` — `token f f' q q' → cleartoken`. Reveals a
     /// cleartext quantity / flavor pair for an encrypted Token by
     /// supplying their cleartext values (`f`, `q`) and Pedersen
     /// blinding factors (`f'`, `q'`).
