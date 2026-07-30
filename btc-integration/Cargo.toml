@@ -4,4 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-corepc-client = "0.16.0"
+corepc-client = { version = "0.16.0", features = ["client-sync"] }
+serde_json = "1"
+
+[dev-dependencies]
+bitcoind = { version = "0.41", features = ["31_0", "download"] }
