@@ -2003,11 +2003,10 @@ impl VM {
     /// _qty:Int253 tag_ **issuepub** → _CT_
     ///
     /// Cleartext mint under the enclosing actor's identity. Requires
-    /// `CallKind::ActorCall`; from `ExternalRoot` errors
-    /// `OpcodeRequiresActorContext`, from `CellOpen` the same (issuance
-    /// domains are disjoint — see spec.md §issuepub). Non-`Int253` qty
-    /// hard-fails `TypeNotInt253`; the confidential path lives in
-    /// [`op_issuepriv`].
+    /// an internal actor frame; `ExternalRoot` and `CellOpen` error
+    /// `OpcodeRequiresActorContext` (issuance domains are disjoint —
+    /// see spec.md §issuepub). Non-`Int253` qty hard-fails
+    /// `TypeNotInt253`; the confidential path lives in [`op_issuepriv`].
     fn op_issuepub(&mut self) -> Result<(), VMError> {
         let tag = self.pop_value()?.to_string()?;
         let qty = match self.pop_value()? {
@@ -2434,11 +2433,13 @@ impl VM {
         })
     }
 
-    /// _args… k refund gas bytes method addr_ **send** → ø
+    /// _args… k refund gas bytes addr_ **send** → ø
     ///
     /// Queues a [`Message`] for the consensus layer to instantiate as a
     /// future internal tx and emits a `TxEntry::Send`. The anchor is
-    /// ratcheted from `last_anchor` before the entry is appended.
+    /// ratcheted from `last_anchor` before the entry is appended. There
+    /// is no VM-level method operand; a selector, when used, is an
+    /// ordinary payload argument (ADR 0020).
     fn op_send(&mut self) -> Result<(), VMError> {
         let target = ActorID::Hash(self.pop_string_32()?);
         let (gas, vbytes) = self.pop_gas_bytes()?;
@@ -2474,12 +2475,13 @@ impl VM {
         Ok(())
     }
 
-    /// _args… k gas bytes method addr_ **call** → _results…_
+    /// _args… k gas bytes addr_ **call** → _results… k' 1 | 0_
     ///
-    /// Synchronous actor-to-actor call. Re-entrancy guard rejects direct
-    /// or indirect cycles. Emits no txlog entry — calls are intra-tx
-    /// control flow; the callee's state mutation (if any) is recorded
-    /// later via `TxEntry::ActorSave` when `op_save` runs.
+    /// Synchronous actor-to-actor call. Re-entry is gated by actor-state
+    /// presence: a checked-out callee soft-fails with `0`; otherwise
+    /// re-entry is permitted. There is no VM-level method operand
+    /// (ADR 0020). Calls emit no txlog entry; a callee state mutation is
+    /// recorded later by `op_save`.
     fn op_call(
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
@@ -2556,17 +2558,17 @@ impl VM {
         Ok(())
     }
 
-    /// **load** → _dict_
+    /// **load** → _value_
     ///
-    /// **Checks out** the current actor's state: moves the Dict out of
+    /// **Checks out** the current actor's state: moves its portable
+    /// `Value` out of
     /// the registry (the actor goes empty) and pushes it onto the
     /// stack. While checked out, any call/load against this actor fails
     /// `ActorEmpty` — the state's presence is the re-entrancy lock (ADR
-    /// 0017). A frame must `save` it back (or dismantle it) before
-    /// returning, per the frame-end clean-stack rule; a load left
-    /// unmatched at tx end self-destructs the actor (Q6). Conventional
-    /// shape `{0x00 → public, 0x01 → private}` (spec.md §Actors), not
-    /// VM-enforced. Re-loading an already-checked-out actor → `ActorEmpty`.
+    /// 0017). A frame must `save` it back or explicitly dismantle it
+    /// before returning; leftover state fails the clean-stack rule and
+    /// rolls back. State shape is not VM-enforced. Re-loading an
+    /// already-checked-out actor errors `ActorEmpty`.
     fn op_load(
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
@@ -2615,8 +2617,8 @@ impl VM {
         registry.save_state(&actor, state)?;
         // Structural effect. State-machine replay applies these
         // last-write-wins per actor; the merkle leaf hashes
-        // `state_root(state)`, while the entry carries the full
-        // Dict for direct consumers.
+        // `state_root(state)`, while the entry carries the full state
+        // value for direct consumers.
         self.txlog.push(TxEntry::ActorSave {
             actor,
             state: state_for_log,
