@@ -2699,7 +2699,7 @@ impl VM {
     /// Pushes the transaction's `locktime` and a unit flag
     /// (0 = block height, 1 = Unix timestamp). Bitcoin BIP-65
     /// convention: `flag = 1` iff `locktime >= LOCKTIME_TIMESTAMP_THRESHOLD`
-    /// (i.e. ≥ Tue 2025-11-05 = 500_000_000 = ~1985-11-05 Unix epoch).
+    /// (i.e. ≥ 500_000_000, approximately 1985-11-05 Unix time).
     fn op_timelock(&mut self) -> Result<(), VMError> {
         let lt = self.header.locktime as u64;
         let flag: u64 = if lt >= LOCKTIME_TIMESTAMP_THRESHOLD as u64 { 1 } else { 0 };
