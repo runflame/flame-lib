@@ -13,7 +13,7 @@ pub use parser::{parse_mint_proof_output, parse_mint_proofs};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use corepc_client::bitcoin::{Amount, ScriptBuf, Transaction, TxOut, absolute, transaction};
+    use corepc_client::bitcoin::{Amount, ScriptBuf, TxOut};
 
     fn proof(flag: bool) -> MintProof {
         MintProof {
