@@ -1,7 +1,7 @@
 use corepc_client::bitcoin::{Amount, Transaction, TxOut};
 
-use super::constants::{MINT_PROOF_MAGIC, OP_RETURN, PUSH_DATA_LEN};
-use super::mint_proof::MintProof;
+use crate::mint_proofs::core::constants::{MINT_PROOF_MAGIC, OP_RETURN, PUSH_DATA_LEN};
+use crate::mint_proofs::core::minting_proof_data::MintingProofData;
 
 struct MintProofParser<'a> {
     bytes: &'a [u8],
@@ -13,7 +13,7 @@ impl<'a> MintProofParser<'a> {
         Self { bytes, cursor: 0 }
     }
 
-    fn parse(mut self) -> Option<MintProof> {
+    fn parse(mut self) -> Option<MintingProofData> {
         if self.read_byte()? != OP_RETURN
             || self.read_byte()? != PUSH_DATA_LEN
             || self.read_array::<3>()? != &MINT_PROOF_MAGIC
@@ -33,7 +33,7 @@ impl<'a> MintProofParser<'a> {
             return None;
         }
 
-        Some(MintProof {
+        Some(MintingProofData {
             network_id,
             flame_block_hash,
             want_participate_in_consensus,
@@ -52,12 +52,12 @@ impl<'a> MintProofParser<'a> {
     }
 }
 
-/// Parses a mint proof from a Bitcoin transaction output.
+/// Parses minting-proof data from a Bitcoin transaction output.
 ///
 /// The output value must be non-zero. The script must use the exact canonical
 /// encoding from the protocol, including the one-byte `0x25` data push. Boolean
 /// flag values other than `0` and `1` are rejected.
-pub fn parse_mint_proof_output(output: &TxOut) -> Option<MintProof> {
+pub fn parse_mint_proof_output(output: &TxOut) -> Option<MintingProofData> {
     if output.value == Amount::ZERO {
         return None;
     }
@@ -65,8 +65,8 @@ pub fn parse_mint_proof_output(output: &TxOut) -> Option<MintProof> {
     MintProofParser::new(output.script_pubkey.as_bytes()).parse()
 }
 
-/// Returns all valid mint proofs from a Bitcoin transaction, in output order.
-pub fn parse_mint_proofs(transaction: &Transaction) -> Vec<MintProof> {
+/// Returns all valid minting-proof data from a transaction, in output order.
+pub fn parse_mint_proofs(transaction: &Transaction) -> Vec<MintingProofData> {
     transaction
         .output
         .iter()

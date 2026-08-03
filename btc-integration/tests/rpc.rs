@@ -1,6 +1,6 @@
 use bitcoind::anyhow::Context;
 use btc_integration::test::setup;
-use btc_integration::{BlockTip, MintProof, MintProofSender, RpcApi};
+use btc_integration::{BlockTip, MintProofSender, MintingProofData, RpcApi};
 use corepc_client::bitcoin::Amount;
 use std::sync::Arc;
 
@@ -59,13 +59,13 @@ fn mint_proof_sender_works_with_core31_rpc_api() -> bitcoind::anyhow::Result<()>
     let confirmed_mint_output = confirmed_transaction
         .output
         .iter()
-        .find(|output| MintProof::from_tx_out(output).is_some())
+        .find(|output| MintingProofData::from_tx_out(output).is_some())
         .context("confirmed transaction does not contain a mint-proof output")?;
 
     assert_eq!(confirmed_mint_output.value, sent_amount);
     assert_eq!(
-        MintProof::from_tx_out(confirmed_mint_output),
-        Some(MintProof {
+        MintingProofData::from_tx_out(confirmed_mint_output),
+        Some(MintingProofData {
             network_id: 1,
             flame_block_hash,
             want_participate_in_consensus: true,

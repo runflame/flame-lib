@@ -8,7 +8,7 @@ use corepc_client::{
     client_sync::Error as RpcError,
 };
 
-use crate::{MintProof, RpcApi};
+use crate::{MintingProofData, RpcApi};
 
 #[derive(Debug)]
 pub enum MintProofSendError {
@@ -61,7 +61,7 @@ impl<R: RpcApi> MintProofSender<R> {
             return Err(MintProofSendError::ZeroAmount);
         }
 
-        let proof = MintProof {
+        let proof = MintingProofData {
             network_id: self.network_id,
             flame_block_hash,
             want_participate_in_consensus: wants_to_participate,

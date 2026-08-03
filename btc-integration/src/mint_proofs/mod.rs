@@ -1,22 +1,22 @@
 //! Flame mint proofs embedded in Bitcoin transaction outputs.
 
-mod constants;
-mod creation;
-mod mint_proof;
-mod parser;
+mod core;
+pub mod mint_proof_sender;
+pub mod minting_proof_storage;
 
-pub use constants::{MINT_PROOF_DATA_LEN, MINT_PROOF_MAGIC};
-pub use creation::mint_proof_to_script;
-pub use mint_proof::MintProof;
-pub use parser::{parse_mint_proof_output, parse_mint_proofs};
+pub use core::constants::{MINT_PROOF_DATA_LEN, MINT_PROOF_MAGIC};
+pub use core::creation::mint_proof_to_script;
+pub use core::minting_proof_data::MintingProofData;
+pub use core::parser::{parse_mint_proof_output, parse_mint_proofs};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mint_proofs::core::constants;
     use corepc_client::bitcoin::{Amount, ScriptBuf, TxOut};
 
-    fn proof(flag: bool) -> MintProof {
-        MintProof {
+    fn proof(flag: bool) -> MintingProofData {
+        MintingProofData {
             network_id: 7,
             flame_block_hash: [0xab; 32],
             want_participate_in_consensus: flag,
@@ -46,7 +46,7 @@ mod tests {
         let expected = proof(false);
         let tx_out = output(1, expected.to_script());
 
-        assert_eq!(MintProof::from_tx_out(&tx_out), Some(expected));
+        assert_eq!(MintingProofData::from_tx_out(&tx_out), Some(expected));
     }
 
     #[test]
