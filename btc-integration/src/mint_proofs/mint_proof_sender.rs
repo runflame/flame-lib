@@ -50,7 +50,7 @@ impl<R: RpcApi> MintProofSender<R> {
         Self { rpc, network_id }
     }
 
-    pub fn send_mint_proof(
+    pub async fn send_mint_proof(
         &self,
         amount: Amount,
         inputs: &[OutPoint],
@@ -85,9 +85,10 @@ impl<R: RpcApi> MintProofSender<R> {
             }],
         };
 
-        let signed_transaction = self.rpc.fund_and_sign_transaction(&transaction)?;
+        let signed_transaction = self.rpc.fund_and_sign_transaction(&transaction).await?;
         Ok(self
             .rpc
-            .publish_mint_transaction(&signed_transaction, amount)?)
+            .publish_mint_transaction(&signed_transaction, amount)
+            .await?)
     }
 }

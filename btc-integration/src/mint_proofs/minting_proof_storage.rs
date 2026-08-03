@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use corepc_client::bitcoin::{Address, Amount};
+use corepc_client::bitcoin::Amount;
 
 use crate::{BlockTip, MintingProofData};
 
@@ -8,7 +8,6 @@ use crate::{BlockTip, MintingProofData};
 pub struct MintingProof {
     pub minting_proof_data: MintingProofData,
     pub burned_amount: Amount,
-    pub btc_sender_address: Address,
     pub bitcoin_block_tip: BlockTip,
 }
 
@@ -57,16 +56,11 @@ impl MintingProofStorage for InMemoryMintingProofStorage {
 mod tests {
     use std::str::FromStr;
 
-    use corepc_client::bitcoin::{Address, Amount, BlockHash, Network};
+    use corepc_client::bitcoin::{Amount, BlockHash};
 
     use super::*;
 
     fn proof(block_hash: [u8; 32], burned_sats: u64, bitcoin_height: u64) -> MintingProof {
-        let btc_sender_address = Address::from_str("bcrt1qcmnpjjjw78yhyjrxtql6lk7pzpujs3h244p7ae")
-            .expect("valid address")
-            .require_network(Network::Regtest)
-            .expect("regtest address");
-
         MintingProof {
             minting_proof_data: MintingProofData {
                 network_id: 7,
@@ -74,7 +68,6 @@ mod tests {
                 want_participate_in_consensus: true,
             },
             burned_amount: Amount::from_sat(burned_sats),
-            btc_sender_address,
             bitcoin_block_tip: BlockTip {
                 hash: BlockHash::from_str(
                     "0000000000000000000000000000000000000000000000000000000000000001",

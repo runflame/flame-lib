@@ -1,5 +1,8 @@
 //! Bitcoin Core RPC abstractions.
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use corepc_client::{
     bitcoin::{
         Amount, BlockHash, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, Txid, Witness,
@@ -9,6 +12,7 @@ use corepc_client::{
     types::v31::{SendRawTransaction, WaitForNewBlock},
 };
 use serde_json::json;
+use tokio::task;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockTip {
@@ -16,18 +20,23 @@ pub struct BlockTip {
     pub height: u64,
 }
 
-pub trait RpcApi {
-    fn transactions_in_block(&self, block_hash: BlockHash) -> Result<Vec<Transaction>>;
+#[async_trait]
+pub trait RpcApi: Send + Sync {
+    async fn block_tip(&self) -> Result<BlockTip>;
 
-    fn transactions_at_height(&self, height: u64) -> Result<(BlockHash, Vec<Transaction>)>;
+    async fn transactions_in_block(&self, block_hash: BlockHash) -> Result<Vec<Transaction>>;
 
-    fn wait_for_next_block(&self, prev_block: BlockTip) -> Result<BlockTip>;
+    async fn transactions_at_height(&self, height: u64) -> Result<(BlockHash, Vec<Transaction>)>;
 
-    fn publish_transaction(&self, signed_transaction: &Transaction) -> Result<Txid>;
+    async fn block_hash_at_height(&self, height: u64) -> Result<BlockHash>;
 
-    fn fund_and_sign_transaction(&self, transaction: &Transaction) -> Result<Transaction>;
+    async fn wait_for_next_block(&self, prev_block: BlockTip) -> Result<BlockTip>;
 
-    fn publish_mint_transaction(
+    async fn publish_transaction(&self, signed_transaction: &Transaction) -> Result<Txid>;
+
+    async fn fund_and_sign_transaction(&self, transaction: &Transaction) -> Result<Transaction>;
+
+    async fn publish_mint_transaction(
         &self,
         transaction: &Transaction,
         max_burn_amount: Amount,
@@ -36,109 +45,151 @@ pub trait RpcApi {
 
 #[derive(Debug)]
 pub struct Core31RpcApi {
-    client: Client,
+    client: Arc<Client>,
 }
 
 impl Core31RpcApi {
     pub fn new(url: &str, auth: Auth) -> Result<Self> {
         Ok(Self {
-            client: Client::new_with_auth(url, auth)?,
+            client: Arc::new(Client::new_with_auth(url, auth)?),
         })
     }
 }
 
+async fn spawn_core_call<T, F>(call: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    task::spawn_blocking(call)
+        .await
+        .map_err(|error| Error::Returned(format!("Bitcoin Core RPC task failed: {error}")))?
+}
+
+#[async_trait]
 impl RpcApi for Core31RpcApi {
-    fn transactions_in_block(&self, block_hash: BlockHash) -> Result<Vec<Transaction>> {
-        Ok(self.client.get_block(block_hash)?.txdata)
+    async fn block_tip(&self) -> Result<BlockTip> {
+        let client = Arc::clone(&self.client);
+        spawn_core_call(move || {
+            let info = client.get_blockchain_info()?;
+            let height = u64::try_from(info.blocks).map_err(|_| Error::UnexpectedStructure)?;
+
+            Ok(BlockTip {
+                hash: info.best_block_hash.parse()?,
+                height,
+            })
+        })
+        .await
     }
 
-    fn transactions_at_height(&self, height: u64) -> Result<(BlockHash, Vec<Transaction>)> {
-        let block_hash = self.client.get_block_hash(height)?.block_hash()?;
-        let transactions = self.transactions_in_block(block_hash)?;
-
-        Ok((block_hash, transactions))
+    async fn transactions_in_block(&self, block_hash: BlockHash) -> Result<Vec<Transaction>> {
+        let client = Arc::clone(&self.client);
+        spawn_core_call(move || Ok(client.get_block(block_hash)?.txdata)).await
     }
 
-    fn wait_for_next_block(&self, prev_block: BlockTip) -> Result<BlockTip> {
-        loop {
-            // Keep the server-side wait below corepc-client's 60-second HTTP timeout.
-            // Passing current_tip prevents missing a tip change between requests.
-            let response: WaitForNewBlock = self.client.call(
-                "waitfornewblock",
-                &[json!(45_000), json!(prev_block.hash.to_string())],
-            )?;
-            let hash = response.hash.parse::<BlockHash>()?;
+    async fn transactions_at_height(&self, height: u64) -> Result<(BlockHash, Vec<Transaction>)> {
+        let client = Arc::clone(&self.client);
+        spawn_core_call(move || {
+            let block_hash = client.get_block_hash(height)?.block_hash()?;
+            let transactions = client.get_block(block_hash)?.txdata;
 
-            if hash != prev_block.hash {
-                let height =
-                    u64::try_from(response.height).map_err(|_| Error::UnexpectedStructure)?;
-                return Ok(BlockTip { hash, height });
+            Ok((block_hash, transactions))
+        })
+        .await
+    }
+
+    async fn block_hash_at_height(&self, height: u64) -> Result<BlockHash> {
+        let client = Arc::clone(&self.client);
+        spawn_core_call(move || Ok(client.get_block_hash(height)?.block_hash()?)).await
+    }
+
+    async fn wait_for_next_block(&self, prev_block: BlockTip) -> Result<BlockTip> {
+        let client = Arc::clone(&self.client);
+        spawn_core_call(move || {
+            loop {
+                // Keep the server-side wait below corepc-client's 60-second HTTP timeout.
+                // Passing current_tip prevents missing a tip change between requests.
+                let response: WaitForNewBlock = client.call(
+                    "waitfornewblock",
+                    &[json!(45_000), json!(prev_block.hash.to_string())],
+                )?;
+                let hash = response.hash.parse::<BlockHash>()?;
+
+                if hash != prev_block.hash {
+                    let height =
+                        u64::try_from(response.height).map_err(|_| Error::UnexpectedStructure)?;
+                    return Ok(BlockTip { hash, height });
+                }
             }
-        }
+        })
+        .await
     }
 
-    fn publish_transaction(&self, signed_transaction: &Transaction) -> Result<Txid> {
-        Ok(self
-            .client
-            .send_raw_transaction(signed_transaction)?
-            .txid()?)
+    async fn publish_transaction(&self, signed_transaction: &Transaction) -> Result<Txid> {
+        let client = Arc::clone(&self.client);
+        let signed_transaction = signed_transaction.clone();
+        spawn_core_call(move || Ok(client.send_raw_transaction(&signed_transaction)?.txid()?)).await
     }
 
-    fn fund_and_sign_transaction(&self, transaction: &Transaction) -> Result<Transaction> {
+    async fn fund_and_sign_transaction(&self, transaction: &Transaction) -> Result<Transaction> {
+        let client = Arc::clone(&self.client);
         let mut transaction = transaction.clone();
+        spawn_core_call(move || {
+            if transaction.input.is_empty() {
+                let utxo = client
+                    .list_unspent()?
+                    .0
+                    .into_iter()
+                    .find(|utxo| utxo.spendable && utxo.safe)
+                    .ok_or_else(|| Error::Returned("wallet has no spendable UTXOs".to_owned()))?;
+                let vout = u32::try_from(utxo.vout).map_err(|_| Error::UnexpectedStructure)?;
 
-        if transaction.input.is_empty() {
-            let utxo = self
-                .client
-                .list_unspent()?
-                .0
-                .into_iter()
-                .find(|utxo| utxo.spendable && utxo.safe)
-                .ok_or_else(|| Error::Returned("wallet has no spendable UTXOs".to_owned()))?;
-            let vout = u32::try_from(utxo.vout).map_err(|_| Error::UnexpectedStructure)?;
+                transaction.input.push(TxIn {
+                    previous_output: OutPoint::new(utxo.txid.parse()?, vout),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::default(),
+                });
+            }
 
-            transaction.input.push(TxIn {
-                previous_output: OutPoint::new(utxo.txid.parse()?, vout),
-                script_sig: ScriptBuf::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::default(),
-            });
-        }
+            let funded = client.fund_raw_transaction(&transaction)?;
+            let funded_transaction = encode::deserialize_hex(&funded.hex)?;
+            let signed = client.sign_raw_transaction_with_wallet(&funded_transaction)?;
 
-        let funded = self.client.fund_raw_transaction(&transaction)?;
-        let funded_transaction = encode::deserialize_hex(&funded.hex)?;
-        let signed = self
-            .client
-            .sign_raw_transaction_with_wallet(&funded_transaction)?;
+            if !signed.complete {
+                return Err(Error::Returned(format!(
+                    "wallet did not completely sign the transaction: {:?}",
+                    signed.errors.unwrap_or_default()
+                )));
+            }
 
-        if !signed.complete {
-            return Err(Error::Returned(format!(
-                "wallet did not completely sign the transaction: {:?}",
-                signed.errors.unwrap_or_default()
-            )));
-        }
-
-        Ok(encode::deserialize_hex(&signed.hex)?)
+            Ok(encode::deserialize_hex(&signed.hex)?)
+        })
+        .await
     }
 
-    fn publish_mint_transaction(
+    async fn publish_mint_transaction(
         &self,
         transaction: &Transaction,
         max_burn_amount: Amount,
     ) -> Result<Txid> {
+        let client = Arc::clone(&self.client);
         let transaction_hex = encode::serialize_hex(transaction);
-        // Bitcoin Node has default value of max_burn_amount=0, so we need to pass this parameter
-        // explicitly. corepc-client wrapper does not support this parameter, so we need to call
-        // .call() manually
-        let response: SendRawTransaction = self.client.call(
-            "sendrawtransaction",
-            &[
-                transaction_hex.into(),
-                serde_json::Value::Null,
-                max_burn_amount.to_btc().into(),
-            ],
-        )?;
+        spawn_core_call(move || {
+            // Bitcoin Node has default value of max_burn_amount=0, so we need to pass this
+            // parameter explicitly. corepc-client wrapper does not support this parameter,
+            // so we need to call .call() manually.
+            let response: SendRawTransaction = client.call(
+                "sendrawtransaction",
+                &[
+                    transaction_hex.into(),
+                    serde_json::Value::Null,
+                    max_burn_amount.to_btc().into(),
+                ],
+            )?;
 
-        Ok(response.txid()?)
+            Ok(response.txid()?)
+        })
+        .await
     }
 }

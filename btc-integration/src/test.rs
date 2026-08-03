@@ -6,7 +6,7 @@ use corepc_client::client_sync::Auth;
 use corepc_client::client_sync::v17::{Input, Output};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::thread;
+use tokio::task::JoinHandle;
 
 pub struct TestContext {
     pub rpc: Arc<Core31RpcApi>,
@@ -16,15 +16,12 @@ pub struct TestContext {
 }
 
 impl TestContext {
-    pub fn wait_for_next_block(&self, prev_block: BlockTip) -> thread::JoinHandle<BlockTip> {
-        let waiter_url = self.rpc_url.clone();
-        let waiter_cookie = self.cookie_file.clone();
+    pub fn wait_for_next_block(&self, prev_block: BlockTip) -> JoinHandle<BlockTip> {
+        let rpc = Arc::clone(&self.rpc);
 
-        thread::spawn(move || {
-            let rpc = Core31RpcApi::new(&waiter_url, Auth::CookieFile(waiter_cookie))
-                .expect("create waiting RPC client");
-
+        tokio::spawn(async move {
             rpc.wait_for_next_block(prev_block)
+                .await
                 .expect("wait for block 102")
         })
     }

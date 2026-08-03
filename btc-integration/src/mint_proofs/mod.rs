@@ -1,6 +1,7 @@
 //! Flame mint proofs embedded in Bitcoin transaction outputs.
 
 mod core;
+pub mod mint_proof_indexer;
 pub mod mint_proof_sender;
 pub mod minting_proof_storage;
 

@@ -7,4 +7,6 @@ edition = "2024"
 corepc-client = { version = "0.16.0", features = ["client-sync"] }
 serde_json = "1"
 bitcoind = { version = "0.41", features = ["31_0", "download"] }
-
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+async-trait = "0.1.91"
