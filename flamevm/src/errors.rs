@@ -223,6 +223,11 @@ pub enum VMError {
     #[error("Item is not a ClearToken")]
     TypeNotClearToken,
 
+    /// `send`/`call` received a ClearToken other than the native
+    /// virtual-byte flavor.
+    #[error("Item is not a virtual-byte token")]
+    InvalidBytesFlavor,
+
     /// This error occurs when an instruction requires a Token.
     #[error("Item is not a Token")]
     TypeNotToken,
@@ -243,7 +248,7 @@ pub enum VMError {
     /// Dict that contains non-portable values (Cell, Merlin, Variable,
     /// negative ClearToken, WideToken, Expression, Constraint,
     /// MultiscalarMul). Long-term storage requires portable values
-    /// only — see `flamevm/spec.md` §save.
+    /// only — see `docs/flamevm.md` §save.
     #[error("Non-portable value in actor state Dict")]
     NonPortableInState,
 

@@ -23,9 +23,8 @@ pub enum Address {
     Predicate(Predicate),
 
     /// Message routing target: deliver `args` to `dst.method` with
-    /// the given gas allotment. The vbyte allotment lives outside
-    /// the Address (in the enclosing `op_send` operand list) since
-    /// it concerns the *send*, not the destination shape.
+    /// the given gas allotment. The byte-token deposit lives outside
+    /// the Address since it concerns the send, not the destination.
     MessageTarget {
         dst: ActorID,
         method: Int253,

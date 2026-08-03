@@ -13,8 +13,10 @@ use crate::errors::VMError;
 use crate::tx::TxHeader;
 use crate::cell::{TaprootProof, Cell, CellID, Predicate};
 use crate::constraints::Commitment;
-use crate::fees::{CheckedFee, FLAME_FLAVOR};
-use crate::token::{flavor_from_actor, flavor_from_predicate};
+use crate::fees::CheckedFee;
+use crate::token::{
+    flavor_from_actor, flavor_from_predicate, BYTES_FLAVOR, FLAME_FLAVOR,
+};
 use crate::tx::{TxEntry, TxID};
 use crate::{
     ClearToken, Constraint, Dict, Expression, Int253, Merlin, Point, String, Token, Value, Variable,
@@ -158,7 +160,7 @@ const GAS_PER_INSTRUCTION: u64 = 1;
 
 /// Maximum nested call/open/signcall depth. Re-entrancy is permitted
 /// (ADR 0017), so without this a load-free A↔B cycle would be bounded
-/// only by gas; the cap restores a structural bound (design.md §Calls).
+/// only by gas; the cap restores a structural bound (docs/flamevm.md §Design).
 const MAX_CALL_DEPTH: usize = 64;
 
 /// A frame's executable code. The prover holds decoded, witness-bearing
@@ -511,6 +513,7 @@ impl core::fmt::Debug for TxResult {
 
 pub(crate) struct VM {
     header: TxHeader,
+    block_height: u64,
 
     /// Per-tx current anchor. `None` for fresh ExternalRoot txs (the
     /// first `op_input` seeds it); `Some(M)` at the start of an
@@ -633,6 +636,8 @@ impl VM {
                     block.height,
                 )?;
             }
+        } else if message.vbytes != 0 {
+            registry.credit_vbytes(&message.target, message.vbytes, block.height)?;
         }
         let script = registry.load_code(&message.target)?;
         let mem_limit = registry.actor_vbytes(&message.target)?.saturating_mul(4);
@@ -663,6 +668,7 @@ impl VM {
             frame.stack.push(v);
         }
         let mut vm = Self::new(header, frame);
+        vm.block_height = block.height;
         // Commit the triggering MessageID into the Internal TxID merkle
         // root. Symmetric with `op_input` for external txs: the first
         // post-Header effect identifies *what consumed-once entity*
@@ -707,6 +713,7 @@ impl VM {
         let last_anchor = initial_call.anchor;
         Self {
             header,
+            block_height: 0,
             last_anchor,
             current_call: initial_call,
             call_stack: Vec::new(),
@@ -762,7 +769,7 @@ impl VM {
             total_fee: self.total_fee.total(),
             // Root frame's metered gas (per-instruction; spec §gas).
             gas_used: self.current_call.gas_used,
-            // Vbytes flow is deferred (design.md note); not yet metered.
+            // Vbytes flow is deferred (docs/flamevm.md §Design); not yet metered.
             vbytes_used: 0,
             bytecode,
             proof,
@@ -2383,8 +2390,7 @@ impl VM {
     }
 
     /// Pops `bytes` then `gas` (in that order — `gas` is deeper) as
-    /// non-negative `u64`. Shared by `op_open`, `op_signcall`,
-    /// `op_call`, `op_send`.
+    /// non-negative `u64`. Shared by `op_open` and `op_signcall`.
     fn pop_gas_bytes(&mut self) -> Result<(u64, u64), VMError> {
         let bytes = self
             .pop_value()?
@@ -2397,6 +2403,23 @@ impl VM {
             .to_u64()
             .ok_or(VMError::InvalidBitrange)?;
         Ok((gas, bytes))
+    }
+
+    /// Pops a virtual-byte ClearToken then `gas`, validates the token's
+    /// canonical flavor and non-negative `u64` quantity, and returns the
+    /// original bearer with its scalar quantity.
+    fn pop_gas_bytes_token(&mut self) -> Result<(u64, u64, ClearToken), VMError> {
+        let token = self.pop_value()?.to_clear_token()?;
+        if token.flv() != BYTES_FLAVOR {
+            return Err(VMError::InvalidBytesFlavor);
+        }
+        let bytes = token.qty().to_u64().ok_or(VMError::InvalidBitrange)?;
+        let gas = self
+            .pop_value()?
+            .to_int253()?
+            .to_u64()
+            .ok_or(VMError::InvalidBitrange)?;
+        Ok((gas, bytes, token))
     }
 
     /// Builds a `TaprootProof` from the four stack-popped pieces. `neighbors`
@@ -2432,7 +2455,7 @@ impl VM {
         })
     }
 
-    /// _args… k refund gas bytes addr_ **send** → ø
+    /// _args… k refund gas bytestoken addr_ **send** → ø
     ///
     /// Queues a [`Message`] for the consensus layer to instantiate as a
     /// future internal tx and emits a `TxEntry::Send`. The anchor is
@@ -2441,7 +2464,7 @@ impl VM {
     /// ordinary payload argument (ADR 0020).
     fn op_send(&mut self) -> Result<(), VMError> {
         let target = ActorID::Hash(self.pop_string_32()?);
-        let (gas, vbytes) = self.pop_gas_bytes()?;
+        let (gas, vbytes, _token) = self.pop_gas_bytes_token()?;
         let refund_predicate = Predicate::opaque(
             curve25519_dalek::ristretto::CompressedRistretto(self.pop_string_32()?),
         );
@@ -2474,7 +2497,7 @@ impl VM {
         Ok(())
     }
 
-    /// _args… k gas bytes addr_ **call** → _results… k' 1 | 0_
+    /// _args… k gas bytestoken addr_ **call** → _results… k' 1 | 0_
     ///
     /// Synchronous actor-to-actor call. Re-entry is gated by actor-state
     /// presence: a checked-out callee soft-fails with `0`; otherwise
@@ -2487,7 +2510,7 @@ impl VM {
     ) -> Result<(), VMError> {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let callee = ActorID::Hash(self.pop_string_32()?);
-        let (gas, vbytes) = self.pop_gas_bytes()?;
+        let (gas, vbytes, _token) = self.pop_gas_bytes_token()?;
         // Debit the grant from the caller (see op_open). A caller that
         // can't afford the grant hard-fails OutOfGas — its own budget
         // is exhausted, not a soft "callee unavailable" marker.
@@ -2504,6 +2527,9 @@ impl VM {
         let pre_frame: Result<(Vec<u8>, u64, ActorID), VMError> = (|| {
             if self.call_stack.len() >= MAX_CALL_DEPTH {
                 return Err(VMError::CallDepthExceeded);
+            }
+            if vbytes != 0 {
+                registry.credit_vbytes(&callee, vbytes, self.block_height)?;
             }
             let script = registry.load_code(&callee)?;
             let mem_limit = registry.actor_vbytes(&callee)?.saturating_mul(4);

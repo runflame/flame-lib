@@ -313,7 +313,7 @@ pub enum TxEntry {
     /// symmetric with `Output(Cell)` which carries the full Cell.
     /// The state machine consumes this entry by replacing the
     /// actor's stored state with `state`; no re-execution of the
-    /// script needed. See design.md §"TxLog records effects, not
+    /// script needed. See docs/flamevm.md §"Design"; TxLog records effects, not
     /// control flow".
     ///
     /// The MerkleItem encoding hashes `(actor.to_hash(),
@@ -361,7 +361,7 @@ impl MerkleItem for TxEntry {
         match self {
             TxEntry::Header(h) => {
                 // Absorb version and locktime as little-endian u32 —
-                // matches the wire format (design.md ADR 0006).
+                // matches the wire format (docs/flamevm.md).
                 t.append_message(b"tx.version", &h.version.to_le_bytes());
                 t.append_message(b"tx.locktime", &h.locktime.to_le_bytes());
             }
@@ -394,7 +394,7 @@ impl MerkleItem for TxEntry {
                 t.append_message(b"retire.flv", flv_pt.as_bytes());
             }
             TxEntry::Fee(qty) => {
-                // Little-endian u64, per design.md "Wire format:
+                // Little-endian u64, per docs/flamevm.md "Encoding:
                 // little-endian everywhere". Domain tag distinguishes
                 // this from any other 8-byte append.
                 t.append_message(b"fee.qty", &qty.to_le_bytes());

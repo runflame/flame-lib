@@ -159,7 +159,7 @@ pub fn code_root(code: &[u8]) -> [u8; 32] {
 /// Full per-actor record stored in the registry. Combines the
 /// mutable script-visible state Dict with the protocol-managed
 /// lifecycle counters (vbyte balance, activation tracking, freeze
-/// state). Per `flamevm/spec.md` §Storage and ADR 0005.
+/// state). Per `docs/flamevm.md` §Storage and ADR 0005.
 #[derive(Clone, Debug)]
 pub struct Actor {
     /// The actor's code blob — a single bytecode string, dispatched on
@@ -242,13 +242,13 @@ pub fn vbyte_size(code: &[u8], state: &Value) -> Result<u64, VMError> {
 // ── Lifecycle constants ───────────────────────────────────────────
 
 /// Per-block introduction of fresh vbytes into the pool. Per
-/// design.md §Resources / Storage and ADR 0004: 5000/block,
+/// docs/blockchain.md §Limits and ADR 0004: 5000/block,
 /// adjustable up to 2× per cycle by supermajority. The constant
 /// here is the genesis value.
 pub const VBYTES_PER_BLOCK: u64 = 5000;
 
 /// Maturity delay for vbytes returning to the pool from a cleared
-/// actor. 100 blocks per design.md §Resources / Storage and ADR
+/// actor. 100 blocks per docs/blockchain.md §Limits and ADR
 /// 0005.
 pub const VBYTE_MATURITY_BLOCKS: u64 = 100;
 
@@ -268,9 +268,9 @@ pub fn grace_window(active_blocks: u64) -> u64 {
 /// Protocol-level vbyte supply. New vbytes flow in at
 /// [`VBYTES_PER_BLOCK`] per block; cleared actors' vbytes flow
 /// back via the maturity queue with a [`VBYTE_MATURITY_BLOCKS`]
-/// delay. Available vbytes are consumed by external transactions
-/// purchasing storage via fees (the consensus layer brokers that
-/// transfer; this module just tracks the pool).
+/// delay. `available` represents unissued `BYTES_FLAVOR` token
+/// quantity; consensus brokers its acquisition. This module tracks
+/// only the pool quantity and maturity schedule.
 #[derive(Clone, Debug, Default)]
 pub struct VbytePool {
     /// Vbytes currently available for purchase.
@@ -444,9 +444,8 @@ pub trait ActorRegistry {
     /// `last_activation_height` is updated to `current_height`.
     /// Errors `ActorNotFound` if no such actor.
     ///
-    /// Called by the consensus side of `op_send` when delivering
-    /// a vbyte-bearing message. An empty send (no method, no args,
-    /// vbytes-only) is the dedicated transfer form per spec.md.
+    /// Called when `send` is delivered or `call` enters after consuming
+    /// a `BYTES_FLAVOR` ClearToken.
     fn credit_vbytes(
         &mut self,
         id: &ActorID,
@@ -463,7 +462,7 @@ pub trait ActorRegistry {
     ///
     /// Returns the set of `ActorID`s cleared (expired past grace)
     /// during this tick, in deterministic order — useful for log
-    /// emission. Per design.md §Internal-transaction grace.
+    /// emission. Per docs/flamevm.md §Design.
     fn tick_block(&mut self, height: u64) -> Vec<ActorID>;
 
     // ── pool ───────────────────────────────────────────────────

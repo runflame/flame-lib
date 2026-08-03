@@ -1,8 +1,10 @@
-# Project Flame
+# Flame
 
-Flame is a new blockchain architecture for Bitcoin with strong focus on decentralization, privacy and programmability.
+Flame is a programmable UTXO-and-actor blockchain architecture designed to run
+alongside Bitcoin. This repository contains FlameVM and its retained support
+crates.
 
-## Credits
-
-Flame is a continuation of the authors’ work on [TxVM](https://github.com/oleganza/txvm) and [ZkVM](https://github.com/oleganza/slingshot/) at Chain Inc. and Interstellar.
-
+- [FlameVM design and specification](docs/flamevm.md)
+- [Blockchain state machine](docs/blockchain.md)
+- [Consensus](docs/consensus.md)
+- [Security findings](docs/security.md)

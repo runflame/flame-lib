@@ -1,10 +1,6 @@
 //! Overflow-safe per-tx fee accumulator.
 
 use crate::errors::VMError;
-use crate::Int253;
-
-/// Canonical flavor of the native Flame token.
-pub const FLAME_FLAVOR: Int253 = Int253::ZERO;
 
 /// Maximum fee an external transaction may accumulate across all
 /// `fee` opcodes. Allows overflow-safe `size_bytes × fee` math in any
@@ -15,7 +11,7 @@ pub const MAX_FEE: u64 = 1 << 24;
 /// Per-transaction fee accumulator. Constructed at `VM::new`, mutated
 /// only by [`Self::add`] (called from `op_fee`), and surfaced through
 /// the eventual `TxResult.total_fee`. Fees always use
-/// [`FLAME_FLAVOR`], so the accumulator needs no flavor field.
+/// [`crate::FLAME_FLAVOR`], so the accumulator needs no flavor field.
 ///
 /// The implementation is intentionally a thin newtype over `u64`. The
 /// `Copy` derive keeps API ergonomics — the field is a value, not a

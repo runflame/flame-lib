@@ -36,14 +36,16 @@ pub use constraints::{
 pub use crypto::{Merlin, Point};
 pub use dict::Dict;
 pub use errors::VMError;
-pub use fees::{CheckedFee, FLAME_FLAVOR, MAX_FEE};
+pub use fees::{CheckedFee, MAX_FEE};
 pub use int253::Int253;
 pub use msm::MultiscalarMul;
 pub use ops::Instruction;
 pub use script::{ScriptBuilder, Script};
 pub use prover::Prover;
 pub use string::String;
-pub use token::{flavor_from_actor, ClearToken, Token, WideToken};
+pub use token::{
+    flavor_from_actor, BYTES_FLAVOR, ClearToken, FLAME_FLAVOR, Token, WideToken,
+};
 pub use value::Value;
 pub use verifier::Verifier;
 

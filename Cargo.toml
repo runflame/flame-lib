@@ -5,19 +5,9 @@ members = [
     "merkle",
     "starsig",
     "musig",
-    "keytree",
     "spacesuit",
-    "zkvm",
-    "blockchain",
-    "token",
-    "accounts",
-    "p2p",
-    "node",
     "flamevm",
 ]
-
-# `demo` crate is built separately with nightly as required by Rocket
-exclude = ["demo"]
 
 # Use the runflame fork of merlin to enable its `dynamic-labels`
 # feature — lifts the upstream `&'static [u8]` label restriction so
