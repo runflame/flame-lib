@@ -1,4 +1,3 @@
-use corepc_client::bitcoin::Transaction;
 use corepc_client::client_sync::{Error, Result as RpcResult};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::{
@@ -7,11 +6,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{BlockTip, MintingProof, MintingProofData, MintingProofStorage, RpcApi};
+use crate::mint_proofs::indexer::worker::IndexerWorker;
+use crate::{MintingProof, MintingProofStorage, RpcApi};
 
 pub type NewMintingProofs = BTreeMap<[u8; 32], Vec<MintingProof>>;
 
-struct IndexerWorker {
+struct IndexerWorkerHandle {
     cancellation_token: CancellationToken,
     join_handle: JoinHandle<RpcResult<()>>,
 }
@@ -20,7 +20,7 @@ pub struct MintProofIndexer<R, S> {
     rpc: Arc<R>,
     storage: Arc<Mutex<S>>,
     subscribers: broadcast::Sender<Arc<NewMintingProofs>>,
-    worker: Mutex<Option<IndexerWorker>>,
+    worker: Mutex<Option<IndexerWorkerHandle>>,
 }
 
 impl<R, S> MintProofIndexer<R, S>
@@ -52,24 +52,26 @@ where
         R: 'static,
         S: Send + 'static,
     {
-        let mut worker = self.worker.lock().await;
-        if worker.is_some() {
+        let mut worker_slot = self.worker.lock().await;
+        if worker_slot.is_some() {
             // TODO: better error
             return Err(Error::Returned(
                 "mint-proof indexer is already running".to_owned(),
             ));
         }
 
-        let rpc = Arc::clone(&self.rpc);
-        let storage = Arc::clone(&self.storage);
-        let subscribers = self.subscribers.clone();
         let cancellation_token = CancellationToken::new();
-        let worker_cancellation_token = cancellation_token.clone();
+        let indexer_worker = IndexerWorker::new(
+            Arc::clone(&self.rpc),
+            Arc::clone(&self.storage),
+            self.subscribers.clone(),
+            cancellation_token.clone(),
+        );
 
-        let join_handle = tokio::spawn(async move {
-            Self::run(rpc, storage, subscribers, worker_cancellation_token).await
-        });
-        *worker = Some(IndexerWorker {
+        let initial_tip = indexer_worker.bootstrap().await?;
+
+        let join_handle = tokio::spawn(indexer_worker.run(initial_tip));
+        *worker_slot = Some(IndexerWorkerHandle {
             cancellation_token,
             join_handle,
         });
@@ -92,91 +94,6 @@ where
 
         result
     }
-
-    async fn run(
-        rpc: Arc<R>,
-        storage: Arc<Mutex<S>>,
-        subscribers: broadcast::Sender<Arc<NewMintingProofs>>,
-        cancellation_token: CancellationToken,
-    ) -> RpcResult<()>
-    where
-        R: 'static,
-        S: Send + 'static,
-    {
-        let initial_tip = tokio::select! {
-            _ = cancellation_token.cancelled() => return Ok(()),
-            result = rpc.block_tip() => result?,
-        };
-
-        let mut previous_tip = initial_tip;
-
-        loop {
-            let announced_tip = tokio::select! {
-                _ = cancellation_token.cancelled() => return Ok(()),
-                result = rpc.wait_for_next_block(previous_tip) => result?,
-            };
-
-            if announced_tip.height > previous_tip.height {
-                for height in (previous_tip.height + 1)..announced_tip.height {
-                    let hash = tokio::select! {
-                        _ = cancellation_token.cancelled() => return Ok(()),
-                        result = rpc.block_hash_at_height(height) => result?,
-                    };
-                    let block_tip = BlockTip { hash, height };
-
-                    Self::index_block(&rpc, &storage, &subscribers, block_tip, &cancellation_token)
-                        .await?
-                }
-
-                Self::index_block(
-                    &rpc,
-                    &storage,
-                    &subscribers,
-                    announced_tip,
-                    &cancellation_token,
-                )
-                .await?
-            } else if announced_tip.hash != previous_tip.hash {
-                // TODO: handle reorgs
-                panic!("reorg")
-            }
-
-            previous_tip = announced_tip;
-        }
-    }
-
-    async fn index_block(
-        rpc: &Arc<R>,
-        storage: &Arc<Mutex<S>>,
-        subscribers: &broadcast::Sender<Arc<NewMintingProofs>>,
-        block_tip: BlockTip,
-        cancellation_token: &CancellationToken,
-    ) -> RpcResult<()> {
-        let transactions = tokio::select! {
-            _ = cancellation_token.cancelled() => return Ok(()),
-            result = rpc.transactions_in_block(block_tip.hash) => result?,
-        };
-        let proofs = get_minting_proofs_from_transactions(&transactions, block_tip);
-        let mut new_proofs = NewMintingProofs::new();
-
-        {
-            let mut storage = storage.lock().await;
-
-            for proof in proofs {
-                let flame_block_hash = proof.minting_proof_data.flame_block_hash;
-                storage.insert(flame_block_hash, proof.clone());
-                new_proofs.entry(flame_block_hash).or_default().push(proof);
-            }
-        }
-
-        if new_proofs.is_empty() {
-            return Ok(());
-        }
-
-        let _ = subscribers.send(Arc::new(new_proofs));
-
-        Ok(())
-    }
 }
 
 impl<R, S> Drop for MintProofIndexer<R, S> {
@@ -187,27 +104,10 @@ impl<R, S> Drop for MintProofIndexer<R, S> {
     }
 }
 
-fn get_minting_proofs_from_transactions(
-    transactions: &[Transaction],
-    block_tip: BlockTip,
-) -> Vec<MintingProof> {
-    transactions
-        .iter()
-        .flat_map(|transaction| {
-            transaction.output.iter().filter_map(|output| {
-                MintingProofData::from_tx_out(output).map(|minting_proof_data| MintingProof {
-                    minting_proof_data,
-                    burned_amount: output.value,
-                    bitcoin_block_tip: block_tip,
-                })
-            })
-        })
-        .collect::<Vec<_>>()
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         future,
         str::FromStr,
         sync::atomic::{AtomicUsize, Ordering},
@@ -221,7 +121,7 @@ mod tests {
     };
 
     use crate::{
-        InMemoryMintingProofStorage, MintingProofData, RpcApi,
+        BlockTip, InMemoryMintingProofStorage, MintingProofData, RpcApi,
         mint_proofs::minting_proof_storage::MintingProof,
     };
 
@@ -231,7 +131,8 @@ mod tests {
         initial_tip: BlockTip,
         next_tip: BlockTip,
         wait_calls: AtomicUsize,
-        transactions: Vec<Transaction>,
+        transaction_calls: AtomicUsize,
+        transactions_by_block: BTreeMap<BlockHash, Vec<Transaction>>,
     }
 
     #[async_trait]
@@ -241,8 +142,12 @@ mod tests {
         }
 
         async fn transactions_in_block(&self, block_hash: BlockHash) -> Result<Vec<Transaction>> {
-            assert_eq!(block_hash, self.next_tip.hash);
-            Ok(self.transactions.clone())
+            self.transaction_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .transactions_by_block
+                .get(&block_hash)
+                .cloned()
+                .unwrap_or_default())
         }
 
         async fn transactions_at_height(
@@ -252,8 +157,8 @@ mod tests {
             unreachable!("the test announces only the directly-adjacent block")
         }
 
-        async fn block_hash_at_height(&self, _height: u64) -> Result<BlockHash> {
-            unreachable!("the test announces only the directly-adjacent block")
+        async fn block_hash_at_height(&self, height: u64) -> Result<BlockHash> {
+            Ok(block_hash(height))
         }
 
         async fn wait_for_next_block(&self, _prev_block: BlockTip) -> Result<BlockTip> {
@@ -286,9 +191,13 @@ mod tests {
 
     fn block_tip(hash_suffix: u8, height: u64) -> BlockTip {
         BlockTip {
-            hash: BlockHash::from_str(&format!("{:064x}", hash_suffix)).expect("valid block hash"),
+            hash: block_hash(u64::from(hash_suffix)),
             height,
         }
+    }
+
+    fn block_hash(value: u64) -> BlockHash {
+        BlockHash::from_str(&format!("{value:064x}")).expect("valid block hash")
     }
 
     fn proof(flame_block_hash: [u8; 32], burned_sats: u64, tip: BlockTip) -> MintingProof {
@@ -330,7 +239,8 @@ mod tests {
             initial_tip,
             next_tip,
             wait_calls: AtomicUsize::new(0),
-            transactions,
+            transaction_calls: AtomicUsize::new(0),
+            transactions_by_block: BTreeMap::from([(next_tip.hash, transactions)]),
         });
         let indexer = MintProofIndexer::new(rpc, InMemoryMintingProofStorage::new());
         let mut received_notifications = indexer.subscribe();
@@ -376,5 +286,47 @@ mod tests {
                 expected
             })
         );
+    }
+
+    #[tokio::test]
+    async fn startup_bootstraps_current_and_previous_nineteen_blocks() {
+        let initial_tip = block_tip(100, 25);
+        let oldest_bootstrap_tip = BlockTip {
+            hash: block_hash(6),
+            height: 6,
+        };
+        let excluded_tip = BlockTip {
+            hash: block_hash(5),
+            height: 5,
+        };
+        let oldest = proof([0x11; 32], 1_000, oldest_bootstrap_tip);
+        let current = proof([0x11; 32], 2_000, initial_tip);
+        let excluded = proof([0x22; 32], 3_000, excluded_tip);
+        let rpc = Arc::new(TestRpc {
+            initial_tip,
+            next_tip: initial_tip,
+            wait_calls: AtomicUsize::new(0),
+            transaction_calls: AtomicUsize::new(0),
+            transactions_by_block: BTreeMap::from([
+                (excluded_tip.hash, vec![transaction(&[excluded])]),
+                (
+                    oldest_bootstrap_tip.hash,
+                    vec![transaction(std::slice::from_ref(&oldest))],
+                ),
+                (
+                    initial_tip.hash,
+                    vec![transaction(std::slice::from_ref(&current))],
+                ),
+            ]),
+        });
+        let indexer = MintProofIndexer::new(Arc::clone(&rpc), InMemoryMintingProofStorage::new());
+
+        indexer.startup().await.expect("start indexer");
+
+        assert_eq!(rpc.transaction_calls.load(Ordering::SeqCst), 20);
+        assert_eq!(indexer.get_proofs([0x11; 32]).await, vec![oldest, current]);
+        assert!(indexer.get_proofs([0x22; 32]).await.is_empty());
+
+        indexer.shutdown().await.expect("shut down indexer");
     }
 }

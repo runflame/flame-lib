@@ -1,9 +1,11 @@
 //! Flame mint proofs embedded in Bitcoin transaction outputs.
 
 mod core;
-pub mod mint_proof_indexer;
+pub mod indexer;
 pub mod mint_proof_sender;
 pub mod minting_proof_storage;
+
+pub use indexer as mint_proof_indexer;
 
 pub use core::constants::{MINT_PROOF_DATA_LEN, MINT_PROOF_MAGIC};
 pub use core::creation::mint_proof_to_script;

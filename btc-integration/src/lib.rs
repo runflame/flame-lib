@@ -4,7 +4,6 @@ pub mod mint_proofs;
 pub mod rpc;
 pub mod test;
 
-pub use mint_proofs::mint_proof_indexer::{MintProofIndexer, NewMintingProofs};
 pub use mint_proofs::mint_proof_sender::{MintProofSendError, MintProofSender};
 pub use mint_proofs::minting_proof_storage::{
     InMemoryMintingProofStorage, MintingProof, MintingProofStorage,

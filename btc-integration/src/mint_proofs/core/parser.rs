@@ -52,11 +52,6 @@ impl<'a> MintProofParser<'a> {
     }
 }
 
-/// Parses minting-proof data from a Bitcoin transaction output.
-///
-/// The output value must be non-zero. The script must use the exact canonical
-/// encoding from the protocol, including the one-byte `0x25` data push. Boolean
-/// flag values other than `0` and `1` are rejected.
 pub fn parse_mint_proof_output(output: &TxOut) -> Option<MintingProofData> {
     if output.value == Amount::ZERO {
         return None;
@@ -65,7 +60,6 @@ pub fn parse_mint_proof_output(output: &TxOut) -> Option<MintingProofData> {
     MintProofParser::new(output.script_pubkey.as_bytes()).parse()
 }
 
-/// Returns all valid minting-proof data from a transaction, in output order.
 pub fn parse_mint_proofs(transaction: &Transaction) -> Vec<MintingProofData> {
     transaction
         .output

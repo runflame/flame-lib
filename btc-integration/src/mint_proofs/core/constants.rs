@@ -1,7 +1,5 @@
-/// Magic prefix identifying a Flame mint proof.
 pub const MINT_PROOF_MAGIC: [u8; 3] = *b"FLM";
 
-/// Number of bytes in the payload pushed after `OP_RETURN`.
 pub const MINT_PROOF_DATA_LEN: usize = 37;
 
 pub(in crate::mint_proofs) const SCRIPT_LEN: usize = 2 + MINT_PROOF_DATA_LEN;
