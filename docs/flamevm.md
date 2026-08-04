@@ -4,7 +4,18 @@ This is the canonical design and specification of FlameVM. Explanatory sections
 give rationale; exact encodings, stack diagrams, and statements using **must** or
 **must not** define consensus behavior.
 
-## Design
+## Introduction
+
+FlameVM implements transaction verifications rules in the Flame blockchain in a form of a Forth-like stack machine.
+
+FlameVM is used in two different contexts: external transactions and internal transactions. External transactions have user-defined results, zero-knowledge proof for confidential transfers and compute, and have access to Utreexo storage: scalable compressed set of unspent transaction outputs. Internal transactions operate on uncompressed storage and invoke multiplayer smart contracts that react to user-defined messages without pre-determined results.
+
+FlameVM operates on multiple data types, including linear types for tokens and zero-knowledge expressions. Types can be “portable” and “non-portable”, “copyable” and “non-copyable”. Portable types can exist in the long-term blockhain state outside of VM execution. Copyable types can be duplicated during VM execution.
+
+Successful VM execution equals to successful transaction verification. Therefore, VM execution encodes both built-in network rules, as well as enables authors to create custom rules within their applications.
+
+
+## Design overview
 
 Flame combines single-use **cells** with persistent stateful **actors**. One
 stack machine verifies both: external transactions consume and create cells and
@@ -53,17 +64,8 @@ All Flame-defined multi-byte integers are little-endian. Decoders reject
 alternate-width integers, unordered or duplicate dictionary keys, excessive
 nesting, unknown tags, and trailing data where a complete value is required.
 
-# **Introduction**
 
-FlameVM implements transaction verifications rules in the Flame blockchain in a form of a Forth-like stack machine.
-
-FlameVM is used in two different contexts: external transactions and internal transactions. External transactions have user-defined results, zero-knowledge proof for confidential transfers and compute, and have access to Utreexo storage: scalable compressed set of unspent transaction outputs. Internal transactions operate on uncompressed storage and invoke multiplayer smart contracts that react to user-defined messages without pre-determined results.
-
-FlameVM operates on multiple data types, including linear types for tokens and zero-knowledge expressions. Types can be “portable” and “non-portable”, “copyable” and “non-copyable”. Portable types can exist in the long-term blockhain state outside of VM execution. Copyable types can be duplicated during VM execution.
-
-Successful VM execution equals to successful transaction verification. Therefore, VM execution encodes both built-in network rules, as well as enables authors to create custom rules within their applications.
-
-# External transactions
+## External transactions
 
 External transactions are composed directly by users and have pre-determined outcome. They consume and produce transaction outputs, modifying the set of *unspent transaction outputs.* Each output can be unlocked by one or more signature and the entire transaction contains a zero-knowledge proof of confidential transfers and other constraints on encrypted data imposed by smart contracts.
 
@@ -80,7 +82,7 @@ External transactions produce the following effects:
 
 Transaction ID (”TxID”) is a hash (merkle root) of the list of all the effects. Transaction signature and ZK proofs both bind to TxID and therefore to all the effects of the transaction.
 
-# Internal transactions
+## Internal transactions
 
 Internal transaction is caused by a “message” sent to an “actor” by an external transaction. Such message does not control the outcome: internal transaction may produce undetermined result or even fail. As such, race conditions (when multiple users send messages to the same actor) can be resolved by the actor itself, accepting all the messages.
 
@@ -103,7 +105,7 @@ Calls themselves are intra-transaction control flow, not effects. Anything a cal
 
 Internal transactions do not support fee payment: they operate within gas- and memory limits set by the external transaction. They also do not support inputs, as those can be consumed only by external transactions with a Utreexo proof and (most of the time), a transaction signature.
 
-# Limits
+## Limits
 
 **Gas limit:** maximum amount of gas used per block. Each tx and sum of all txs in a block cannot exceed that amount of gas.
 
@@ -115,7 +117,7 @@ Internal transactions do not support fee payment: they operate within gas- and m
 
 **Added storage:** amount of storage virtual bytes introduced by each block.
 
-# Fees
+## Fees
 
 Transaction fees are paid by external transactions and are necessary to prioritize common resources on the open network and mitigate denial-of-service attacks. As blockchain imposes limits on storage and computation costs, transactions paying higher fees (per resource used) are prioritised over transactions paying lower fees.
 
@@ -133,7 +135,7 @@ Each block makes available virtual bytes: (recycled from the existing actors + n
 
 BFT consensus implies that the block candidate is progressively built and already included transactions are not pruned by higher-paying ones.
 
-# Types
+## Types
 
 Ownership: every type on the stack is always owned. FlameVM does not allow reference-counting, borrowing, read-only access or implicit copies.
 
@@ -182,7 +184,7 @@ Stack-only types (non-portable, never encoded on the wire):
 | Constraint | Logical combination of boolean conditions. |
 | MultiscalarMul | Lazy `sum(s_i · P_i)` accumulator; consumed by `verify` which appends it to the same batch as Schnorr/Musig sigs (assertion: `sum == identity`). |
 
-**Encoding**
+### Encoding**
 
 Every value has exactly one canonical wire byte sequence. The first byte is a type+width tag; within each type, width classes carve the value range into disjoint, offset-based sub-ranges so the encoder has no choice about which tag to use.
 
@@ -329,7 +331,7 @@ WideToken: encrypted token without a range proof on quantity (could be negative)
 
 Token: encrypted token with a proven non-negative qty, 
 
-# Actors
+## Actors
 
 An actor is **`(code, state)`**:
 
@@ -343,13 +345,13 @@ Each actor is identified by a unique Actor ID — `enum { 0x00: hash, 0x01: cons
 
 Actors pay for their storage in vbytes each block (see Storage below). When an actor's vbyte balance reaches zero, it enters a frozen state with a grace period proportional to its prior activity (one block per four blocks of activity, capped at six months of blocks). A top-up restores it; without one the state is cleared and the vbytes are recycled (subject to 100-block maturity).
 
-# Messages
+## Messages
 
 Messages execute “method calls” asynchronously. Each message contains a predicate for bouncing its arguments in case of actor failure. If the method called through a message returns any values, the call fails and the original arguments are bounced.
 
 Not only users, but also actors can send async messages to each other. This allows an actor to commit intermediate results between transactions.
 
-# Addresses
+## Addresses
 
 Address is an entity that supports sending funds to predicates or actors.
 
@@ -364,7 +366,7 @@ Address = enum {
 }
 ```
 
-# Storage
+## Storage
 
 Each actor occupies a deterministic number of *virtual bytes* (vbytes) for its code and data. The vbyte metric is defined at the protocol level to remain consistent among implementations and may differ from actual bytes stored on disk.
 
@@ -383,7 +385,7 @@ Withdrawn vbytes are recycled into the total pool. Recycling is subject to 100-b
 **Transient memory.** In addition to persistent storage, an actor may use transient memory during a call (scratch space released when the call ends). The cap is fixed at 4× the actor's current persistent vbyte size; the `memlimit` opcode returns this cap. Allocations that would push live memory past the cap fail the call.
 
 
-# Anchors
+## Anchors
 
 Every new cell and message is **anchored** by a unique 32-byte value embedded in its wire form, so two cells with the same predicate + payload but different anchors hash to different ids. Uniqueness is the core safety property — without it, cell ids collide across txs and authors can be tricked into operating on the wrong entity.
 
@@ -416,7 +418,7 @@ The `left` half is embedded in the new entity (cell anchor / MessageID); the `ri
 
 FlameVM splits anchors at the source: every consume site produces two cryptographically independent children, so neither the cell's stored anchor nor the residual anchor can be reused without the matching half of the original split.
 
-# Instruction set
+## Instruction set
 
 Each instruction is a one-byte **opcode** optionally followed by **immediate data** encoded inline in the bytecode. Stack effects are written in left-to-right bottom-to-top order: in `a b → c`, `b` is the top of the stack on entry, `c` is the top on exit.
 
@@ -424,8 +426,6 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 - **ext.** — external-only. Hard-fails `ExternalOnly` from internal context. Covers `input`, the constraint-system opcodes (`scalar`, `commit`, `alloc`, `expr`, `range`), and the CS-consuming opcodes (`mix`, `decrypt`, `fee`). Branch-polymorphic opcodes (`borrow`, `eq`, `add`, `and`, `or`) keep a blank Ctx marker; their CS-branch restriction is in the per-opcode prose.
 - **int.** — internal-only. Needs a registry handle. Covers `call`, `load`, `save`, and the chain-info family.
 - *(blank)* — works in either context. Most opcodes, including `send` (which emits messages from external txs too).
-
-## Instruction table
 
 | Hex | Name | Ctx | Stack | Description |
 | --- | --- | --- | --- | --- |
@@ -547,14 +547,14 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 
 Opcodes marked *planned* are reserved in the byte map; their handlers are not yet wired. Scripts using them error `UnknownOpcode`.
 
-## Failure modes
+### Failure modes
 
 A **hard fail** aborts the current call.
 
 A **soft fail** is an in-band signal: the opcode pushes an optional shape `{value 1 | 0}` and leaves the consumed value(s) on the stack untouched so the script can branch. The two kinds are noted per opcode.
 
 
-## Stack instructions
+### Stack instructions
 
 ### push:k and friends
 
@@ -1129,7 +1129,7 @@ Pushes the type code of the top value as `Int253`, leaving the value on the stac
 | 5 | WideToken | 12 | MultiscalarMul |
 | 6 | ClearToken | | |
 
-## Cell, actor, and send instructions
+### Cell, actor, and send instructions
 
 [`open`](#open), [`signcall`](#signcall), and [`call`](#call) all create isolated call frames as described in [Design](#design).
 
@@ -1364,7 +1364,7 @@ Pushes the vbyte quantity delivered to the frame: the byte-token quantity for
 `call` / `send`, or the scalar `bytes` operand for `open` / `signcall`. Zero at
 `ExternalRoot` (no parent). Available in either context.
 
-## Chain-info instructions  *(all planned, internal-only)*
+### Chain-info instructions  *(all planned, internal-only)*
 
 These opcodes read from the consensus-supplied `BlockContext`. All height-parameterized opcodes enforce the 100-block maturity window — querying `h > current_height − 100` hard-fails `BlockHeightImmature`.
 
