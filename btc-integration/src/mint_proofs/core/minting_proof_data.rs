@@ -1,7 +1,7 @@
 use corepc_client::bitcoin::{ScriptBuf, TxOut};
 
 use crate::mint_proofs::core::creation::mint_proof_to_script;
-use crate::parse_mint_proof_output;
+use crate::mint_proofs::parse_mint_proof_output;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MintingProofData {

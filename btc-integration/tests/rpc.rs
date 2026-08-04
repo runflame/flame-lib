@@ -1,6 +1,8 @@
 use bitcoind::anyhow::Context;
+use btc_integration::mint_proofs::MintingProofData;
+use btc_integration::prelude::*;
+use btc_integration::rpc::RpcApi;
 use btc_integration::test::setup;
-use btc_integration::{BlockTip, MintProofSender, MintingProofData, RpcApi};
 use corepc_client::bitcoin::Amount;
 use std::sync::Arc;
 
@@ -16,7 +18,7 @@ async fn core31_rpc_api_works_with_regtest_blocks_and_transactions() -> bitcoind
     assert_eq!(transactions_at_height.len(), 1);
 
     let (previous_tip_hash, _) = rpc.transactions_at_height(101).await?;
-    let previous_tip = BlockTip {
+    let previous_tip = BtcBlockTip {
         hash: previous_tip_hash,
         height: 101,
     };
@@ -46,7 +48,7 @@ async fn core31_rpc_api_works_with_regtest_blocks_and_transactions() -> bitcoind
 async fn mint_proof_sender_works_with_core31_rpc_api() -> bitcoind::anyhow::Result<()> {
     let ctx = setup()?;
     let rpc = Arc::clone(&ctx.rpc);
-    let mint_proof_sender = MintProofSender::new(Arc::clone(&rpc), 1);
+    let mint_proof_sender = MintProofSenderV31::new(Arc::clone(&rpc), 1);
     let sent_amount = Amount::from_btc(1.0).expect("valid BTC amount");
     let flame_block_hash = [0xab; 32];
 

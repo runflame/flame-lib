@@ -6,8 +6,10 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::MintingProof;
 use crate::mint_proofs::indexer::worker::IndexerWorker;
-use crate::{MintingProof, MintingProofStorage, RpcApi};
+use crate::mint_proofs::minting_proof_storage::MintingProofStorage;
+use crate::rpc::RpcApi;
 
 pub type NewMintingProofs = BTreeMap<[u8; 32], Vec<MintingProof>>;
 
@@ -120,16 +122,15 @@ mod tests {
         client_sync::Result,
     };
 
-    use crate::{
-        BlockTip, InMemoryMintingProofStorage, MintingProofData, RpcApi,
-        mint_proofs::minting_proof_storage::MintingProof,
-    };
-
     use super::*;
+    use crate::mint_proofs::MintingProofData;
+    use crate::mint_proofs::minting_proof_storage::InMemoryMintingProofStorage;
+    use crate::mint_proofs::minting_proof_storage::MintingProof;
+    use crate::rpc::BtcBlockTip;
 
     struct TestRpc {
-        initial_tip: BlockTip,
-        next_tip: BlockTip,
+        initial_tip: BtcBlockTip,
+        next_tip: BtcBlockTip,
         wait_calls: AtomicUsize,
         transaction_calls: AtomicUsize,
         transactions_by_block: BTreeMap<BlockHash, Vec<Transaction>>,
@@ -137,7 +138,7 @@ mod tests {
 
     #[async_trait]
     impl RpcApi for TestRpc {
-        async fn block_tip(&self) -> Result<BlockTip> {
+        async fn block_tip(&self) -> Result<BtcBlockTip> {
             Ok(self.initial_tip)
         }
 
@@ -161,7 +162,7 @@ mod tests {
             Ok(block_hash(height))
         }
 
-        async fn wait_for_next_block(&self, _prev_block: BlockTip) -> Result<BlockTip> {
+        async fn wait_for_next_block(&self, _prev_block: BtcBlockTip) -> Result<BtcBlockTip> {
             if self.wait_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 Ok(self.next_tip)
             } else {
@@ -189,8 +190,8 @@ mod tests {
         }
     }
 
-    fn block_tip(hash_suffix: u8, height: u64) -> BlockTip {
-        BlockTip {
+    fn block_tip(hash_suffix: u8, height: u64) -> BtcBlockTip {
+        BtcBlockTip {
             hash: block_hash(u64::from(hash_suffix)),
             height,
         }
@@ -200,7 +201,7 @@ mod tests {
         BlockHash::from_str(&format!("{value:064x}")).expect("valid block hash")
     }
 
-    fn proof(flame_block_hash: [u8; 32], burned_sats: u64, tip: BlockTip) -> MintingProof {
+    fn proof(flame_block_hash: [u8; 32], burned_sats: u64, tip: BtcBlockTip) -> MintingProof {
         MintingProof {
             minting_proof_data: MintingProofData {
                 network_id: 7,
@@ -291,11 +292,11 @@ mod tests {
     #[tokio::test]
     async fn startup_bootstraps_current_and_previous_nineteen_blocks() {
         let initial_tip = block_tip(100, 25);
-        let oldest_bootstrap_tip = BlockTip {
+        let oldest_bootstrap_tip = BtcBlockTip {
             hash: block_hash(6),
             height: 6,
         };
-        let excluded_tip = BlockTip {
+        let excluded_tip = BtcBlockTip {
             hash: block_hash(5),
             height: 5,
         };

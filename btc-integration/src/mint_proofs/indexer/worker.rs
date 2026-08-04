@@ -4,8 +4,11 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
+use crate::MintingProof;
+use crate::mint_proofs::MintingProofData;
 use crate::mint_proofs::indexer::indexer::NewMintingProofs;
-use crate::{BlockTip, MintingProof, MintingProofData, MintingProofStorage, RpcApi};
+use crate::mint_proofs::minting_proof_storage::MintingProofStorage;
+use crate::rpc::{BtcBlockTip, RpcApi};
 
 const BOOTSTRAP_INDEX_BLOCK: u64 = 20;
 
@@ -35,7 +38,7 @@ where
         }
     }
 
-    pub(super) async fn run(self, initial_tip: BlockTip) -> RpcResult<()>
+    pub(super) async fn run(self, initial_tip: BtcBlockTip) -> RpcResult<()>
     where
         R: 'static,
         S: Send + 'static,
@@ -54,7 +57,7 @@ where
                         _ = self.cancellation_token.cancelled() => return Ok(()),
                         result = self.rpc_api.block_hash_at_height(height) => result?,
                     };
-                    let block_tip = BlockTip { hash, height };
+                    let block_tip = BtcBlockTip { hash, height };
 
                     self.index_block(block_tip).await?
                 }
@@ -69,7 +72,7 @@ where
         }
     }
 
-    pub(super) async fn bootstrap(&self) -> RpcResult<BlockTip> {
+    pub(super) async fn bootstrap(&self) -> RpcResult<BtcBlockTip> {
         let initial_tip = self.rpc_api.block_tip().await?;
         let first_height = initial_tip.height.saturating_sub(BOOTSTRAP_INDEX_BLOCK - 1);
 
@@ -82,7 +85,7 @@ where
                 },
                 result = self.rpc_api.block_hash_at_height(height) => result?,
             };
-            let block_tip = BlockTip { hash, height };
+            let block_tip = BtcBlockTip { hash, height };
 
             self.index_block(block_tip).await?;
         }
@@ -91,7 +94,7 @@ where
         Ok(initial_tip)
     }
 
-    async fn index_block(&self, block_tip: BlockTip) -> RpcResult<()> {
+    async fn index_block(&self, block_tip: BtcBlockTip) -> RpcResult<()> {
         let transactions = tokio::select! {
             _ = self.cancellation_token.cancelled() => return Ok(()),
             result = self.rpc_api.transactions_in_block(block_tip.hash) => result?,
@@ -121,7 +124,7 @@ where
 
 fn get_minting_proofs_from_transactions(
     transactions: &[Transaction],
-    block_tip: BlockTip,
+    block_tip: BtcBlockTip,
 ) -> Vec<MintingProof> {
     transactions
         .iter()

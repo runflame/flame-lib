@@ -1,4 +1,4 @@
-use crate::{BlockTip, Core31RpcApi, RpcApi};
+use crate::rpc::{BtcBlockTip, Core31RpcApi, RpcApi};
 use bitcoind::anyhow::Context;
 use bitcoind::mtype::SignRawTransaction;
 use corepc_client::bitcoin::{Address, Amount};
@@ -16,7 +16,7 @@ pub struct TestContext {
 }
 
 impl TestContext {
-    pub fn wait_for_next_block(&self, prev_block: BlockTip) -> JoinHandle<BlockTip> {
+    pub fn wait_for_next_block(&self, prev_block: BtcBlockTip) -> JoinHandle<BtcBlockTip> {
         let rpc = Arc::clone(&self.rpc);
 
         tokio::spawn(async move {

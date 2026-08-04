@@ -1,6 +1,6 @@
 use corepc_client::bitcoin::ScriptBuf;
 
-use crate::MintingProofData;
+use crate::mint_proofs::MintingProofData;
 use crate::mint_proofs::core::constants::{MINT_PROOF_MAGIC, OP_RETURN, PUSH_DATA_LEN, SCRIPT_LEN};
 
 pub fn mint_proof_to_script(proof: &MintingProofData) -> ScriptBuf {

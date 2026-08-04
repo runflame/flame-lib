@@ -2,13 +2,14 @@ use std::collections::BTreeMap;
 
 use corepc_client::bitcoin::Amount;
 
-use crate::{BlockTip, MintingProofData};
+use crate::mint_proofs::MintingProofData;
+use crate::rpc::BtcBlockTip;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MintingProof {
     pub minting_proof_data: MintingProofData,
     pub burned_amount: Amount,
-    pub bitcoin_block_tip: BlockTip,
+    pub bitcoin_block_tip: BtcBlockTip,
 }
 
 pub trait MintingProofStorage {
@@ -68,7 +69,7 @@ mod tests {
                 want_participate_in_consensus: true,
             },
             burned_amount: Amount::from_sat(burned_sats),
-            bitcoin_block_tip: BlockTip {
+            bitcoin_block_tip: BtcBlockTip {
                 hash: BlockHash::from_str(
                     "0000000000000000000000000000000000000000000000000000000000000001",
                 )

@@ -1,5 +1,7 @@
-use std::{error, fmt, sync::Arc};
+use std::sync::Arc;
 
+use crate::mint_proofs::MintingProofData;
+use crate::rpc::RpcApi;
 use corepc_client::{
     bitcoin::{
         Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, absolute,
@@ -7,37 +9,14 @@ use corepc_client::{
     },
     client_sync::Error as RpcError,
 };
+use thiserror::Error;
 
-use crate::{MintingProofData, RpcApi};
-
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum MintProofSendError {
+    #[error("mint-proof amount must be greater than zero")]
     ZeroAmount,
-    Rpc(RpcError),
-}
-
-impl fmt::Display for MintProofSendError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ZeroAmount => formatter.write_str("mint-proof amount must be greater than zero"),
-            Self::Rpc(error) => write!(formatter, "Bitcoin Core RPC error: {error}"),
-        }
-    }
-}
-
-impl error::Error for MintProofSendError {
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        match self {
-            Self::ZeroAmount => None,
-            Self::Rpc(error) => Some(error),
-        }
-    }
-}
-
-impl From<RpcError> for MintProofSendError {
-    fn from(error: RpcError) -> Self {
-        Self::Rpc(error)
-    }
+    #[error("Bitcoin Core RPC error: {0}")]
+    Rpc(#[from] RpcError),
 }
 
 pub struct MintProofSender<R: RpcApi> {

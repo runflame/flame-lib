@@ -15,14 +15,14 @@ use serde_json::json;
 use tokio::task;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BlockTip {
+pub struct BtcBlockTip {
     pub hash: BlockHash,
     pub height: u64,
 }
 
 #[async_trait]
 pub trait RpcApi: Send + Sync {
-    async fn block_tip(&self) -> Result<BlockTip>;
+    async fn block_tip(&self) -> Result<BtcBlockTip>;
 
     async fn transactions_in_block(&self, block_hash: BlockHash) -> Result<Vec<Transaction>>;
 
@@ -30,7 +30,7 @@ pub trait RpcApi: Send + Sync {
 
     async fn block_hash_at_height(&self, height: u64) -> Result<BlockHash>;
 
-    async fn wait_for_next_block(&self, prev_block: BlockTip) -> Result<BlockTip>;
+    async fn wait_for_next_block(&self, prev_block: BtcBlockTip) -> Result<BtcBlockTip>;
 
     async fn publish_transaction(&self, signed_transaction: &Transaction) -> Result<Txid>;
 
@@ -68,13 +68,13 @@ where
 
 #[async_trait]
 impl RpcApi for Core31RpcApi {
-    async fn block_tip(&self) -> Result<BlockTip> {
+    async fn block_tip(&self) -> Result<BtcBlockTip> {
         let client = Arc::clone(&self.client);
         spawn_core_call(move || {
             let info = client.get_blockchain_info()?;
             let height = u64::try_from(info.blocks).map_err(|_| Error::UnexpectedStructure)?;
 
-            Ok(BlockTip {
+            Ok(BtcBlockTip {
                 hash: info.best_block_hash.parse()?,
                 height,
             })
@@ -103,7 +103,7 @@ impl RpcApi for Core31RpcApi {
         spawn_core_call(move || Ok(client.get_block_hash(height)?.block_hash()?)).await
     }
 
-    async fn wait_for_next_block(&self, prev_block: BlockTip) -> Result<BlockTip> {
+    async fn wait_for_next_block(&self, prev_block: BtcBlockTip) -> Result<BtcBlockTip> {
         let client = Arc::clone(&self.client);
         spawn_core_call(move || {
             loop {
@@ -118,7 +118,7 @@ impl RpcApi for Core31RpcApi {
                 if hash != prev_block.hash {
                     let height =
                         u64::try_from(response.height).map_err(|_| Error::UnexpectedStructure)?;
-                    return Ok(BlockTip { hash, height });
+                    return Ok(BtcBlockTip { hash, height });
                 }
             }
         })
