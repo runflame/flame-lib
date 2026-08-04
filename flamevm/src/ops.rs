@@ -12,7 +12,7 @@ use crate::string::String;
 
 // ── Opcode bytes ─────────────────────────────────────────────────────
 
-// Byte map: see `flamevm/spec.md` §"Instruction table" for the
+// Byte map: see `docs/flamevm.md` §"Instruction table" for the
 // canonical view. The high nibble is the block; low nibble is either
 // the slot or, for k-class ops (`push:k`, `dup:k`, `roll:k`), the
 // inline operand. `label`/`jump`/`jumpif` carry a sub-varint operand.
@@ -232,7 +232,7 @@ pub enum Instruction {
     Mix,                   // tokens… cmts… m n mix → tokens
     Decrypt,               // T f' f q' q decrypt → CT
     Verify,                // x verify → ø
-    Fee,                   // qty flv fee → -WT
+    Fee,                   // qty fee → -WT
     Label(u32),            // ø label:n → ø  (operand: label number)
     Jump(u32),             // ø jump:n → ø   (unconditional)
     JumpIf(u32),           // x jumpif:n → ø (jump iff x ≠ 0)
@@ -242,8 +242,8 @@ pub enum Instruction {
     Cell,                  // items… k pred cell → cell
     Output,                // items… k pred output → ø
     Open,                  // cell ik nbrs pos script gas bytes args… k open → results… k'
-    Send,                  // args… k refund gas bytes addr send → ø
-    Call,                  // args… k gas bytes addr call → results… k'
+    Send,                  // args… k refund gas bytestoken addr send → ø
+    Call,                  // args… k gas bytestoken addr call → results… k'
     Load,                  // ø load → value   (actor state, any Value)
     Save,                  // value save → ø
     Setcode,               // code setcode → ø  (replace actor code blob)

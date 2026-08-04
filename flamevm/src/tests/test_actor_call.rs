@@ -38,12 +38,13 @@ fn vm_for_actor(actor: ActorID, script: Vec<u8>) -> VM {
 
 /// Helper: builds bytecode that invokes `op_call` with `k=0` args
 /// (plain single-action callee — no selector). Spec stack
-/// (bottom→top): `k gas bytes addr call`.
+/// (bottom→top): `k gas bytestoken addr call`.
 fn call_script(target: &ActorID, gas: u64) -> Vec<u8> {
     ScriptBuilder::new()
         .push_int(0u64)                                // k = 0 args
         .push_int(gas)                                 // gas
-        .push_int(0u64)                                // bytes
+        .push_int(BYTES_FLAVOR)
+        .pushtoken()                                   // zero-byte token
         .push_str(String::from(target.to_hash().to_vec())) // addr (32-byte)
         .call()
         .to_bytecode()
@@ -57,7 +58,8 @@ fn call_with_selector(target: &ActorID, sel: u64, gas: u64) -> Vec<u8> {
         .push_int(sel)                                 // selector arg (top)
         .push_int(1u64)                                // k = 1 arg
         .push_int(gas)
-        .push_int(0u64)                                // bytes
+        .push_int(BYTES_FLAVOR)
+        .pushtoken()                                   // zero-byte token
         .push_str(String::from(target.to_hash().to_vec()))
         .call()
         .to_bytecode()
@@ -67,6 +69,63 @@ fn call_with_selector(target: &ActorID, sel: u64, gas: u64) -> Vec<u8> {
 /// about call-frame mechanics, not the callee body.
 fn nop_recv() -> Vec<u8> {
     ScriptBuilder::new().nop().to_bytecode()
+}
+
+#[test]
+fn call_consumes_bytes_token_and_credits_callee() {
+    let mut reg = MemRegistry::new();
+    let callee = deploy_recv(&mut reg, nop_recv(), 100);
+    let caller = deploy_recv(&mut reg, ScriptBuilder::new().nop().nop().to_bytecode(), 100);
+    let mut vm = vm_for_actor(caller, ScriptBuilder::new().call().to_bytecode());
+    vm.current_call.stack = vec![
+        Value::Int253(Int253::ZERO),
+        Value::Int253(Int253::from(10_000u64)),
+        Value::ClearToken(ClearToken::new(Int253::from(50u64), BYTES_FLAVOR)),
+        Value::String(String::from(callee.to_hash().to_vec())),
+    ];
+
+    vm.step_internal_with_registry(&mut reg).expect("call");
+
+    assert_eq!(reg.actor_vbytes(&callee).unwrap(), 150);
+    assert_eq!(vm.current_call.newbytes, 50);
+}
+
+#[test]
+fn call_rejects_non_bytes_flavor() {
+    let mut reg = MemRegistry::new();
+    let callee = deploy_recv(&mut reg, nop_recv(), 100);
+    let caller = deploy_recv(&mut reg, ScriptBuilder::new().nop().nop().to_bytecode(), 100);
+    let mut vm = vm_for_actor(caller, ScriptBuilder::new().call().to_bytecode());
+    vm.current_call.stack = vec![
+        Value::Int253(Int253::ZERO),
+        Value::Int253(Int253::from(10_000u64)),
+        Value::ClearToken(ClearToken::new(Int253::ZERO, FLAME_FLAVOR)),
+        Value::String(String::from(callee.to_hash().to_vec())),
+    ];
+
+    let err = vm.step_internal_with_registry(&mut reg).unwrap_err();
+
+    assert!(matches!(err, VMError::InvalidBytesFlavor));
+    assert_eq!(reg.actor_vbytes(&callee).unwrap(), 100);
+}
+
+#[test]
+fn call_rejects_negative_bytes_quantity() {
+    let mut reg = MemRegistry::new();
+    let callee = deploy_recv(&mut reg, nop_recv(), 100);
+    let caller = deploy_recv(&mut reg, ScriptBuilder::new().nop().nop().to_bytecode(), 100);
+    let mut vm = vm_for_actor(caller, ScriptBuilder::new().call().to_bytecode());
+    vm.current_call.stack = vec![
+        Value::Int253(Int253::ZERO),
+        Value::Int253(Int253::from(10_000u64)),
+        Value::ClearToken(ClearToken::new(Int253::from(-1i64), BYTES_FLAVOR)),
+        Value::String(String::from(callee.to_hash().to_vec())),
+    ];
+
+    let err = vm.step_internal_with_registry(&mut reg).unwrap_err();
+
+    assert!(matches!(err, VMError::InvalidBitrange));
+    assert_eq!(reg.actor_vbytes(&callee).unwrap(), 100);
 }
 
 #[test]
@@ -486,7 +545,8 @@ fn call_depth_caps_at_exactly_max() {
         .gas()
         .push_int(-200i64)
         .add() // grant = remaining − 200
-        .push_int(0u64) // bytes
+        .push_int(BYTES_FLAVOR)
+        .pushtoken() // zero-byte token
         .push_str(String::from(id.to_hash().to_vec()))
         .call()
         .drop_()
@@ -549,7 +609,8 @@ fn f1_failed_subcall_load_does_not_destroy_actor() {
     let a_recv = ScriptBuilder::new()
         .push_int(0u64)                              // k = 0 args
         .push_int(5_000u64)                          // gas
-        .push_int(0u64)                              // bytes
+        .push_int(BYTES_FLAVOR)
+        .pushtoken()                                 // zero-byte token
         .push_str(String::from(x_id.to_hash().to_vec())) // addr
         .call()
         .drop_()                                     // drop failure marker (0)
@@ -613,7 +674,8 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
     let a_recv = ScriptBuilder::new()
         .push_int(0u64)
         .push_int(5_000u64)
-        .push_int(0u64)
+        .push_int(BYTES_FLAVOR)
+        .pushtoken()
         .push_str(String::from(x_id.to_hash().to_vec()))
         .call()
         .drop_()
@@ -689,7 +751,8 @@ fn f3_save_failure_rolls_back_and_preserves_actor() {
     let a_recv = ScriptBuilder::new()
         .push_int(0u64)
         .push_int(5_000u64)
-        .push_int(0u64)
+        .push_int(BYTES_FLAVOR)
+        .pushtoken()
         .push_str(String::from(x_id.to_hash().to_vec()))
         .call()
         .drop_()

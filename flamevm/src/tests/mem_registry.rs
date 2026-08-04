@@ -257,7 +257,10 @@ impl ActorRegistry for MemRegistry {
             .actors
             .get_mut(&id.to_hash())
             .ok_or(VMError::ActorNotFound)?;
-        actor.vbytes = actor.vbytes.saturating_add(amount);
+        actor.vbytes = actor
+            .vbytes
+            .checked_add(amount)
+            .ok_or(VMError::InvalidBitrange)?;
         if actor.is_frozen() {
             actor.frozen_since = None;
             actor.active_blocks = 0;
@@ -356,7 +359,7 @@ impl Env for MemEnv {
     fn apply_changes(&mut self, log: &TxLog) {
         // First cut: replay actor-state saves onto existing actors.
         // Deploy / vbyte-credit / reaping flow is deferred — see
-        // design.md §Transaction lifecycle & API (vbytes flow note).
+        // docs/flamevm.md §Design.
         for entry in log.iter() {
             match entry {
                 TxEntry::ActorSave { actor, state } => {

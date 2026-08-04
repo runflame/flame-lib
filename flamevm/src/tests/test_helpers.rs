@@ -23,7 +23,7 @@ pub use crate::{
     Token, WideToken, Value,
     PredicateTree, VbytePool,
     Instruction,
-    CheckedFee, MAX_FEE,
+    BYTES_FLAVOR, CheckedFee, FLAME_FLAVOR, MAX_FEE,
     CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,
 };
 
@@ -270,7 +270,8 @@ pub(crate) fn call_to(target: &ActorID) -> ScriptBuilder {
     ScriptBuilder::new()
         .push_int(0u64) // k = 0
         .push_int(50_000u64) // gas
-        .push_int(0u64) // bytes
+        .push_int(BYTES_FLAVOR)
+        .pushtoken() // zero-byte token
         .push_str(String::from(target.to_hash().to_vec()))
         .call()
 }
@@ -282,7 +283,8 @@ pub(crate) fn call_with_sel(target: &ActorID, sel: u64) -> ScriptBuilder {
         .push_int(sel) // selector arg (top)
         .push_int(1u64) // k = 1
         .push_int(50_000u64) // gas
-        .push_int(0u64) // bytes
+        .push_int(BYTES_FLAVOR)
+        .pushtoken() // zero-byte token
         .push_str(String::from(target.to_hash().to_vec()))
         .call()
 }

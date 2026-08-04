@@ -69,8 +69,8 @@ fn facade_internal_execute_tx_roundtrip() {
 }
 
 /// Deploy-on-first-delivery edge: a second message to the same
-/// Constructor-form target must NOT re-deploy or re-credit vbytes —
-/// the actor (and its balance) persists from the first delivery.
+/// Constructor-form target deploys only once; subsequent deliveries
+/// credit their byte-token quantity to the existing actor.
 #[test]
 fn second_constructor_send_does_not_redeploy() {
     let mut reg = MemRegistry::new();
@@ -90,7 +90,7 @@ fn second_constructor_send_does_not_redeploy() {
     VM::execute_internal(dummy_header(), mk(777), &mut reg, &block).expect("first");
     VM::execute_internal(dummy_header(), mk(500), &mut reg, &block).expect("second");
     let a = reg.actor(&canonical).expect("deployed once");
-    assert_eq!(a.vbytes, 777, "second delivery must not re-deploy or re-credit");
+    assert_eq!(a.vbytes, 1_277, "second delivery credits the existing actor");
     assert_eq!(a.code, code);
 }
 

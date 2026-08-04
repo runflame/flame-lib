@@ -459,8 +459,8 @@ fn failed_call_rolls_back_every_state_lane() {
         .push_int(0u64)                                    // k=0 args
         .push_str(String::from(vec![0u8; 32]))             // refund (32 B)
         .push_int(1u64)                                    // gas
-        .push_int(0u64)                                    // bytes
-        .push_int(0u64)                                    // method
+        .push_int(BYTES_FLAVOR)
+        .pushtoken()                                       // zero-byte token
         .push_str(String::from(vec![0xcc; 32]))            // addr (32 B)
         .send()
         // ── lane 3: deferred_sigs (signtx records TxBound) ──────

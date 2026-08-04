@@ -12,15 +12,28 @@ use crate::tx::{TxEntry, TxID};
 use crate::{ActorID, ActorRegistry, Int253};
 
 /// `op_send` operands as a recv-code blob. Spec stack (bottom→top):
-/// `args… k refund gas bytes addr send`.
+/// `args… k refund gas bytestoken addr send`.
 fn send_script(target: &ActorID, refund_bytes: [u8; 32], selector: u64, gas: u64, vbytes: u64) -> Vec<u8> {
     // ADR 0020: the selector is just the topmost payload arg.
-    ScriptBuilder::new()
+    let mut program = ScriptBuilder::new()
         .push_int(selector) // selector arg
         .push_int(1u64) // k = 1 arg
         .push_str(String::from(refund_bytes.to_vec())) // refund (32-byte)
-        .push_int(gas)
-        .push_int(vbytes)
+        .push_int(gas);
+    program = if vbytes == 0 {
+        program.push_int(BYTES_FLAVOR).pushtoken()
+    } else {
+        // Produce a balanced ±bytes pair, retire the debt half, and
+        // leave the positive bearer as send's byte-token operand.
+        program
+            .push_int(vbytes)
+            .push_int(BYTES_FLAVOR)
+            .borrow()
+            .push_int(1u64)
+            .roll()
+            .retire()
+    };
+    program
         .push_str(String::from(target.to_hash().to_vec())) // addr (32-byte)
         .send()
         .to_bytecode()
@@ -98,7 +111,8 @@ fn send_payload_differs_across_args() {
             .push_int(1u64) // k = 1
             .push_str(String::from(refund.to_vec())) // refund
             .push_int(1u64) // gas
-            .push_int(0u64) // bytes
+            .push_int(BYTES_FLAVOR)
+            .pushtoken() // zero-byte token
             .push_str(String::from(target.to_hash().to_vec())) // addr
             .send()
             .to_bytecode()
@@ -143,7 +157,8 @@ fn send_with_non_32_byte_addr_errors() {
         .push_int(0u64) // k = 0
         .push_str(String::from(vec![0u8; 32])) // refund (valid)
         .push_int(1u64) // gas
-        .push_int(0u64) // bytes
+        .push_int(BYTES_FLAVOR)
+        .pushtoken() // zero-byte token
         .push_str(String::from(vec![0u8; 16])) // BAD addr: 16 bytes
         .send()
         .to_bytecode();
@@ -158,7 +173,8 @@ fn send_with_non_32_byte_refund_errors() {
         .push_int(0u64) // k = 0
         .push_str(String::from(vec![0u8; 16])) // BAD refund: 16 bytes
         .push_int(1u64) // gas
-        .push_int(0u64) // bytes
+        .push_int(BYTES_FLAVOR)
+        .pushtoken() // zero-byte token
         .push_str(String::from(vec![0u8; 32])) // addr (valid)
         .send()
         .to_bytecode();

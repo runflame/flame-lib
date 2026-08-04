@@ -60,9 +60,9 @@ pub struct Message {
     /// spec.md).
     pub gas: u64,
 
-    /// Vbyte allotment delivered to the target on success — used to
-    /// fund storage. Restores a frozen actor (per ADR 0005: top-up
-    /// resets the counter and clears `frozen_since`).
+    /// Quantity extracted from the sender's `BYTES_FLAVOR`
+    /// ClearToken. The flavor is validated and discarded at `send`;
+    /// delivery deposits this quantity into the target's rent balance.
     pub vbytes: u64,
 
     /// Sender-chosen bounce predicate. If the delivered internal tx

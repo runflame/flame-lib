@@ -43,7 +43,9 @@ pub use ops::Instruction;
 pub use script::{ScriptBuilder, Script};
 pub use prover::Prover;
 pub use string::String;
-pub use token::{flavor_from_actor, ClearToken, Token, WideToken};
+pub use token::{
+    flavor_from_actor, BYTES_FLAVOR, ClearToken, FLAME_FLAVOR, Token, WideToken,
+};
 pub use value::Value;
 pub use verifier::Verifier;
 

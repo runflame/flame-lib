@@ -7,6 +7,12 @@ use crate::constraints::Commitment;
 use crate::actor::ActorID;
 use crate::{Int253, Predicate, String};
 
+/// Canonical flavor of the native Flame token.
+pub const FLAME_FLAVOR: Int253 = Int253::ZERO;
+
+/// Canonical flavor of the virtual-byte rent token.
+pub const BYTES_FLAVOR: Int253 = Int253::ONE;
+
 // ── Token ────────────────────────────────────────────────────────
 
 /// Encrypted asset value — Pedersen commitments to a non-negative
