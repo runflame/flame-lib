@@ -1,6 +1,12 @@
 use corepc_client::bitcoin::{Amount, Transaction, TxOut};
+use curve25519_dalek::ristretto::CompressedRistretto;
+use ed25519_dalek::VerifyingKey;
+use flamevm::Predicate;
 
-use crate::mint_proofs::core::constants::{MINT_PROOF_MAGIC, OP_RETURN, PUSH_DATA_LEN};
+use crate::mint_proofs::core::constants::{
+    MINT_PROOF_DATA_LEN, MINT_PROOF_MAGIC, OP_PUSHDATA1, OP_RETURN,
+    PARTICIPATING_MINT_PROOF_DATA_LEN,
+};
 use crate::mint_proofs::core::minting_proof_data::MintingProofData;
 
 struct MintProofParser<'a> {
@@ -14,29 +20,43 @@ impl<'a> MintProofParser<'a> {
     }
 
     fn parse(mut self) -> Option<MintingProofData> {
-        if self.read_byte()? != OP_RETURN
-            || self.read_byte()? != PUSH_DATA_LEN
-            || self.read_array::<3>()? != &MINT_PROOF_MAGIC
-        {
+        if self.read_byte()? != OP_RETURN {
+            return None;
+        }
+
+        let payload_len = match self.read_byte()? {
+            length if usize::from(length) == MINT_PROOF_DATA_LEN => MINT_PROOF_DATA_LEN,
+            OP_PUSHDATA1 if usize::from(self.read_byte()?) == PARTICIPATING_MINT_PROOF_DATA_LEN => {
+                PARTICIPATING_MINT_PROOF_DATA_LEN
+            }
+            _ => return None,
+        };
+        let payload_end = self.cursor.checked_add(payload_len)?;
+
+        if self.read_array::<3>()? != &MINT_PROOF_MAGIC {
             return None;
         }
 
         let network_id = self.read_byte()?;
         let flame_block_hash = *self.read_array::<32>()?;
-        let want_participate_in_consensus = match self.read_byte()? {
-            0 => false,
-            1 => true,
+        let flame_address = Predicate::opaque(CompressedRistretto(*self.read_array::<32>()?));
+        let validator_pubkey = match payload_len {
+            PARTICIPATING_MINT_PROOF_DATA_LEN => {
+                Some(VerifyingKey::from_bytes(self.read_array::<32>()?).ok()?)
+            }
+            MINT_PROOF_DATA_LEN => None,
             _ => return None,
         };
 
-        if self.cursor != self.bytes.len() {
+        if self.cursor != payload_end || payload_end != self.bytes.len() {
             return None;
         }
 
         Some(MintingProofData {
             network_id,
             flame_block_hash,
-            want_participate_in_consensus,
+            flame_reward_address: flame_address,
+            validator_pubkey,
         })
     }
 

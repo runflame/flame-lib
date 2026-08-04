@@ -4,6 +4,8 @@ use btc_integration::prelude::*;
 use btc_integration::rpc::RpcApi;
 use btc_integration::test::setup;
 use corepc_client::bitcoin::Amount;
+use ed25519_dalek::SigningKey;
+use flamevm::Predicate;
 use std::sync::Arc;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -51,9 +53,17 @@ async fn mint_proof_sender_works_with_core31_rpc_api() -> bitcoind::anyhow::Resu
     let mint_proof_sender = MintProofSenderV31::new(Arc::clone(&rpc), 1);
     let sent_amount = Amount::from_btc(1.0).expect("valid BTC amount");
     let flame_block_hash = [0xab; 32];
+    let flame_address = Predicate::opaque(Predicate::unspendable_key());
+    let validator_pubkey = SigningKey::from_bytes(&[7; 32]).verifying_key();
 
     let txid = mint_proof_sender
-        .send_mint_proof(sent_amount, &[], flame_block_hash, true)
+        .send_mint_proof(
+            sent_amount,
+            &[],
+            flame_block_hash,
+            flame_address.clone(),
+            Some(validator_pubkey),
+        )
         .await?;
     let confirmation_block = ctx.generate_next_block()?;
     let confirmed_transactions = ctx.rpc.transactions_in_block(confirmation_block).await?;
@@ -73,7 +83,8 @@ async fn mint_proof_sender_works_with_core31_rpc_api() -> bitcoind::anyhow::Resu
         Some(MintingProofData {
             network_id: 1,
             flame_block_hash,
-            want_participate_in_consensus: true,
+            flame_reward_address: flame_address,
+            validator_pubkey: Some(validator_pubkey),
         })
     );
 

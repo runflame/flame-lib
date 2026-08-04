@@ -58,6 +58,8 @@ mod tests {
     use std::str::FromStr;
 
     use corepc_client::bitcoin::{Amount, BlockHash};
+    use ed25519_dalek::SigningKey;
+    use flamevm::Predicate;
 
     use super::*;
 
@@ -66,7 +68,8 @@ mod tests {
             minting_proof_data: MintingProofData {
                 network_id: 7,
                 flame_block_hash: block_hash,
-                want_participate_in_consensus: true,
+                flame_reward_address: Predicate::opaque(Predicate::unspendable_key()),
+                validator_pubkey: Some(SigningKey::from_bytes(&[7; 32]).verifying_key()),
             },
             burned_amount: Amount::from_sat(burned_sats),
             bitcoin_block_tip: BtcBlockTip {

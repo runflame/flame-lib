@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 corepc-client = { version = "0.16.0", features = ["client-sync"] }
+curve25519-dalek = "4"
+ed25519-dalek = "2"
+flamevm = { path = "../flamevm" }
 serde_json = "1"
 bitcoind = { version = "0.41", features = ["31_0", "download"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }

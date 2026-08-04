@@ -9,6 +9,8 @@ use corepc_client::{
     },
     client_sync::Error as RpcError,
 };
+use ed25519_dalek::VerifyingKey;
+use flamevm::Predicate;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -34,7 +36,8 @@ impl<R: RpcApi> MintProofSender<R> {
         amount: Amount,
         inputs: &[OutPoint],
         flame_block_hash: [u8; 32],
-        wants_to_participate: bool,
+        flame_address: Predicate,
+        validator_pubkey: Option<VerifyingKey>,
     ) -> Result<Txid, MintProofSendError> {
         if amount == Amount::ZERO {
             return Err(MintProofSendError::ZeroAmount);
@@ -43,7 +46,8 @@ impl<R: RpcApi> MintProofSender<R> {
         let proof = MintingProofData {
             network_id: self.network_id,
             flame_block_hash,
-            want_participate_in_consensus: wants_to_participate,
+            flame_reward_address: flame_address,
+            validator_pubkey,
         };
         let transaction = Transaction {
             version: transaction::Version::TWO,
