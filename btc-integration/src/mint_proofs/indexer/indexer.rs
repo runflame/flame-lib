@@ -38,7 +38,7 @@ struct IndexerWorkerHandle {
 
 pub struct MintProofIndexer<R, S> {
     rpc: Arc<R>,
-    storage: Arc<Mutex<S>>,
+    storage: Arc<S>,
     subscribers: broadcast::Sender<Arc<MintingProofUpdate>>,
     worker: Mutex<Option<IndexerWorkerHandle>>,
 }
@@ -48,19 +48,19 @@ where
     R: RpcApi,
     S: MintingProofStorage,
 {
-    pub fn new(rpc: Arc<R>, storage: S) -> Self {
+    pub fn new(rpc: Arc<R>, storage: Arc<S>) -> Self {
         let (subscribers, _) = broadcast::channel(16);
 
         Self {
             rpc,
-            storage: Arc::new(Mutex::new(storage)),
+            storage,
             subscribers,
             worker: Mutex::new(None),
         }
     }
 
     pub async fn get_proofs(&self, flame_block_hash: [u8; 32]) -> Vec<MintingProof> {
-        self.storage.lock().await.get(flame_block_hash)
+        self.storage.get(flame_block_hash).await
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<MintingProofUpdate>> {
@@ -70,7 +70,7 @@ where
     pub async fn startup(&self) -> RpcResult<()>
     where
         R: 'static,
-        S: Send + 'static,
+        S: 'static,
     {
         let mut worker_slot = self.worker.lock().await;
         if worker_slot.is_some() {
@@ -290,7 +290,7 @@ mod tests {
                 (next_tip.hash, header(next_tip, Some(initial_tip.hash))),
             ]),
         });
-        let indexer = MintProofIndexer::new(rpc, InMemoryMintingProofStorage::new());
+        let indexer = MintProofIndexer::new(rpc, Arc::new(InMemoryMintingProofStorage::new()));
         let mut received_notifications = indexer.subscribe();
 
         indexer.startup().await.unwrap();
@@ -373,7 +373,10 @@ mod tests {
                 header(initial_tip, Some(block_hash(99))),
             )]),
         });
-        let indexer = MintProofIndexer::new(Arc::clone(&rpc), InMemoryMintingProofStorage::new());
+        let indexer = MintProofIndexer::new(
+            Arc::clone(&rpc),
+            Arc::new(InMemoryMintingProofStorage::new()),
+        );
 
         indexer.startup().await.expect("start indexer");
 
@@ -424,7 +427,7 @@ mod tests {
                 (new_tip.hash, header(new_tip, Some(new_block.hash))),
             ]),
         });
-        let indexer = MintProofIndexer::new(rpc, InMemoryMintingProofStorage::new());
+        let indexer = MintProofIndexer::new(rpc, Arc::new(InMemoryMintingProofStorage::new()));
         let mut notifications = indexer.subscribe();
 
         indexer.startup().await.expect("start indexer");
@@ -513,7 +516,10 @@ mod tests {
                 (best_tip.hash, header(best_tip, Some(best_middle.hash))),
             ]),
         });
-        let indexer = MintProofIndexer::new(Arc::clone(&rpc), InMemoryMintingProofStorage::new());
+        let indexer = MintProofIndexer::new(
+            Arc::clone(&rpc),
+            Arc::new(InMemoryMintingProofStorage::new()),
+        );
         let mut notifications = indexer.subscribe();
 
         indexer.startup().await.expect("start indexer");

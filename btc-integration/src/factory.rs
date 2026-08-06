@@ -21,7 +21,7 @@ pub fn create_mint_proof_components(
 > {
     let rpc_api = Arc::new(Core31RpcApi::new(&config.btc_rpc_api, config.btc_rpc_auth)?);
     let sender = MintProofSenderV31::new(Arc::clone(&rpc_api), config.flame_network_id);
-    let indexer = MintProofIndexer::new(rpc_api, InMemoryMintingProofStorage::new());
+    let indexer = MintProofIndexer::new(rpc_api, Arc::new(InMemoryMintingProofStorage::new()));
 
     Ok((sender, indexer))
 }

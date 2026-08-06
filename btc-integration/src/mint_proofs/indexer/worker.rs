@@ -1,7 +1,7 @@
 use corepc_client::bitcoin::{BlockHash, Transaction};
 use corepc_client::client_sync::{Error, Result as RpcResult};
 use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::MintingProof;
@@ -17,7 +17,7 @@ const BOOTSTRAP_INDEX_BLOCK: u64 = 20;
 
 pub(super) struct IndexerWorker<R, S> {
     rpc_api: Arc<R>,
-    storage: Arc<Mutex<S>>,
+    storage: Arc<S>,
     subscribers: broadcast::Sender<Arc<MintingProofUpdate>>,
     cancellation_token: CancellationToken,
 }
@@ -29,7 +29,7 @@ where
 {
     pub(super) fn new(
         rpc_api: Arc<R>,
-        storage: Arc<Mutex<S>>,
+        storage: Arc<S>,
         subscribers: broadcast::Sender<Arc<MintingProofUpdate>>,
         cancellation_token: CancellationToken,
     ) -> Self {
@@ -44,7 +44,7 @@ where
     pub(super) async fn run(self, initial_tip: BtcBlockTip) -> RpcResult<()>
     where
         R: 'static,
-        S: Send + 'static,
+        S: 'static,
     {
         let mut applied_tip = initial_tip;
         let mut update_planner =
@@ -169,24 +169,17 @@ where
         let proofs = get_minting_proofs_from_transactions(&transactions, block_tip);
         let mut new_proofs = NewMintingProofs::new();
 
-        {
-            let mut storage = self.storage.lock().await;
-
-            for proof in proofs {
-                let flame_block_hash = proof.minting_proof_data.flame_block_hash;
-                storage.insert(flame_block_hash, proof.clone());
-                new_proofs.entry(flame_block_hash).or_default().push(proof);
-            }
+        for proof in proofs {
+            let flame_block_hash = proof.minting_proof_data.flame_block_hash;
+            self.storage.insert(flame_block_hash, proof.clone()).await;
+            new_proofs.entry(flame_block_hash).or_default().push(proof);
         }
 
         Ok(new_proofs)
     }
 
     async fn delete_proofs(&self, block_hashes: &[BlockHash]) -> MintingProofsByBitcoinBlock {
-        self.storage
-            .lock()
-            .await
-            .remove_by_bitcoin_blocks(block_hashes)
+        self.storage.remove_by_bitcoin_blocks(block_hashes).await
     }
 
     fn publish(&self, update: MintingProofUpdate) {
