@@ -31,7 +31,7 @@ async fn indexer_bootstraps_and_follows_new_bitcoin_blocks() -> bitcoind::anyhow
         )
         .await?;
     let bootstrap_block_hash = ctx.generate_next_block()?;
-    let bootstrap_tip = ctx.rpc.block_tip().await?;
+    let bootstrap_tip = ctx.rpc.best_block_tip().await?;
     assert_eq!(bootstrap_tip.hash, bootstrap_block_hash);
 
     indexer.startup().await?;
@@ -65,7 +65,7 @@ async fn indexer_bootstraps_and_follows_new_bitcoin_blocks() -> bitcoind::anyhow
         )
         .await?;
     let live_block_hash = ctx.generate_next_block()?;
-    let live_tip = ctx.rpc.block_tip().await?;
+    let live_tip = ctx.rpc.best_block_tip().await?;
     assert_eq!(live_tip.hash, live_block_hash);
 
     let notification = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
@@ -82,8 +82,11 @@ async fn indexer_bootstraps_and_follows_new_bitcoin_blocks() -> bitcoind::anyhow
         bitcoin_block_tip: live_tip,
     };
 
+    let MintingProofUpdate::NewBlocks(new_proofs) = notification.as_ref() else {
+        bitcoind::anyhow::bail!("expected a new-blocks notification");
+    };
     assert_eq!(
-        notification
+        new_proofs
             .get(&live_flame_hash)
             .context("notification did not contain the live mint proof")?,
         &vec![live_proof.clone()]

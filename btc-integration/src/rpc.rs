@@ -20,9 +20,28 @@ pub struct BtcBlockTip {
     pub height: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BtcBlockHeaderInfo {
+    pub tip: BtcBlockTip,
+    pub previous_block_hash: Option<BlockHash>,
+}
+
 #[async_trait]
 pub trait RpcApi: Send + Sync {
-    async fn block_tip(&self) -> Result<BtcBlockTip>;
+    async fn best_block_tip(&self) -> Result<BtcBlockTip>;
+
+    async fn block_header_info(&self, block_hash: BlockHash) -> Result<BtcBlockHeaderInfo>;
+
+    async fn previous_header(&self, header: BtcBlockHeaderInfo) -> Result<BtcBlockHeaderInfo> {
+        let previous_hash = header.previous_block_hash.ok_or_else(|| {
+            Error::Returned(format!(
+                "block {:?} does not have a previous block",
+                header.tip
+            ))
+        })?;
+
+        self.block_header_info(previous_hash).await
+    }
 
     async fn transactions_in_block(&self, block_hash: BlockHash) -> Result<Vec<Transaction>>;
 
@@ -68,7 +87,7 @@ where
 
 #[async_trait]
 impl RpcApi for Core31RpcApi {
-    async fn block_tip(&self) -> Result<BtcBlockTip> {
+    async fn best_block_tip(&self) -> Result<BtcBlockTip> {
         let client = Arc::clone(&self.client);
         spawn_core_call(move || {
             let info = client.get_blockchain_info()?;
@@ -77,6 +96,26 @@ impl RpcApi for Core31RpcApi {
             Ok(BtcBlockTip {
                 hash: info.best_block_hash.parse()?,
                 height,
+            })
+        })
+        .await
+    }
+
+    async fn block_header_info(&self, block_hash: BlockHash) -> Result<BtcBlockHeaderInfo> {
+        let client = Arc::clone(&self.client);
+        spawn_core_call(move || {
+            let info = client.get_block_header_verbose(&block_hash)?;
+            let height = u64::try_from(info.height).map_err(|_| Error::UnexpectedStructure)?;
+
+            Ok(BtcBlockHeaderInfo {
+                tip: BtcBlockTip {
+                    hash: info.hash.parse()?,
+                    height,
+                },
+                previous_block_hash: info
+                    .previous_block_hash
+                    .map(|hash| hash.parse())
+                    .transpose()?,
             })
         })
         .await

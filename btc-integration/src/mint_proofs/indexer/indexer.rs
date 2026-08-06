@@ -1,3 +1,12 @@
+//! Mint Proof Indexer is a background task that performs 2 key functions:
+//! - Indexing minting proofs
+//! - Indexing reorgs
+//!
+//! The service does not have any persistent state, as only last 10 bitcoin blocks are usually needed
+//! to be indexed. It is the task of indexer user to store the last bitcoin tip and pass it to the
+//! indexer on startup. This ensures that only one btc block is used in the node, and there is no
+//! conflict between indexer btc block tip and indexer user btc block tip.
+
 use corepc_client::client_sync::{Error, Result as RpcResult};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::{
@@ -8,10 +17,19 @@ use tokio_util::sync::CancellationToken;
 
 use crate::MintingProof;
 use crate::mint_proofs::indexer::worker::IndexerWorker;
-use crate::mint_proofs::minting_proof_storage::MintingProofStorage;
+use crate::mint_proofs::minting_proof_storage::{MintingProofStorage, MintingProofsByBitcoinBlock};
 use crate::rpc::RpcApi;
 
 pub type NewMintingProofs = BTreeMap<[u8; 32], Vec<MintingProof>>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MintingProofUpdate {
+    NewBlocks(NewMintingProofs),
+    Reorg {
+        deleted_proofs: MintingProofsByBitcoinBlock,
+        new_proofs: NewMintingProofs,
+    },
+}
 
 struct IndexerWorkerHandle {
     cancellation_token: CancellationToken,
@@ -21,7 +39,7 @@ struct IndexerWorkerHandle {
 pub struct MintProofIndexer<R, S> {
     rpc: Arc<R>,
     storage: Arc<Mutex<S>>,
-    subscribers: broadcast::Sender<Arc<NewMintingProofs>>,
+    subscribers: broadcast::Sender<Arc<MintingProofUpdate>>,
     worker: Mutex<Option<IndexerWorkerHandle>>,
 }
 
@@ -45,7 +63,7 @@ where
         self.storage.lock().await.get(flame_block_hash)
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<Arc<NewMintingProofs>> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<MintingProofUpdate>> {
         self.subscribers.subscribe()
     }
 
@@ -128,20 +146,33 @@ mod tests {
     use crate::mint_proofs::MintingProofData;
     use crate::mint_proofs::minting_proof_storage::InMemoryMintingProofStorage;
     use crate::mint_proofs::minting_proof_storage::MintingProof;
-    use crate::rpc::BtcBlockTip;
+    use crate::rpc::{BtcBlockHeaderInfo, BtcBlockTip};
 
     struct TestRpc {
         initial_tip: BtcBlockTip,
         next_tip: BtcBlockTip,
+        best_tip: BtcBlockTip,
+        block_tip_calls: AtomicUsize,
         wait_calls: AtomicUsize,
         transaction_calls: AtomicUsize,
         transactions_by_block: BTreeMap<BlockHash, Vec<Transaction>>,
+        headers: BTreeMap<BlockHash, BtcBlockHeaderInfo>,
     }
 
     #[async_trait]
     impl RpcApi for TestRpc {
-        async fn block_tip(&self) -> Result<BtcBlockTip> {
-            Ok(self.initial_tip)
+        async fn best_block_tip(&self) -> Result<BtcBlockTip> {
+            if self.block_tip_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(self.initial_tip)
+            } else {
+                Ok(self.best_tip)
+            }
+        }
+
+        async fn block_header_info(&self, block_hash: BlockHash) -> Result<BtcBlockHeaderInfo> {
+            self.headers.get(&block_hash).copied().ok_or_else(|| {
+                Error::Returned(format!("test block header {block_hash} was not found"))
+            })
         }
 
         async fn transactions_in_block(&self, block_hash: BlockHash) -> Result<Vec<Transaction>> {
@@ -203,6 +234,13 @@ mod tests {
         BlockHash::from_str(&format!("{value:064x}")).expect("valid block hash")
     }
 
+    fn header(tip: BtcBlockTip, previous_block_hash: Option<BlockHash>) -> BtcBlockHeaderInfo {
+        BtcBlockHeaderInfo {
+            tip,
+            previous_block_hash,
+        }
+    }
+
     fn proof(flame_block_hash: [u8; 32], burned_sats: u64, tip: BtcBlockTip) -> MintingProof {
         MintingProof {
             minting_proof_data: MintingProofData {
@@ -242,9 +280,15 @@ mod tests {
         let rpc = Arc::new(TestRpc {
             initial_tip,
             next_tip,
+            best_tip: initial_tip,
+            block_tip_calls: AtomicUsize::new(0),
             wait_calls: AtomicUsize::new(0),
             transaction_calls: AtomicUsize::new(0),
             transactions_by_block: BTreeMap::from([(next_tip.hash, transactions)]),
+            headers: BTreeMap::from([
+                (initial_tip.hash, header(initial_tip, Some(block_hash(0)))),
+                (next_tip.hash, header(next_tip, Some(initial_tip.hash))),
+            ]),
         });
         let indexer = MintProofIndexer::new(rpc, InMemoryMintingProofStorage::new());
         let mut received_notifications = indexer.subscribe();
@@ -282,8 +326,8 @@ mod tests {
         );
         assert_eq!(indexer.get_proofs([0x22; 32]).await, vec![other.clone()]);
         assert_eq!(
-            notification,
-            Arc::new({
+            notification.as_ref(),
+            &MintingProofUpdate::NewBlocks({
                 let mut expected = NewMintingProofs::new();
                 expected.insert([0x11; 32], vec![first, second]);
                 expected.insert([0x22; 32], vec![other]);
@@ -309,6 +353,8 @@ mod tests {
         let rpc = Arc::new(TestRpc {
             initial_tip,
             next_tip: initial_tip,
+            best_tip: initial_tip,
+            block_tip_calls: AtomicUsize::new(0),
             wait_calls: AtomicUsize::new(0),
             transaction_calls: AtomicUsize::new(0),
             transactions_by_block: BTreeMap::from([
@@ -322,6 +368,10 @@ mod tests {
                     vec![transaction(std::slice::from_ref(&current))],
                 ),
             ]),
+            headers: BTreeMap::from([(
+                initial_tip.hash,
+                header(initial_tip, Some(block_hash(99))),
+            )]),
         });
         let indexer = MintProofIndexer::new(Arc::clone(&rpc), InMemoryMintingProofStorage::new());
 
@@ -330,6 +380,168 @@ mod tests {
         assert_eq!(rpc.transaction_calls.load(Ordering::SeqCst), 20);
         assert_eq!(indexer.get_proofs([0x11; 32]).await, vec![oldest, current]);
         assert!(indexer.get_proofs([0x22; 32]).await.is_empty());
+
+        indexer.shutdown().await.expect("shut down indexer");
+    }
+
+    #[tokio::test]
+    async fn reorg_deletes_discarded_proofs_and_publishes_replacement_proofs() {
+        let common_ancestor = block_tip(0, 0);
+        let old_tip = block_tip(11, 1);
+        let new_block = block_tip(21, 1);
+        let new_tip = block_tip(22, 2);
+        let discarded = proof([0x11; 32], 1_000, old_tip);
+        let replacement = proof([0x11; 32], 2_000, new_block);
+        let additional = proof([0x22; 32], 3_000, new_tip);
+        let rpc = Arc::new(TestRpc {
+            initial_tip: old_tip,
+            next_tip: new_tip,
+            best_tip: new_tip,
+            block_tip_calls: AtomicUsize::new(0),
+            wait_calls: AtomicUsize::new(0),
+            transaction_calls: AtomicUsize::new(0),
+            transactions_by_block: BTreeMap::from([
+                (
+                    old_tip.hash,
+                    vec![transaction(std::slice::from_ref(&discarded))],
+                ),
+                (
+                    new_block.hash,
+                    vec![transaction(std::slice::from_ref(&replacement))],
+                ),
+                (
+                    new_tip.hash,
+                    vec![transaction(std::slice::from_ref(&additional))],
+                ),
+            ]),
+            headers: BTreeMap::from([
+                (common_ancestor.hash, header(common_ancestor, None)),
+                (old_tip.hash, header(old_tip, Some(common_ancestor.hash))),
+                (
+                    new_block.hash,
+                    header(new_block, Some(common_ancestor.hash)),
+                ),
+                (new_tip.hash, header(new_tip, Some(new_block.hash))),
+            ]),
+        });
+        let indexer = MintProofIndexer::new(rpc, InMemoryMintingProofStorage::new());
+        let mut notifications = indexer.subscribe();
+
+        indexer.startup().await.expect("start indexer");
+        let bootstrap_update = notifications.recv().await.expect("bootstrap update");
+        assert_eq!(
+            bootstrap_update.as_ref(),
+            &MintingProofUpdate::NewBlocks(BTreeMap::from([
+                ([0x11; 32], vec![discarded.clone()],)
+            ]))
+        );
+
+        let reorg_update = tokio::time::timeout(Duration::from_secs(1), notifications.recv())
+            .await
+            .expect("reorg notification timeout")
+            .expect("reorg notification");
+        assert_eq!(
+            reorg_update.as_ref(),
+            &MintingProofUpdate::Reorg {
+                deleted_proofs: BTreeMap::from([(old_tip.hash, vec![discarded])]),
+                new_proofs: BTreeMap::from([
+                    ([0x11; 32], vec![replacement.clone()]),
+                    ([0x22; 32], vec![additional.clone()]),
+                ]),
+            }
+        );
+        assert_eq!(indexer.get_proofs([0x11; 32]).await, vec![replacement]);
+        assert_eq!(indexer.get_proofs([0x22; 32]).await, vec![additional]);
+
+        indexer.shutdown().await.expect("shut down indexer");
+    }
+
+    #[tokio::test]
+    async fn rechecks_the_best_tip_when_another_reorg_occurs_during_handling() {
+        let common_ancestor = block_tip(0, 0);
+        let old_tip = block_tip(11, 1);
+        let announced_block = block_tip(21, 1);
+        let announced_tip = block_tip(22, 2);
+        let best_block = block_tip(31, 1);
+        let best_middle = block_tip(32, 2);
+        let best_tip = block_tip(33, 3);
+        let old_proof = proof([0x11; 32], 1_000, old_tip);
+        let superseded_proof = proof([0x11; 32], 2_000, announced_block);
+        let winning_proof = proof([0x11; 32], 3_000, best_block);
+        let additional_proof = proof([0x22; 32], 4_000, best_tip);
+        let rpc = Arc::new(TestRpc {
+            initial_tip: old_tip,
+            next_tip: announced_tip,
+            best_tip,
+            block_tip_calls: AtomicUsize::new(0),
+            wait_calls: AtomicUsize::new(0),
+            transaction_calls: AtomicUsize::new(0),
+            transactions_by_block: BTreeMap::from([
+                (
+                    old_tip.hash,
+                    vec![transaction(std::slice::from_ref(&old_proof))],
+                ),
+                (
+                    announced_block.hash,
+                    vec![transaction(std::slice::from_ref(&superseded_proof))],
+                ),
+                (
+                    best_block.hash,
+                    vec![transaction(std::slice::from_ref(&winning_proof))],
+                ),
+                (
+                    best_tip.hash,
+                    vec![transaction(std::slice::from_ref(&additional_proof))],
+                ),
+            ]),
+            headers: BTreeMap::from([
+                (common_ancestor.hash, header(common_ancestor, None)),
+                (old_tip.hash, header(old_tip, Some(common_ancestor.hash))),
+                (
+                    announced_block.hash,
+                    header(announced_block, Some(common_ancestor.hash)),
+                ),
+                (
+                    announced_tip.hash,
+                    header(announced_tip, Some(announced_block.hash)),
+                ),
+                (
+                    best_block.hash,
+                    header(best_block, Some(common_ancestor.hash)),
+                ),
+                (best_middle.hash, header(best_middle, Some(best_block.hash))),
+                (best_tip.hash, header(best_tip, Some(best_middle.hash))),
+            ]),
+        });
+        let indexer = MintProofIndexer::new(Arc::clone(&rpc), InMemoryMintingProofStorage::new());
+        let mut notifications = indexer.subscribe();
+
+        indexer.startup().await.expect("start indexer");
+        notifications.recv().await.expect("bootstrap update");
+
+        let reorg_update = tokio::time::timeout(Duration::from_secs(1), notifications.recv())
+            .await
+            .expect("reorg notification timeout")
+            .expect("reorg notification");
+        assert_eq!(
+            reorg_update.as_ref(),
+            &MintingProofUpdate::Reorg {
+                deleted_proofs: BTreeMap::from([(old_tip.hash, vec![old_proof])]),
+                new_proofs: BTreeMap::from([
+                    ([0x11; 32], vec![winning_proof.clone()]),
+                    ([0x22; 32], vec![additional_proof.clone()]),
+                ]),
+            }
+        );
+        assert_eq!(indexer.get_proofs([0x11; 32]).await, vec![winning_proof]);
+        assert_eq!(indexer.get_proofs([0x22; 32]).await, vec![additional_proof]);
+        assert!(
+            !indexer
+                .get_proofs([0x11; 32])
+                .await
+                .contains(&superseded_proof)
+        );
+        assert_eq!(rpc.block_tip_calls.load(Ordering::SeqCst), 3);
 
         indexer.shutdown().await.expect("shut down indexer");
     }
