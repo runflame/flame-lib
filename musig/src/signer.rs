@@ -2,7 +2,6 @@ use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
-use rand;
 
 use starsig::{Signature, TranscriptProtocol};
 
@@ -43,7 +42,7 @@ pub struct SignerAwaitingShares<C: MusigContext> {
 
 impl Signer {
     /// Create new signing party for a given transcript.
-    pub fn new<'t, C: MusigContext>(
+    pub fn start<'t, C: MusigContext>(
         // The message `m` has already been fed into the transcript
         transcript: &'t mut Transcript,
         position: usize,
@@ -112,7 +111,7 @@ impl<'t, C: MusigContext> SignerAwaitingCommitments<'t, C> {
     /// Provide nonce commitments to the party and transition to the next round
     /// if they match the precommitments.
     pub fn receive_commitments(
-        mut self,
+        self,
         nonce_commitments: Vec<NonceCommitment>,
     ) -> Result<(SignerAwaitingShares<C>, Scalar), MusigError> {
         // Make R = sum_i(R_i). nonce_commitments = R_i from all the parties.
@@ -127,7 +126,7 @@ impl<'t, C: MusigContext> SignerAwaitingCommitments<'t, C> {
             .collect::<Result<_, _>>()?;
 
         // Commit the context with label "X", and commit the nonce sum with label "R"
-        self.context.commit(&mut self.transcript);
+        self.context.commit(self.transcript);
         self.transcript.append_point(b"R", &R.compress());
 
         // Make a copy of the transcript for extracting the challenge c_i.
@@ -136,7 +135,7 @@ impl<'t, C: MusigContext> SignerAwaitingCommitments<'t, C> {
         let transcript = self.transcript.clone();
 
         // Get per-party challenge c_i
-        let c_i = self.context.challenge(self.position, &mut self.transcript);
+        let c_i = self.context.challenge(self.position, self.transcript);
 
         // Generate share: s_i = r_i + c * a_i * x_i
         let s_i = self.r_i + c_i * self.x_i;
@@ -154,11 +153,11 @@ impl<'t, C: MusigContext> SignerAwaitingCommitments<'t, C> {
     }
 }
 
-impl<'t, C: MusigContext> SignerAwaitingShares<C> {
+impl<C: MusigContext> SignerAwaitingShares<C> {
     /// Assemble trusted signature shares (e.g. when all keys owned by one signer)
     pub fn receive_trusted_shares(self, shares: Vec<Scalar>) -> Signature {
         // s = sum(s_i), s_i = shares[i]
-        let s: Scalar = shares.into_iter().map(|share| share).sum();
+        let s: Scalar = shares.into_iter().sum();
         Signature {
             s,
             R: self.R.compress(),

@@ -18,12 +18,12 @@ fn spacesuit_helper(
     let pc_gens = PedersenGens::default();
     let mut rng = rand::thread_rng();
 
-    let (proof, in_com, out_com) = prove(&bp_gens, &pc_gens, &inputs, &outputs, &mut rng)?;
+    let (proof, in_com, out_com) = prove(bp_gens, &pc_gens, &inputs, &outputs, &mut rng)?;
 
-    verify(&bp_gens, &pc_gens, &proof, &in_com, &out_com)
+    verify(bp_gens, &pc_gens, &proof, &in_com, &out_com)
 }
 
-fn prove<R: Rng + CryptoRng>(
+fn prove<R>(
     bp_gens: &BulletproofGens,
     pc_gens: &PedersenGens,
     inputs: &Vec<Value>,
@@ -31,16 +31,16 @@ fn prove<R: Rng + CryptoRng>(
     rng: &mut R,
 ) -> Result<(R1CSProof, Vec<CommittedValue>, Vec<CommittedValue>), R1CSError>
 where
-    R: rand::RngCore,
+    R: Rng + CryptoRng,
 {
     let mut prover_transcript = Transcript::new(b"TransactionTest");
-    let mut prover = Prover::new(&pc_gens, &mut prover_transcript);
+    let mut prover = Prover::new(pc_gens, &mut prover_transcript);
 
     let (in_com, in_vars) = inputs.commit(&mut prover, rng);
     let (out_com, out_vars) = outputs.commit(&mut prover, rng);
 
     cloak(&mut prover, in_vars, out_vars)?;
-    let proof = prover.prove(&bp_gens)?;
+    let proof = prover.prove(bp_gens)?;
 
     Ok((proof, in_com, out_com))
 }
@@ -61,7 +61,7 @@ fn verify(
 
     assert!(cloak(&mut verifier, in_vars, out_vars,).is_ok());
 
-    Ok(verifier.verify(&proof, &pc_gens, &bp_gens)?)
+    verifier.verify(proof, pc_gens, bp_gens)
 }
 
 // Helper functions to make the tests easier to read

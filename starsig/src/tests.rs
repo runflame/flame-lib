@@ -100,7 +100,7 @@ fn sign_and_verify_batch() {
     );
     sig2.verify_batched(
         &mut Transcript::new(b"example transcript 2"),
-        pub1.clone(),
+        pub1,
         &mut bad_batch,
     );
     sig3.verify_batched(

@@ -705,8 +705,7 @@ impl VM {
 
     fn new(header: TxHeader, initial_call: CallFrame) -> Self {
         // Header is the first txlog entry so TxID binds to version + locktime.
-        let mut txlog = Vec::new();
-        txlog.push(TxEntry::Header(header));
+        let txlog = vec![TxEntry::Header(header)];
         // Seed last_anchor from the root frame's kind: ExternalRoot →
         // None (op_input must seed); InternalRoot → Some(Message.anchor)
         // (already unique from prior tx's op_send split).
@@ -1452,7 +1451,7 @@ impl VM {
     fn op_read_bits(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(256)?;
         let s = self.pop_value()?.to_string()?;
-        let n_bytes = (n + 7) / 8;
+        let n_bytes = n.div_ceil(8);
         if s.len() < n_bytes {
             self.push_read_failure(s); // restore original (witness-preserving)
             return Ok(());
@@ -2965,7 +2964,6 @@ impl VM {
     /// the cloak gadget. Token/ClearToken commit to the CS; WideToken
     /// unwraps in place.
     fn value_to_allocated<D: Delegate>(
-        &mut self,
         value: Value,
         delegate: &mut D,
     ) -> Result<spacesuit::AllocatedValue, VMError> {
@@ -2990,7 +2988,7 @@ impl VM {
             }
             Value::ClearToken(c) => {
                 let token = Token::cleartext(c.qty(), c.flv());
-                self.value_to_allocated(Value::Token(token), delegate)
+                Self::value_to_allocated(Value::Token(token), delegate)
             }
             _ => Err(VMError::TypeNotToken),
         }
@@ -3029,7 +3027,7 @@ impl VM {
             let qty_commit = qty_str.to_commitment()?;
             let token = Token::new(qty_commit, flv_commit);
             // Build the AllocatedValue against the CS.
-            let allocated = self.value_to_allocated(
+            let allocated = Self::value_to_allocated(
                 Value::Token(token.clone()),
                 delegate,
             )?;
@@ -3041,7 +3039,7 @@ impl VM {
         let mut cloak_ins: Vec<spacesuit::AllocatedValue> = Vec::with_capacity(m);
         for _ in 0..m {
             let item = self.pop_value()?;
-            let allocated = self.value_to_allocated(item, delegate)?;
+            let allocated = Self::value_to_allocated(item, delegate)?;
             cloak_ins.insert(0, allocated);
         }
         // Run the cloak gadget. On constraint-system error, surface

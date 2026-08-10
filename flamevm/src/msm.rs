@@ -64,6 +64,11 @@ impl MultiscalarMul {
         self.terms.len()
     }
 
+    /// Returns true when the MSM has no terms.
+    pub fn is_empty(&self) -> bool {
+        self.terms.is_empty()
+    }
+
     /// Appends another MSM's terms (consumes both).
     pub fn append(mut self, mut other: MultiscalarMul) -> Self {
         self.terms.append(&mut other.terms);

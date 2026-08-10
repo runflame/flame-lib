@@ -1,4 +1,5 @@
 [workspace]
+resolver = "2"
 
 members = [
     "readerwriter",
@@ -7,6 +8,8 @@ members = [
     "musig",
     "spacesuit",
     "flamevm",
+    "btc-integration",
+    "types",
 ]
 
 # Use the runflame fork of merlin to enable its `dynamic-labels`

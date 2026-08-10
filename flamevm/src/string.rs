@@ -312,7 +312,7 @@ impl String {
                 }
             }
         }
-        let removed_bytes = (n + 7) / 8;
+        let removed_bytes = n.div_ceil(8);
         let pad = removed_bytes * 8 - n;
         let mut removed = vec![0u8; removed_bytes];
         for i in 0..n {
@@ -336,7 +336,7 @@ impl String {
                 set_bit(&mut shifted, i, bit);
             }
         }
-        let removed_bytes = (n + 7) / 8;
+        let removed_bytes = n.div_ceil(8);
         let mut removed = vec![0u8; removed_bytes];
         for i in 0..n {
             if let Some(src) = (total + i).checked_sub(n) {

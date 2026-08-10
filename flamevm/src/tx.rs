@@ -55,7 +55,7 @@ impl ExternalTx {
             self.header,
             limits.gas,
             limits.mem,
-            Some(self.signature.clone()),
+            Some(self.signature),
         )?;
         Ok(TxLog(result.txlog))
     }

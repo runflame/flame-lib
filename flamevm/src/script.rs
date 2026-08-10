@@ -203,11 +203,13 @@ impl ScriptBuilder {
 
     pub fn abs(mut self) -> Self { self.instructions.push(Instruction::Abs); self }
     pub fn eq(mut self) -> Self { self.instructions.push(Instruction::Eq); self }
+    #[allow(clippy::should_implement_trait)]
     pub fn neg(mut self) -> Self { self.instructions.push(Instruction::Neg); self }
     pub fn add(mut self) -> Self { self.instructions.push(Instruction::Add); self }
     pub fn mul(mut self) -> Self { self.instructions.push(Instruction::Mul); self }
     pub fn divmod(mut self) -> Self { self.instructions.push(Instruction::DivMod); self }
     pub fn mod252(mut self) -> Self { self.instructions.push(Instruction::Mod252); self }
+    #[allow(clippy::should_implement_trait)]
     pub fn not(mut self) -> Self { self.instructions.push(Instruction::Not); self }
     pub fn and(mut self) -> Self { self.instructions.push(Instruction::And); self }
     pub fn or(mut self) -> Self { self.instructions.push(Instruction::Or); self }

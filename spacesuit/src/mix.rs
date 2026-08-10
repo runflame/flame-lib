@@ -60,9 +60,9 @@ pub fn k_mix<CS: RandomizableConstraintSystem>(
 // Calls `k` mix gadgets, using mix_in and mix_mid as inputs, and mix_mid and mix_out as outputs.
 fn call_mix_gadget<CS: RandomizableConstraintSystem>(
     cs: &mut CS,
-    mix_in: &Vec<AllocatedValue>,
-    mix_mid: &Vec<AllocatedValue>,
-    mix_out: &Vec<AllocatedValue>,
+    mix_in: &[AllocatedValue],
+    mix_mid: &[AllocatedValue],
+    mix_out: &[AllocatedValue],
 ) -> Result<(), R1CSError> {
     let k = mix_out.len();
     if mix_in.len() != k || mix_mid.len() != k - 2 {
@@ -72,9 +72,9 @@ fn call_mix_gadget<CS: RandomizableConstraintSystem>(
     }
 
     // The first value of mix_in, to prepend to mix_mid for creating A inputs.
-    let first_in = mix_in[0].clone();
+    let first_in = mix_in[0];
     // The last value of mix_out, to append to mix_mid for creating D outputs.
-    let last_out = mix_out[k - 1].clone();
+    let last_out = mix_out[k - 1];
 
     // For each of the `k-1` mix gadget calls, constrain A, B, C, D:
     for (((A, B), C), D) in
@@ -101,17 +101,16 @@ fn call_mix_gadget<CS: RandomizableConstraintSystem>(
 // * a vector of `AllocatedValue`s for the input values of a k-mix gadget
 // * a vector of `AllocatedValue`s for the middle values of a k-mix gadget
 // * a vector of `AllocatedValue`s for the output values of a k-mix gadget
+type MixIntermediateValues = (
+    Vec<AllocatedValue>,
+    Vec<AllocatedValue>,
+    Vec<AllocatedValue>,
+);
+
 fn make_intermediate_values<CS: RandomizableConstraintSystem>(
-    inputs: &Vec<AllocatedValue>,
+    inputs: &[AllocatedValue],
     cs: &mut CS,
-) -> Result<
-    (
-        Vec<AllocatedValue>,
-        Vec<AllocatedValue>,
-        Vec<AllocatedValue>,
-    ),
-    R1CSError,
-> {
+) -> Result<MixIntermediateValues, R1CSError> {
     let collected_inputs: Option<Vec<_>> = inputs.iter().map(|input| input.assignment).collect();
     match collected_inputs {
         Some(input_values) => {
@@ -136,11 +135,11 @@ fn make_intermediate_values<CS: RandomizableConstraintSystem>(
 //   where all `AllocatedValues` have been grouped according to flavor
 // * a vector of `Value`s that were used to create the output `AllocatedValue`s
 fn order_by_flavor<CS: RandomizableConstraintSystem>(
-    inputs: &Vec<Value>,
+    inputs: &[Value],
     cs: &mut CS,
 ) -> Result<(Vec<AllocatedValue>, Vec<Value>), R1CSError> {
     let k = inputs.len();
-    let mut outputs = inputs.clone();
+    let mut outputs = inputs.to_vec();
 
     for i in 0..k - 1 {
         // This tuple has the flavor that we are trying to group by in this loop
@@ -180,27 +179,27 @@ fn order_by_flavor<CS: RandomizableConstraintSystem>(
 //   are moved without modification. (See `mix.rs` for more information on 2-mix gadgets.)
 // * a vector of the `AllocatedValue`s that are only outputs of 2-mix gadgets.
 fn combine_by_flavor<CS: RandomizableConstraintSystem>(
-    inputs: &Vec<Value>,
+    inputs: &[Value],
     cs: &mut CS,
 ) -> Result<(Vec<AllocatedValue>, Vec<AllocatedValue>), R1CSError> {
     let mut mid = Vec::with_capacity(inputs.len() - 1);
     let mut outputs = Vec::with_capacity(inputs.len());
 
     let mut A = inputs[0];
-    for B in inputs.into_iter().skip(1) {
+    for B in inputs.iter().skip(1) {
         // Check if A and B have the same flavors
         let same_flavor = A.f.ct_eq(&B.f);
 
         // If same_flavor, merge: C.0, C.1, C.2 = 0.
         // Else, move: C = A.
-        let mut C = A.clone();
+        let mut C = A;
         C.q.conditional_assign(&0u64.into(), same_flavor);
         C.f.conditional_assign(&Scalar::ZERO, same_flavor);
         outputs.push(C);
 
         // If same_flavor, merge: D.0 = A.0 + B.0, D.1 = A.1, D.2 = A.2.
         // Else, move: D = B.
-        let mut D = B.clone();
+        let mut D = *B;
         match A.q + B.q {
             Some(x) => D.q.conditional_assign(&x, same_flavor),
             None => {
@@ -342,7 +341,7 @@ mod tests {
 
         mix(&mut verifier, A_var, B_var, C_var, D_var)?;
 
-        Ok(verifier.verify(&proof, &pc_gens, &bp_gens)?)
+        verifier.verify(&proof, &pc_gens, &bp_gens)
     }
 
     #[test]
@@ -473,7 +472,7 @@ mod tests {
         // Verifier adds constraints to the constraint system
         assert!(call_mix_gadget(&mut verifier, &input_vars, &mid_vars, &output_vars).is_ok());
 
-        Ok(verifier.verify(&proof, &pc_gens, &bp_gens)?)
+        verifier.verify(&proof, &pc_gens, &bp_gens)
     }
 
     // Note: the output vectors for order_by_flavor does not have to be in a particular order,
@@ -487,50 +486,50 @@ mod tests {
 
         // k = 1
         assert_eq!(
-            order_by_flavor(&vec![yuan(1)], &mut prover_cs).unwrap().1,
+            order_by_flavor(&[yuan(1)], &mut prover_cs).unwrap().1,
             vec![yuan(1)]
         );
         // k = 2
         assert_eq!(
-            order_by_flavor(&vec![yuan(1), yuan(2)], &mut prover_cs)
+            order_by_flavor(&[yuan(1), yuan(2)], &mut prover_cs)
                 .unwrap()
                 .1,
             vec![yuan(1), yuan(2)]
         );
         assert_eq!(
-            order_by_flavor(&vec![yuan(1), peso(2)], &mut prover_cs)
+            order_by_flavor(&[yuan(1), peso(2)], &mut prover_cs)
                 .unwrap()
                 .1,
             vec![yuan(1), peso(2)]
         );
         // k = 3
         assert_eq!(
-            order_by_flavor(&vec![yuan(1), peso(3), yuan(2)], &mut prover_cs)
+            order_by_flavor(&[yuan(1), peso(3), yuan(2)], &mut prover_cs)
                 .unwrap()
                 .1,
             vec![yuan(1), yuan(2), peso(3)]
         );
         // k = 4
         assert_eq!(
-            order_by_flavor(&vec![yuan(1), peso(3), yuan(2), peso(4)], &mut prover_cs)
+            order_by_flavor(&[yuan(1), peso(3), yuan(2), peso(4)], &mut prover_cs)
                 .unwrap()
                 .1,
             vec![yuan(1), yuan(2), peso(3), peso(4)]
         );
         assert_eq!(
-            order_by_flavor(&vec![yuan(1), peso(3), peso(4), yuan(2)], &mut prover_cs)
+            order_by_flavor(&[yuan(1), peso(3), peso(4), yuan(2)], &mut prover_cs)
                 .unwrap()
                 .1,
             vec![yuan(1), yuan(2), peso(4), peso(3)]
         );
         assert_eq!(
-            order_by_flavor(&vec![yuan(1), peso(3), zero(), yuan(2)], &mut prover_cs)
+            order_by_flavor(&[yuan(1), peso(3), zero(), yuan(2)], &mut prover_cs)
                 .unwrap()
                 .1,
             vec![yuan(1), yuan(2), zero(), peso(3)]
         );
         assert_eq!(
-            order_by_flavor(&vec![yuan(1), yuan(2), yuan(3), yuan(4)], &mut prover_cs)
+            order_by_flavor(&[yuan(1), yuan(2), yuan(3), yuan(4)], &mut prover_cs)
                 .unwrap()
                 .1,
             vec![yuan(1), yuan(4), yuan(3), yuan(2)]
@@ -538,7 +537,7 @@ mod tests {
         // k = 5
         assert_eq!(
             order_by_flavor(
-                &vec![yuan(1), yuan(2), yuan(3), yuan(4), yuan(5)],
+                &[yuan(1), yuan(2), yuan(3), yuan(4), yuan(5)],
                 &mut prover_cs
             )
             .unwrap()
@@ -547,7 +546,7 @@ mod tests {
         );
         assert_eq!(
             order_by_flavor(
-                &vec![yuan(1), peso(2), yuan(3), peso(4), yuan(5)],
+                &[yuan(1), peso(2), yuan(3), peso(4), yuan(5)],
                 &mut prover_cs
             )
             .unwrap()
@@ -556,7 +555,7 @@ mod tests {
         );
         assert_eq!(
             order_by_flavor(
-                &vec![yuan(1), peso(2), zero(), peso(4), yuan(5)],
+                &[yuan(1), peso(2), zero(), peso(4), yuan(5)],
                 &mut prover_cs
             )
             .unwrap()
@@ -569,36 +568,36 @@ mod tests {
     fn combine_by_flavor_test() {
         // k = 2
         assert_eq!(
-            combine_by_flavor_helper(&vec![yuan(1), peso(4)]),
+            combine_by_flavor_helper(&[yuan(1), peso(4)]),
             (vec![], vec![yuan(1), peso(4)])
         );
         assert_eq!(
-            combine_by_flavor_helper(&vec![yuan(1), yuan(3)]),
+            combine_by_flavor_helper(&[yuan(1), yuan(3)]),
             (vec![], vec![zero(), yuan(4)])
         );
         // k = 3
         assert_eq!(
-            combine_by_flavor_helper(&vec![yuan(1), peso(4), zero()]),
+            combine_by_flavor_helper(&[yuan(1), peso(4), zero()]),
             (vec![peso(4)], vec![yuan(1), peso(4), zero()])
         );
         assert_eq!(
-            combine_by_flavor_helper(&vec![yuan(1), yuan(3), peso(2)]),
+            combine_by_flavor_helper(&[yuan(1), yuan(3), peso(2)]),
             (vec![yuan(4)], vec![zero(), yuan(4), peso(2)])
         );
         assert_eq!(
-            combine_by_flavor_helper(&vec![peso(2), yuan(1), yuan(3)]),
+            combine_by_flavor_helper(&[peso(2), yuan(1), yuan(3)]),
             (vec![yuan(1)], vec![peso(2), zero(), yuan(4)])
         );
         // k = 4
         assert_eq!(
-            combine_by_flavor_helper(&vec![yuan(1), yuan(1), peso(4), peso(4)]),
+            combine_by_flavor_helper(&[yuan(1), yuan(1), peso(4), peso(4)]),
             (
                 vec![yuan(2), peso(4)],
                 vec![zero(), yuan(2), zero(), peso(8)]
             )
         );
         assert_eq!(
-            combine_by_flavor_helper(&vec![yuan(1), yuan(2), yuan(3), yuan(4)]),
+            combine_by_flavor_helper(&[yuan(1), yuan(2), yuan(3), yuan(4)]),
             (
                 vec![yuan(3), yuan(6)],
                 vec![zero(), zero(), zero(), yuan(10)]
@@ -606,12 +605,12 @@ mod tests {
         );
     }
 
-    fn combine_by_flavor_helper(inputs: &Vec<Value>) -> (Vec<Value>, Vec<Value>) {
+    fn combine_by_flavor_helper(inputs: &[Value]) -> (Vec<Value>, Vec<Value>) {
         let pc_gens = PedersenGens::default();
         let mut transcript = Transcript::new(b"CombineByFlavorTest");
         let mut prover_cs = Prover::new(&pc_gens, &mut transcript);
 
-        let (allocated_mid, allocated_output) = combine_by_flavor(&inputs, &mut prover_cs).unwrap();
+        let (allocated_mid, allocated_output) = combine_by_flavor(inputs, &mut prover_cs).unwrap();
         let mid = allocated_mid
             .iter()
             .map(|allocated| allocated.assignment)

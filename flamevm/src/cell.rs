@@ -454,7 +454,7 @@ fn merkle_root_of_leaves(leaves: &[PredicateLeaf]) -> [u8; 32] {
 /// Packs a slice of `0`/`1` bit values into bytes, LSB-first within
 /// each byte. Trailing high bits in the last byte are zero-padded.
 fn pack_position_bits(bits: &[u8]) -> Vec<u8> {
-    let byte_count = (bits.len() + 7) / 8;
+    let byte_count = bits.len().div_ceil(8);
     let mut out = vec![0u8; byte_count];
     for (i, &b) in bits.iter().enumerate() {
         if b & 1 != 0 {

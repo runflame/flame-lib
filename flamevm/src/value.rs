@@ -50,6 +50,7 @@ impl Value {
 
     /// _x_ **neg** — sign flip for Int253, LC negate for Expression,
     /// scalar-coefficient negation for Point/MSM (lifts to MSM).
+    #[allow(clippy::should_implement_trait)]
     pub fn neg(self) -> Result<Value, VMError> {
         match self {
             Value::Int253(v) => Ok(Value::Int253(-v)),
@@ -93,6 +94,7 @@ impl Value {
 
 
     /// _x_ **not** — cleartext if Int253; structural if Constraint.
+    #[allow(clippy::should_implement_trait)]
     pub fn not(self) -> Result<Value, VMError> {
         match self {
             Value::Int253(v) => {

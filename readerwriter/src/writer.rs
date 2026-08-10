@@ -1,4 +1,3 @@
-use core::mem;
 use std::fmt::Formatter;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,7 +58,7 @@ impl Writer for Vec<u8> {
 
     #[inline]
     fn remaining_capacity(&self) -> usize {
-        usize::max_value()
+        usize::MAX
     }
 }
 
@@ -68,7 +67,7 @@ impl Writer for &mut [u8] {
     fn write(&mut self, _label: &'static [u8], src: &[u8]) -> Result<(), WriteError> {
         let n = src.len();
         if n <= self.remaining_capacity() {
-            let (a, b) = mem::replace(self, &mut []).split_at_mut(n);
+            let (a, b) = std::mem::take(self).split_at_mut(n);
             a.copy_from_slice(&src[..n]);
             *self = b;
             Ok(())

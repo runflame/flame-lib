@@ -158,7 +158,7 @@ fn vbyte_size_grows_with_state() {
 fn vbyte_size_grows_with_code() {
     let state = empty_state();
     let n_small = vbyte_size(&[0x1d], &state).expect("vbyte_size");
-    let n_big = vbyte_size(&vec![0x1d; 100], &state).expect("vbyte_size");
+    let n_big = vbyte_size(&[0x1d; 100], &state).expect("vbyte_size");
     assert!(n_big - n_small >= 99, "code length counts toward vbytes");
 }
 

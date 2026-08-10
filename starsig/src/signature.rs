@@ -139,8 +139,8 @@ impl fmt::Debug for Signature {
         write!(
             f,
             "Signature({}{})",
-            hex::encode(&self.s.as_bytes()),
-            hex::encode(&self.R.as_bytes())
+            hex::encode(self.s.as_bytes()),
+            hex::encode(self.R.as_bytes())
         )
         // Without hex crate we'd do this, but it outputs comma-separated numbers: [aa, 11, 5a, ...]
         // write!(f, "{:x?}", &self.0)

@@ -46,11 +46,11 @@ fn make_multikey() {
     assert_eq!(expected_pubkey, multikey.aggregated_key().into_point());
 }
 
-fn multikey_helper(priv_keys: &Vec<Scalar>) -> Multikey {
+fn multikey_helper(priv_keys: &[Scalar]) -> Multikey {
     Multikey::new(
         priv_keys
             .iter()
-            .map(|priv_key| VerificationKey::from_secret(priv_key))
+            .map(VerificationKey::from_secret)
             .collect(),
     )
     .unwrap()
@@ -71,23 +71,23 @@ fn sign_multikey() {
 }
 
 fn sign_with_mpc<C: MusigContext + Clone>(
-    privkeys: &Vec<Scalar>,
+    privkeys: &[Scalar],
     context: C,
     transcript: Transcript,
 ) -> Result<(Signature, Scalar), MusigError> {
     let pubkeys: Vec<_> = privkeys
         .iter()
-        .map(|privkey| VerificationKey::from_secret(privkey))
+        .map(VerificationKey::from_secret)
         .collect();
 
     let mut transcripts: Vec<_> = pubkeys.iter().map(|_| transcript.clone()).collect();
 
     let (parties, precomms): (Vec<_>, Vec<_>) = privkeys
-        .clone()
-        .into_iter()
+        .iter()
+        .copied()
         .zip(transcripts.iter_mut())
         .enumerate()
-        .map(|(i, (x_i, transcript))| Signer::new(transcript, i, x_i, context.clone()))
+        .map(|(i, (x_i, transcript))| Signer::start(transcript, i, x_i, context.clone()))
         .unzip();
 
     let (parties, comms): (Vec<_>, Vec<_>) = parties
@@ -119,7 +119,7 @@ fn sign_with_mpc<C: MusigContext + Clone>(
         assert_eq!(cmp_challenge, challenge);
     }
 
-    Ok((signatures[0].clone(), cmp_challenge))
+    Ok((signatures[0], cmp_challenge))
 }
 
 #[test]
@@ -207,12 +207,12 @@ fn sign_multimessage() {
 }
 
 fn multimessage_helper<M: AsRef<[u8]>>(
-    priv_keys: &Vec<Scalar>,
+    priv_keys: &[Scalar],
     messages: Vec<M>,
 ) -> Vec<(VerificationKey, M)> {
     priv_keys
         .iter()
-        .zip(messages.into_iter())
+        .zip(messages)
         .map(|(priv_key, msg)| (VerificationKey::from_secret(priv_key), msg))
         .collect()
 }

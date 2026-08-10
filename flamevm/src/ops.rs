@@ -585,14 +585,12 @@ fn encode_push_int(i: &Int253, w: &mut impl Writer) -> Result<(), WriteError> {
     let mag_bytes = mag_scalar.to_bytes();
 
     // Try push:k (only for 0..=15 and non-negative).
-    if !neg {
-        if mag_bytes[8..].iter().all(|&b| b == 0) {
-            let mut lo = [0u8; 8];
-            lo.copy_from_slice(&mag_bytes[..8]);
-            let v = u64::from_le_bytes(lo);
-            if v <= OP_PUSH_SMALL_MAX as u64 {
-                return w.write_u8(b"pushsmall", v as u8);
-            }
+    if !neg && mag_bytes[8..].iter().all(|&b| b == 0) {
+        let mut lo = [0u8; 8];
+        lo.copy_from_slice(&mag_bytes[..8]);
+        let v = u64::from_le_bytes(lo);
+        if v <= OP_PUSH_SMALL_MAX as u64 {
+            return w.write_u8(b"pushsmall", v as u8);
         }
     }
 

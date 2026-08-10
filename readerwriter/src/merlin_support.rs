@@ -12,6 +12,6 @@ impl Writer for Transcript {
 
     #[inline]
     fn remaining_capacity(&self) -> usize {
-        usize::max_value()
+        usize::MAX
     }
 }

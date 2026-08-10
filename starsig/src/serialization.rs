@@ -18,7 +18,8 @@ impl Signature {
         sbuf[..].copy_from_slice(&sig[32..]);
         Ok(Signature {
             R: CompressedRistretto(Rbuf),
-            s: Option::from(Scalar::from_canonical_bytes(sbuf)).ok_or(StarsigError::InvalidSignature)?,
+            s: Option::from(Scalar::from_canonical_bytes(sbuf))
+                .ok_or(StarsigError::InvalidSignature)?,
         })
     }
 
@@ -43,7 +44,7 @@ impl AsRefExt for [u8] {
     }
 }
 
-impl<'a> AsRefExt for &'a [u8] {
+impl AsRefExt for &[u8] {
     fn as_ref_ext(&self) -> &[u8] {
         self
     }

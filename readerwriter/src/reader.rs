@@ -109,8 +109,7 @@ pub trait Reader {
             // if we don't have enough data.
             return Err(ReadError::InsufficientBytes);
         }
-        let mut vec = Vec::with_capacity(len);
-        vec.resize(len, 0u8);
+        let mut vec = vec![0u8; len];
         self.read(&mut vec)?;
         Ok(vec)
     }
@@ -156,7 +155,7 @@ impl Reader for &[u8] {
 
     #[inline]
     fn read_u8(&mut self) -> Result<u8, ReadError> {
-        if self.len() > 0 {
+        if !self.is_empty() {
             let x = self[0];
             let (_, rest) = self.split_at(1);
             *self = rest;

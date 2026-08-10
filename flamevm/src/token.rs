@@ -138,6 +138,7 @@ impl ClearToken {
     /// their quantities. Returns the merged token, or — on flavor
     /// mismatch — the two original tokens unchanged (for the soft-fail
     /// path used by the `merge` opcode).
+    #[allow(clippy::result_large_err)]
     pub fn merge_into(self, other: ClearToken) -> Result<ClearToken, (ClearToken, ClearToken)> {
         if self.flv != other.flv {
             return Err((self, other));

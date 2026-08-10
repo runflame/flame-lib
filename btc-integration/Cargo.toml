@@ -1,0 +1,30 @@
+[package]
+name = "btc-integration"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# TODO: consider removing flamevm as dependency
+flamevm = { path = "../flamevm" }
+types = { path = "../types" }
+
+# BTC dependencies
+corepc-client = { version = "0.16.0", features = ["client-sync"] }
+
+# crypto
+curve25519-dalek = "4"
+ed25519-dalek = "2"
+
+# async
+futures-util = "0.3"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+async-trait = "0.1.91"
+
+# utils
+serde_json = "1"
+thiserror = "2.0.19"
+log = "0.4.33"
+
+[dev-dependencies]
+bitcoind = { version = "0.41", features = ["31_0", "download"] }

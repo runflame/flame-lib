@@ -429,7 +429,7 @@ fn clean_call_cs_alloc_propagates_to_parent_proof() {
 ///   1. `output` — emits `TxEntry::Output` (lane: TxLog truncate).
 ///   2. `send`   — emits `TxEntry::Send`   (lane: TxLog truncate).
 ///   3. `cell` + `signtx` — records a `DeferredSig::TxBound`
-///       (lane: deferred_sigs truncate).
+///      (lane: deferred_sigs truncate).
 ///   4. MSM `verify` with a non-identity statement (lane: batch
 ///      rollback via `BatchCheckpoint::restore`).
 ///   5. R1CS `alloc / eq / verify` with an unsatisfiable equality

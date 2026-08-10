@@ -19,7 +19,7 @@ extern crate bulletproofs;
 use bulletproofs::r1cs::{Prover, R1CSError, R1CSProof, Verifier};
 use bulletproofs::{BulletproofGens, PedersenGens};
 
-fn prove<R: Rng + CryptoRng>(
+fn prove<R>(
     bp_gens: &BulletproofGens,
     pc_gens: &PedersenGens,
     inputs: &Vec<Value>,
@@ -27,16 +27,16 @@ fn prove<R: Rng + CryptoRng>(
     rng: &mut R,
 ) -> Result<(R1CSProof, Vec<CommittedValue>, Vec<CommittedValue>), R1CSError>
 where
-    R: rand::RngCore,
+    R: Rng + CryptoRng,
 {
     let mut prover_transcript = Transcript::new(b"TransactionTest");
-    let mut prover = Prover::new(&pc_gens, &mut prover_transcript);
+    let mut prover = Prover::new(pc_gens, &mut prover_transcript);
 
     let (in_com, in_vars) = inputs.commit(&mut prover, rng);
     let (out_com, out_vars) = outputs.commit(&mut prover, rng);
 
     cloak(&mut prover, in_vars, out_vars)?;
-    let proof = prover.prove(&bp_gens)?;
+    let proof = prover.prove(bp_gens)?;
 
     Ok((proof, in_com, out_com))
 }
@@ -57,7 +57,7 @@ fn verify(
 
     assert!(cloak(&mut verifier, in_vars, out_vars,).is_ok());
 
-    Ok(verifier.verify(&proof, &pc_gens, &bp_gens)?)
+    verifier.verify(proof, pc_gens, bp_gens)
 }
 
 fn create_spacesuit_proof_helper(n: usize, c: &mut Criterion) {
@@ -69,10 +69,10 @@ fn create_spacesuit_proof_helper(n: usize, c: &mut Criterion) {
         let pc_gens = PedersenGens::default();
 
         let mut rng = thread_rng();
-        let (min, max) = (0u64, std::u64::MAX / 2);
+        let range = 0u64..u64::MAX / 2;
         let inputs: Vec<Value> = (0..n)
             .map(|_| Value {
-                q: rng.gen_range(min, max).into(),
+                q: rng.gen_range(range.clone()).into(),
                 f: Scalar::random(&mut rng),
             })
             .collect();
@@ -116,10 +116,10 @@ fn verify_spacesuit_proof_helper(n: usize, c: &mut Criterion) {
         let pc_gens = PedersenGens::default();
 
         let mut rng = thread_rng();
-        let (min, max) = (0u64, std::u64::MAX / 2);
+        let range = 0u64..u64::MAX / 2;
         let inputs: Vec<Value> = (0..n)
             .map(|_| Value {
-                q: rng.gen_range(min, max).into(),
+                q: rng.gen_range(range.clone()).into(),
                 f: Scalar::random(&mut rng),
             })
             .collect();
