@@ -20,11 +20,12 @@ mod tests {
     use corepc_client::bitcoin::{Amount, ScriptBuf, TxOut};
     use ed25519_dalek::SigningKey;
     use flamevm::Predicate;
+    use types::{BlockHash, FlameNetwork};
 
     fn proof(flag: bool) -> MintingProofData {
         MintingProofData {
-            network_id: 7,
-            flame_block_hash: [0xab; 32],
+            network: FlameNetwork::Regtest,
+            flame_block_hash: BlockHash::from([0xab; 32]),
             flame_reward_address: Predicate::opaque(Predicate::unspendable_key()),
             validator_pubkey: flag.then(|| SigningKey::from_bytes(&[0x42; 32]).verifying_key()),
         }
@@ -44,7 +45,7 @@ mod tests {
         let bytes = script.as_bytes();
 
         assert_eq!(bytes.len(), 70);
-        assert_eq!(&bytes[..6], &[0x6a, 0x44, b'F', b'L', b'M', 7]);
+        assert_eq!(&bytes[..6], &[0x6a, 0x44, b'F', b'L', b'M', 0]);
         assert_eq!(&bytes[6..38], &[0xab; 32]);
         assert_eq!(
             &bytes[38..70],
@@ -59,7 +60,7 @@ mod tests {
         let bytes = script.as_bytes();
 
         assert_eq!(bytes.len(), 103);
-        assert_eq!(&bytes[..7], &[0x6a, 0x4c, 0x64, b'F', b'L', b'M', 7]);
+        assert_eq!(&bytes[..7], &[0x6a, 0x4c, 0x64, b'F', b'L', b'M', 0]);
         assert_eq!(&bytes[7..39], &[0xab; 32]);
         assert_eq!(
             &bytes[39..71],
@@ -103,6 +104,10 @@ mod tests {
         let mut wrong_magic = valid.clone();
         wrong_magic[3] = b'X';
         cases.push(wrong_magic);
+
+        let mut unknown_network = valid.clone();
+        unknown_network[6] = 3;
+        cases.push(unknown_network);
 
         let mut invalid_validator_pubkey = valid.clone();
         invalid_validator_pubkey[71..].fill(2);

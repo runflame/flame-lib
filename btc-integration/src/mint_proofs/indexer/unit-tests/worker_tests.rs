@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
+use types::{BlockHash, FlameNetwork};
 
 use super::{IndexerWorker, IndexerWorkerError};
 use crate::mint_proofs::indexer::{
@@ -24,7 +25,13 @@ fn worker(
     let storage = Arc::new(InMemoryMintingProofStorage::new());
     let (updates, receiver) = broadcast::channel(16);
     (
-        IndexerWorker::new(rpc, Arc::clone(&storage), 7, updates, cancellation_token),
+        IndexerWorker::new(
+            rpc,
+            Arc::clone(&storage),
+            FlameNetwork::Regtest,
+            updates,
+            cancellation_token,
+        ),
         storage,
         receiver,
     )
@@ -40,7 +47,7 @@ async fn bootstrap_indexes_latest_twenty_blocks_for_selected_network() {
     let excluded = proof([0x22; 32], 3_000, excluded_tip);
     let other_network = {
         let mut prf = proof([0x11; 32], 4_000, current_tip);
-        prf.minting_proof_data.network_id = 8;
+        prf.minting_proof_data.network = FlameNetwork::Testnet;
         prf
     };
     let chain = TestChain::linear(5, 25)
@@ -51,8 +58,11 @@ async fn bootstrap_indexes_latest_twenty_blocks_for_selected_network() {
     let (worker, storage, mut updates) = worker(rpc, CancellationToken::new());
 
     assert_eq!(worker.bootstrap().await.unwrap(), current_tip);
-    assert_eq!(storage.get([0x11; 32]).await, vec![oldest, current]);
-    assert!(storage.get([0x22; 32]).await.is_empty());
+    assert_eq!(
+        storage.get(BlockHash::from([0x11; 32])).await,
+        vec![oldest, current]
+    );
+    assert!(storage.get(BlockHash::from([0x22; 32])).await.is_empty());
     assert!(matches!(
         recv_update(&mut updates).await.as_ref(),
         MintingProofUpdate::NewBlocks(_)
@@ -68,7 +78,7 @@ async fn extension_stores_and_groups_new_proofs_for_selected_network() {
     let other = proof([0x22; 32], 3_000, next_tip);
     let other_network = {
         let mut prf = proof([0x11; 32], 4_000, next_tip);
-        prf.minting_proof_data.network_id = 8;
+        prf.minting_proof_data.network = FlameNetwork::Testnet;
         prf
     };
     let chain = TestChain::linear(81, 101).proofs(
@@ -87,15 +97,18 @@ async fn extension_stores_and_groups_new_proofs_for_selected_network() {
     );
 
     assert_eq!(
-        storage.get([0x11; 32]).await,
+        storage.get(BlockHash::from([0x11; 32])).await,
         vec![first.clone(), second.clone()]
     );
-    assert_eq!(storage.get([0x22; 32]).await, vec![other.clone()]);
+    assert_eq!(
+        storage.get(BlockHash::from([0x22; 32])).await,
+        vec![other.clone()]
+    );
     assert_eq!(
         recv_update(&mut updates).await.as_ref(),
         &MintingProofUpdate::NewBlocks(BTreeMap::from([
-            ([0x11; 32], vec![first, second]),
-            ([0x22; 32], vec![other]),
+            (BlockHash::from([0x11; 32]), vec![first, second]),
+            (BlockHash::from([0x22; 32]), vec![other]),
         ]))
     );
 }
@@ -140,13 +153,19 @@ async fn reorg_replaces_discarded_proofs_atomically() {
         &MintingProofUpdate::Reorg {
             deleted_proofs: BTreeMap::from([(old_tip.hash, vec![discarded])]),
             new_proofs: BTreeMap::from([
-                ([0x11; 32], vec![replacement.clone()]),
-                ([0x22; 32], vec![additional.clone()]),
+                (BlockHash::from([0x11; 32]), vec![replacement.clone()]),
+                (BlockHash::from([0x22; 32]), vec![additional.clone()]),
             ]),
         }
     );
-    assert_eq!(storage.get([0x11; 32]).await, vec![replacement]);
-    assert_eq!(storage.get([0x22; 32]).await, vec![additional]);
+    assert_eq!(
+        storage.get(BlockHash::from([0x11; 32])).await,
+        vec![replacement]
+    );
+    assert_eq!(
+        storage.get(BlockHash::from([0x22; 32])).await,
+        vec![additional]
+    );
 }
 
 #[tokio::test]
@@ -209,13 +228,19 @@ async fn reorg_is_replanned_when_best_tip_changes_during_fetch() {
         &MintingProofUpdate::Reorg {
             deleted_proofs: BTreeMap::from([(old_tip.hash, vec![old_proof])]),
             new_proofs: BTreeMap::from([
-                ([0x11; 32], vec![winning.clone()]),
-                ([0x22; 32], vec![additional.clone()]),
+                (BlockHash::from([0x11; 32]), vec![winning.clone()]),
+                (BlockHash::from([0x22; 32]), vec![additional.clone()]),
             ]),
         }
     );
-    assert_eq!(storage.get([0x11; 32]).await, vec![winning]);
-    assert_eq!(storage.get([0x22; 32]).await, vec![additional]);
+    assert_eq!(
+        storage.get(BlockHash::from([0x11; 32])).await,
+        vec![winning]
+    );
+    assert_eq!(
+        storage.get(BlockHash::from([0x22; 32])).await,
+        vec![additional]
+    );
 }
 
 #[tokio::test]
@@ -251,7 +276,10 @@ async fn failed_reorg_fetch_preserves_the_previous_chain() {
         .expect_err("replacement block fetch must fail");
 
     assert!(matches!(error, IndexerWorkerError::RpcError(_)));
-    assert_eq!(storage.get([0x11; 32]).await, vec![old_proof]);
+    assert_eq!(
+        storage.get(BlockHash::from([0x11; 32])).await,
+        vec![old_proof]
+    );
 }
 
 #[tokio::test]
@@ -310,12 +338,15 @@ async fn run_rebootstraps_after_a_failed_live_update() {
     rpc.wait_for_transaction_calls(next_tip.hash, 1).await;
     rpc.allow_transactions_for(next_tip.hash).await;
 
-    let expected = BTreeMap::from([([0x11; 32], vec![indexed_proof.clone()])]);
+    let expected = BTreeMap::from([(BlockHash::from([0x11; 32]), vec![indexed_proof.clone()])]);
     assert_eq!(
         recv_update(&mut updates).await.as_ref(),
         &MintingProofUpdate::NewBlocks(expected)
     );
-    assert_eq!(storage.get([0x11; 32]).await, vec![indexed_proof]);
+    assert_eq!(
+        storage.get(BlockHash::from([0x11; 32])).await,
+        vec![indexed_proof]
+    );
 
     cancellation_token.cancel();
     run.await.expect("worker task did not panic");

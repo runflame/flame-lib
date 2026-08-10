@@ -14,10 +14,10 @@ async fn indexer_bootstraps_and_follows_new_bitcoin_blocks() -> bitcoind::anyhow
     let (sender, indexer) = create_mint_proof_components(BtcIntegrationConfig {
         btc_rpc_api: ctx.rpc_url.clone(),
         btc_rpc_auth: BitcoinRpcAuth::CookieFile(ctx.cookie_file.clone()),
-        flame_network_id: 7,
+        flame_network: FlameNetwork::Regtest,
     })?;
 
-    let bootstrap_flame_hash = [0x11; 32];
+    let bootstrap_flame_hash = BlockHash::from([0x11; 32]);
     let bootstrap_amount = Amount::from_sat(10_000);
     let bootstrap_flame_address = Predicate::opaque(Predicate::unspendable_key());
     let bootstrap_validator_pubkey = SigningKey::from_bytes(&[7; 32]).verifying_key();
@@ -38,7 +38,7 @@ async fn indexer_bootstraps_and_follows_new_bitcoin_blocks() -> bitcoind::anyhow
 
     let bootstrap_proof = MintingProof {
         minting_proof_data: MintingProofData {
-            network_id: 7,
+            network: FlameNetwork::Regtest,
             flame_block_hash: bootstrap_flame_hash,
             flame_reward_address: bootstrap_flame_address,
             validator_pubkey: Some(bootstrap_validator_pubkey),
@@ -52,7 +52,7 @@ async fn indexer_bootstraps_and_follows_new_bitcoin_blocks() -> bitcoind::anyhow
     );
 
     let mut notifications = indexer.subscribe();
-    let live_flame_hash = [0x22; 32];
+    let live_flame_hash = BlockHash::from([0x22; 32]);
     let live_amount = Amount::from_sat(20_000);
     let live_flame_address = Predicate::opaque(Predicate::unspendable_key());
     sender
@@ -73,7 +73,7 @@ async fn indexer_bootstraps_and_follows_new_bitcoin_blocks() -> bitcoind::anyhow
         .context("timed out waiting for the indexed mint proof")??;
     let live_proof = MintingProof {
         minting_proof_data: MintingProofData {
-            network_id: 7,
+            network: FlameNetwork::Regtest,
             flame_block_hash: live_flame_hash,
             flame_reward_address: live_flame_address,
             validator_pubkey: None,

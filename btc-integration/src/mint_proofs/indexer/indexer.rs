@@ -13,13 +13,14 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
+use types::{BlockHash, FlameNetwork};
 
 use crate::MintingProof;
 use crate::mint_proofs::indexer::worker::IndexerWorker;
 use crate::mint_proofs::minting_proof_storage::{MintingProofStorage, MintingProofsByBitcoinBlock};
 use crate::rpc::RpcApi;
 
-pub type NewMintingProofs = BTreeMap<[u8; 32], Vec<MintingProof>>;
+pub type NewMintingProofs = BTreeMap<BlockHash, Vec<MintingProof>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartupError {
@@ -52,7 +53,7 @@ struct IndexerWorkerHandle {
 pub struct MintProofIndexer<R, S> {
     rpc: Arc<R>,
     storage: Arc<S>,
-    network_id: u8,
+    network: FlameNetwork,
     subscribers: broadcast::Sender<Arc<MintingProofUpdate>>,
     worker: Mutex<Option<IndexerWorkerHandle>>,
 }
@@ -62,19 +63,19 @@ where
     R: RpcApi,
     S: MintingProofStorage,
 {
-    pub fn new(rpc: Arc<R>, storage: Arc<S>, network_id: u8) -> Self {
+    pub fn new(rpc: Arc<R>, storage: Arc<S>, network: FlameNetwork) -> Self {
         let (subscribers, _) = broadcast::channel(16);
 
         Self {
             rpc,
             storage,
-            network_id,
+            network,
             subscribers,
             worker: Mutex::new(None),
         }
     }
 
-    pub async fn get_proofs(&self, flame_block_hash: [u8; 32]) -> Vec<MintingProof> {
+    pub async fn get_proofs(&self, flame_block_hash: BlockHash) -> Vec<MintingProof> {
         self.storage.get(flame_block_hash).await
     }
 
@@ -97,7 +98,7 @@ where
             let indexer_worker = IndexerWorker::new(
                 Arc::clone(&self.rpc),
                 Arc::clone(&self.storage),
-                self.network_id,
+                self.network,
                 self.subscribers.clone(),
                 cancellation_token.clone(),
             );

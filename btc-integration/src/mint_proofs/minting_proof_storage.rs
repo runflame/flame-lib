@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use corepc_client::bitcoin::{Amount, BlockHash};
 use tokio::sync::RwLock;
+use types::BlockHash as FlameBlockHash;
 
 use crate::mint_proofs::MintingProofData;
 use crate::rpc::BtcBlockTip;
@@ -18,7 +19,7 @@ pub type MintingProofsByBitcoinBlock = BTreeMap<BlockHash, Vec<MintingProof>>;
 
 #[async_trait]
 pub trait MintingProofStorage: Send + Sync {
-    async fn get(&self, flame_block_hash: [u8; 32]) -> Vec<MintingProof>;
+    async fn get(&self, flame_block_hash: FlameBlockHash) -> Vec<MintingProof>;
 
     async fn apply_chain_update(
         &self,
@@ -29,7 +30,7 @@ pub trait MintingProofStorage: Send + Sync {
 
 #[derive(Debug, Default)]
 pub struct InMemoryMintingProofStorage {
-    minting_proofs: RwLock<BTreeMap<[u8; 32], Vec<MintingProof>>>,
+    minting_proofs: RwLock<BTreeMap<FlameBlockHash, Vec<MintingProof>>>,
 }
 
 impl InMemoryMintingProofStorage {
@@ -53,7 +54,7 @@ impl InMemoryMintingProofStorage {
 
 #[async_trait]
 impl MintingProofStorage for InMemoryMintingProofStorage {
-    async fn get(&self, flame_block_hash: [u8; 32]) -> Vec<MintingProof> {
+    async fn get(&self, flame_block_hash: FlameBlockHash) -> Vec<MintingProof> {
         self.minting_proofs
             .read()
             .await
@@ -105,14 +106,15 @@ mod tests {
     use corepc_client::bitcoin::{Amount, BlockHash};
     use ed25519_dalek::SigningKey;
     use flamevm::Predicate;
+    use types::FlameNetwork;
 
     use super::*;
 
     fn proof(block_hash: [u8; 32], burned_sats: u64, bitcoin_height: u64) -> MintingProof {
         MintingProof {
             minting_proof_data: MintingProofData {
-                network_id: 7,
-                flame_block_hash: block_hash,
+                network: FlameNetwork::Regtest,
+                flame_block_hash: FlameBlockHash::from(block_hash),
                 flame_reward_address: Predicate::opaque(Predicate::unspendable_key()),
                 validator_pubkey: Some(SigningKey::from_bytes(&[7; 32]).verifying_key()),
             },
@@ -137,9 +139,18 @@ mod tests {
             .await;
 
         assert_eq!(storage.len().await, 3);
-        assert_eq!(storage.get([0x11; 32]).await, vec![first, second]);
-        assert_eq!(storage.get([0x22; 32]).await, vec![other]);
-        assert_eq!(storage.get([0x33; 32]).await, Vec::new());
+        assert_eq!(
+            storage.get(FlameBlockHash::from([0x11; 32])).await,
+            vec![first, second]
+        );
+        assert_eq!(
+            storage.get(FlameBlockHash::from([0x22; 32])).await,
+            vec![other]
+        );
+        assert_eq!(
+            storage.get(FlameBlockHash::from([0x33; 32])).await,
+            Vec::new()
+        );
     }
 
     #[tokio::test]
@@ -165,7 +176,15 @@ mod tests {
             storage.apply_chain_update(&[discarded_hash], &[]).await,
             BTreeMap::from([(discarded_hash, vec![discarded_first, discarded_second])])
         );
-        assert_eq!(storage.get([0x11; 32]).await, vec![retained]);
-        assert!(storage.get([0x22; 32]).await.is_empty());
+        assert_eq!(
+            storage.get(FlameBlockHash::from([0x11; 32])).await,
+            vec![retained]
+        );
+        assert!(
+            storage
+                .get(FlameBlockHash::from([0x22; 32]))
+                .await
+                .is_empty()
+        );
     }
 }

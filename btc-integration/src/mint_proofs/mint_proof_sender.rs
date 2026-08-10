@@ -12,6 +12,7 @@ use corepc_client::{
 use ed25519_dalek::VerifyingKey;
 use flamevm::Predicate;
 use thiserror::Error;
+use types::{BlockHash, FlameNetwork};
 
 #[derive(Debug, Error)]
 pub enum MintProofSendError {
@@ -23,19 +24,19 @@ pub enum MintProofSendError {
 
 pub struct MintProofSender<R: RpcApi> {
     rpc: Arc<R>,
-    network_id: u8,
+    network: FlameNetwork,
 }
 
 impl<R: RpcApi> MintProofSender<R> {
-    pub fn new(rpc: Arc<R>, network_id: u8) -> Self {
-        Self { rpc, network_id }
+    pub fn new(rpc: Arc<R>, network: FlameNetwork) -> Self {
+        Self { rpc, network }
     }
 
     pub async fn send_mint_proof(
         &self,
         amount: Amount,
         inputs: &[OutPoint],
-        flame_block_hash: [u8; 32],
+        flame_block_hash: BlockHash,
         flame_address: Predicate,
         validator_pubkey: Option<VerifyingKey>,
     ) -> Result<Txid, MintProofSendError> {
@@ -44,7 +45,7 @@ impl<R: RpcApi> MintProofSender<R> {
         }
 
         let proof = MintingProofData {
-            network_id: self.network_id,
+            network: self.network,
             flame_block_hash,
             flame_reward_address: flame_address,
             validator_pubkey,

@@ -50,9 +50,9 @@ async fn core31_rpc_api_works_with_regtest_blocks_and_transactions() -> bitcoind
 async fn mint_proof_sender_works_with_core31_rpc_api() -> bitcoind::anyhow::Result<()> {
     let ctx = setup()?;
     let rpc = Arc::clone(&ctx.rpc);
-    let mint_proof_sender = MintProofSenderV31::new(Arc::clone(&rpc), 1);
+    let mint_proof_sender = MintProofSenderV31::new(Arc::clone(&rpc), FlameNetwork::Testnet);
     let sent_amount = Amount::from_btc(1.0).expect("valid BTC amount");
-    let flame_block_hash = [0xab; 32];
+    let flame_block_hash = BlockHash::from([0xab; 32]);
     let flame_address = Predicate::opaque(Predicate::unspendable_key());
     let validator_pubkey = SigningKey::from_bytes(&[7; 32]).verifying_key();
 
@@ -81,7 +81,7 @@ async fn mint_proof_sender_works_with_core31_rpc_api() -> bitcoind::anyhow::Resu
     assert_eq!(
         MintingProofData::from_tx_out(confirmed_mint_output),
         Some(MintingProofData {
-            network_id: 1,
+            network: FlameNetwork::Testnet,
             flame_block_hash,
             flame_reward_address: flame_address,
             validator_pubkey: Some(validator_pubkey),

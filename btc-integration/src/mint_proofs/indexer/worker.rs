@@ -6,6 +6,7 @@ use thiserror::Error;
 use tokio::sync::{broadcast, oneshot};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
+use types::FlameNetwork;
 
 use crate::MintingProof;
 use crate::mint_proofs::MintingProofData;
@@ -32,7 +33,7 @@ type WorkerResult<T> = Result<T, IndexerWorkerError>;
 pub(super) struct IndexerWorker<R, S> {
     rpc_api: Arc<R>,
     storage: Arc<S>,
-    network_id: u8,
+    network: FlameNetwork,
     subscribers: broadcast::Sender<Arc<MintingProofUpdate>>,
     cancellation_token: CancellationToken,
 }
@@ -45,14 +46,14 @@ where
     pub(super) fn new(
         rpc_api: Arc<R>,
         storage: Arc<S>,
-        network_id: u8,
+        network: FlameNetwork,
         subscribers: broadcast::Sender<Arc<MintingProofUpdate>>,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
             rpc_api,
             storage,
-            network_id,
+            network,
             subscribers,
             cancellation_token,
         }
@@ -213,7 +214,7 @@ where
                 Ok::<_, BitcoinRpcError>(get_minting_proofs_from_transactions(
                     &transactions,
                     block,
-                    self.network_id,
+                    self.network,
                 ))
             })
             .collect::<Vec<_>>();
@@ -288,14 +289,14 @@ fn group_proofs(proofs: &[MintingProof]) -> NewMintingProofs {
 fn get_minting_proofs_from_transactions(
     transactions: &[Transaction],
     block_tip: BtcBlockTip,
-    network_id: u8,
+    network: FlameNetwork,
 ) -> Vec<MintingProof> {
     transactions
         .iter()
         .flat_map(|transaction| {
             transaction.output.iter().filter_map(|output| {
                 MintingProofData::from_tx_out(output)
-                    .filter(|minting_proof_data| minting_proof_data.network_id == network_id)
+                    .filter(|minting_proof_data| minting_proof_data.network == network)
                     .map(|minting_proof_data| MintingProof {
                         minting_proof_data,
                         burned_amount: output.value,

@@ -2,6 +2,7 @@ use corepc_client::bitcoin::{Amount, Transaction, TxOut};
 use curve25519_dalek::ristretto::CompressedRistretto;
 use ed25519_dalek::VerifyingKey;
 use flamevm::Predicate;
+use types::{BlockHash, FlameNetwork};
 
 use crate::mint_proofs::core::constants::{
     MINT_PROOF_DATA_LEN, MINT_PROOF_MAGIC, OP_PUSHDATA1, OP_RETURN,
@@ -37,8 +38,8 @@ impl<'a> MintProofParser<'a> {
             return None;
         }
 
-        let network_id = self.read_byte()?;
-        let flame_block_hash = *self.read_array::<32>()?;
+        let network = FlameNetwork::try_from(self.read_byte()?).ok()?;
+        let flame_block_hash = BlockHash::from(*self.read_array::<32>()?);
         let flame_address = Predicate::opaque(CompressedRistretto(*self.read_array::<32>()?));
         let validator_pubkey = match payload_len {
             PARTICIPATING_MINT_PROOF_DATA_LEN => {
@@ -53,7 +54,7 @@ impl<'a> MintProofParser<'a> {
         }
 
         Some(MintingProofData {
-            network_id,
+            network,
             flame_block_hash,
             flame_reward_address: flame_address,
             validator_pubkey,

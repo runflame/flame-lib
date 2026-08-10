@@ -13,6 +13,7 @@ use corepc_client::{
 use ed25519_dalek::SigningKey;
 use flamevm::Predicate;
 use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, mpsc, watch};
+use types::{BlockHash as FlameBlockHash, FlameNetwork};
 
 use super::indexer::MintingProofUpdate;
 use crate::{
@@ -269,8 +270,8 @@ pub fn block_tip(hash_value: u64, height: u64) -> BtcBlockTip {
 pub fn proof(flame_block_hash: [u8; 32], burned_sats: u64, tip: BtcBlockTip) -> MintingProof {
     MintingProof {
         minting_proof_data: MintingProofData {
-            network_id: 7,
-            flame_block_hash,
+            network: FlameNetwork::Regtest,
+            flame_block_hash: FlameBlockHash::from(flame_block_hash),
             flame_reward_address: Predicate::opaque(Predicate::unspendable_key()),
             validator_pubkey: Some(SigningKey::from_bytes(&[7; 32]).verifying_key()),
         },

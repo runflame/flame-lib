@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use types::FlameNetwork;
 
 use crate::mint_proofs::{
     indexer::{
@@ -14,7 +15,7 @@ fn indexer(rpc: Arc<FakeRpc>) -> Arc<MintProofIndexer<FakeRpc, InMemoryMintingPr
     Arc::new(MintProofIndexer::new(
         rpc,
         Arc::new(InMemoryMintingProofStorage::new()),
-        7,
+        FlameNetwork::Regtest,
     ))
 }
 

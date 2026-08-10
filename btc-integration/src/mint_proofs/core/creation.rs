@@ -22,8 +22,8 @@ pub fn mint_proof_to_script(proof: &MintingProofData) -> ScriptBuf {
         script.push(payload_len as u8);
     }
     script.extend_from_slice(&MINT_PROOF_MAGIC);
-    script.push(proof.network_id);
-    script.extend_from_slice(&proof.flame_block_hash);
+    script.push(proof.network.as_u8());
+    script.extend_from_slice(proof.flame_block_hash.as_bytes());
     script.extend_from_slice(proof.flame_reward_address.to_point().as_bytes());
     if let Some(validator_pubkey) = &proof.validator_pubkey {
         script.extend_from_slice(validator_pubkey.as_bytes());
