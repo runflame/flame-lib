@@ -1,7 +1,9 @@
-use corepc_client::bitcoin::{BlockHash, Transaction};
-use corepc_client::client_sync::{Error, Result as RpcResult};
+use corepc_client::bitcoin::Transaction;
+use corepc_client::client_sync::Error as BitcoinRpcError;
+use futures_util::future::try_join_all;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use thiserror::Error;
+use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::MintingProof;
@@ -10,14 +12,27 @@ use crate::mint_proofs::indexer::bitcoin_chain_update_planner::{
     BitcoinChainUpdatePlanner, ChainUpdatePlan,
 };
 use crate::mint_proofs::indexer::indexer::{MintingProofUpdate, NewMintingProofs};
-use crate::mint_proofs::minting_proof_storage::{MintingProofStorage, MintingProofsByBitcoinBlock};
+use crate::mint_proofs::minting_proof_storage::MintingProofStorage;
 use crate::rpc::{BtcBlockTip, RpcApi};
 
-const BOOTSTRAP_INDEX_BLOCK: u64 = 20;
+const BOOTSTRAP_INDEX_BLOCKS: usize = 20;
+
+#[derive(Debug, Error)]
+pub enum IndexerWorkerError {
+    #[error("Bitcoin Core RPC error: {0}")]
+    RpcError(#[from] BitcoinRpcError),
+    #[error("mint-proof indexer worker was cancelled")]
+    Cancelled,
+    #[error("mint-proof indexer bootstrap was unsuccessful: {0}")]
+    UnsuccessfulBootstrap(String),
+}
+
+type WorkerResult<T> = Result<T, IndexerWorkerError>;
 
 pub(super) struct IndexerWorker<R, S> {
     rpc_api: Arc<R>,
     storage: Arc<S>,
+    network_id: u8,
     subscribers: broadcast::Sender<Arc<MintingProofUpdate>>,
     cancellation_token: CancellationToken,
 }
@@ -30,34 +45,38 @@ where
     pub(super) fn new(
         rpc_api: Arc<R>,
         storage: Arc<S>,
+        network_id: u8,
         subscribers: broadcast::Sender<Arc<MintingProofUpdate>>,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
             rpc_api,
             storage,
+            network_id,
             subscribers,
             cancellation_token,
         }
     }
 
-    pub(super) async fn run(self, initial_tip: BtcBlockTip) -> RpcResult<()>
+    pub(super) async fn run(
+        self,
+        bootstrap_result: oneshot::Sender<WorkerResult<()>>,
+    ) -> WorkerResult<()>
     where
         R: 'static,
         S: 'static,
     {
-        let mut applied_tip = initial_tip;
+        let initial_tip = self.bootstrap_with_response(bootstrap_result).await?;
         let mut update_planner =
             BitcoinChainUpdatePlanner::new(initial_tip, Arc::clone(&self.rpc_api));
 
         loop {
-            let announced_tip = tokio::select! {
-                _ = self.cancellation_token.cancelled() => return Ok(()),
-                result = self.rpc_api.wait_for_next_block(applied_tip) => result?,
-            };
+            let applied_tip = update_planner.get_applied_tip();
+            let announced_tip = self
+                .with_cancellation(|api| async move { api.wait_for_next_block(applied_tip).await })
+                .await?;
 
-            applied_tip = self
-                .handle_new_tip(announced_tip, &mut update_planner)
+            self.handle_new_tip(announced_tip, &mut update_planner)
                 .await?;
         }
     }
@@ -66,120 +85,185 @@ where
         &self,
         new_tip: BtcBlockTip,
         update_planner: &mut BitcoinChainUpdatePlanner<R>,
-    ) -> RpcResult<BtcBlockTip> {
+    ) -> WorkerResult<BtcBlockTip> {
         let mut tip = new_tip;
-        loop {
-            let update_plan = update_planner.plan_update(tip).await?;
-            match update_plan {
-                ChainUpdatePlan::Extension { .. } => {
-                    self.apply_update_plan(update_plan).await?;
-                    update_planner.mark_applied(tip);
 
-                    return Ok(tip);
-                }
-                ChainUpdatePlan::Reorg { .. } => {
-                    let best_tip = self.rpc_api.best_block_tip().await?;
-                    if best_tip != tip {
-                        // If we receive reorg during reorg handling, restart the process with the
-                        // new best tip.
-                        tip = best_tip;
-                        continue;
-                    } else {
-                        self.apply_update_plan(update_plan).await?;
-                        update_planner.mark_applied(tip);
-                        return Ok(best_tip);
-                    }
-                }
+        loop {
+            let update_plan = self
+                .with_cancellation(|_| async { update_planner.plan_update(tip).await })
+                .await?;
+
+            let new_blocks = match &update_plan {
+                ChainUpdatePlan::Extension { new_blocks }
+                | ChainUpdatePlan::Reorg { new_blocks, .. } => new_blocks,
+            };
+            let new_proofs = self.gather_proofs(new_blocks).await?;
+
+            let best_tip = self
+                .with_cancellation(|api| async move { api.best_block_tip().await })
+                .await?;
+
+            if best_tip != tip {
+                // In case when new block arrived or reorg occurred when update plan was being prepared
+                tip = best_tip;
+                continue;
+            }
+
+            let proof_update = self.commit_update_plan(update_plan, &new_proofs).await;
+            update_planner.mark_applied(tip);
+            self.publish(proof_update);
+
+            return Ok(tip);
+        }
+    }
+
+    async fn bootstrap_with_response(
+        &self,
+        bootstrap_result: oneshot::Sender<WorkerResult<()>>,
+    ) -> WorkerResult<BtcBlockTip> {
+        match self.bootstrap().await {
+            Ok(initial_tip) => {
+                let _ = bootstrap_result.send(Ok(()));
+                Ok(initial_tip)
+            }
+            Err(IndexerWorkerError::Cancelled) => {
+                let _ = bootstrap_result.send(Err(IndexerWorkerError::Cancelled));
+                Err(IndexerWorkerError::Cancelled)
+            }
+            Err(error) => {
+                bootstrap_result
+                    .send(Err(error))
+                    .map_err(|e| e.unwrap_err())?;
+                Err(IndexerWorkerError::UnsuccessfulBootstrap(
+                    "Bootstrap failed".to_string(),
+                ))
             }
         }
     }
 
-    pub(super) async fn bootstrap(&self) -> RpcResult<BtcBlockTip> {
-        let initial_tip = self.rpc_api.best_block_tip().await?;
-        let first_height = initial_tip.height.saturating_sub(BOOTSTRAP_INDEX_BLOCK - 1);
+    async fn bootstrap(&self) -> WorkerResult<BtcBlockTip> {
+        loop {
+            let initial_tip = self
+                .with_cancellation(|api| async move { api.best_block_tip().await })
+                .await?;
+            let blocks = self.recent_chain(initial_tip).await?;
+            let proofs = self.gather_proofs(&blocks).await?;
 
-        for height in first_height..initial_tip.height {
-            let hash = tokio::select! {
-                _ = self.cancellation_token.cancelled() => {
-                    return Err(Error::Returned(
-                        "mint-proof indexer bootstrap was cancelled".to_owned(),
-                    ));
-                },
-                result = self.rpc_api.block_hash_at_height(height) => result?,
-            };
-            let block_tip = BtcBlockTip { hash, height };
+            let best_tip = self
+                .with_cancellation(|api| async move { api.best_block_tip().await })
+                .await?;
 
-            let new_proofs = self.index_block(block_tip).await?;
+            if best_tip != initial_tip {
+                continue;
+            }
+
+            if self.cancellation_token.is_cancelled() {
+                return Err(IndexerWorkerError::Cancelled);
+            }
+
+            // Replacing proofs for the same block hashes makes bootstrap idempotent on restart.
+            let indexed_block_hashes = blocks.iter().map(|block| block.hash).collect::<Vec<_>>();
+            self.storage
+                .apply_chain_update(&indexed_block_hashes, &proofs)
+                .await;
+            let new_proofs = group_proofs(&proofs);
             if !new_proofs.is_empty() {
                 self.publish(MintingProofUpdate::NewBlocks(new_proofs));
             }
-        }
-        let new_proofs = self.index_block(initial_tip).await?;
-        if !new_proofs.is_empty() {
-            self.publish(MintingProofUpdate::NewBlocks(new_proofs));
-        }
 
-        Ok(initial_tip)
+            return Ok(initial_tip);
+        }
     }
 
-    async fn index_blocks(&self, blocks: &[BtcBlockTip]) -> RpcResult<NewMintingProofs> {
-        let mut all_new_proofs = NewMintingProofs::new();
+    async fn recent_chain(&self, tip: BtcBlockTip) -> WorkerResult<Vec<BtcBlockTip>> {
+        let mut header = self
+            .with_cancellation(|api| async move { api.block_header_info(tip.hash).await })
+            .await?;
 
-        for block in blocks {
-            merge_proofs(&mut all_new_proofs, self.index_block(*block).await?);
-        }
+        let mut blocks_reverse = Vec::with_capacity(BOOTSTRAP_INDEX_BLOCKS);
+        blocks_reverse.push(header.tip);
 
-        Ok(all_new_proofs)
-    }
-
-    async fn apply_update_plan(&self, update_plan: ChainUpdatePlan) -> RpcResult<()> {
-        match update_plan {
-            ChainUpdatePlan::Extension { new_blocks } => {
-                let new_proofs = self.index_blocks(&new_blocks).await?;
-                if !new_proofs.is_empty() {
-                    self.publish(MintingProofUpdate::NewBlocks(new_proofs));
-                }
-            }
-            ChainUpdatePlan::Reorg {
-                discarded_blocks,
-                new_blocks,
-            } => {
-                let discarded_hashes = discarded_blocks
-                    .iter()
-                    .map(|block| block.hash)
-                    .collect::<Vec<_>>();
-                let deleted_proofs = self.delete_proofs(&discarded_hashes).await;
-                let new_proofs = self.index_blocks(&new_blocks).await?;
-
-                self.publish(MintingProofUpdate::Reorg {
-                    deleted_proofs,
-                    new_proofs,
-                });
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn index_block(&self, block_tip: BtcBlockTip) -> RpcResult<NewMintingProofs> {
-        let transactions = tokio::select! {
-            _ = self.cancellation_token.cancelled() => return Ok(NewMintingProofs::new()),
-            result = self.rpc_api.transactions_in_block(block_tip.hash) => result?,
+        let Some(initial_block_hash) = header.previous_block_hash else {
+            return Ok(blocks_reverse);
         };
-        let proofs = get_minting_proofs_from_transactions(&transactions, block_tip);
-        let mut new_proofs = NewMintingProofs::new();
 
-        for proof in proofs {
-            let flame_block_hash = proof.minting_proof_data.flame_block_hash;
-            self.storage.insert(flame_block_hash, proof.clone()).await;
-            new_proofs.entry(flame_block_hash).or_default().push(proof);
+        let mut block_hash = initial_block_hash;
+        for _ in 0..BOOTSTRAP_INDEX_BLOCKS - 1 {
+            header = self
+                .with_cancellation(|api| async move { api.block_header_info(block_hash).await })
+                .await?;
+            blocks_reverse.push(header.tip);
+            let Some(previous_hash) = header.previous_block_hash else {
+                break;
+            };
+            block_hash = previous_hash;
         }
 
-        Ok(new_proofs)
+        blocks_reverse.reverse();
+        Ok(blocks_reverse)
     }
 
-    async fn delete_proofs(&self, block_hashes: &[BlockHash]) -> MintingProofsByBitcoinBlock {
-        self.storage.remove_by_bitcoin_blocks(block_hashes).await
+    async fn gather_proofs(&self, blocks: &[BtcBlockTip]) -> WorkerResult<Vec<MintingProof>> {
+        let requests = blocks
+            .iter()
+            .copied()
+            .map(|block| async move {
+                let transactions = self.rpc_api.transactions_in_block(block.hash).await?;
+                Ok::<_, BitcoinRpcError>(get_minting_proofs_from_transactions(
+                    &transactions,
+                    block,
+                    self.network_id,
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        let proofs_by_block = self
+            .with_cancellation(|_| async move { try_join_all(requests).await })
+            .await?;
+
+        Ok(proofs_by_block.into_iter().flatten().collect())
+    }
+
+    async fn commit_update_plan(
+        &self,
+        update_plan: ChainUpdatePlan,
+        new_proofs: &[MintingProof],
+    ) -> MintingProofUpdate {
+        let discarded_block_hashes = match &update_plan {
+            ChainUpdatePlan::Extension { .. } => Vec::new(),
+            ChainUpdatePlan::Reorg {
+                discarded_blocks, ..
+            } => discarded_blocks
+                .iter()
+                .map(|block| block.hash)
+                .collect::<Vec<_>>(),
+        };
+        let deleted_proofs = self
+            .storage
+            .apply_chain_update(&discarded_block_hashes, new_proofs)
+            .await;
+        let grouped_new_proofs = group_proofs(new_proofs);
+
+        match update_plan {
+            ChainUpdatePlan::Extension { .. } => MintingProofUpdate::NewBlocks(grouped_new_proofs),
+            ChainUpdatePlan::Reorg { .. } => MintingProofUpdate::Reorg {
+                deleted_proofs,
+                new_proofs: grouped_new_proofs,
+            },
+        }
+    }
+
+    async fn with_cancellation<F, Fut, T>(&self, f: F) -> WorkerResult<T>
+    where
+        F: FnOnce(Arc<R>) -> Fut,
+        Fut: Future<Output = Result<T, BitcoinRpcError>>,
+    {
+        tokio::select! {
+            _ = self.cancellation_token.cancelled() => {
+                Err(IndexerWorkerError::Cancelled)
+            },
+            result = f(self.rpc_api.clone()) => Ok(result?),
+        }
     }
 
     fn publish(&self, update: MintingProofUpdate) {
@@ -187,26 +271,40 @@ where
     }
 }
 
-fn merge_proofs(target: &mut NewMintingProofs, proofs: NewMintingProofs) {
-    for (flame_block_hash, proofs) in proofs {
-        target.entry(flame_block_hash).or_default().extend(proofs);
+fn group_proofs(proofs: &[MintingProof]) -> NewMintingProofs {
+    let mut grouped = NewMintingProofs::new();
+
+    for proof in proofs {
+        grouped
+            .entry(proof.minting_proof_data.flame_block_hash)
+            .or_default()
+            .push(proof.clone());
     }
+
+    grouped
 }
 
 fn get_minting_proofs_from_transactions(
     transactions: &[Transaction],
     block_tip: BtcBlockTip,
+    network_id: u8,
 ) -> Vec<MintingProof> {
     transactions
         .iter()
         .flat_map(|transaction| {
             transaction.output.iter().filter_map(|output| {
-                MintingProofData::from_tx_out(output).map(|minting_proof_data| MintingProof {
-                    minting_proof_data,
-                    burned_amount: output.value,
-                    bitcoin_block_tip: block_tip,
-                })
+                MintingProofData::from_tx_out(output)
+                    .filter(|minting_proof_data| minting_proof_data.network_id == network_id)
+                    .map(|minting_proof_data| MintingProof {
+                        minting_proof_data,
+                        burned_amount: output.value,
+                        bitcoin_block_tip: block_tip,
+                    })
             })
         })
         .collect::<Vec<_>>()
 }
+
+#[cfg(test)]
+#[path = "unit-tests/worker_tests.rs"]
+mod tests;

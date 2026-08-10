@@ -18,13 +18,12 @@ pub type MintingProofsByBitcoinBlock = BTreeMap<BlockHash, Vec<MintingProof>>;
 
 #[async_trait]
 pub trait MintingProofStorage: Send + Sync {
-    async fn insert(&self, flame_block_hash: [u8; 32], minting_proof: MintingProof);
-
     async fn get(&self, flame_block_hash: [u8; 32]) -> Vec<MintingProof>;
 
-    async fn remove_by_bitcoin_blocks(
+    async fn apply_chain_update(
         &self,
-        block_hashes: &[BlockHash],
+        discarded_block_hashes: &[BlockHash],
+        new_proofs: &[MintingProof],
     ) -> MintingProofsByBitcoinBlock;
 }
 
@@ -54,15 +53,6 @@ impl InMemoryMintingProofStorage {
 
 #[async_trait]
 impl MintingProofStorage for InMemoryMintingProofStorage {
-    async fn insert(&self, flame_block_hash: [u8; 32], minting_proof: MintingProof) {
-        self.minting_proofs
-            .write()
-            .await
-            .entry(flame_block_hash)
-            .or_default()
-            .push(minting_proof);
-    }
-
     async fn get(&self, flame_block_hash: [u8; 32]) -> Vec<MintingProof> {
         self.minting_proofs
             .read()
@@ -72,16 +62,18 @@ impl MintingProofStorage for InMemoryMintingProofStorage {
             .unwrap_or_default()
     }
 
-    async fn remove_by_bitcoin_blocks(
+    async fn apply_chain_update(
         &self,
-        block_hashes: &[BlockHash],
+        discarded_block_hashes: &[BlockHash],
+        new_proofs: &[MintingProof],
     ) -> MintingProofsByBitcoinBlock {
         let mut removed = MintingProofsByBitcoinBlock::new();
+        let mut stored_proofs = self.minting_proofs.write().await;
 
-        self.minting_proofs.write().await.retain(|_, proofs| {
+        stored_proofs.retain(|_, proofs| {
             proofs.retain(|proof| {
                 let bitcoin_block_hash = proof.bitcoin_block_tip.hash;
-                if block_hashes.contains(&bitcoin_block_hash) {
+                if discarded_block_hashes.contains(&bitcoin_block_hash) {
                     removed
                         .entry(bitcoin_block_hash)
                         .or_default()
@@ -94,6 +86,13 @@ impl MintingProofStorage for InMemoryMintingProofStorage {
 
             !proofs.is_empty()
         });
+
+        for proof in new_proofs {
+            stored_proofs
+                .entry(proof.minting_proof_data.flame_block_hash)
+                .or_default()
+                .push(proof.clone());
+        }
 
         removed
     }
@@ -133,9 +132,9 @@ mod tests {
         let other = proof([0x22; 32], 3_000, 102);
         let storage = InMemoryMintingProofStorage::new();
 
-        storage.insert([0x11; 32], first.clone()).await;
-        storage.insert([0x11; 32], second.clone()).await;
-        storage.insert([0x22; 32], other.clone()).await;
+        storage
+            .apply_chain_update(&[], &[first.clone(), second.clone(), other.clone()])
+            .await;
 
         assert_eq!(storage.len().await, 3);
         assert_eq!(storage.get([0x11; 32]).await, vec![first, second]);
@@ -151,12 +150,19 @@ mod tests {
         let discarded_hash = discarded_first.bitcoin_block_tip.hash;
         let storage = InMemoryMintingProofStorage::new();
 
-        storage.insert([0x11; 32], discarded_first.clone()).await;
-        storage.insert([0x22; 32], discarded_second.clone()).await;
-        storage.insert([0x11; 32], retained.clone()).await;
+        storage
+            .apply_chain_update(
+                &[],
+                &[
+                    discarded_first.clone(),
+                    discarded_second.clone(),
+                    retained.clone(),
+                ],
+            )
+            .await;
 
         assert_eq!(
-            storage.remove_by_bitcoin_blocks(&[discarded_hash]).await,
+            storage.apply_chain_update(&[discarded_hash], &[]).await,
             BTreeMap::from([(discarded_hash, vec![discarded_first, discarded_second])])
         );
         assert_eq!(storage.get([0x11; 32]).await, vec![retained]);

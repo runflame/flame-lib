@@ -28,6 +28,10 @@ impl<R: RpcApi> BitcoinChainUpdatePlanner<R> {
         }
     }
 
+    pub fn get_applied_tip(&self) -> BtcBlockTip {
+        self.applied_tip
+    }
+
     pub fn mark_applied(&mut self, tip: BtcBlockTip) {
         self.applied_tip = tip;
     }

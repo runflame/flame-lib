@@ -10,7 +10,7 @@ pub mod prelude {
     pub use crate::factory::{BtcIntegrationConfig, create_mint_proof_components};
     pub use crate::mint_proofs::MintingProofData;
     pub use crate::mint_proofs::indexer::indexer::{
-        MintProofIndexer, MintingProofUpdate, NewMintingProofs,
+        MintProofIndexer, MintingProofUpdate, NewMintingProofs, ShutdownError, StartupError,
     };
     pub use crate::mint_proofs::mint_proof_sender::{MintProofSendError, MintProofSender};
     pub use crate::mint_proofs::minting_proof_storage::{
