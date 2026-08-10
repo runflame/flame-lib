@@ -104,6 +104,7 @@ pub struct FakeRpc {
     announcements: mpsc::UnboundedSender<BtcBlockTip>,
     announcement_receiver: Mutex<mpsc::UnboundedReceiver<BtcBlockTip>>,
     failing_blocks: RwLock<HashSet<BlockHash>>,
+    transaction_calls: Mutex<HashMap<BlockHash, usize>>,
     transaction_gates: RwLock<HashMap<BlockHash, Arc<TransactionGate>>>,
 }
 
@@ -117,6 +118,7 @@ impl FakeRpc {
             announcements,
             announcement_receiver: Mutex::new(announcement_receiver),
             failing_blocks: RwLock::new(HashSet::new()),
+            transaction_calls: Mutex::new(HashMap::new()),
             transaction_gates: RwLock::new(HashMap::new()),
         })
     }
@@ -133,6 +135,30 @@ impl FakeRpc {
 
     pub async fn fail_transactions_for(&self, block_hash: BlockHash) {
         self.failing_blocks.write().await.insert(block_hash);
+    }
+
+    pub async fn allow_transactions_for(&self, block_hash: BlockHash) {
+        self.failing_blocks.write().await.remove(&block_hash);
+    }
+
+    pub async fn wait_for_transaction_calls(&self, block_hash: BlockHash, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let calls = self
+                    .transaction_calls
+                    .lock()
+                    .await
+                    .get(&block_hash)
+                    .copied()
+                    .unwrap_or_default();
+                if calls >= expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("transaction call timeout");
     }
 
     pub async fn block_transactions_for(&self, block_hash: BlockHash) -> TransactionBlocker {
@@ -163,6 +189,12 @@ impl RpcApi for FakeRpc {
     }
 
     async fn transactions_in_block(&self, block_hash: BlockHash) -> Result<Vec<Transaction>> {
+        *self
+            .transaction_calls
+            .lock()
+            .await
+            .entry(block_hash)
+            .or_default() += 1;
         let gate = self
             .transaction_gates
             .read()
@@ -265,7 +297,7 @@ fn transaction(proofs: &[MintingProof]) -> Transaction {
 pub async fn recv_update(
     receiver: &mut broadcast::Receiver<Arc<MintingProofUpdate>>,
 ) -> Arc<MintingProofUpdate> {
-    tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+    tokio::time::timeout(Duration::from_secs(3), receiver.recv())
         .await
         .expect("proof update timeout")
         .expect("proof update sender remains alive")

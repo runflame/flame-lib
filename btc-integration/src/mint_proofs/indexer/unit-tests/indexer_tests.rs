@@ -4,7 +4,6 @@ use crate::mint_proofs::{
     indexer::{
         indexer::MintingProofUpdate,
         test_support::{FakeRpc, TestChain, block_tip, recv_update},
-        worker::IndexerWorkerError,
     },
     minting_proof_storage::InMemoryMintingProofStorage,
 };
@@ -97,22 +96,25 @@ async fn startup_waits_until_bootstrap_completes() {
 }
 
 #[tokio::test]
-async fn failed_bootstrap_releases_the_worker_slot() {
+async fn failed_bootstrap_is_retried_until_it_succeeds() {
     let genesis = block_tip(0, 0);
     let rpc = FakeRpc::new(TestChain::new().block(genesis, None, &[]), genesis);
     rpc.fail_transactions_for(genesis.hash).await;
-    let indexer = indexer(rpc);
+    let indexer = indexer(Arc::clone(&rpc));
+    let startup_indexer = Arc::clone(&indexer);
+    let startup = tokio::spawn(async move { startup_indexer.startup().await });
 
-    for _ in 0..2 {
-        let error = indexer
-            .startup()
-            .await
-            .expect_err("bootstrap RPC call must fail");
-        let StartupError::WorkerError(IndexerWorkerError::RpcError(error)) = error else {
-            panic!("unexpected startup error: {error:?}");
-        };
-        assert!(error.to_string().contains("failed to fetch test block"));
-    }
+    rpc.wait_for_transaction_calls(genesis.hash, 1).await;
+    assert!(!startup.is_finished());
+    rpc.allow_transactions_for(genesis.hash).await;
+    rpc.wait_for_transaction_calls(genesis.hash, 2).await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(3), startup)
+        .await
+        .expect("bootstrap retry timeout")
+        .expect("startup task did not panic")
+        .expect("bootstrap retry succeeds");
+    indexer.shutdown().await.expect("shut down indexer");
 }
 
 #[tokio::test]
@@ -131,8 +133,5 @@ async fn shutdown_waits_for_cancelled_startup() {
         .await
         .expect("startup task did not panic")
         .expect_err("startup must report cancellation");
-    assert!(matches!(
-        error,
-        StartupError::WorkerError(IndexerWorkerError::Cancelled)
-    ));
+    assert!(matches!(error, StartupError::WorkerStopped));
 }

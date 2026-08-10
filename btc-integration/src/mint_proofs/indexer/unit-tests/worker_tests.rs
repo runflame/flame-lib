@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::{IndexerWorker, IndexerWorkerError};
@@ -285,4 +285,38 @@ async fn cancellation_aborts_all_concurrent_bootstrap_fetches() {
         Err(IndexerWorkerError::Cancelled)
     ));
     assert!(storage.is_empty().await);
+}
+
+#[tokio::test]
+async fn run_rebootstraps_after_a_failed_live_update() {
+    let initial_tip = block_tip(0, 0);
+    let next_tip = block_tip(1, 1);
+    let indexed_proof = proof([0x11; 32], 1_000, next_tip);
+    let chain = TestChain::new().block(initial_tip, None, &[]).block(
+        next_tip,
+        Some(initial_tip.hash),
+        std::slice::from_ref(&indexed_proof),
+    );
+    let rpc = FakeRpc::new(chain, initial_tip);
+    let cancellation_token = CancellationToken::new();
+    let (worker, storage, mut updates) = worker(Arc::clone(&rpc), cancellation_token.clone());
+    let (bootstrap_sender, bootstrap_result) = oneshot::channel();
+    let run = tokio::spawn(worker.run(bootstrap_sender));
+
+    bootstrap_result.await.expect("bootstrap succeeds");
+    rpc.fail_transactions_for(next_tip.hash).await;
+    rpc.set_best_tip(next_tip).await;
+    rpc.announce(next_tip);
+    rpc.wait_for_transaction_calls(next_tip.hash, 1).await;
+    rpc.allow_transactions_for(next_tip.hash).await;
+
+    let expected = BTreeMap::from([([0x11; 32], vec![indexed_proof.clone()])]);
+    assert_eq!(
+        recv_update(&mut updates).await.as_ref(),
+        &MintingProofUpdate::NewBlocks(expected)
+    );
+    assert_eq!(storage.get([0x11; 32]).await, vec![indexed_proof]);
+
+    cancellation_token.cancel();
+    run.await.expect("worker task did not panic");
 }

@@ -15,7 +15,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::MintingProof;
-use crate::mint_proofs::indexer::worker::{IndexerWorker, IndexerWorkerError};
+use crate::mint_proofs::indexer::worker::IndexerWorker;
 use crate::mint_proofs::minting_proof_storage::{MintingProofStorage, MintingProofsByBitcoinBlock};
 use crate::rpc::RpcApi;
 
@@ -25,16 +25,14 @@ pub type NewMintingProofs = BTreeMap<[u8; 32], Vec<MintingProof>>;
 pub enum StartupError {
     #[error("mint-proof indexer is already running")]
     AlreadyRunningError,
-    #[error("mint-proof indexer worker failed during startup: {0}")]
-    WorkerError(#[from] IndexerWorkerError),
+    #[error("mint-proof indexer worker stopped before startup completed")]
+    WorkerStopped,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ShutdownError {
     #[error("mint-proof indexer task failed while shutting down: {0}")]
     WorkerJoinError(#[from] tokio::task::JoinError),
-    #[error("mint-proof indexer worker failed while shutting down: {0}")]
-    WorkerError(#[from] IndexerWorkerError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,7 +46,7 @@ pub enum MintingProofUpdate {
 
 struct IndexerWorkerHandle {
     cancellation_token: CancellationToken,
-    join_handle: JoinHandle<Result<(), IndexerWorkerError>>,
+    join_handle: JoinHandle<()>,
 }
 
 pub struct MintProofIndexer<R, S> {
@@ -114,13 +112,9 @@ where
             (bootstrap_result, worker_id)
         };
 
-        let result = match bootstrap_result.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(StartupError::WorkerError(error)),
-            Err(error) => Err(StartupError::WorkerError(
-                IndexerWorkerError::UnsuccessfulBootstrap(error.to_string()),
-            )),
-        };
+        let result = bootstrap_result
+            .await
+            .map_err(|_| StartupError::WorkerStopped);
 
         if result.is_err() {
             let mut worker_slot = self.worker.lock().await;
@@ -142,13 +136,10 @@ where
         };
 
         worker.cancellation_token.cancel();
-        let result = worker.join_handle.await?;
+        worker.join_handle.await?;
         drop(worker_slot);
 
-        match result {
-            Ok(()) | Err(IndexerWorkerError::Cancelled) => Ok(()),
-            Err(error) => Err(ShutdownError::WorkerError(error)),
-        }
+        Ok(())
     }
 }
 

@@ -1,9 +1,10 @@
 use corepc_client::bitcoin::Transaction;
 use corepc_client::client_sync::Error as BitcoinRpcError;
 use futures_util::future::try_join_all;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::sync::{broadcast, oneshot};
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use crate::MintingProof;
@@ -16,6 +17,7 @@ use crate::mint_proofs::minting_proof_storage::MintingProofStorage;
 use crate::rpc::{BtcBlockTip, RpcApi};
 
 const BOOTSTRAP_INDEX_BLOCKS: usize = 20;
+const RETRY_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Error)]
 pub enum IndexerWorkerError {
@@ -23,8 +25,6 @@ pub enum IndexerWorkerError {
     RpcError(#[from] BitcoinRpcError),
     #[error("mint-proof indexer worker was cancelled")]
     Cancelled,
-    #[error("mint-proof indexer bootstrap was unsuccessful: {0}")]
-    UnsuccessfulBootstrap(String),
 }
 
 type WorkerResult<T> = Result<T, IndexerWorkerError>;
@@ -58,15 +58,33 @@ where
         }
     }
 
-    pub(super) async fn run(
-        self,
-        bootstrap_result: oneshot::Sender<WorkerResult<()>>,
-    ) -> WorkerResult<()>
+    pub(super) async fn run(self, bootstrap_result: oneshot::Sender<()>)
     where
         R: 'static,
         S: 'static,
     {
-        let initial_tip = self.bootstrap_with_response(bootstrap_result).await?;
+        let mut bootstrap_result = Some(bootstrap_result);
+
+        loop {
+            match self.run_inner(&mut bootstrap_result).await {
+                Ok(()) | Err(IndexerWorkerError::Cancelled) => return,
+                Err(error) => log::error!("mint-proof indexer worker failed: {error}"),
+            }
+
+            if !self.wait_for_retry().await {
+                return;
+            }
+        }
+    }
+
+    async fn run_inner(
+        &self,
+        bootstrap_result: &mut Option<oneshot::Sender<()>>,
+    ) -> WorkerResult<()> {
+        let initial_tip = self.bootstrap().await?;
+        if let Some(bootstrap_result) = bootstrap_result.take() {
+            let _ = bootstrap_result.send(());
+        }
         let mut update_planner =
             BitcoinChainUpdatePlanner::new(initial_tip, Arc::clone(&self.rpc_api));
 
@@ -117,27 +135,10 @@ where
         }
     }
 
-    async fn bootstrap_with_response(
-        &self,
-        bootstrap_result: oneshot::Sender<WorkerResult<()>>,
-    ) -> WorkerResult<BtcBlockTip> {
-        match self.bootstrap().await {
-            Ok(initial_tip) => {
-                let _ = bootstrap_result.send(Ok(()));
-                Ok(initial_tip)
-            }
-            Err(IndexerWorkerError::Cancelled) => {
-                let _ = bootstrap_result.send(Err(IndexerWorkerError::Cancelled));
-                Err(IndexerWorkerError::Cancelled)
-            }
-            Err(error) => {
-                bootstrap_result
-                    .send(Err(error))
-                    .map_err(|e| e.unwrap_err())?;
-                Err(IndexerWorkerError::UnsuccessfulBootstrap(
-                    "Bootstrap failed".to_string(),
-                ))
-            }
+    async fn wait_for_retry(&self) -> bool {
+        tokio::select! {
+            _ = self.cancellation_token.cancelled() => false,
+            _ = sleep(RETRY_TIMEOUT) => true,
         }
     }
 
