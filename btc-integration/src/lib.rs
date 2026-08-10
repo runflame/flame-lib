@@ -1,8 +1,6 @@
 mod factory;
 pub mod mint_proofs;
 pub mod rpc;
-// TODO: implement more elegant solution for integration testing
-pub mod test;
 
 pub use prelude::*;
 

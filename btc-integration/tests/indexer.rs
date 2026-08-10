@@ -1,9 +1,11 @@
+mod common;
+
 use std::time::Duration;
 
 use bitcoind::anyhow::Context;
 use btc_integration::prelude::*;
 use btc_integration::rpc::RpcApi;
-use btc_integration::test::setup;
+use common::setup;
 use corepc_client::bitcoin::Amount;
 use ed25519_dalek::SigningKey;
 use flamevm::Predicate;

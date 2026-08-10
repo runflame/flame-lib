@@ -1,11 +1,14 @@
-use crate::rpc::{BtcBlockTip, Core31RpcApi, RpcApi};
+#![allow(dead_code)] // Each integration-test crate uses a different subset of these helpers.
+
+use std::str::FromStr;
+use std::sync::Arc;
+
 use bitcoind::anyhow::Context;
 use bitcoind::mtype::SignRawTransaction;
+use btc_integration::rpc::{BtcBlockTip, Core31RpcApi, RpcApi};
 use corepc_client::bitcoin::{Address, Amount};
 use corepc_client::client_sync::Auth;
 use corepc_client::client_sync::v17::{Input, Output};
-use std::str::FromStr;
-use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 pub struct TestContext {

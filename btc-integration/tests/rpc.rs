@@ -1,8 +1,10 @@
+mod common;
+
 use bitcoind::anyhow::Context;
 use btc_integration::mint_proofs::MintingProofData;
 use btc_integration::prelude::*;
 use btc_integration::rpc::RpcApi;
-use btc_integration::test::setup;
+use common::setup;
 use corepc_client::bitcoin::Amount;
 use ed25519_dalek::SigningKey;
 use flamevm::Predicate;
