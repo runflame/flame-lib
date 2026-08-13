@@ -43,14 +43,11 @@ mempools, and MEV controls are not specified.
 
 ## Governance
 
-Governance is **TBD**. It must enumerate mutable parameters, legal ranges,
-proposal and activation delays, electorate, voting threshold, emergency powers,
-and rollback policy. It must cover membership, block limits, virtual-byte
-issuance, fees, versions, and cryptographic deprecation.
+Flame follows the Bitcoin style of minimal governance. The protocol offers slow super-majority agreement mechanism for
+adjusting several hard limits and signal soft-fork expansion of the VM to allow expansion.
 
-VM bytecode, encoding, hash domains, state transitions, and signature payloads
-are consensus surfaces. Upgrades must activate deterministically by height or
-epoch; implementations must reject unknown active versions rather than guess.
+* Gas and size limits per block.
+* Actor storage allocation rate.
 
 ## Decisions required before implementation
 

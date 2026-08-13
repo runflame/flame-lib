@@ -4,70 +4,88 @@
 
 This document defines the state surrounding FlameVM: cells, actors, blocks,
 resource limits, and transaction admission. VM execution is specified in
-[flamevm.md](flamevm.md); agreement on blocks belongs in
-[consensus.md](consensus.md).
+[flamevm.md](flamevm.md), actor storage in [storage.md](storage.md), and
+agreement on blocks in [consensus.md](consensus.md).
 
 Only FlameVM is currently implemented. Exact block encoding, persistent
 accumulator, mempool rules, and consensus integration are **TBD**.
 
 ## State
 
-At height `h`, chain state consists of the previous block identifier and height;
-a Utreexo-style commitment to unspent cells; the actor registry; the virtual-byte
-pool and immature recycled bytes; token-supply commitments; and consensus state.
+At height `h` within a selected main chain, _chain state_ consists of:
+
+* current height;
+* the previous block identifier;
+* a Utreexo-style commitment to unspent cells;
+* the actor registry;
+* the available storage pool;
+* index of active storage leases;
 
 Cells are single-use. Spending verifies membership against pre-block state,
-removes the cell, and inserts emitted cells. Actors persist and are updated by
-ordered internal transactions. Actor records contain code, state, virtual-byte
-balance, lifecycle counters, and freeze status.
+removes the cell, and inserts emitted cells. Cells are spent by _external transactions_.
+
+Actors are multi-use records containing code and arbitrary data.
+Actors code is executed in response to messages from external transactions,
+actors can make calls to each other. The updates to actors’ state are recorded
+as _internal transactions_.
 
 ## Utreexo
 
-The retained design is a forest of perfect binary Merkle trees whose ordered
-roots and leaf count commit to the cell set. A proof identifies its accumulator
-generation and leaf position and supplies sibling hashes to an applicable root.
+The set of all cells is stored in a data structure "Utreexo", a forest
+of perfect binary Merkle trees. Each input to an external transaction carries a proof
+of membership in Utreexo. This way, each user carries the cost of storage by themselves,
+without requiring other nodes store that data. Utreexo storage is unbounded and zero-cost.
 
-The state machine must verify and delete consumed leaves, append created leaves,
-normalize the forest, and publish catch-up data sufficient to update proofs
-between generations. The old ZkVM algorithm is research input only: Flame hash
-domains, proof encoding, normalization cadence, and catch-up retention require
-new test vectors before becoming normative.
+## Actor registry
+
+Actor registry is a list of actors with their code, data and leased storage allocations.
+Actors persist in active memory and process messages from arbitrary users, so their storage 
+is bounded. Each actor pays for leased storage with flames.
+The network adjusts the storage prices automatically: price rises and drops in response to changes
+to available storage. 
+
+To prevent long-range attacks by minters, storage fees are burned and extra storage is unlocked
+on every block, slowly growing the total amout of available space.
+
+Application developers are free to design how the storage is renewed, extended and organized.
+For massive multi-user applications, individual per-user data can sometimes be offloaded to the cells,
+leaving the actor storage only for data that needs to be accessed by all users.
 
 ## Blocks and ordering
 
-A block contains a header, ordered external transactions, and internal
-transactions caused by their messages. The header must commit to protocol
-version, height, parent, time, transaction root, resulting cell and actor roots,
-resource usage, and a consensus certificate. Exact encoding is **TBD**.
+A block contains a header, ordered external and internal transactions.
+The header commits to protocol version, height, parent, time, transaction root, resulting chain state.
 
-External transactions may be verified in parallel against immutable pre-block
-state. Conflicting cell spends invalidate the block. Effects are applied in block
+External transactions may be verified in parallel against pre-block state.
+Conflicting cell spends are prohibited. Effects are applied in block
 order. Messages are delivered in originating-transaction and emission order;
-internal execution, including nested actor calls, is serial. Actor rent,
-freezing, expiry, and byte-pool maturation run after transaction effects.
+internal execution, including nested actor calls and storage purchases, is
+serial. Lease expiry, actor destruction, storage recycling, and storage issuance run before
+transaction execution.
 
 ## Applying a block
 
 1. Validate the header and consensus certificate.
-2. Canonically decode transactions and enforce static size limits.
-3. Verify external FlameVM executions, proofs, and signatures.
-4. Reject missing or duplicate inputs and apply external transaction logs.
-5. Deliver messages deterministically and atomically apply each successful
-   internal transaction log.
-6. Apply actor rent, freeze/expiry, and matured-byte recycling.
+2. Expire leases, recycle their bytes, destroy under-capacity actors,
+   and issue the block's new storage bytes.
+3. Canonically decode transactions and enforce static size limits.
+4. Verify external FlameVM executions, proofs, and signatures.
+5. Reject missing or duplicate inputs and apply external transaction logs.
+6. Deliver messages deterministically and atomically apply each successful
+   internal transaction log, including immediate storage-pool updates.
 7. Recompute committed roots and resource totals and compare them to the header.
 
 Any mismatch invalidates the whole block.
 
 ## Limits
 
-Consensus must independently bound encoded block and transaction bytes, parallel
-external gas, serial internal gas, newly introduced virtual bytes, proof and MSM
+Consensus independently bound encoded block and transaction bytes, parallel
+external gas, serial internal gas, issued and purchased storage, proof and MSM
 work, and any actor/message counts not already bounded by those resources.
 
-The current design discusses separate parallel and serial gas pools at an initial
-`4:1` ratio and `5000` new virtual bytes per block. These values are provisional.
-Recycled bytes mature after 100 blocks.
+The current design discusses separate parallel and serial gas pools at an
+initial `4:1` ratio. Storage begins with a 128 MiB reserve and issues 8 KiB per
+core block; the complete parameters are in [storage.md](storage.md).
 
 ## Mempool policy
 

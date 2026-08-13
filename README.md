@@ -13,6 +13,7 @@ Flame is a blockchain network that turns Bitcoin into digital cash: confidential
 ### Documentation
 
 - [FlameVM Specification](docs/flamevm.md)
+- [Actor Storage Specification](docs/storage.md)
 - [Blockchain State Machine](docs/blockchain.md)
 - [Consensus](docs/consensus.md)
 - [Implementation Plan](docs/plan.md)

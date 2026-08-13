@@ -28,9 +28,10 @@ boundaries; ephemeral verification values such as transcripts, expressions,
 constraints, and MSMs may not.
 
 The VM emits an ordered log of state effects. Inputs, outputs, issuance,
-retirement, fees, sends, actor saves, and explicit data are effects. Calls,
-branches, signatures, constraints, and batch verification are execution
-machinery and do not appear in the log. TxID commits to the ordered effects.
+retirement, fees, sends, actor saves, storage purchases, actor destruction, and
+explicit data are effects. Calls, branches, signatures, constraints, and batch
+verification are execution machinery and do not appear in the log. TxID commits
+to the ordered effects.
 
 Every `open`, `signcall`, and actor `call` runs in an isolated frame with its own
 stack, control flow, gas, and transient-memory budget. Successful calls return
@@ -44,21 +45,20 @@ before `load` is safe because no partial state exists. Authors must still avoid
 holding a stale loaded snapshot across a call and then saving it: the VM prevents
 re-entrant observation, not application-level check-then-act mistakes.
 
-Persistent storage is measured in virtual bytes. Virtual bytes are clear tokens
-with canonical flavor `1`; `send` and `call` consume such a token and deposit its
-nonnegative quantity into the destination actor. Messages and call frames retain
-only the quantity. Byte tokens stored in cells or actor state remain ordinary
-assets and do not pay rent until explicitly deposited. Flame has flavor `0`.
+Persistent actor storage is purchased in one-year leases by the actor itself.
+Purchases burn Flame at a deterministic reserve price; storage is neither a
+token nor transferable between actors. See [Actor storage](storage.md).
 
-An actor frame's transient-memory cap is four times its persistent-vbyte balance.
+An actor frame's transient-memory cap is
+`TRANSIENT_MEMORY_CAPACITY_MULTIPLIER` times its current storage capacity.
 Memory uses monotonic high-water accounting. Calls are bounded to 64 nested
 frames. Instruction fetch and forward label scans consume gas; a failed entered
 call burns its grant, while a call rejected before entry refunds it.
 
 External transaction effects are atomic and independently verifiable. Internal
-transactions execute serially because they share actor state. Actor balances
-bleed over time; exhaustion freezes an actor, a deposit can unfreeze it during
-grace, and expired storage returns to the byte pool after maturity.
+transactions execute serially because they share actor state. Expired leases
+return to the byte pool; an actor is destroyed when an expiry leaves it with
+less capacity than its occupied storage.
 
 All Flame-defined multi-byte integers are little-endian. Decoders reject
 alternate-width integers, unordered or duplicate dictionary keys, excessive
@@ -92,18 +92,28 @@ Internal transactions do not have a pre-determined effect and therefore do not s
 
 Like external, internal transactions produce effects:
 
-1. `Receive(MessageID)` (txlog variant `TxEntry::Receive`) — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating `MessageID` (canonical 32-byte hash of the whole Send: anchor, target, caller, payload, gas, vbytes, refund predicate — analogous to `CellID` for cells) into the Internal TxID merkle root. Symmetric with `Input` for external transactions. The message **payload is delivered onto the recv frame's stack** in payload order before code runs — symmetric with `op_call` pushing its args; a conventional dispatch selector rides as the topmost payload arg.
+1. `Receive(MessageID)` (txlog variant `TxEntry::Receive`) — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating `MessageID` (canonical 32-byte hash of the whole Send: anchor, target, caller, payload, gas, refund predicate — analogous to `CellID` for cells) into the Internal TxID merkle root. Symmetric with `Input` for external transactions. The message **payload is delivered onto the recv frame's stack** in payload order before code runs — symmetric with `op_call` pushing its args; a conventional dispatch selector rides as the topmost payload arg.
 2. Outputs — creation of new entries in the Utreexo.
 3. Sends — messages sent to actors that produce other internal transactions.
 4. Issuance and retirement — creation and removal of tokens to/from circulation.
 5. Actor-state mutations — `op_save` records the actor's post-save state hash, allowing a state machine to mutate the registry without re-running the script.
 6. Data entry — for data logging that does not occupy permanent storage.
+7. Storage purchases — `addstorage` records the actor, purchased bytes, expiry
+   height, and burned sparks.
+
+Actor destruction caused by lease expiry is represented by a system internal
+transaction. It has `ActorDestroy(actor)` instead of a
+`Receive` as its effect. Destruction transactions are ordered lexicographically
+by actor ID. See [Actor storage](storage.md#global-state-and-block-order).
 
 Calls themselves are intra-transaction control flow, not effects. Anything a callee does that the outer world cares about appears through one of the effects above.
 
-**TxLog transport.** The TxLog (`Vec<TxEntry>`) is **re-derived by re-executing** the bytecode under the proof + signature binding — it is never trusted from the wire. `ExternalTx::verify` re-runs the script and rebuilds the log from scratch, so full-node consensus needs no TxLog decoding and a forged TxLog cannot be injected. For storage and light-client transport the crate provides a canonical **encode-only** serialization (`Encodable` for `TxEntry`/`TxLog`): a u64-LE entry count, then per entry a tag byte (sequential in declaration order: `0 Header, 1 Data, 2 Input, 3 Receive, 4 Output, 5 IssuePub, 6 IssuePriv, 7 Retire, 8 Fee, 9 ActorSave, 10 SetCode, 11 Send`) followed by the variant's fields in their existing canonical forms — `Cell`/`Message`/`ActorID` encoders, `write_value`/`write_int253`, u32/u64 little-endian integers, u64-LE length-prefixed byte blobs. **`Decodable` is deliberately absent in this crate**: a wire→TxLog path would be a second source of truth that must stay bit-identical to re-execution forever; consumers that need decode (light clients) implement it at the node layer against the golden wire vectors. Merkle leaves are unchanged: each entry `commit`s a 32-byte digest (`ActorSave` → `(actor, state_root)`, `SetCode` → `(actor, code_root)`, `Output` → `cell.id()`, `Send` → `Message::id()`) while the full payload rides in the entry (the Bitcoin txid/witness split). Golden vectors pinning both the digests and the wire bytes live in `test_golden.rs`.
+**TxLog transport.** The TxLog (`Vec<TxEntry>`) is **re-derived by re-executing** the bytecode under the proof + signature binding — it is never trusted from the wire. `ExternalTx::verify` re-runs the script and rebuilds the log from scratch, so full-node consensus needs no TxLog decoding and a forged TxLog cannot be injected. For storage and light-client transport the crate provides a canonical **encode-only** serialization (`Encodable` for `TxEntry`/`TxLog`): a u64-LE entry count, then per entry a tag byte (sequential in declaration order: `0 Header, 1 Data, 2 Input, 3 Receive, 4 Output, 5 IssuePub, 6 IssuePriv, 7 Retire, 8 Fee, 9 ActorSave, 10 SetCode, 11 Send, 12 StoragePurchase, 13 ActorDestroy`) followed by the variant's fields in their existing canonical forms — `Cell`/`Message`/`ActorID` encoders, `write_value`/`write_int253`, u32/u64 little-endian integers, u64-LE length-prefixed byte blobs. `StoragePurchase` encodes actor, bytes (`u64`), expiry height (`u64`), and fee sparks (`Int253`); `ActorDestroy` encodes its actor.
 
-Internal transactions do not support fee payment: they operate within gas- and memory limits set by the external transaction. They also do not support inputs, as those can be consumed only by external transactions with a Utreexo proof and (most of the time), a transaction signature.
+Internal transactions do not pay transaction-prioritization fees. Actors may
+nevertheless burn Flame for storage through `addstorage`. Internal transactions
+do not support inputs, as those can be consumed only by external transactions
+with a Utreexo proof and, most of the time, a transaction signature.
 
 ## Limits
 
@@ -115,13 +125,16 @@ Internal transactions do not support fee payment: they operate within gas- and m
 
 **Gas credit:** maximum amount of gas used by external transaction without additional gas allocated for message sends.
 
-**Added storage:** amount of storage virtual bytes introduced by each block.
+**Issued storage:** amount added to the available storage pool by each core block.
 
 ## Fees
 
 Transaction fees are paid by external transactions and are necessary to prioritize common resources on the open network and mitigate denial-of-service attacks. As blockchain imposes limits on storage and computation costs, transactions paying higher fees (per resource used) are prioritised over transactions paying lower fees.
+BFT consensus implies that the block candidate is progressively built and already included transactions are not pruned by higher-paying ones.
 
-Transaction fees are paid in *flames* and cover both the computation cost (”gas limit”) for the external transaction and subsequent calls, and storage costs (”bytes”).
+Transaction fees are paid in Flame and cover computation for the external
+transaction and subsequent calls within internal transactions. Actor storage is paid separately by burning
+Flame through `addstorage`. 
 
 External transaction pays for its own de-facto gas used and for additional gas requested for *sent messages*. Internal transactions cannot request or store gas beyond amount allocated at the “message send” operation at the internal transaction.
 
@@ -129,11 +142,11 @@ Unused gas in a message send is discarded: transaction commits to full amount of
 
 Amount of gas available to each call can be limited by the caller. By default, the total remaining gas of the caller is available to the callee.
 
-Each block makes available virtual bytes: (recycled from the existing actors + newly introduced) that can be purchased by external transaction and distributed towards any actor.
+One Flame equals `100_000_000` sparks. Native token quantities and fees are
+integral sparks. 
 
-**Transaction prioritisation**
-
-BFT consensus implies that the block candidate is progressively built and already included transactions are not pruned by higher-paying ones.
+Storage-purchase pricing and issuance are specified in
+[Actor storage](storage.md).
 
 ## Types
 
@@ -327,6 +340,10 @@ Drilling down the nested dict preserving ownership with `get` and `put` instruct
 
 All token types are linear types: non-copyable and non-droppable.
 
+The native Flame flavor is `FLAME_FLAVOR = 0`. One Flame is exactly
+`100_000_000` sparks; all native-token quantities on the stack and wire are
+integral sparks.
+
 WideToken: encrypted token without a range proof on quantity (could be negative). Non-portable: cannot be stored.
 
 Token: encrypted token with a proven non-negative qty, 
@@ -341,9 +358,13 @@ An actor is **`(code, state)`**:
 
 Each actor is identified by a unique Actor ID — `enum { 0x00: hash, 0x01: constructor }` — derived from its *constructor script*: `Hash(h)` and `Constructor(bytes)` denote the same actor when `h = H(bytes)`, so the **id commits to the code**. Each unique constructor defines a unique actor.
 
-**Deploy-on-first-delivery.** The first message delivered to a not-yet-deployed `Constructor`-form target instantiates the actor: code = the constructor bytes (self-authorized — the id commits to them), state = empty, vbyte balance = the message's `vbytes` grant, activated at the delivering block's height. A `Hash`-form target that doesn't exist fails `ActorNotFound` (the hash alone carries no code). The consensus layer must not double-credit the deploying message's vbytes via the ordinary top-up path.
-
-Actors pay for their storage in vbytes each block (see Storage below). When an actor's vbyte balance reaches zero, it enters a frozen state with a grace period proportional to its prior activity (one block per four blocks of activity, capped at six months of blocks). A top-up restores it; without one the state is cleared and the vbytes are recycled (subject to 100-block maturity).
+**Deploy-on-first-delivery.** The first message delivered to a not-yet-deployed
+`Constructor`-form target instantiates a provisional actor: code is the
+constructor bytes (self-authorized because the id commits to them) and state is
+empty. Its constructor may use `addstorage` to buy its first lease. The actor is
+committed only if its storage capacity covers its usage when the transaction
+ends. A `Hash`-form target that does not exist fails `ActorNotFound` because the
+hash alone carries no code.
 
 ## Messages
 
@@ -368,21 +389,14 @@ Address = enum {
 
 ## Storage
 
-Each actor occupies a deterministic number of *virtual bytes* (vbytes) for its code and data. The vbyte metric is defined at the protocol level to remain consistent among implementations and may differ from actual bytes stored on disk.
+Persistent-storage allocation, pricing, leases, expiry, destruction, and
+introspection are specified in [Actor storage](storage.md).
 
-Each block, after executing all transactions, every actor's vbyte balance is deducted by the number of vbytes it occupies. When an actor's balance reaches zero, it enters a *frozen* state: it stops accepting calls but its state is preserved. The frozen state lasts for a grace period equal to one block of grace per four blocks of prior activity, capped at six months of blocks. A [message send](#messages) that delivers vbytes restores the actor. If the grace period elapses without a top-up, the actor's state is cleared and its vbytes return to the pool.
-
-Each block introduces 5000 new vbytes. New actors can “buy” (via tx fees) any amount of vbytes already available (recycled from previous blocks) plus newly introduced bytes.
-
-A message send attaches vbytes to be deposited onto the destination actor. An empty message simply assigns vbytes, without running any code, and is guaranteed not to fail.
-
-The amount of vbytes introduced per block can be adjusted by super-majority (up to 2× lower / 2× higher).
-
-Why deduct after execution? So that a transaction can pre-pay for a single-use actor, let it do its job, and self-destruct.
-
-Withdrawn vbytes are recycled into the total pool. Recycling is subject to 100-block maturity. With this design it should be hard to “trade” vbytes: any actor that allocates unnecessary storage continuously “bleeds” it in subsequent blocks.
-
-**Transient memory.** In addition to persistent storage, an actor may use transient memory during a call (scratch space released when the call ends). The cap is fixed at 4× the actor's current persistent vbyte size; the `memlimit` opcode returns this cap. Allocations that would push live memory past the cap fail the call.
+**Transient memory.** In addition to persistent storage, an actor may use
+transient memory during a call. The cap is
+`TRANSIENT_MEMORY_CAPACITY_MULTIPLIER × current capacity`; `memlimit` returns
+this cap. Allocations that would push monotonic memory accounting past the cap
+fail the call. The multiplier is defined in [Actor storage](storage.md).
 
 
 ## Anchors
@@ -521,37 +535,44 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | c4 | [signtx](#signtx) | | cell → items… k | Authorize the tx with the cell predicate's signature; pour payload. |
 | c5 | [signcall](#signcall) | | cell script sig gas bytes args… m → results… k' | Run a script signed by the cell predicate in an isolated frame. |
 |    | **Actors** | | | |
-| d0 | [send](#send) | | args… k refund gas bytestoken addr → ø | Consume a clear byte token and queue its quantity with the message. |
-| d1 | [call](#call) | int. | args… k gas bytestoken addr → results… k' | Consume and deposit a clear byte token, then synchronously call an actor. |
+| d0 | [send](#send) | | args… k refund gas addr → ø | Queue an asynchronous actor message. |
+| d1 | [call](#call) | int. | args… k gas addr → results… k' | Synchronously call an actor. |
 | d2 | [load](#load) | int. | ø → value | Check out the actor's state (any portable Value; moves it out, locks re-entry). |
 | d3 | [save](#save) | int. | value → ø | Move the state value back in (requires checkout; unlocks). |
 | d4 | [setcode](#setcode) | int. | code → ø | Replace the actor's code blob (author-gated upgrade). |
+| d5 | [addstorage](#addstorage) | int. | q → {debt 1 \| 0} | Buy `q` bytes for one storage year and return a negative Flame token. *planned* |
+| d6 | [quotestorage](#quotestorage) | int. | q → {fee 1 \| 0} | Quote the positive integral storage fee in sparks without reserving bytes. *planned* |
 |    | **Frame introspection** | | | |
 | e0 | [selfid](#selfid) | | ø → s | Push the current actor's id (32-byte string). |
 | e1 | [anchor](#anchor) | | ø → s | Push the current frame's anchor (32-byte string). |
 | e2 | [callerid](#callerid) | | ø → s | Push the caller actor's id (zero string if invoked externally). |
 | e4 | [gas](#gas) | | ø → n | Push remaining gas budget for the current call. |
 | e5 | [gaslimit](#gaslimit) | | ø → n | Push the call's total gas budget cap. |
-| e6 | [bytes](#bytes) | int. | ø → n | Push the actor's remaining persistent vbyte balance. |
-| e7 | [memlimit](#memlimit) | | ø → n | Push the transient-memory cap (`4 × persistent_vbytes` for actor frames). |
-| e8 | [newbytes](#newbytes) | | ø → n | Push vbytes delivered with the current call (0 at outermost frame). |
+| e6 | [usage](#usage) | int. | ø → n | Push the actor's currently occupied storage bytes. *planned* |
+| e7 | [memlimit](#memlimit) | | ø → n | Push the transient-memory cap (capacity multiplier for actor frames). |
+| e8 | [capacity](#capacity) | int. | h → n | Push actor storage capacity available at future core-block height `h`. *planned* |
 |    | **Tx & chain info** | | | |
 | f0 | [timelock](#timelock) | | ø → n {0\|1} | Push tx locktime and a flag for height (`0`) vs. timestamp (`1`). |
 | f1 | [version](#version) | | ø → n | Push tx version. |
-| f2 | [height](#height) | int. | ø → n | Push the current block height. *planned* |
+| f2 | [height](#height) | | ø → n | Push the current core-block height, or zero in an external transaction. *planned* |
 | f3 | [blockhash](#blockhash) | int. | h → s | Push the block hash at height `h`. *planned* |
 | f4 | [blockburn](#blockburn) | int. | h → n | Push satoshis burned at height `h` (Bitcoin-coupled). *planned; maturity 100* |
 | f5 | [blockweight](#blockweight) | int. | h → n | Push block weight at height `h`. *planned; maturity 100* |
 | f6 | [blockrate](#blockrate) | int. | h → n | Push sparks-per-satoshi mint rate at height `h`. *planned; maturity 100* |
 | f7 | [chainstate](#chainstate) | int. | n → dict | Push a dict of block stats at height `n`. *planned; maturity 100* |
 
-Opcodes marked *planned* are reserved in the byte map; their handlers are not yet wired. Scripts using them error `UnknownOpcode`.
+Opcodes marked *planned* are reserved in the target byte map but are not yet
+implemented with the specified behavior. Until the storage model activates,
+scripts must not rely on the revised storage opcodes or message operands.
 
 ### Failure modes
 
 A **hard fail** aborts the current call.
 
-A **soft fail** is an in-band signal: the opcode pushes an optional shape `{value 1 | 0}` and leaves the consumed value(s) on the stack untouched so the script can branch. The two kinds are noted per opcode.
+A **soft fail** is an in-band signal: the opcode pushes an optional shape
+`{value 1 | 0}` so the script can branch. Its stack diagram is authoritative
+about whether failed operands are retained; storage request opcodes consume `q`
+on either branch. The two kinds are noted per opcode.
 
 
 ### Stack instructions
@@ -1056,7 +1077,7 @@ _x_ → ø
 
 _qty_ → _−WT_
 
-Pops `qty: Int253` (non-negative, `≤ MAX_FEE = 2²⁴`). Fees always use the canonical native flavor `FLAME_FLAVOR = Int253::ZERO`. The `2²⁴` cap is chosen so fee-rate arithmetic stays within `u64`: even a `2⁴⁰`-byte (~1 TB) transaction leaves 24 bits of headroom. Emits `TxEntry::Fee(qty as u64)` and bumps the per-tx [`CheckedFee`](#fees) accumulator (also capped at `MAX_FEE`). Allocates a fresh `WideToken` debt with `q = −qty`, `f = FLAME_FLAVOR` (both cleartext-constrained) and pushes it. The script must balance the debt against native Flame tokens, typically via [`mix`](#mix).
+Pops `qty: Int253` in sparks (non-negative, `≤ MAX_FEE = 2²⁴`). Fees always use the canonical native flavor `FLAME_FLAVOR = Int253::ZERO`. The `2²⁴`-spark cap is chosen so fee-rate arithmetic stays within `u64`: even a `2⁴⁰`-byte (~1 TB) transaction leaves 24 bits of headroom. Emits `TxEntry::Fee(qty as u64)` and bumps the per-tx [`CheckedFee`](#fees) accumulator (also capped at `MAX_FEE`). Allocates a fresh `WideToken` debt with `q = −qty`, `f = FLAME_FLAVOR` (both cleartext-constrained) and pushes it. The script must balance the debt against native Flame tokens, typically via [`mix`](#mix).
 
 Hard-fails: `FeeQtyNegative`, `FeeTooHigh` (per-arg or aggregate overflow), `TypeNotInt253`, `ExternalOnly`. The blinded-fee branch is reserved for a future phase.
 
@@ -1170,7 +1191,7 @@ _cell internal_key neighbors position script gas bytes args… k_ → _results�
 Verifies the Taproot proof against the cell's predicate:
 
 1. Pops `k` (Int253) and `args` (k portable values).
-2. Pops `bytes` and `gas` as `Int253` (vbyte and gas allotments).
+2. Pops `bytes` and `gas` as `Int253` (transient-memory and gas allotments).
 3. Pops `script` (String) — the revealed leaf bytes (or witness-bearing `String::Script` on the prover).
 4. Pops `position` (String, bit-packed path), `neighbors` (list-Dict of 32-byte Strings, leaf-to-root), `internal_key` (Point).
 5. Pops `cell`.
@@ -1185,20 +1206,16 @@ Hard-fails: `TaprootProofMismatch`, `MalformedTaprootProof`, plus the type error
 
 ### send
 
-_args… k refund gas bytestoken addr_ → ø
+_args… k refund gas addr_ → ø
 
 Asynchronous message-send. Pops operands top-first:
 
 1. `addr` (32-byte String) — target [`ActorID::Hash`](#addresses).
-2. `bytestoken` (`ClearToken`) — flavor `BYTES_FLAVOR = 1` and a
-   nonnegative `u64` quantity. The bearer is consumed; `Message.vbytes` retains
-   only its quantity.
-3. `gas` (`Int253`) — gas allotment.
-4. `refund` (32-byte String) — bounce predicate point.
-5. `k` (`Int253`) — args count.
-6. `args…` — k portable values, delivery payload.
-
-There is **no VM-level method selector** : the callee receives the `k` args as-is. *Convention (non-normative):* a multi-action contract reads its selector — any comparable value, including a `String` name — from the **top-of-stack argument**; a single-action contract needs none.
+2. `gas` (`Int253`) — gas allotment.
+3. `refund` (32-byte String) — bounce predicate point.
+4. `k` (`Int253`) — args count.
+5. `args…` — k portable values, delivery payload. A caller may include Flame
+   here for the destination actor to spend with `addstorage`.
 
 Splits the frame's `last_anchor` (see §Anchors): the `left` half becomes the message's `anchor`, the `right` half replaces `last_anchor`. Hard-fails `AnchorMissing` if no anchor has been claimed yet. Emits `TxEntry::Send(Message)` — the full `Message` lives in the entry, symmetric with `TxEntry::Output(Cell)`. There is no separate "sends queue"; the block builder reads `TxEntry::Send` records from the TxLog when constructing internal-tx deliveries. The originator's actor id (if any) becomes the message's `caller`.
 
@@ -1209,8 +1226,7 @@ The send's identity is the canonical 32-byte `MessageID = H(b"flamevm.message.id
 3. `caller` — `0x00` for None, `0x01 ‖ ActorID::encode(canonical)` for Some.
 4. `refund_predicate` — 32-byte compressed Ristretto.
 5. `gas` — little-endian u64.
-6. `vbytes` — little-endian u64.
-7. `payload` — little-endian u64 count, then each value's canonical `Value` encoding.
+6. `payload` — little-endian u64 count, then each value's canonical `Value` encoding.
 
 The merkle leaf for `TxEntry::Send` commits to this single 32-byte MessageID, just as `TxEntry::Output(Cell)`'s leaf commits to `Cell::id()`. Uniqueness is inherited from `anchor`: every distinct send carries a distinct anchor, hence a distinct MessageID.
 
@@ -1220,19 +1236,18 @@ On internal-tx failure during delivery, consensus seals the message payload into
 
 ### call
 
-_args… k gas bytestoken addr_ → _results… k'_
+_args… k gas addr_ → _results… k'_
 
 Synchronous actor-to-actor call. Same operand shape as [`send`](#send) minus
-`refund` and, likewise, no method selector. The byte token is consumed at entry;
-only its quantity enters the child frame and the callee's rent balance.
+`refund` and, likewise, no method selector. A caller that wants the callee to
+purchase storage passes Flame among the ordinary arguments; allocation remains
+the callee's explicit decision.
 
-**Re-entrancy & state discipline.** The state-checkout lock  closes both the DAO write-mid-update class and the read-only re-entrancy class *by construction*: state is reachable **only** via `load`, which acquires the lock (`take()` → `None`), and there is no peek-state opcode, so a half-applied update is never observable — a re-entrant `call`/`load` into an actor that has already `load`ed its state fails `ActorEmpty` (→ `0` marker for `call`). The lock does **not** enforce checks-effects-interactions ordering *within* a load/save window: holding a loaded state across a `call`/`send`/`open` is legal, but anything `save`d afterward is a pre-call snapshot — authors must `save` (or fully discharge) before calling out. Nested call depth is capped at `MAX_CALL_DEPTH` (64); deeper entry fails `CallDepthExceeded` (→ `0` marker for `call`, hard-fail for `open`/`signcall`).
-
-Loads the callee's **code** via the registry — selector-agnostic; the code blob itself dispatches on its top-of-stack argument by convention  — then splits the parent's anchor (left to the child frame, right held in `post_call_anchor` for restoration on return). **Re-entrancy is governed by the actor's state, not a call-stack guard** : if the callee's state is currently **checked out** (a live frame `load`ed it and hasn't `save`d it back), `load_code` returns `ActorEmpty` and the call returns the `0` failure marker — the call "did not happen". A callee whose state is committed (or never loaded) is entered normally, so safe re-entry is permitted.
+**Re-entrancy:** the state-checkout lock closes issues with re-entracy: state is reachable **only** via `load`, which acquires the lock, and there is no peek-state opcode, so a half-applied update is never observable — a re-entrant `call`/`load` into an actor that has already `load`ed its state fails `ActorEmpty` (→ `0` marker for `call`). The lock does **not** enforce checks-effects-interactions ordering *within* a load/save window: holding a loaded state across a `call`/`send`/`open` is legal, but anything `save`d afterward is a pre-call snapshot — authors must `save` (or fully discharge) before calling out. Nested call depth is capped at `MAX_CALL_DEPTH` (64); deeper entry fails `CallDepthExceeded` (→ `0` marker for `call`, hard-fail for `open`/`signcall`).
 
 **Emits no txlog entry.** Calls are intra-tx control flow; the structural effects produced inside the callee (`Output`, `Send`, `ActorSave`, `Issue`, `Retire`, `Fee`, `Data`) are what the state machine reads. The `(External TxID, Internal TxID)` of a tx is a merkle root over effects only — see the effect model above.
 
-Creates an isolated `CallKind::ActorCall { actor, caller }` frame (the frame's starting anchor lives in `CallFrame.anchor` — todo #4) with the popped `gas` / `bytes` allotments. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
+Creates an isolated `CallKind::ActorCall { actor, caller }` frame (the frame's starting anchor lives in `CallFrame.anchor` — todo #4) with the popped gas allotment. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
 
 Returns via `return k'`. Hard-fails `RegistryUnavailable` outside an internal-tx execution.
 
@@ -1244,35 +1259,89 @@ Returns via `return k'`. Hard-fails `RegistryUnavailable` outside an internal-tx
 
 While checked out, the actor has no data, so any `call`/`send`/`load` against it fails `ActorEmpty` — the **state's presence is the re-entrancy lock** . The state is a linear resource: `load` *moves* it (no copy); the frame must discharge it before returning, per the frame-end clean-stack rule. Re-loading an already-checked-out actor → `ActorEmpty`.
 
-Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorEmpty` (already checked out), `ActorNotFound`, `ActorFrozen`.
+Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorEmpty` (already checked out), `ActorNotFound`.
 
-**Self-destruct.** A frame discharges a loaded state by either `save`ing it back (the actor persists) or **explicitly dismantling it** — recursively reading every item out, retiring/spending tokens (they're non-droppable, so they *can't* be silently dropped; only a zero-qty `ClearToken` shell is droppable), and dropping the droppable residue. A fully-dismantled state leaves the actor empty, and the tx-end hook reaps it (removes the record, recycles vbytes through the maturity queue, 100 blocks). Forgetting to discharge is caught loudly — a Dict left on the stack hard-fails `StackNotClean` (rolled back), never a silent reap. A *failed* `load` is rolled back (state restored), so only an intentional dismantle self-destructs .
+**Self-destruct.** A frame discharges a loaded state by either `save`ing it back
+(the actor persists) or **explicitly dismantling it** — recursively reading
+every item out, retiring/spending tokens, and dropping the droppable residue. A
+fully dismantled state leaves the actor empty; the transaction emits
+`ActorDestroy` and removes its code and state. Unexpired leases are not refunded
+and recycle only at their original expiry heights. Forgetting to discharge is
+caught loudly by `StackNotClean` and rolls the transaction back.
 
 ### save
 
 _value_ → ø
 
-Pops the state `Value`, **validates portability** (every value must be portable per `Value::is_portable`), and **moves it back** into the current actor — which must be **checked out** by a prior `load`, else `SaveWithoutLoad` (saving to a non-checked-out actor would clobber, and silently drop the tokens of, live state). Emits `TxEntry::ActorSave { actor, state }` carrying the **full** post-save state — symmetric with `Output(Cell)` which carries the full Cell. The merkle leaf for this entry hashes `(actor.to_hash(), state_root(&state))`, so the TxID commits to the canonical state root while consumers reading the txlog directly get the bytes (no separate state-witness channel needed).
+Pops the state `Value`, **validates portability**, measures the prospective actor usage according to [Actor storage](storage.md), and **moves it back** into the current actor — which must be **checked out** by a prior `load`, else `SaveWithoutLoad` (saving to a non-checked-out actor would clobber, and silently drop the tokens of, live state). `save` hard-fails `StorageCapacityExceeded` if prospective usage exceeds capacity at the current core-block height. Emits `TxEntry::ActorSave { actor, state }` carrying the **full** post-save state — symmetric with `Output(Cell)` which carries the full Cell. The merkle leaf for this entry hashes `(actor.to_hash(), state_root(&state))`, so the TxID commits to the canonical state root while consumers reading the txlog directly get the bytes (no separate state-witness channel needed).
 
-**State is any portable Value.** There is no mandated `{public, private}` shape and no methods-in-state — methods live in the actor's code blob (`setcode`), dispatched on the top-of-stack selector by convention . The author structures state however they like (a Dict, an Int, a Token, …).
+**State is any portable Value.** The author structures state however they like (a Dict, an Int, a Token, …).
 
-**Portability is the canonical storage gate.** Portable values: `Int253`, `String`, `Point`, `Dict` of portable, non-negative `ClearToken`, `Token`. Non-portable values (`Cell`, `Merlin`, `Variable`, `Expression`, `Constraint`, `MultiscalarMul`, `WideToken`, negative `ClearToken`) hard-fail `NonPortableInState`. Portability is distinct from VM stack-copyability (Tokens are portable but not copyable — they survive the load/save round-trip via Rust-level deep clone, ignoring the linear-type discipline that gates `dup`).
-
-**Token portability invariant.** An encrypted `Token` is unconditionally portable; its non-negative-quantity obligation is discharged once at the **construction site** (`issuepriv` / `mix` / `borrow` range-proof CS gates), not re-checked at `save` / `output` / `send`. Any future Token constructor must preserve this — minting a Token without the range proof would let a negative/forged token be sealed into storage, breaking conservation. Linearity (non-copyability) is what guarantees the stored token can't be duplicated back out; the storage deep-clone is the single sanctioned move, and the registry holds the sole surviving copy after the tx applies.
+**Portability is the canonical storage gate.** Portable values: `Int253`, `String`, `Point`, `Dict` of portable, non-negative `ClearToken`, `Token`. Non-portable values (`Cell`, `Merlin`, `Variable`, `Expression`, `Constraint`, `MultiscalarMul`, `WideToken`, negative `ClearToken`) hard-fail `NonPortableInState`.
 
 ### setcode
 
 _code_ → ø
 
-Pops a String and replaces the current actor's **code blob** with its bytes, then records `TxEntry::SetCode { actor, code }` (merkle leaf `(actor.to_hash(), code_root(&code))`, symmetric with [`save`](#save)). Method-agnostic; independent of the state checkout lock (touches only code). Requires actor context.
+Pops a String, measures prospective usage, and replaces the current actor's
+**code blob** with its bytes. It hard-fails `StorageCapacityExceeded` if the new
+code would exceed current capacity. On success it records
+`TxEntry::SetCode { actor, code }`, symmetric with [`save`](#save)). It is
+method-agnostic and independent of the state checkout lock. Requires actor
+context.
 
 **Upgrade is author policy over a VM mechanism.** The VM provides `setcode`; *who* may call it is gated in the actor's own code. Actors authenticate by **caller identity** — `require(callerid() == GOV)` — not signatures: internal context has no constraint system or signature batch, so signature checks live at the external cell/predicate boundary. A naked `setcode` with no caller gate is an unconditionally-upgradeable (i.e. rug-able) actor — deliberately the author's call. See the design.
 
-Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `TypeNotString`, `ActorNotFound`, `ActorFrozen`.
+Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `TypeNotString`, `ActorNotFound`, `StorageCapacityExceeded`.
 
-**Atomicity.** A `save` failure (`SaveWithoutLoad`, `NonPortableInState`, `ActorNotFound`) propagates as a frame failure. The frame's call boundary rolls back both the txlog (truncating any ActorSave entry the failed callee may have written earlier) and the actor registry (restoring pre-frame state — a failed `load`'s checked-out state is restored to present, so the actor isn't spuriously self-destructed), keeping the actor consistent with the truncated txlog. At the outermost frame, `execute_internal` applies the same rollback at the tx level.
+**Atomicity.** A `save` failure (`SaveWithoutLoad`, `NonPortableInState`,
+`StorageCapacityExceeded`, `ActorNotFound`) propagates as a frame failure. The
+frame's call boundary rolls back both the txlog and actor registry. At the
+outermost frame, `execute_internal` applies the same rollback at transaction
+level.
 
-Hard-fails: `SaveWithoutLoad` (actor not checked out), `NonPortableInState`, `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorNotFound`.
+Hard-fails: `SaveWithoutLoad` (actor not checked out), `NonPortableInState`, `StorageCapacityExceeded`, `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorNotFound`.
+
+### addstorage
+
+_q_ → _debt 1 | 0_
+
+Pops `q` as a positive `Int253` byte count. The request must be at least
+`MIN_LEASE_BYTES`, must be a multiple of `STORAGE_UNIT_BYTES`, and must leave at
+least `MIN_REMAINING_POOL_BYTES` in the global pool. The constants, quote
+formula, block ordering, and lease rules are defined in
+[Actor storage](storage.md).
+
+On success, atomically:
+
+1. recomputes the fee against the current reserve;
+2. removes `q` bytes from that reserve;
+3. adds or coalesces a lease for the current actor at
+   `current_height + LEASE_DURATION_CORE_BLOCKS`;
+4. emits `TxEntry::StoragePurchase { actor, bytes, expiry_height, fee_sparks }`;
+5. pushes `ClearToken(-fee_sparks, FLAME_FLAVOR)` followed by `1`.
+
+The negative token must be balanced with actual Flame before transaction
+finalization. The storage-purchase effect burns that amount rather than paying a
+minter. A later failure rolls back the pool, lease, effect, and burn.
+
+An unavailable or unrepresentable request consumes `q`, pushes `0`, and changes
+nothing. Type and context violations hard-fail: `TypeNotInt253`,
+`OpcodeRequiresActorContext`, or `RegistryUnavailable`.
+
+### quotestorage
+
+_q_ → _fee 1 | 0_
+
+Performs the same request, reserve, arithmetic, and representation checks as
+[`addstorage`](#addstorage). On success it consumes `q` and pushes the positive
+integral total fee in sparks followed by `1`. On an unavailable quote it
+consumes `q` and pushes `0`.
+
+This opcode is read-only: it does not reserve bytes, add a lease, emit an effect,
+or change the price. `addstorage` always recomputes its quote, so an intervening
+purchase may change the fee or make the request unavailable. Type and context
+violations hard-fail under the same conditions as `addstorage`.
 
 ### signtx
 
@@ -1328,13 +1397,17 @@ Pushes the frame's *current* `last_anchor` as a 32-byte String — the value the
 
 Pushes the current call's remaining gas budget — i.e. `gaslimit − gas_used` (saturating). Available in either context.
 
-**Gas metering.** Every fetched instruction costs a flat 1 gas — *fetched* meaning executed **or** scanned while skipping forward to a label, so dead branches and loop bodies are charged identically on the prover (in-memory instructions) and a streaming verifier (decode-as-you-go); both walk the same instruction sequence. Label tables are collected afresh per frame — **no caching** — so gas is a pure function of the code and its inputs, never of prior execution state . Exhaustion hard-fails `OutOfGas`. Per-opcode cost calibration replaces the flat unit later ; the *mechanism* — charge at fetch, charge the skip-scan — is normative now. Call entry (`call` / `open` / `signcall`) **debits the full gas grant from the caller**: a caller that cannot afford the grant hard-fails `OutOfGas`; leftover gas is refunded on clean return; a **failed** call burns the entire grant (its partial execution is unobservable, so the burn is the only deterministic choice); a call blocked *before* the frame is created (re-entrancy lock, missing actor → `0` marker) refunds the grant in full. `send` does not debit the sender's frame — the message's gas grant is funded at delivery by the consensus layer (vbytes-flow design, deferred).
+**Gas metering.** Every fetched instruction costs a flat 1 gas — *fetched* meaning executed **or** scanned while skipping forward to a label, so dead branches and loop bodies are charged identically on the prover (in-memory instructions) and a streaming verifier (decode-as-you-go); both walk the same instruction sequence. Label tables are collected afresh per frame — **no caching** — so gas is a pure function of the code and its inputs, never of prior execution state . Exhaustion hard-fails `OutOfGas`. Per-opcode cost calibration replaces the flat unit later ; the *mechanism* — charge at fetch, charge the skip-scan — is normative now. Call entry (`call` / `open` / `signcall`) **debits the full gas grant from the caller**: a caller that cannot afford the grant hard-fails `OutOfGas`; leftover gas is refunded on clean return; a **failed** call burns the entire grant (its partial execution is unobservable, so the burn is the only deterministic choice); a call blocked *before* the frame is created (re-entrancy lock, missing actor → `0` marker) refunds the grant in full. `send` does not debit the sender's frame; the message's gas grant is funded at delivery by the consensus layer.
 
-### bytes
+### usage
 
 ø → _n_
 
-Pushes the current actor's remaining persistent vbyte balance, read from the registry. Internal-only: hard-fails `RegistryUnavailable` from external context and `OpcodeRequiresActorContext` from any frame without an actor identity (`ExternalRoot` / `CellOpen`).
+Pushes the current actor's occupied persistent-storage bytes, including code,
+canonical state encoding, and lease records, as defined in
+[Actor storage](storage.md). While state is checked out, the result measures the
+checked-out committed state until `save` supplies a replacement. Hard-fails
+`RegistryUnavailable` or `OpcodeRequiresActorContext` outside actor execution.
 
 ### callerid
 
@@ -1352,27 +1425,40 @@ Pushes the current call's total gas budget cap (the value set at frame creation,
 
 ø → _n_
 
-Pushes the current call's transient-memory cap — `4 × persistent_vbytes` for actor frames per the design, or the caller-specified `bytes` operand for `CellOpen` frames, or the explicit limit passed at the outermost frame. Available in either context.
+Pushes the current call's transient-memory cap —
+`TRANSIENT_MEMORY_CAPACITY_MULTIPLIER × current capacity` for actor frames, the
+caller-specified `bytes` operand for `CellOpen` frames, or the explicit limit
+passed at the outermost frame. Available in either context.
 
 **Memory accounting.** Each frame meters its transient growth against the cap with a monotonic high-water counter: `pushstr` literals, `append`, `writezeros`, and `tread` charge the bytes they add; drops do **not** release budget (the cap bounds total growth, keeping accounting O(1) and rollback-free — the counter dies with the frame). Exceeding the cap hard-fails `MemLimitExceeded`. Further growth ops (Dict inserts, stack depth) join the same charging seam as they are calibrated.
 
-### newbytes
+### capacity
 
-ø → _n_
+_h_ → _n_
 
-Pushes the vbyte quantity delivered to the frame: the byte-token quantity for
-`call` / `send`, or the scalar `bytes` operand for `open` / `signcall`. Zero at
-`ExternalRoot` (no parent). Available in either context.
+Pops a nonnegative future core-block height and pushes the current actor's
+leased capacity in bytes at that height:
 
-### Chain-info instructions  *(all planned, internal-only)*
+```text
+capacity(h) = STORAGE_UNIT_BYTES
+            * sum(lease.units where lease.expiry_height > h)
+```
 
-These opcodes read from the consensus-supplied `BlockContext`. All height-parameterized opcodes enforce the 100-block maturity window — querying `h > current_height − 100` hard-fails `BlockHeightImmature`.
+The query is read-only and does not expose the lease list. Heights below the
+current core-block height return zero. Outside actor execution also returns zero.
+
+### Chain-info instructions  *(all planned)*
+
+These opcodes read from the consensus-supplied `BlockContext`. Historical
+height-parameterized opcodes enforce the 100-block maturity window — querying
+`h > current_height − 100` hard-fails `BlockHeightImmature`.
 
 ### height
 
 ø → _n_
 
-Pushes the current block height.
+Pushes the current core-block height during an internal transaction. Pushes zero
+throughout an external transaction, including its nested `CellOpen` frames.
 
 ### blockhash
 

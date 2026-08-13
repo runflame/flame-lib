@@ -1,0 +1,208 @@
+# Actor storage
+
+This document defines the consensus rules for persistent actor storage. VM
+opcode encodings and stack behavior are specified in
+[flamevm.md](flamevm.md).
+
+**Status:** specified but not yet implemented. The lease market, revised
+message encoding, and storage opcodes must activate together; the legacy
+transferable-vbyte mechanism is not part of this specification.
+
+Actors lease storage by burning Flame. Storage is not a token: a lease cannot
+be transferred, shortened, or refunded. Every lease lasts exactly one storage
+year, and its bytes return to the global pool only when the lease expires.
+
+## Units and parameters
+
+All byte quantities exposed to FlameVM are literal bytes. Lease purchases and
+the global pool are restricted to whole `STORAGE_UNIT_BYTES` units.
+
+| Parameter | Initial value |
+| --- | ---: |
+| `SPARKS_PER_FLAME` | `100_000_000` |
+| `STORAGE_UNIT_BYTES` | `1_024` |
+| `INITIAL_POOL_BYTES` | `128 * 1_024 * 1_024 = 134_217_728` |
+| `INITIAL_POOL_UNITS` | `131_072` |
+| `LEASE_DURATION_CORE_BLOCKS` | `52_500` |
+| `ISSUED_BYTES_PER_CORE_BLOCK` | `8 * 1_024 = 8_192` |
+| `ISSUED_UNITS_PER_CORE_BLOCK` | `8` |
+| `MIN_LEASE_BYTES` | `1_024` |
+| `MIN_REMAINING_POOL_BYTES` | `1_024` |
+| `LEASE_RECORD_BYTES` | `16` |
+| `TRANSIENT_MEMORY_CAPACITY_MULTIPLIER` | `4` |
+| `INITIAL_PRICE_SPARKS_PER_UNIT` | `10 * SPARKS_PER_FLAME = 1_000_000_000` |
+
+One Flame is divisible into `100_000_000` sparks, analogous to satoshis in
+Bitcoin. All Flame token quantities and storage fees are integral sparks.
+
+A core-block height is the protocol's Bitcoin-coupled block counter. Lease
+duration and expiry use that counter, never timestamps; every internal
+transaction executed in one core block observes the same height.
+
+The fixed price numerator is derived from the initial conditions:
+
+```text
+STORAGE_PRICE_PRODUCT
+    = INITIAL_POOL_UNITS * INITIAL_PRICE_SPARKS_PER_UNIT
+    = 131_072_000_000_000 sparks * units
+```
+
+These names identify consensus parameters. Their initial values may be tuned
+before launch; changing one on a live network requires an explicit protocol
+upgrade. `STORAGE_PRICE_PRODUCT` is derived once from the activated initial
+values and does not change as bytes are issued, recycled, or purchased.
+
+The exact global unit price is represented by two integers:
+
+```text
+price_dividend = STORAGE_PRICE_PRODUCT
+price_divisor  = available_storage_units
+unit_price     = price_dividend / price_divisor
+```
+
+Only the divisor changes. No rounded or floating-point base price is stored.
+Storage units, byte amounts, expiry heights, and the available pool are
+consensus `u64` values; every conversion and update is checked.
+
+## Global state and block order
+
+The chain state contains:
+
+- `available_storage_units`, the unleased reserve;
+- an expiry index containing every outstanding lease; and
+- for each actor, an ordered list of `(expiry_height, units)` leases.
+
+Leases with the same actor and expiry height must be coalesced. The expiry index
+survives actor destruction because destroying an actor does not refund its
+unexpired leases.
+
+At the beginning of core block `h`, before executing transactions:
+
+1. Remove leases whose `expiry_height == h` and return their units to the pool.
+2. Mark every actor whose remaining capacity is below its usage for destruction.
+   Such actors cannot execute in this block.
+3. Add `ISSUED_UNITS_PER_CORE_BLOCK` to the pool.
+
+Storage purchases then execute serially in transaction order and update the
+pool immediately. This makes every quote a deterministic function of preceding
+block execution.
+
+At the end of the block, each actor marked in step 2 is destroyed by a separate
+system internal transaction, ordered lexicographically by actor ID. The
+transaction removes its code and state; portable token values are recursively
+retired and all other stored values are discarded. Its unexpired leases remain
+in the expiry index and recycle only at their original expiration heights.
+
+## Actor usage and capacity
+
+Actor usage is measured deterministically as:
+
+```text
+usage = len(code)
+      + len(canonical_encode(state))
+      + LEASE_RECORD_BYTES * number_of_lease_records
+```
+
+Each coalesced lease record is charged as two canonical `u64` fields: expiry
+height and storage units. Registry-tree overhead is not charged separately; the
+minimum 1 KiB lease provides the fixed per-actor allowance.
+
+An actor's capacity at core-block height `h` is:
+
+```text
+capacity(h) = STORAGE_UNIT_BYTES
+            * sum(lease.units where lease.expiry_height > h)
+```
+
+Expiration is exclusive: bytes from a lease expiring at height `E` are not
+available during block `E`.
+
+An existing actor must satisfy `usage <= capacity(current_height)` whenever its
+state is committed with `save`. A newly constructed actor may execute
+provisionally so it can purchase its first lease, but its creating transaction
+commits only if the same invariant holds at the end. Failure rolls back the
+actor, purchases, burns, and all other transaction effects.
+
+## Pricing
+
+Let:
+
+- `R` be `available_storage_units` immediately before an operation;
+- `q` be the requested byte amount;
+- `Q = q / STORAGE_UNIT_BYTES` be the requested number of units; and
+- `K` be `STORAGE_PRICE_PRODUCT`.
+
+The current marginal price of one unit is the exact rational `K / R`. A quote
+uses the reserve after the requested purchase:
+
+```text
+R_after    = R - Q
+fee_sparks = ceil(Q * K / R_after)
+```
+
+Equivalently, the quoted unit price is `K / R_after`, multiplied by `Q` and
+rounded up once. Implementations must use checked wide intermediates and the
+identity `ceil(a / b) = a / b + (a % b != 0)`; floating-point arithmetic is
+forbidden.
+
+A request is unavailable when:
+
+- its byte amount is less than `MIN_LEASE_BYTES`;
+- its byte amount is not a multiple of `STORAGE_UNIT_BYTES`;
+- `R_after` would be below `MIN_REMAINING_POOL_BYTES / STORAGE_UNIT_BYTES`;
+- the byte amount, pool update, or expiry height does not fit its consensus
+  `u64` representation;
+- an intermediate calculation overflows; or
+- the resulting positive fee cannot be represented as an `Int253` and as the
+  magnitude of a `ClearToken` quantity.
+
+The final unit is therefore never purchasable: its quoted price is
+mathematically unbounded.
+
+## Purchasing and quoting
+
+Only an actor may purchase storage. It may fund itself from Flame in its state,
+its call arguments, or a delivered message. There is no transferable virtual-
+byte asset and callers do not allocate storage directly to callees.
+
+For a valid byte request `q`, [`quotestorage`](flamevm.md#quotestorage) returns
+the positive integral `fee_sparks` without changing state.
+[`addstorage`](flamevm.md#addstorage) recomputes the same quote, immediately
+deducts the units from the pool, and adds a lease expiring at:
+
+```text
+current_height + LEASE_DURATION_CORE_BLOCKS
+```
+
+It emits a storage-purchase effect and returns
+`ClearToken(-fee_sparks, FLAME_FLAVOR)`. The transaction must balance that debt
+with actual Flame. A successful storage-purchase effect burns the balanced
+amount irrevocably; minters do not collect it.
+
+`quotestorage` is advisory, not a reservation. Any intervening successful
+purchase changes the reserve and therefore the result of a later `addstorage`.
+Both operations have the same request, reserve, arithmetic, and representation
+checks. Insufficient Flame is not an opcode failure: an unbalanced transaction
+fails at finalization and rolls the purchase back.
+
+## Introspection
+
+Actors can inspect their lease schedule without receiving the underlying list:
+
+```text
+height             -> h
+usage              -> bytes
+h capacity         -> bytes
+q quotestorage     -> { fee_sparks 1 | 0 }
+q addstorage       -> { flame_debt 1 | 0 }
+```
+
+`height` returns the current core-block height during an internal transaction
+and zero throughout an external transaction. `usage` returns the current
+actor's charged usage. `capacity(h)` returns its capacity at future height `h`;
+negative and past heights hard-fail. `usage` and `capacity` require actor
+context.
+
+When state is checked out by `load`, `usage` continues to describe the checked-
+out committed state until `save` supplies its replacement. `save` measures the
+replacement before committing it and fails if it exceeds current capacity.

@@ -11,10 +11,9 @@ when the specification, implementation, and focused regression tests agree.
      propagate failure to a transaction boundary that restores it. A successful
      enclosing transaction must never silently discard a `Token`, nonzero
      `ClearToken`, `WideToken`, `Cell`, or token-bearing `Dict`.
-   - [ ] Fix pre-entry `call` failure. Target lookup, call-depth checks, vbyte
-     credit, and other fallible setup currently happen after arguments and the
-     byte token have been removed. A returned `0` must have a defined ownership
-     result for all of them.
+   - [ ] Fix pre-entry `call` failure. Target lookup, call-depth checks, and
+     other fallible setup currently happen after arguments have been removed. A
+     returned `0` must have a defined ownership result for all of them.
    - [ ] Fix entered-call failure. [`VM::fail_current_call`](../flamevm/src/vm.rs)
      currently discards the complete child stack; preserve the entry escrow for
      actor-call arguments and for the `Cell`, payload, and arguments consumed by
@@ -23,28 +22,23 @@ when the specification, implementation, and focused regression tests agree.
      `StackNotClean`, `BadReturnArity`, and explicit verification failure.
    - [ ] Put every rollback checkpoint before its boundary side effects. In
      particular, a failed `signcall` must not retain the signature recorded
-     before its snapshot, and actor vbyte credit must follow the chosen deposit
-     rollback rule.
-   - [ ] Make `credit_vbytes` participate in registry checkpoints. A synchronous
-     call credit must not survive rollback of the frame or transaction that
-     supplied its byte token; pin any deliberate root-message top-up exception
-     separately.
+     before its snapshot, and storage-pool and lease changes must roll back with
+     their transaction.
    - [ ] Add a failure matrix covering pre-entry rejection, entered failure,
      dirty EOF, bad return arity, and nested failure for every bearer type, plus
-     a byte-supply conservation test across nested and outer rollback.
+     a storage-pool conservation test across nested and outer rollback.
 
 2. [ ] Make asynchronous message failure conserve payload assets.
 
    - [ ] Implement the documented bounce: on failed delivery, seal the original
      payload into exactly one cell under `refund_predicate`, or replace the spec
      with another exactly-once recovery rule before implementing it.
-   - [ ] Define whether a failed delivery consumes, refunds, or retains the
-     attached vbytes, and whether failed constructor delivery leaves an actor
-     deployed. Deployment, credit, message consumption, and bounce creation must
-     share one atomic boundary.
-   - [ ] Cover missing, frozen, and checked-out actors; malformed or failing
-     code; dirty return stacks; repeated delivery; and failure while producing
-     the bounce.
+   - [ ] Ensure a failed constructor delivery rolls back the provisional actor,
+     storage purchases, burns, message consumption, and bounce creation in one
+     atomic boundary.
+   - [ ] Cover missing, pending-destruction, and checked-out actors; malformed
+     or failing code; dirty return stacks; repeated delivery; and failure while
+     producing the bounce.
    - [ ] Prove with tests that a message carrying each portable bearer type can
      be delivered or recovered, but never lost or recovered twice.
 
@@ -109,8 +103,8 @@ when the specification, implementation, and focused regression tests agree.
 
 7. [ ] Settle actor and call-context semantics.
 
-   - [ ] Decide whether an empty message is a guaranteed code-free vbyte top-up
-     or a normal delivery. The implementation currently always runs actor code.
+   - [ ] Remove the obsolete code-free vbyte top-up path; messages always run
+     actor code, and actors purchase their own leases with `addstorage`.
    - [ ] Decide whether `CellOpen` may `send` and, during internal execution,
      `call` an actor with the zero caller identity. Align the context table and
      handlers.
@@ -130,20 +124,18 @@ when the specification, implementation, and focused regression tests agree.
    - [ ] Build one context matrix test covering ExternalRoot, InternalRoot,
      ActorCall, and external/internal CellOpen for every restricted opcode.
 
-8. [ ] Finish the vbyte token and actor-rent model.
+8. [ ] Implement the actor-storage lease market.
 
-   - [ ] Use one transient-memory formula everywhere. The implementation and the
-     Design section use `4 * remaining vbyte balance`; the Storage section says
-     `4 * occupied persistent size`.
-   - [ ] Specify the acquisition mechanism for flavor-1 byte tokens. The VM pool
-     delegates purchase to consensus, while the document still refers to buying
-     bytes through fees.
-   - [ ] State plainly that byte tokens held in cells or state are ordinary
-     tradeable assets and do not bleed until deposited into actor rent.
-   - [ ] Implement and report meaningful `vbytes_used`, including deposits,
-     storage bleed, freeze/unfreeze, destruction, recycling, and maturity.
-   - [ ] Resolve the failed-call and failed-delivery deposit rule from tasks 1
-     and 2 before exposing the market mechanism.
+   - [ ] Replace flavor-1 byte tokens and message/call byte grants with the
+     reserve and fixed-duration leases in [storage.md](storage.md).
+   - [ ] Implement checked exact pricing, `addstorage`, and `quotestorage`, with
+     pool, lease, burn, and txlog rollback at every call and transaction boundary.
+   - [ ] Implement deterministic actor usage, `usage`, `capacity`, and the
+     capacity checks in `save`, `setcode`, and provisional deployment.
+   - [ ] Process expiry and issuance before execution; produce ordered
+     end-of-block destruction transactions and retire stored tokens.
+   - [ ] Add golden vectors for quote rounding, pool boundaries, lease
+     coalescing, expiry, destruction, wire effects, and nested rollback.
 
 9. [ ] Reconcile value capabilities and public data models.
 
