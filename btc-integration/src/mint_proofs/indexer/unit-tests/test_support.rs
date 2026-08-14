@@ -13,7 +13,7 @@ use corepc_client::{
 use ed25519_dalek::SigningKey;
 use flamevm::Predicate;
 use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, mpsc, watch};
-use types::{BlockHash as FlameBlockHash, FlameNetwork};
+use flamechain::{BlockHash as FlameBlockHash, FlameNetwork};
 
 use super::indexer::MintingProofUpdate;
 use crate::{

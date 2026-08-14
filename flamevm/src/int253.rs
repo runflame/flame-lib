@@ -53,6 +53,16 @@ impl Int253 {
         Some(u64::from_le_bytes(lo))
     }
 
+    /// Returns the value as a non-negative `u128` if it fits.
+    pub fn to_u128(&self) -> Option<u128> {
+        if self.is_negative() || self.bytes[16..].iter().any(|&b| b != 0) {
+            return None;
+        }
+        let mut lo = [0u8; 16];
+        lo.copy_from_slice(&self.bytes[..16]);
+        Some(u128::from_le_bytes(lo))
+    }
+
     /// Returns the absolute value as a `Scalar`.
     pub fn abs_scalar(&self) -> Scalar {
         let abs_bytes = clear_high_bit(self.bytes);
@@ -267,6 +277,14 @@ impl From<u64> for Int253 {
     }
 }
 
+impl From<u128> for Int253 {
+    fn from(v: u128) -> Self {
+        let mut bytes = [0u8; 32];
+        bytes[..16].copy_from_slice(&v.to_le_bytes());
+        Int253 { bytes }
+    }
+}
+
 impl From<i64> for Int253 {
     fn from(v: i64) -> Self {
         // `unsigned_abs` handles i64::MIN correctly (magnitude 2^63
@@ -378,6 +396,12 @@ mod tests {
         let i = Int253::from(42u64);
         assert!(!i.is_negative());
         assert_eq!(i.to_scalar_mod_order(), Scalar::from(42u64));
+    }
+
+    #[test]
+    fn from_u128_roundtrip() {
+        let v = u128::from(u64::MAX) + 42;
+        assert_eq!(Int253::from(v).to_u128(), Some(v));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use thiserror::Error;
 use tokio::sync::{broadcast, oneshot};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use types::FlameNetwork;
+use flamechain::FlameNetwork;
 
 use crate::MintingProof;
 use crate::mint_proofs::MintingProofData;

@@ -534,6 +534,17 @@ fn retire_cleartoken_emits_txlog() {
 }
 
 #[test]
+fn retire_rejects_negative_cleartoken() {
+    let mut vm = vm_with_script(ScriptBuilder::new().retire().to_bytecode());
+    vm.push_value(Value::ClearToken(ClearToken::new(
+        Int253::from(-1i64),
+        FLAME_FLAVOR,
+    )));
+    let err = vm.step_internal().unwrap_err();
+    assert!(matches!(err, VMError::NegativeTokenRetirement));
+}
+
+#[test]
 fn retire_token_emits_txlog_with_commitment_points() {
     let token = make_cleartext_token(11, 22);
     let q_pt = token.qty.to_point();
@@ -735,4 +746,3 @@ fn issueprivflv_rejects_non_32_byte_predicate() {
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::IndexOutOfRange));
 }
-

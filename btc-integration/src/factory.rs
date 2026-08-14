@@ -2,7 +2,7 @@ use crate::mint_proofs::minting_proof_storage::InMemoryMintingProofStorage;
 use crate::rpc::Core31RpcApi;
 use crate::{BitcoinRpcAuth, MintProofIndexer, MintProofSenderV31};
 use std::sync::Arc;
-use types::FlameNetwork;
+use flamechain::FlameNetwork;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BtcIntegrationConfig {

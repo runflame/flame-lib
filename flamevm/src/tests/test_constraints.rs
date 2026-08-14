@@ -16,12 +16,19 @@ fn eq_external_strings_peek_compare_not_cs_lift() {
         .eq();
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(prog.into_instructions(), CallKind::ExternalRoot, 1_000_000, 0, 0),
+        CallFrame::new(
+            prog.into_instructions(),
+            CallKind::ExternalRoot,
+            1_000_000,
+            0,
+            0,
+        ),
     );
     let mut prover = Prover::new(&pc_gens);
     vm.step_external(&mut prover).expect("push a");
     vm.step_external(&mut prover).expect("push b");
-    vm.step_external(&mut prover).expect("eq must not error in external context");
+    vm.step_external(&mut prover)
+        .expect("eq must not error in external context");
     // Non-consuming cleartext eq leaves [a, b, 1].
     assert_eq!(vm.current_call.stack.len(), 3);
     assert_int(&vm.current_call.stack[2], Int253::from(1u64));
@@ -41,9 +48,11 @@ fn range_proof_accepts_in_range_value() {
         .alloc(Some(Int253::from(42u64)))
         .eq()
         .verify();
-    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
-            .expect("prove succeeds");
-    let TxResult { bytecode, proof, .. } = _pp;
+    let _pp =
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0).expect("prove succeeds");
+    let TxResult {
+        bytecode, proof, ..
+    } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -71,13 +80,7 @@ fn range_proof_rejects_out_of_range_value() {
         .alloc(Some(Int253::from(512u64)))
         .eq()
         .verify();
-    let result = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-        0,
-    );
+    let result = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0);
     // The prover may succeed (constructs a proof with bad witness)
     // and the verifier rejects, OR the prover errors directly.
     // Either way, the full pipeline must reject. Cover both
@@ -87,7 +90,9 @@ fn range_proof_rejects_out_of_range_value() {
             // Prover refused — good.
         }
         Ok(_pp) => {
-            let TxResult { bytecode, proof, .. } = _pp;
+            let TxResult {
+                bytecode, proof, ..
+            } = _pp;
             let proof = proof.expect("proof set");
             let pc_gens_v = PedersenGens::default();
             let err = Verifier::verify(
@@ -117,14 +122,7 @@ fn range_bit_count_zero_rejected() {
         .alloc(Some(Int253::from(0u64)))
         .eq()
         .verify();
-    let err = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-        0,
-    )
-    .unwrap_err();
+    let err = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0).unwrap_err();
     assert!(matches!(err, VMError::BitCountOutOfRange));
 }
 
@@ -139,14 +137,7 @@ fn range_bit_count_above_64_rejected() {
         .alloc(Some(Int253::from(1u64)))
         .eq()
         .verify();
-    let err = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-        0,
-    )
-    .unwrap_err();
+    let err = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0).unwrap_err();
     assert!(matches!(err, VMError::BitCountOutOfRange));
 }
 
@@ -167,9 +158,11 @@ fn constraint_and_overload_combines_two_constraints() {
         // AND the two Constraints
         .and()
         .verify();
-    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
-            .expect("prove succeeds");
-    let TxResult { bytecode, proof, .. } = _pp;
+    let _pp =
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0).expect("prove succeeds");
+    let TxResult {
+        bytecode, proof, ..
+    } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -198,9 +191,11 @@ fn constraint_or_overload_combines_two_constraints() {
         .eq()
         .or()
         .verify();
-    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
-            .expect("prove succeeds");
-    let TxResult { bytecode, proof, .. } = _pp;
+    let _pp =
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0).expect("prove succeeds");
+    let TxResult {
+        bytecode, proof, ..
+    } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -225,9 +220,11 @@ fn constraint_not_overload_negates_constraint() {
         .eq()
         .not()
         .verify();
-    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
-            .expect("prove succeeds");
-    let TxResult { bytecode, proof, .. } = _pp;
+    let _pp =
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0).expect("prove succeeds");
+    let TxResult {
+        bytecode, proof, ..
+    } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -257,8 +254,10 @@ fn constraint_and_with_false_branch_rejected() {
         .and()
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
-            .expect("prove succeeds (constructs proof of unsatisfiable constraint)");
-    let TxResult { bytecode, proof, .. } = _pp;
+        .expect("prove succeeds (constructs proof of unsatisfiable constraint)");
+    let TxResult {
+        bytecode, proof, ..
+    } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     let err = Verifier::verify(
@@ -278,7 +277,11 @@ fn constraint_and_with_false_branch_rejected() {
 fn range_in_internal_context_errors_external_only() {
     // Internal context dispatches `range` to ExternalOnly.
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_int(1u64).push_int(64u64).range().to_bytecode(),
+        ScriptBuilder::new()
+            .push_int(1u64)
+            .push_int(64u64)
+            .range()
+            .to_bytecode(),
     );
     // Push an Expression manually so dispatch_internal hits range.
     // Actually we can't construct an Expression in internal context
@@ -297,11 +300,8 @@ fn range_in_internal_context_errors_external_only() {
 /// or success marker on the stack for the caller's continuation.
 fn open_with_inner(inner: ScriptBuilder) -> ScriptBuilder {
     let inner_bytes = inner.to_bytecode();
-    let tree = PredicateTree::scripts_only(
-        vec![inner_bytes.clone()],
-        TEST_BLINDING_KEY,
-    )
-    .expect("scripts_only tree");
+    let tree = PredicateTree::scripts_only(vec![inner_bytes.clone()], TEST_BLINDING_KEY)
+        .expect("scripts_only tree");
     let cp = tree.taproot_proof_for(0).expect("cp");
     let pred_point = tree.point;
     let cell = Cell::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![]);
@@ -312,9 +312,7 @@ fn open_with_inner(inner: ScriptBuilder) -> ScriptBuilder {
         .input()
         .push_point(*cp.internal_key.as_bytes());
     for (i, h) in cp.neighbors.iter().enumerate() {
-        outer = outer
-            .push_str(String::from(h.to_vec()))
-            .push_int(i as u64);
+        outer = outer.push_str(String::from(h.to_vec())).push_int(i as u64);
     }
     outer
         .push_int(cp.neighbors.len() as u64)
@@ -347,13 +345,13 @@ fn failed_call_unsat_cs_does_not_pollute_parent_proof() {
         .add()
         .alloc(Some(Int253::from(99u64)))
         .eq()
-        .verify()                                  // unsat constraint into CS
+        .verify() // unsat constraint into CS
         .push_int(0u64)
-        .verify()                                  // VerifyFailed → unwind
+        .verify() // VerifyFailed → unwind
         .push_int(0u64)
         .return_();
     let outer = open_with_inner(inner)
-        .drop_()                                   // discard `0` failure marker
+        .drop_() // discard `0` failure marker
         // Parent's own constraint: 7 + 3 == 10 — satisfiable.
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
@@ -361,9 +359,10 @@ fn failed_call_unsat_cs_does_not_pollute_parent_proof() {
         .alloc(Some(Int253::from(10u64)))
         .eq()
         .verify();
-    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
-        .expect("prove ok");
-    let TxResult { bytecode, proof, .. } = result;
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0).expect("prove ok");
+    let TxResult {
+        bytecode, proof, ..
+    } = result;
     let proof = proof.expect("proof set");
 
     // Verifier must accept: the child's `7+3==99` was rolled back
@@ -400,12 +399,14 @@ fn clean_call_cs_alloc_propagates_to_parent_proof() {
         .push_int(0u64)
         .return_();
     let outer = open_with_inner(inner)
-        .verify()                                  // pop success marker (1)
-        .drop_();                                  // drop count
+        .verify() // pop success marker (1)
+        .drop_(); // drop count
 
     let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
         .expect("prover always builds something");
-    let TxResult { bytecode, proof, .. } = result;
+    let TxResult {
+        bytecode, proof, ..
+    } = result;
     let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();
@@ -456,24 +457,22 @@ fn failed_call_rolls_back_every_state_lane() {
         .push_point([0xbb; 32])
         .output()
         // ── lane 2: TxLog (Send) ────────────────────────────────
-        .push_int(0u64)                                    // k=0 args
-        .push_str(String::from(vec![0u8; 32]))             // refund (32 B)
-        .push_int(1u64)                                    // gas
-        .push_int(BYTES_FLAVOR)
-        .pushtoken()                                       // zero-byte token
-        .push_str(String::from(vec![0xcc; 32]))            // addr (32 B)
+        .push_int(0u64) // k=0 args
+        .push_str(String::from(vec![0u8; 32])) // refund (32 B)
+        .push_int(1u64) // gas
+        .push_str(String::from(vec![0xcc; 32])) // addr (32 B)
         .send()
         // ── lane 3: deferred_sigs (signtx records TxBound) ──────
-        .push_int(0u64)                                    // payload count = 0
-        .push_point([0xdd; 32])                            // predicate
-        .cell()                                            // → Cell on stack
-        .signtx()                                          // pours payload + count; records TxBound
-        .drop_()                                           // drop count = 0
+        .push_int(0u64) // payload count = 0
+        .push_point([0xdd; 32]) // predicate
+        .cell() // → Cell on stack
+        .signtx() // pours payload + count; records TxBound
+        .drop_() // drop count = 0
         // ── lane 4: MSM/sig batch (non-identity 1·G) ────────────
         .push_int(1u64)
         .push_point(g_bytes)
         .mul()
-        .verify()                                          // appends 1·G to batch
+        .verify() // appends 1·G to batch
         // ── lane 5: R1CS (unsatisfiable 7+3==99) ────────────────
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
@@ -483,12 +482,12 @@ fn failed_call_rolls_back_every_state_lane() {
         .verify()
         // ── deliberately fail ───────────────────────────────────
         .push_int(0u64)
-        .verify()                                          // VerifyFailed → frame unwinds
+        .verify() // VerifyFailed → frame unwinds
         .push_int(0u64)
-        .return_();                                        // unreachable
+        .return_(); // unreachable
 
     let outer = open_with_inner(inner)
-        .drop_()                                           // discard `0` failure marker
+        .drop_() // discard `0` failure marker
         // Parent's own satisfiable constraint: 7 + 3 == 10.
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
@@ -497,8 +496,7 @@ fn failed_call_rolls_back_every_state_lane() {
         .eq()
         .verify();
 
-    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
-        .expect("prove ok");
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0).expect("prove ok");
     let txid_p = result.txid;
 
     // ── TxLog assertion: rollback truncated all child entries ──
@@ -533,7 +531,9 @@ fn failed_call_rolls_back_every_state_lane() {
     //     `None`.
     //   - batch: 1·G != identity → `BatchSignatureVerificationFailed`.
     //   - CS: 7+3==99 unsatisfiable → `InvalidR1CSProof`.
-    let TxResult { bytecode, proof, .. } = result;
+    let TxResult {
+        bytecode, proof, ..
+    } = result;
     let proof = proof.expect("proof set");
     let verifier_result = Verifier::verify(
         &pc_gens,

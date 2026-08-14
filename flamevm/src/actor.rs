@@ -154,216 +154,52 @@ pub fn code_root(code: &[u8]) -> [u8; 32] {
     h
 }
 
-// ── Actor (full record, including lifecycle counters) ────────────
-
-/// Full per-actor record stored in the registry. Combines the
-/// mutable script-visible state Dict with the protocol-managed
-/// lifecycle counters (vbyte balance, activation tracking, freeze
-/// state). Per `docs/flamevm.md` §Storage and ADR 0005.
-#[derive(Clone, Debug)]
-pub struct Actor {
-    /// The actor's code blob — a single bytecode string, dispatched on
-    /// the `method` opcode. Set at deploy, replaced by `setcode`.
-    pub code: Vec<u8>,
-
-    /// Mutable script-visible state — **any** portable `Value` — or
-    /// `None` while **checked out**: `op_load` moves the state onto a
-    /// frame's stack (leaving `None`), `op_save` moves it back. A
-    /// checked-out actor can't be called/loaded (`ActorEmpty`): the
-    /// state's presence *is* the re-entrancy lock (ADR 0017).
-    pub state: Option<Value>,
-
-    /// Persistent vbyte balance. Bled per block during `tick_block`
-    /// (Unit 3). `0` puts the actor in the frozen state
-    /// ([`Self::frozen_since`]).
-    pub vbytes: u64,
-
-    /// Number of blocks the actor has been continuously active.
-    /// Drives the grace-window formula
-    /// `min(active_blocks/4, blocks_per_6_months)`. Reset by a
-    /// top-up when frozen (per ADR 0005).
-    pub active_blocks: u64,
-
-    /// Height at which the actor's last activation (deployment or
-    /// post-freeze top-up) occurred. Combined with `active_blocks`
-    /// the grace window is precisely bounded.
-    pub last_activation_height: u64,
-
-    /// `Some(height)` iff currently frozen; the height is when the
-    /// vbyte balance first hit zero. `None` iff active.
-    pub frozen_since: Option<u64>,
-}
-
-impl Actor {
-    /// Constructs a fresh actor with the given code, initial state, and
-    /// vbyte funding, activated at `height`.
-    pub fn new_active(code: Vec<u8>, state: Value, vbytes: u64, height: u64) -> Self {
-        Self {
-            code,
-            state: Some(state),
-            vbytes,
-            active_blocks: 0,
-            last_activation_height: height,
-            frozen_since: None,
-        }
-    }
-
-    /// True iff currently in the frozen state.
-    pub fn is_frozen(&self) -> bool {
-        self.frozen_since.is_some()
-    }
-
-    /// True iff the state is checked out (a frame `load`ed it and
-    /// hasn't `save`d it back). Such an actor — left empty at tx end
-    /// because the frame dismantled its state instead of saving — is
-    /// reaped (self-destruct, Q6).
-    pub fn is_checked_out(&self) -> bool {
-        self.state.is_none()
-    }
-}
-
 // ── Vbyte sizing ──────────────────────────────────────────────────
 
-/// Canonical vbyte size of an actor's state Dict (Q2): `wire_len(state) +
-/// STORAGE_OVERHEAD`, the overhead covering the protocol-managed lifecycle
-/// counters every actor carries.
+/// Canonical charged size of an actor's code and state. Lease-record overhead
+/// belongs to the blockchain host because FlameVM does not own lease records.
 ///
 /// `Err(MalformedActorState)` if the state can't be encoded. Note:
 /// encodability ≠ portability — op_save's `is_portable` check is the
 /// authoritative storage gate; this reports the rare case of a portable
 /// value that lacks an encoder.
 pub fn vbyte_size(code: &[u8], state: &Value) -> Result<u64, VMError> {
-    const STORAGE_OVERHEAD: u64 = 32;
     let mut buf = Vec::new();
     write_value(&mut buf, state).map_err(|_| VMError::MalformedActorState)?;
-    Ok(code.len() as u64 + buf.len() as u64 + STORAGE_OVERHEAD)
+    (code.len() as u64)
+        .checked_add(buf.len() as u64)
+        .ok_or(VMError::StorageArithmeticOverflow)
 }
 
-// ── Lifecycle constants ───────────────────────────────────────────
-
-/// Per-block introduction of fresh vbytes into the pool. Per
-/// docs/blockchain.md §Limits and ADR 0004: 5000/block,
-/// adjustable up to 2× per cycle by supermajority. The constant
-/// here is the genesis value.
-pub const VBYTES_PER_BLOCK: u64 = 5000;
-
-/// Maturity delay for vbytes returning to the pool from a cleared
-/// actor. 100 blocks per docs/blockchain.md §Limits and ADR
-/// 0005.
-pub const VBYTE_MATURITY_BLOCKS: u64 = 100;
-
-/// Cap on the grace window in blocks (≈ six months)
-pub const GRACE_BLOCKS_CAP: u64 = 144*30*6;
-
-/// Grace-window formula. Returns the number of blocks an actor
-/// stays frozen before being cleared. Per ADR 0005:
-/// `min(active_blocks / 4, GRACE_BLOCKS_CAP)`.
-pub fn grace_window(active_blocks: u64) -> u64 {
-    let earned = active_blocks / 4;
-    earned.min(GRACE_BLOCKS_CAP)
+/// Result of a successful persistent-storage purchase. The host owns
+/// pricing and lease bookkeeping; the VM only turns this deterministic
+/// result into a debt token and transaction-log effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoragePurchase {
+    pub fee_sparks: crate::Int253,
+    pub expiry_height: u64,
 }
 
-// ── VbytePool ────────────────────────────────────────────────────
-
-/// Protocol-level vbyte supply. New vbytes flow in at
-/// [`VBYTES_PER_BLOCK`] per block; cleared actors' vbytes flow
-/// back via the maturity queue with a [`VBYTE_MATURITY_BLOCKS`]
-/// delay. `available` represents unissued `BYTES_FLAVOR` token
-/// quantity; consensus brokers its acquisition. This module tracks
-/// only the pool quantity and maturity schedule.
-#[derive(Clone, Debug, Default)]
-pub struct VbytePool {
-    /// Vbytes currently available for purchase.
-    pub available: u64,
-
-    /// Maturity queue keyed by the block height at which the
-    /// entry becomes spendable (= clear_height + VBYTE_MATURITY_BLOCKS).
-    /// Inserted by [`VbytePool::queue_recycle`]; drained by
-    /// [`VbytePool::release_matured`].
-    pub maturing: std::collections::BTreeMap<u64, u64>,
-}
-
-impl VbytePool {
-    /// Constructs an empty pool. Real chains seed with the genesis
-    /// vbyte introduction; tests build piecewise.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Per-block introduction of fresh vbytes. Adds
-    /// [`VBYTES_PER_BLOCK`] to `available`. Called once per block
-    /// by [`MemRegistry::tick_block`] (real consensus impls do the
-    /// same).
-    pub fn introduce_block_vbytes(&mut self) {
-        self.available = self.available.saturating_add(VBYTES_PER_BLOCK);
-    }
-
-    /// Queues `amount` vbytes recycled from a cleared actor for
-    /// release at `cleared_at_height + VBYTE_MATURITY_BLOCKS`.
-    pub fn queue_recycle(&mut self, amount: u64, cleared_at_height: u64) {
-        if amount == 0 {
-            return;
-        }
-        let release_height =
-            cleared_at_height.saturating_add(VBYTE_MATURITY_BLOCKS);
-        *self.maturing.entry(release_height).or_insert(0) =
-            self.maturing
-                .get(&release_height)
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(amount);
-    }
-
-    /// Releases any maturing entries whose release height has
-    /// arrived (`<= current_height`). Returns the amount released.
-    pub fn release_matured(&mut self, current_height: u64) -> u64 {
-        // Drain entries with key ≤ current_height. BTreeMap doesn't
-        // have a `drain_filter` on stable, so we split off the
-        // strictly-larger half and accumulate the remainder.
-        let upper = self.maturing.split_off(&(current_height + 1));
-        let mut total = 0u64;
-        for (_h, v) in self.maturing.iter() {
-            total = total.saturating_add(*v);
-        }
-        self.maturing = upper;
-        self.available = self.available.saturating_add(total);
-        total
-    }
-
-    /// True iff no vbytes are available or maturing.
-    pub fn is_empty(&self) -> bool {
-        self.available == 0 && self.maturing.is_empty()
-    }
-}
+/// Transient actor-frame memory is bounded by four times the larger of
+/// current capacity and charged usage. The usage side is the constructor's
+/// bootstrap allowance before its first lease is purchased.
+pub const TRANSIENT_MEMORY_CAPACITY_MULTIPLIER: u64 = 4;
 
 // ── ActorRegistry trait ──────────────────────────────────────────
 
-/// Mutable handle into the live actor registry. The VM consults
-/// this from `op_load` / `op_save` / `op_call` / `op_send` (Units
-/// 5–8). The trait stays thin so a real consensus-backed
-/// implementation only needs to supply storage + the per-block
-/// tick.
+/// Mutable handle into actor state owned by the blockchain state machine.
+/// FlameVM never owns the global lease pool or block lifecycle; it only asks
+/// this host for deterministic actor reads and mutations while executing one
+/// transaction.
 ///
-/// **Re-entrancy lock semantics.** `mark_for_destruction` is the
-/// runtime enforcement of the load/save lock from
-/// `flamevm/CLAUDE.md`. `op_load` marks; `op_save` unmarks; a
-/// second `op_load` against a marked actor errors
-/// `LoadAlreadyMarked`. If a transaction commits with an actor
-/// still marked, the registry deletes the actor and recycles its
-/// vbytes via the pool — that's the "load without save = destroy"
-/// path (Q6).
-///
-/// **Lifecycle ownership.** `tick_block` is the sole transition
-/// site for ACTIVE↔FROZEN↔CLEARED + maturity. Consensus calls it
-/// once per block after applying that block's transactions.
 pub trait ActorRegistry {
     // ── lookup ─────────────────────────────────────────────────
 
     /// **Checks out** the actor's state — moves it out of the registry
     /// (leaving the actor `None`/empty) and returns it for `op_load` to
     /// push onto the stack. Errors `ActorEmpty` if it's already checked
-    /// out (the re-entrancy lock), `ActorFrozen` if frozen, or
-    /// `ActorNotFound`. The matching `save_state` moves it back.
+    /// out (the re-entrancy lock), or `ActorNotFound`. The matching
+    /// `save_state` moves it back.
     fn load_state(&mut self, id: &ActorID) -> Result<Value, VMError>;
 
     /// Moves `state` back into a **checked-out** actor (`op_save`).
@@ -373,23 +209,59 @@ pub trait ActorRegistry {
     fn save_state(&mut self, id: &ActorID, state: Value) -> Result<(), VMError>;
 
     /// Returns the actor's code blob, method-agnostic — the code itself
-    /// dispatches on the `method` opcode. Errors `ActorNotFound` /
-    /// `ActorFrozen` / `ActorEmpty` (checked out → re-entrancy block).
+    /// dispatches on the `method` opcode. Errors `ActorNotFound` or
+    /// `ActorEmpty` (checked out → re-entrancy block).
     fn load_code(&self, actor: &ActorID) -> Result<Vec<u8>, VMError>;
 
-    /// Replaces the actor's code blob (`setcode`). Errors
-    /// `ActorNotFound` / `ActorFrozen`. Independent of the state lock.
+    /// Replaces the actor's code blob (`setcode`). Errors `ActorNotFound`.
     fn set_code(&mut self, actor: &ActorID, code: Vec<u8>) -> Result<(), VMError>;
 
-    /// Returns the actor's persistent vbyte balance. Used by the
-    /// VM driver to size the transient-memory cap (`4× persistent`
-    /// per ADR 0002).
-    fn actor_vbytes(&self, actor: &ActorID) -> Result<u64, VMError>;
+    /// Charged bytes currently occupied by code, committed state, and lease
+    /// records. While state is checked out this remains the committed usage.
+    fn actor_usage(&self, actor: &ActorID) -> Result<u64, VMError>;
+
+    /// Leased bytes available at `height`. A past height and an actor pending
+    /// block-boundary destruction are hard errors.
+    fn actor_capacity(&self, actor: &ActorID, height: u64) -> Result<u64, VMError>;
+
+    /// Multiplier converting persistent actor bytes into a transient frame
+    /// memory allowance. Chain implementations override the default when the
+    /// activated consensus parameter differs.
+    fn transient_memory_multiplier(&self) -> u64 {
+        TRANSIENT_MEMORY_CAPACITY_MULTIPLIER
+    }
+
+    /// Quotes `bytes` without changing state. `None` is the storage opcodes'
+    /// in-band unavailable result; arithmetic or invariant failures are hard
+    /// errors.
+    fn quote_storage(
+        &self,
+        actor: &ActorID,
+        bytes: u64,
+        current_height: u64,
+    ) -> Result<Option<StoragePurchase>, VMError>;
+
+    /// Atomically buys a one-year lease for `actor`. The implementation must
+    /// use the same checks and quote as [`Self::quote_storage`].
+    fn purchase_storage(
+        &mut self,
+        actor: &ActorID,
+        bytes: u64,
+        current_height: u64,
+    ) -> Result<Option<StoragePurchase>, VMError>;
+
+    /// Checks the post-mutation `usage <= capacity(current_height)` invariant.
+    /// This is also the final gate for a provisionally deployed actor.
+    fn validate_actor_storage(
+        &self,
+        actor: &ActorID,
+        current_height: u64,
+    ) -> Result<(), VMError>;
 
     /// True iff a row exists in the registry for `actor`. Used by
-    /// `op_call` / `op_send` to distinguish "actor doesn't exist"
-    /// (hard fail for direct calls; deploy path for sends via
-    /// `Constructor`) from frozen/loaded states.
+    /// `op_call` / message delivery to distinguish "actor doesn't exist"
+    /// (hard fail for direct calls; deploy path for constructor messages)
+    /// from a temporarily checked-out state.
     fn exists(&self, actor: &ActorID) -> bool;
 
     // ── checkpoint / rollback (call-frame atomicity) ───────────
@@ -416,57 +288,21 @@ pub trait ActorRegistry {
 
     // ── self-destruct (Q6 / ADR 0017) ──────────────────────────
 
-    /// End-of-tx hook called by the VM driver after a successful run.
-    /// Reaps any actor left **checked out** (`state == None` — a `load`
-    /// whose state the frame dismantled instead of saving), recycling
-    /// its vbytes to the pool with [`VBYTE_MATURITY_BLOCKS`] delay.
-    /// Returns the count cleared. `current_height` is the containing
-    /// block's height.
-    fn commit_tx_destructions(&mut self, current_height: u64) -> usize;
+    /// End-of-tx hook for explicit self-destruction: removes actors whose
+    /// checked-out state was fully dismantled and returns their ids in
+    /// canonical order. Unexpired leases remain owned by the global expiry
+    /// index and are not refunded.
+    fn commit_tx_destructions(&mut self) -> Vec<ActorID>;
 
     // ── deployment (Q4 — transparent on first delivery) ────────
 
-    /// Installs a freshly-deployed actor under `id` with `code` and
-    /// initial `state`, funded with `vbytes`, activated at `height`.
-    /// Errors `ActorAlreadyExists` if the id is already taken.
+    /// Installs a provisional actor with no lease. Its constructor may buy
+    /// storage; the containing transaction commits only after
+    /// [`Self::validate_actor_storage`] succeeds.
     fn deploy(
         &mut self,
         id: ActorID,
         code: Vec<u8>,
         state: Value,
-        vbytes: u64,
-        height: u64,
     ) -> Result<(), VMError>;
-
-    /// Credits `amount` vbytes to `id`. If the actor was frozen,
-    /// this restores it to ACTIVE, clears `frozen_since`, and resets
-    /// `active_blocks` per ADR 0005's "top-up resets the counter".
-    /// `last_activation_height` is updated to `current_height`.
-    /// Errors `ActorNotFound` if no such actor.
-    ///
-    /// Called when `send` is delivered or `call` enters after consuming
-    /// a `BYTES_FLAVOR` ClearToken.
-    fn credit_vbytes(
-        &mut self,
-        id: &ActorID,
-        amount: u64,
-        current_height: u64,
-    ) -> Result<(), VMError>;
-
-    // ── lifecycle ──────────────────────────────────────────────
-
-    /// Per-block tick: bleed every actor's vbytes by their current
-    /// `vbyte_size`, transition ACTIVE↔FROZEN, expire FROZEN past
-    /// grace, and release matured pool entries. Called once per
-    /// block by consensus after applying transactions.
-    ///
-    /// Returns the set of `ActorID`s cleared (expired past grace)
-    /// during this tick, in deterministic order — useful for log
-    /// emission. Per docs/flamevm.md §Design.
-    fn tick_block(&mut self, height: u64) -> Vec<ActorID>;
-
-    // ── pool ───────────────────────────────────────────────────
-
-    /// Read-only view of the protocol's vbyte pool.
-    fn vbyte_pool(&self) -> &VbytePool;
 }

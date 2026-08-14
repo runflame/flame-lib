@@ -29,7 +29,7 @@ impl MessageID {
 /// bounce cell produced when the delivered internal tx fails (Q3 —
 /// failure path emits an Output directly via consensus, not a fresh
 /// sub-VM).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Message {
     /// Destination actor (either `Hash` for an already-deployed actor,
     /// or `Constructor` for transparent on-the-fly deployment per Q4).
@@ -59,11 +59,6 @@ pub struct Message {
     /// regardless of internal-tx outcome (no refunds for sends per
     /// spec.md).
     pub gas: u64,
-
-    /// Quantity extracted from the sender's `BYTES_FLAVOR`
-    /// ClearToken. The flavor is validated and discarded at `send`;
-    /// delivery deposits this quantity into the target's rent balance.
-    pub vbytes: u64,
 
     /// Sender-chosen bounce predicate. If the delivered internal tx
     /// fails, consensus seals `payload` into a fresh cell under this
@@ -97,8 +92,7 @@ impl Message {
 /// 5. `refund_predicate` — 32-byte compressed Ristretto (via
 ///    `Predicate: Encodable`).
 /// 6. `gas` — little-endian u64.
-/// 7. `vbytes` — little-endian u64.
-/// 8. `payload` — little-endian u64 count, then each value's
+/// 7. `payload` — little-endian u64 count, then each value's
 ///    canonical `write_value` encoding.
 ///
 /// Fails only if the underlying writer runs out of capacity —
@@ -107,7 +101,9 @@ impl Message {
 impl Encodable for Message {
     fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
         self.anchor.encode(w)?;
-        self.target.to_canonical().encode(w)?;
+        // Preserve Constructor bytes: they are the code needed for
+        // deploy-on-first-delivery. Registry lookup still canonicalizes the id.
+        self.target.encode(w)?;
         match &self.caller {
             None => w.write_u8(b"send.caller.tag", 0)?,
             Some(c) => {
@@ -117,7 +113,6 @@ impl Encodable for Message {
         }
         self.refund_predicate.encode(w)?;
         w.write_u64(b"send.gas", self.gas)?;
-        w.write_u64(b"send.vbytes", self.vbytes)?;
         w.write_u64(b"send.payload.len", self.payload.len() as u64)?;
         for v in &self.payload {
             write_value(w, v).map_err(|_| WriteError::InsufficientCapacity)?;
@@ -143,23 +138,21 @@ mod tests {
             anchor,
             payload: Vec::new(),
             gas: 1_000,
-            vbytes: 0,
             refund_predicate: dummy_predicate(),
         }
     }
 
     #[test]
-    fn sendid_canonical_actor_form() {
-        // MessageID canonicalizes target via `to_canonical()` so the same
-        // actor accessed via `Hash` vs `Constructor` variant produces
-        // the same MessageID.
+    fn sendid_preserves_constructor_code() {
+        // Constructor bytes must survive the queued message so first delivery
+        // can deploy code. Registry identity still canonicalizes separately.
         let ctor = ActorID::Constructor(vec![0x42, 0x42, 0x42]);
         let hash_form = ActorID::Hash(ctor.to_hash());
         let mut m1 = fixture_message(Anchor([0x99; 32]));
         let mut m2 = fixture_message(Anchor([0x99; 32]));
         m1.target = ctor;
         m2.target = hash_form;
-        assert_eq!(m1.id(), m2.id(), "canonical actor form must dominate");
+        assert_ne!(m1.id(), m2.id(), "constructor witness must be committed");
     }
 
     #[test]

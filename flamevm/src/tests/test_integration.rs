@@ -11,8 +11,8 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::tx::TxEntry;
 use crate::empty_state;
+use crate::tx::TxEntry;
 
 fn b() -> ScriptBuilder {
     ScriptBuilder::new()
@@ -47,7 +47,11 @@ fn while_loop_emits_one_effect_per_iteration() {
     let mut reg = MemRegistry::new();
     let id = deploy_actor(&mut reg, recv);
     let log = deliver(&mut reg, msg_to(id));
-    assert_eq!(data_trace(&log), vec![b"x".to_vec(); 3], "one Data per loop iteration");
+    assert_eq!(
+        data_trace(&log),
+        vec![b"x".to_vec(); 3],
+        "one Data per loop iteration"
+    );
 }
 
 #[test]
@@ -59,7 +63,11 @@ fn break_exits_loop_after_first_iteration() {
     let mut reg = MemRegistry::new();
     let id = deploy_actor(&mut reg, recv);
     let log = deliver(&mut reg, msg_to(id));
-    assert_eq!(data_trace(&log), vec![b"once".to_vec()], "break stops after one pass");
+    assert_eq!(
+        data_trace(&log),
+        vec![b"once".to_vec()],
+        "break stops after one pass"
+    );
 }
 
 #[test]
@@ -77,7 +85,10 @@ fn continue_skips_rest_of_body_each_iteration() {
     let mut reg = MemRegistry::new();
     let id = deploy_actor(&mut reg, recv);
     let log = deliver(&mut reg, msg_to(id));
-    assert!(data_trace(&log).is_empty(), "continue skips the log every iteration");
+    assert!(
+        data_trace(&log).is_empty(),
+        "continue skips the log every iteration"
+    );
 }
 
 // ── Branching ────────────────────────────────────────────────────────
@@ -92,10 +103,22 @@ fn if_else_takes_branch_by_selector_arg() {
     let id = deploy_actor(&mut reg, recv);
 
     // Deliver with a truthy payload arg, then a falsy one.
-    let truthy = Message { payload: vec![Value::Int253(Int253::from(1u64))], ..msg_to(id.clone()) };
-    let falsy = Message { payload: vec![Value::Int253(Int253::from(0u64))], ..msg_to(id) };
-    assert_eq!(data_trace(&deliver(&mut reg, truthy)), vec![b"then".to_vec()]);
-    assert_eq!(data_trace(&deliver(&mut reg, falsy)), vec![b"else".to_vec()]);
+    let truthy = Message {
+        payload: vec![Value::Int253(Int253::from(1u64))],
+        ..msg_to(id.clone())
+    };
+    let falsy = Message {
+        payload: vec![Value::Int253(Int253::from(0u64))],
+        ..msg_to(id)
+    };
+    assert_eq!(
+        data_trace(&deliver(&mut reg, truthy)),
+        vec![b"then".to_vec()]
+    );
+    assert_eq!(
+        data_trace(&deliver(&mut reg, falsy)),
+        vec![b"else".to_vec()]
+    );
 }
 
 // ── Calls ────────────────────────────────────────────────────────────
@@ -117,9 +140,16 @@ fn call_chain_interleaves_callee_then_caller_effects() {
     let a_id = deploy_actor(&mut reg, a_recv);
 
     let log = deliver(&mut reg, msg_to(a_id));
-    assert_eq!(data_trace(&log), vec![b"B".to_vec(), b"A".to_vec()], "callee then caller");
+    assert_eq!(
+        data_trace(&log),
+        vec![b"B".to_vec(), b"A".to_vec()],
+        "callee then caller"
+    );
     // No Send/Receive/Output spawned by the intra-tx call itself.
-    assert_eq!(log.iter().filter(|e| matches!(e, TxEntry::Send(_))).count(), 0);
+    assert_eq!(
+        log.iter().filter(|e| matches!(e, TxEntry::Send(_))).count(),
+        0
+    );
 }
 
 #[test]
@@ -139,7 +169,11 @@ fn failed_subcall_effects_roll_back_but_caller_continues() {
     let a_id = deploy_actor(&mut reg, a_recv);
 
     let log = deliver(&mut reg, msg_to(a_id));
-    assert_eq!(data_trace(&log), vec![b"A".to_vec()], "B's effect rolled back, A's survives");
+    assert_eq!(
+        data_trace(&log),
+        vec![b"A".to_vec()],
+        "B's effect rolled back, A's survives"
+    );
 }
 
 // ── Re-entrancy ──────────────────────────────────────────────────────
@@ -153,10 +187,14 @@ fn reentrant_call_runs_and_its_effect_is_observable() {
     let a_method1 = log_str(b(), "R").to_bytecode();
     let a_recv = call_with_sel(&a_id, 1).drop_().drop_().to_bytecode();
     let a_code = dispatch_code(&[(0, a_recv.clone()), (1, a_method1)]);
-    reg.deploy(a_id.clone(), a_code, empty_state(), 1_000_000, 0).expect("deploy");
+    reg.deploy(a_id.clone(), a_code, empty_state(), 1_000_000)
+        .expect("deploy");
 
     let log = deliver(&mut reg, msg_with_sel(a_id, 0));
-    assert!(data_trace(&log).contains(&b"R".to_vec()), "re-entrant method ran");
+    assert!(
+        data_trace(&log).contains(&b"R".to_vec()),
+        "re-entrant method ran"
+    );
 }
 
 // ── setcode upgrade ──────────────────────────────────────────────────
@@ -179,13 +217,23 @@ fn setcode_upgrade_changes_dispatched_behavior() {
         .to_bytecode();
     let id = ActorID::Hash([0xcc; 32]);
     let code = dispatch_code(&[(0, recv_v1), (1, upgrade)]);
-    reg.deploy(id.clone(), code, empty_state(), 1_000_000, 0).expect("deploy");
+    reg.deploy(id.clone(), code, empty_state(), 1_000_000)
+        .expect("deploy");
 
-    assert_eq!(data_trace(&deliver(&mut reg, msg_with_sel(id.clone(), 0))), vec![b"v1".to_vec()]);
+    assert_eq!(
+        data_trace(&deliver(&mut reg, msg_with_sel(id.clone(), 0))),
+        vec![b"v1".to_vec()]
+    );
     // Run the upgrade (emits a SetCode effect, no Data).
     let up_log = deliver(&mut reg, msg_with_sel(id.clone(), 1));
-    assert!(up_log.iter().any(|e| matches!(e, TxEntry::SetCode { .. })), "upgrade emits SetCode");
+    assert!(
+        up_log.iter().any(|e| matches!(e, TxEntry::SetCode { .. })),
+        "upgrade emits SetCode"
+    );
     // Note: the in-memory registry's working copy is mutated by setcode,
     // so a follow-up delivery dispatches the new code.
-    assert_eq!(data_trace(&deliver(&mut reg, msg_with_sel(id, 0))), vec![b"v2".to_vec()]);
+    assert_eq!(
+        data_trace(&deliver(&mut reg, msg_with_sel(id, 0))),
+        vec![b"v2".to_vec()]
+    );
 }

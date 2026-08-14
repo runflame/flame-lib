@@ -192,9 +192,10 @@ pub enum VMError {
     #[error("Actor not found in registry")]
     ActorNotFound,
 
-    /// This error occurs when an operation targets a frozen actor.
-    #[error("Actor is frozen")]
-    ActorFrozen,
+    /// A negative clear token is a liability and cannot be destroyed to
+    /// satisfy balance. It must be matched by an equal positive token.
+    #[error("negative token quantity cannot be retired")]
+    NegativeTokenRetirement,
 
     /// This error occurs when `deploy` is called against an existing actor ID.
     #[error("Actor already exists at this id")]
@@ -219,14 +220,31 @@ pub enum VMError {
     #[error("Non-portable value in send payload")]
     NonPortableInSend,
 
+    /// Synchronous calls may only transfer values with canonical portable
+    /// encodings; liabilities and VM-local objects cannot cross frames.
+    #[error("Non-portable value in call arguments")]
+    NonPortableInCall,
+
+    /// Actor code, state, or lease metadata would exceed current capacity.
+    #[error("Actor storage usage exceeds leased capacity")]
+    StorageCapacityExceeded,
+
+    /// A checked integer operation in storage accounting overflowed.
+    #[error("Storage arithmetic overflow")]
+    StorageArithmeticOverflow,
+
+    /// Capacity introspection is defined for the current or a future block.
+    #[error("Storage capacity height is in the past")]
+    StorageHeightInPast,
+
+    /// Lease expiry made the actor under-capacity at block start; it cannot
+    /// execute before its deterministic end-of-block destruction.
+    #[error("Actor is pending storage-expiry destruction")]
+    ActorPendingDestruction,
+
     /// This error occurs when an instruction requires a ClearToken.
     #[error("Item is not a ClearToken")]
     TypeNotClearToken,
-
-    /// `send`/`call` received a ClearToken other than the native
-    /// virtual-byte flavor.
-    #[error("Item is not a virtual-byte token")]
-    InvalidBytesFlavor,
 
     /// This error occurs when an instruction requires a Token.
     #[error("Item is not a Token")]

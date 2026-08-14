@@ -9,7 +9,7 @@ members = [
     "spacesuit",
     "flamevm",
     "btc-integration",
-    "types",
+    "flamechain",
 ]
 
 # Use the runflame fork of merlin to enable its `dynamic-labels`

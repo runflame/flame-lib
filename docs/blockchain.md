@@ -1,103 +1,272 @@
 # Flame blockchain state machine
 
-## Scope
+## Scope and trust boundary
 
-This document defines the state surrounding FlameVM: cells, actors, blocks,
-resource limits, and transaction admission. VM execution is specified in
-[flamevm.md](flamevm.md), actor storage in [storage.md](storage.md), and
-agreement on blocks in [consensus.md](consensus.md).
+`flamechain` is the deterministic state machine around FlameVM. Given a prior
+state, consensus parameters, an authenticated core-block context, and a
+candidate Flame block, it either produces one new state plus complete undo data
+or rejects the block without changing state.
 
-Only FlameVM is currently implemented. Exact block encoding, persistent
-accumulator, mempool rules, and consensus integration are **TBD**.
+It owns cells and their accumulator, actors, storage leases, block resource
+accounting, block application, local reorganization, and basic transaction
+admission. It does **not** choose a Bitcoin branch, talk to Bitcoin Core, select
+minters, run BFT, persist data, or provide networking. Those responsibilities
+remain outside the state machine:
 
-## State
+| Component | Responsibility |
+| --- | --- |
+| `flamevm` | Verify external scripts and execute actor messages under an explicit context. |
+| `flamechain` | Apply deterministic Flame state transitions and make them reversible. |
+| `btc-integration` | Observe and validate Bitcoin data, then supply authenticated core-block context and branch changes. |
+| consensus / node | Choose the accepted branch, authenticate context, store blocks and undo, and call detach/attach operations. |
 
-At height `h` within a selected main chain, _chain state_ consists of:
+The block header commits an opaque `core_block_hash`, while FlameVM receives the
+corresponding height as a plain integer rather than a Bitcoin RPC object. This
+split makes the state machine reproducible and easy to test, but creates an
+important trust boundary: `flamechain` cannot by itself prove that a supplied
+Bitcoin hash or height is genuine or that two supplied hashes are parent and
+child. The caller must authenticate that context according to
+[consensus.md](consensus.md).
 
-* current height;
-* the previous block identifier;
-* a Utreexo-style commitment to unspent cells;
-* the actor registry;
-* the available storage pool;
-* index of active storage leases;
+This document is the architectural target, not a claim that every wire format,
+commitment, or persistence path is implemented. Open launch requirements are
+called out explicitly below.
 
-Cells are single-use. Spending verifies membership against pre-block state,
-removes the cell, and inserts emitted cells. Cells are spent by _external transactions_.
+## Chain state
 
-Actors are multi-use records containing code and arbitrary data.
-Actors code is executed in response to messages from external transactions,
-actors can make calls to each other. The updates to actors’ state are recorded
-as _internal transactions_.
+At a selected tip the persistent state contains:
 
-## Utreexo
+- tip height and block identifier;
+- the Utreexo forest committing to every live cell;
+- the actor registry: actor code, state, and leases;
+- the available actor-storage pool and a lease-expiry index derived from the
+  committed per-actor leases; and
+- any consensus resource counters that affect later validation.
 
-The set of all cells is stored in a data structure "Utreexo", a forest
-of perfect binary Merkle trees. Each input to an external transaction carries a proof
-of membership in Utreexo. This way, each user carries the cost of storage by themselves,
-without requiring other nodes store that data. Utreexo storage is unbounded and zero-cost.
+Mempool contents, proof caches, Bitcoin RPC state, and transient VM frames are
+not consensus state.
 
-## Actor registry
+All state arithmetic is checked integer arithmetic. A failed check, invalid
+proof, resource-limit breach, commitment mismatch, or VM failure required by
+the transaction rules rejects the candidate transition. Applying a block is
+atomic: no persistent mutation becomes visible until all checks pass.
 
-Actor registry is a list of actors with their code, data and leased storage allocations.
-Actors persist in active memory and process messages from arbitrary users, so their storage 
-is bounded. Each actor pays for leased storage with flames.
-The network adjusts the storage prices automatically: price rises and drops in response to changes
-to available storage. 
+## Cells and Utreexo
 
-To prevent long-range attacks by minters, storage fees are burned and extra storage is unlocked
-on every block, slowly growing the total amout of available space.
+Cells are single-use values. An external transaction proves each input's
+membership in the parent accumulator, deletes it once, and inserts its outputs.
+The Flame-specific Utreexo implementation represents the accumulator as a
+forest of perfect binary Merkle trees:
 
-Application developers are free to design how the storage is renewed, extended and organized.
-For massive multi-user applications, individual per-user data can sometimes be offloaded to the cells,
-leaving the actor storage only for data that needs to be accessed by all users.
+- `Forest` is the committed compact state;
+- `WorkForest` stages insertions and deletions without mutating `Forest`;
+- a `Proof` identifies a transient item or supplies a committed Merkle path;
+- normalization produces the next canonical `Forest`; and
+- `Catchup` updates surviving proofs across that transition.
 
-## Blocks and ordering
+Committed inputs prove membership in the declared parent root and no cell may
+be deleted twice. A `Transient` proof intentionally permits a later transaction
+in the same ordered block to spend an output created earlier in that block; the
+same rule lets FIFO mempool children depend on admitted parents. The work forest
+is normalized once after the ordered batch, and its resulting commitment must
+equal the block's committed cell root.
 
-A block contains a header, ordered external and internal transactions.
-The header commits to protocol version, height, parent, time, transaction root, resulting chain state.
+This lets a validating node keep a small accumulator instead of every cell
+payload. It does not make cells literally free or solve data availability:
+owners must retain payloads and proofs, proofs need updating, blocks still carry
+witness data, and archival history remains a separate cost.
 
-External transactions may be verified in parallel against pre-block state.
-Conflicting cell spends are prohibited. Effects are applied in block
-order. Messages are delivered in originating-transaction and emission order;
-internal execution, including nested actor calls and storage purchases, is
-serial. Lease expiry, actor destruction, storage recycling, and storage issuance run before
-transaction execution.
+## Actors and leased storage
 
-## Applying a block
+Actors are reusable code-and-state records and therefore remain in the common
+validated state. Their capacity, pricing, expiry, destruction, and opcodes are
+defined in [storage.md](storage.md). `flamechain` owns this state; FlameVM reaches
+it only through the actor-registry interface and an explicit block context.
 
-1. Validate the header and consensus certificate.
-2. Expire leases, recycle their bytes, destroy under-capacity actors,
-   and issue the block's new storage bytes.
-3. Canonically decode transactions and enforce static size limits.
-4. Verify external FlameVM executions, proofs, and signatures.
-5. Reject missing or duplicate inputs and apply external transaction logs.
-6. Deliver messages deterministically and atomically apply each successful
-   internal transaction log, including immediate storage-pool updates.
-7. Recompute committed roots and resource totals and compare them to the header.
+At the beginning of core block `h`, before user execution, the state machine:
 
-Any mismatch invalidates the whole block.
+1. expires leases at `h` and returns their units to the pool;
+2. marks newly under-capacity actors for destruction and prevents their
+   execution in this block; and
+3. issues the configured storage units for `h`.
 
-## Limits
+Storage purchases execute serially in transaction order. Each successful
+purchase immediately changes the reserve used by the next quote. At block end,
+marked actors are destroyed in lexicographic actor-ID order and each destruction
+is represented by a derived system internal transaction. Unexpired leases of a
+destroyed actor remain locked until their original expiry.
 
-Consensus independently bound encoded block and transaction bytes, parallel
-external gas, serial internal gas, issued and purchased storage, proof and MSM
-work, and any actor/message counts not already bounded by those resources.
+Serial pricing is deterministic and maintains a hard storage bound, but ordering
+has economic value: a proposer can place one valid purchase before another.
+Burning storage fees prevents the proposer from directly recovering the fee; it
+does not remove ordering advantage or general MEV. The specified endpoint quote
+also makes split purchases cheaper than a single bulk purchase; this is an
+explicit harmonic marginal-price policy, not a sybil-resistant bulk premium.
 
-The current design discusses separate parallel and serial gas pools at an
-initial `4:1` ratio. Storage begins with a 128 MiB reserve and issues 8 KiB per
-core block; the complete parameters are in [storage.md](storage.md).
+## Blocks and commitments
 
-## Mempool policy
+A block has a header and an ordered body of external transactions. Internal
+transactions are execution records derived by the state machine; they are not
+independently submitted or selected by a proposer.
 
-Mempool policy is local, not consensus. A minimal policy checks canonical
-decoding, current cell proofs, VM proofs/signatures, a local fee floor, conflicts,
-and next-block resource limits. Replacement, package relay, proof refresh after
-accumulator normalization, eviction, and anti-spam limits are **TBD**. A block may
-remain valid even if local policy would not have admitted one of its transactions.
+The in-memory header commits, with domain-separated hashes, to:
 
-## Reorganizations
+- protocol/network version, parent, and height;
+- the authenticated core-block context;
+- the exact ordered external-transaction witness;
+- the resulting cell-accumulator commitment;
+- the resulting actor/storage-state commitment; and
+- consensus resource totals needed to validate the transition.
 
-Nodes must retain prior state or reversible deltas to detach non-final blocks and
-apply an alternative branch. Accumulator catch-up data and actor rollback must
-cover the permitted reorganization window, which depends on consensus and Bitcoin
-coupling and is **TBD**.
+The exact wire encoding of the header and external transaction is **TBD**. The
+current hash preimages and actor-state commitment must be frozen with additional
+conformance vectors before consensus launch. In particular, committing only to
+effect logs is insufficient when signatures or proofs bind to an external
+transaction witness.
+
+The first implementation may use an in-memory `BlockBody` and locally verified
+effects while canonical `ExternalTx` transport is being finalized. Such values
+are an internal API, not a consensus wire block: effects received across a trust
+boundary must never be accepted instead of re-executing the transaction, and an
+exact witness hash is required before launch.
+
+## Staged block application
+
+Block application follows one shared validation path for normal extension and
+reorganization attachment:
+
+1. Check parent, height, version, context relation, static limits, and canonical
+   encodings that are already defined.
+2. Stage lease expiry, recycling, actor marking, and issuance.
+3. Verify external transactions against the declared parent cell state. Reject
+   missing or duplicate inputs and accumulate their resource use.
+4. Apply external effects in block order and enqueue their sends in effect
+   order.
+5. Execute the message queue serially. A synchronous `call` remains inside its
+   current internal transaction; `send` effects append new messages to the
+   queue in emission order. Successful effects update the staged state. A failed
+   delivery rolls its actor changes back and deterministically creates one
+   refund cell containing the original portable payload.
+6. Derive storage-purchase records and other internal records from execution;
+   never trust proposer-supplied versions.
+7. Derive the ordered actor-destruction records and apply them.
+8. Normalize Utreexo, recompute all state commitments and resource totals, and
+   compare them with the header.
+9. Commit the staged state and retain complete undo data.
+
+The message discipline is FIFO: external transactions seed the queue in block
+and send-effect order, and sends made by an internal transaction append in that
+transaction's effect order. This is simple and deterministic, but it makes a
+long send chain serial and lets early transactions influence all later actor and
+storage outcomes. Gas, message-count, call-depth, and block limits must bound
+that work.
+
+## Derived internal transactions
+
+An internal transaction is a receipt of deterministic execution, not another
+consensus input. It starts from a `Send`, records its `Receive`, runs the target
+actor and synchronous calls, and records the resulting ordered effects. A
+lease-expiry destruction is a system internal transaction with
+`ActorDestroy(actor)` instead of `Receive`; it recursively records token
+retirements and binds the expiry height. A failed delivery records `Receive` and
+the refund `Output`, and its execution-record kind distinguishes failure from
+success.
+
+Re-derivation prevents a proposer from forging actor changes and avoids a second
+admission path. Its cost is that every validator must repeat serial actor
+execution. Internal receipts may be stored or committed for audit and light
+clients, but they cannot replace re-execution unless a future proof system is
+specified.
+
+## Consensus limits
+
+Consensus parameters independently bound work that is not already bounded by a
+smaller enclosing value, including:
+
+- encoded block and external-transaction bytes;
+- external and internal gas;
+- cell inputs, outputs, and proof work;
+- messages, actor executions, and call depth;
+- cryptographic multiplication/MSM work; and
+- issued and purchased storage.
+
+Storage parameters are listed in [storage.md](storage.md). Every active parameter
+set must be selected by a committed protocol version; node-local configuration
+must not silently alter consensus validity. Separate limits are easier to audit
+and prevent one cheap resource from exhausting another, at the cost of more
+parameters and possible under-utilization between pools.
+
+## Basic bounded mempool
+
+The mempool is local policy, never part of chain state or block validity. A
+minimal implementation:
+
+- admits only transactions that pass canonical decoding and the reusable
+  transaction checks against the current tip;
+- rejects an input conflict already represented by an admitted transaction;
+- enforces explicit local count/byte/work bounds;
+- enforces a configurable minimum fee and otherwise preserves FIFO order, so a
+  transient child is never sorted before its parent; and
+- after every tip change, updates Utreexo proofs with `Catchup` where possible,
+  then replays or drops transactions that are no longer valid.
+
+No replacement-by-fee, package scoring, persistent mempool, peer reputation, or
+fair ordering is implied. A block remains valid even when local policy would
+have rejected one of its transactions. Hard bounds prevent unbounded local
+memory, but first-admitted FIFO is vulnerable to churn and low-value occupation;
+peer-level rate limits belong in networking.
+
+## Bitcoin-like reorganization
+
+Fork choice is deliberately external. The caller supplies an exact sequence of
+tip blocks to detach and candidate blocks to attach. `flamechain` must:
+
+1. verify that every requested detach matches the current tip;
+2. apply stored undo records in reverse order;
+3. validate and stage each attachment through the ordinary block path; and
+4. expose the new state only if the whole requested reorganization succeeds.
+
+Undo is *complete* when it can restore the byte-for-byte prior persistent state
+without re-running VM code or querying Bitcoin. It therefore covers the tip,
+Utreexo forest, actor changes and destruction, storage purchases, issuance,
+lease expiry/recycling, expiry indexes, and all other committed counters.
+Mempool changes are not undone; the pool is revalidated against the resulting
+tip.
+
+Normal detachment stores compact first-write actor/storage undo plus the prior
+small Utreexo forest and header. A multi-block reorganization additionally
+takes one full in-memory snapshot before detaching, so a failed replacement can
+restore the original branch atomically. That rare-path clone is easy to audit
+but costs time and memory proportional to live actor state; retained forward
+blocks or a persistent transactional store should replace it if profiling shows
+the cost matters. A node cannot detach deeper than its retained undo window and
+must obtain an older trusted snapshot/state sync instead.
+
+## Decision ledger
+
+| Decision | Benefit | Cost / risk |
+| --- | --- | --- |
+| Keep Bitcoin tracking outside `flamechain`. | Pure, repeatable state transitions and no RPC dependency in consensus code. | The caller must authenticate and commit context; a forged height corrupts lease timing. |
+| Derive internal transactions. | One admission path; actor effects cannot be forged. | Validators repeat serial work; receipts alone are not proofs. |
+| Use Flame Utreexo for cells. | Small common live-cell state and user-carried proofs. | Proof transport/catchup and owner availability become operational requirements. |
+| Keep actors in bounded leased storage. | Prices scarce common state and caps node burden. | Lease metadata, ordered pricing, expiry cliffs, and irreversible destruction complicate applications. |
+| Use endpoint reserve pricing. | One checked rational formula; reserve pressure is immediate. | Purchase splitting follows a much cheaper harmonic path; ordering creates MEV. |
+| Stage a whole block atomically. | Invalid tails cannot leave partial state. | Requires transient working state; naive cloning may be expensive. |
+| Retain complete undo. | Simple, exact detach and safe failed-branch handling. | Disk/memory grows with state size and reorg window. |
+| Keep mempool policy local and bounded. | Limits RAM/CPU DoS and avoids making relay policy consensus. | Nodes may hold different candidates; basic eviction is gameable. |
+| Start with in-memory block bodies. | Allows the state model to settle before freezing transport. | Not interoperable or launch-safe until canonical witness encoding and hashes exist. |
+| Destroy actors exactly at expiry. | Capacity semantics are simple and deterministic. | Coordinated expiries can concentrate state traversal and retirement work into one block. |
+
+## Launch-critical TBDs
+
+Before this state machine can define production consensus, the project must
+freeze and test:
+
+1. canonical block, external-transaction, proof, receipt, and undo encodings;
+2. every domain-separated hash preimage, especially the external witness root;
+3. the actor/storage-state commitment and state-sync verification rules;
+4. authenticated core-block context and its behavior across Bitcoin reorgs;
+5. exact resource limits and protocol-version activation;
+6. the failure-receipt/error taxonomy, concentrated-expiry work bounds, and all
+   queue edge cases; and
+7. persistence/crash recovery and the retained undo/state-sync policy.

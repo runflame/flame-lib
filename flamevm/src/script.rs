@@ -484,6 +484,8 @@ impl ScriptBuilder {
     pub fn load(mut self) -> Self { self.instructions.push(Instruction::Load); self }
     pub fn save(mut self) -> Self { self.instructions.push(Instruction::Save); self }
     pub fn setcode(mut self) -> Self { self.instructions.push(Instruction::Setcode); self }
+    pub fn addstorage(mut self) -> Self { self.instructions.push(Instruction::AddStorage); self }
+    pub fn quotestorage(mut self) -> Self { self.instructions.push(Instruction::QuoteStorage); self }
 
     // ── Tx-level & frame introspection (0xe0..=0xf1) ───
 
@@ -492,11 +494,12 @@ impl ScriptBuilder {
     pub fn selfid(mut self) -> Self { self.instructions.push(Instruction::Selfid); self }
     pub fn anchor(mut self) -> Self { self.instructions.push(Instruction::Anchor); self }
     pub fn gas(mut self) -> Self { self.instructions.push(Instruction::Gas); self }
-    pub fn bytes(mut self) -> Self { self.instructions.push(Instruction::Bytes); self }
+    pub fn usage(mut self) -> Self { self.instructions.push(Instruction::Usage); self }
     pub fn callerid(mut self) -> Self { self.instructions.push(Instruction::Callerid); self }
     pub fn gaslimit(mut self) -> Self { self.instructions.push(Instruction::Gaslimit); self }
     pub fn memlimit(mut self) -> Self { self.instructions.push(Instruction::Memlimit); self }
-    pub fn newbytes(mut self) -> Self { self.instructions.push(Instruction::Newbytes); self }
+    pub fn capacity(mut self) -> Self { self.instructions.push(Instruction::Capacity); self }
+    pub fn height(mut self) -> Self { self.instructions.push(Instruction::Height); self }
 }
 
 // ── Script ──────────────────────────────────────────────────────────

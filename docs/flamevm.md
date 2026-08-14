@@ -10,7 +10,7 @@ FlameVM implements transaction verifications rules in the Flame blockchain in a 
 
 FlameVM is used in two different contexts: external transactions and internal transactions. External transactions have user-defined results, zero-knowledge proof for confidential transfers and compute, and have access to Utreexo storage: scalable compressed set of unspent transaction outputs. Internal transactions operate on uncompressed storage and invoke multiplayer smart contracts that react to user-defined messages without pre-determined results.
 
-FlameVM operates on multiple data types, including linear types for tokens and zero-knowledge expressions. Types can be “portable” and “non-portable”, “copyable” and “non-copyable”. Portable types can exist in the long-term blockhain state outside of VM execution. Copyable types can be duplicated during VM execution.
+FlameVM operates on multiple data types, including linear types for tokens and zero-knowledge expressions. Types can be “portable” and “non-portable”, “copyable” and “non-copyable”. Portable types can exist in the long-term blockchain state outside of VM execution. Copyable types can be duplicated during VM execution.
 
 Successful VM execution equals to successful transaction verification. Therefore, VM execution encodes both built-in network rules, as well as enables authors to create custom rules within their applications.
 
@@ -49,11 +49,14 @@ Persistent actor storage is purchased in one-year leases by the actor itself.
 Purchases burn Flame at a deterministic reserve price; storage is neither a
 token nor transferable between actors. See [Actor storage](storage.md).
 
-An actor frame's transient-memory cap is
-`TRANSIENT_MEMORY_CAPACITY_MULTIPLIER` times its current storage capacity.
-Memory uses monotonic high-water accounting. Calls are bounded to 64 nested
-frames. Instruction fetch and forward label scans consume gas; a failed entered
-call burns its grant, while a call rejected before entry refunds it.
+At actor-frame entry, the transient-memory cap is
+`TRANSIENT_MEMORY_CAPACITY_MULTIPLIER` times the larger of current storage
+capacity and charged usage. The usage term bootstraps a provisional constructor
+before its first lease; a successful `addstorage` raises the current frame's cap
+to reflect the new capacity. Memory uses monotonic high-water accounting. Calls
+are bounded to 64 nested frames. Instruction fetch and forward label scans
+consume gas; a failed entered call burns its grant, while a call rejected before
+entry refunds it.
 
 External transaction effects are atomic and independently verifiable. Internal
 transactions execute serially because they share actor state. Expired leases
@@ -103,8 +106,10 @@ Like external, internal transactions produce effects:
 
 Actor destruction caused by lease expiry is represented by a system internal
 transaction. It has `ActorDestroy(actor)` instead of a
-`Receive` as its effect. Destruction transactions are ordered lexicographically
-by actor ID. See [Actor storage](storage.md#global-state-and-block-order).
+`Receive` as its identifying effect, binds the expiry height, and contains a
+`Retire` effect for every token recursively removed from state. Destruction
+transactions are ordered lexicographically by actor ID. See
+[Actor storage](storage.md#global-state-and-block-order).
 
 Calls themselves are intra-transaction control flow, not effects. Anything a callee does that the outer world cares about appears through one of the effects above.
 
@@ -356,7 +361,20 @@ An actor is **`(code, state)`**:
 
 - **state** — **any portable `Value`** (Int253, String, Point, Token, Dict, …), with no mandated shape and no methods-in-state. [`load`](#load) checks it out, [`save`](#save) moves it back; the author structures it however they like.
 
-Each actor is identified by a unique Actor ID — `enum { 0x00: hash, 0x01: constructor }` — derived from its *constructor script*: `Hash(h)` and `Constructor(bytes)` denote the same actor when `h = H(bytes)`, so the **id commits to the code**. Each unique constructor defines a unique actor.
+Each actor is identified by a unique Actor ID derived from its constructor
+script. `Hash(h)` and `Constructor(bytes)` route to the same registry key when
+`h = H(bytes)`, so the identity commits to the initial code. Their exact wire
+forms are distinct:
+
+```text
+Hash(h)            = 0x00 || h[32]
+Constructor(code)  = 0x01 || len(code):u64-le || code
+```
+
+The constructor form carries the code needed for deployment; the hash form is
+the compact address used afterward. A VM actor-destination operand is a String
+containing either of those encodings. For compatibility it also accepts a bare
+32-byte String as `Hash(bytes)`.
 
 **Deploy-on-first-delivery.** The first message delivered to a not-yet-deployed
 `Constructor`-form target instantiates a provisional actor: code is the
@@ -364,7 +382,9 @@ constructor bytes (self-authorized because the id commits to them) and state is
 empty. Its constructor may use `addstorage` to buy its first lease. The actor is
 committed only if its storage capacity covers its usage when the transaction
 ends. A `Hash`-form target that does not exist fails `ActorNotFound` because the
-hash alone carries no code.
+hash alone carries no code. Deployment occurs only on asynchronous delivery;
+`call` canonicalizes a constructor-form destination for lookup but never deploys
+it.
 
 ## Messages
 
@@ -393,10 +413,13 @@ Persistent-storage allocation, pricing, leases, expiry, destruction, and
 introspection are specified in [Actor storage](storage.md).
 
 **Transient memory.** In addition to persistent storage, an actor may use
-transient memory during a call. The cap is
-`TRANSIENT_MEMORY_CAPACITY_MULTIPLIER × current capacity`; `memlimit` returns
-this cap. Allocations that would push monotonic memory accounting past the cap
-fail the call. The multiplier is defined in [Actor storage](storage.md).
+transient memory during a call. At frame entry the cap is
+`TRANSIENT_MEMORY_CAPACITY_MULTIPLIER × max(current capacity, charged usage)`;
+the usage term lets a zero-capacity provisional constructor reach
+`addstorage`. A successful storage purchase raises the current frame's cap to
+reflect its new capacity. `memlimit` returns the actual current cap. Allocations
+that would push monotonic memory accounting past it fail the call. The
+multiplier is defined in [Actor storage](storage.md).
 
 
 ## Anchors
@@ -540,21 +563,21 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | d2 | [load](#load) | int. | ø → value | Check out the actor's state (any portable Value; moves it out, locks re-entry). |
 | d3 | [save](#save) | int. | value → ø | Move the state value back in (requires checkout; unlocks). |
 | d4 | [setcode](#setcode) | int. | code → ø | Replace the actor's code blob (author-gated upgrade). |
-| d5 | [addstorage](#addstorage) | int. | q → {debt 1 \| 0} | Buy `q` bytes for one storage year and return a negative Flame token. *planned* |
-| d6 | [quotestorage](#quotestorage) | int. | q → {fee 1 \| 0} | Quote the positive integral storage fee in sparks without reserving bytes. *planned* |
+| d5 | [addstorage](#addstorage) | int. | q → {debt 1 \| 0} | Buy `q` bytes for one storage year and return a negative Flame token. |
+| d6 | [quotestorage](#quotestorage) | int. | q → {fee 1 \| 0} | Quote the positive integral storage fee in sparks without reserving bytes. |
 |    | **Frame introspection** | | | |
 | e0 | [selfid](#selfid) | | ø → s | Push the current actor's id (32-byte string). |
 | e1 | [anchor](#anchor) | | ø → s | Push the current frame's anchor (32-byte string). |
 | e2 | [callerid](#callerid) | | ø → s | Push the caller actor's id (zero string if invoked externally). |
 | e4 | [gas](#gas) | | ø → n | Push remaining gas budget for the current call. |
 | e5 | [gaslimit](#gaslimit) | | ø → n | Push the call's total gas budget cap. |
-| e6 | [usage](#usage) | int. | ø → n | Push the actor's currently occupied storage bytes. *planned* |
-| e7 | [memlimit](#memlimit) | | ø → n | Push the transient-memory cap (capacity multiplier for actor frames). |
-| e8 | [capacity](#capacity) | int. | h → n | Push actor storage capacity available at future core-block height `h`. *planned* |
+| e6 | [usage](#usage) | int. | ø → n | Push the actor's currently occupied storage bytes. |
+| e7 | [memlimit](#memlimit) | | ø → n | Push the frame's current transient-memory cap. |
+| e8 | [capacity](#capacity) | int. | h → n | Push actor storage capacity available at current or future core-block height `h`. |
 |    | **Tx & chain info** | | | |
 | f0 | [timelock](#timelock) | | ø → n {0\|1} | Push tx locktime and a flag for height (`0`) vs. timestamp (`1`). |
 | f1 | [version](#version) | | ø → n | Push tx version. |
-| f2 | [height](#height) | | ø → n | Push the current core-block height, or zero in an external transaction. *planned* |
+| f2 | [height](#height) | | ø → n | Push the current core-block height, or zero in an external transaction. |
 | f3 | [blockhash](#blockhash) | int. | h → s | Push the block hash at height `h`. *planned* |
 | f4 | [blockburn](#blockburn) | int. | h → n | Push satoshis burned at height `h` (Bitcoin-coupled). *planned; maturity 100* |
 | f5 | [blockweight](#blockweight) | int. | h → n | Push block weight at height `h`. *planned; maturity 100* |
@@ -562,8 +585,9 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | f7 | [chainstate](#chainstate) | int. | n → dict | Push a dict of block stats at height `n`. *planned; maturity 100* |
 
 Opcodes marked *planned* are reserved in the target byte map but are not yet
-implemented with the specified behavior. Until the storage model activates,
-scripts must not rely on the revised storage opcodes or message operands.
+implemented with the specified behavior. The storage opcodes and `height` are
+implemented; bytes `f3` through `f7` remain reserved and currently fail
+`UnknownOpcode`.
 
 ### Failure modes
 
@@ -1014,7 +1038,11 @@ Pops `tag` (String) and `cid` (String, exactly 32 bytes — an actor id). Pushes
 
 _t_ → ø
 
-Consumes a token; emits `TxEntry::Retire(qty_point, flv_point)`. `ClearToken` uses unblinded commitments; `Token` uses the live commitment points. Other types hard-fail `TypeNotToken`.
+Consumes a non-negative token and emits `TxEntry::Retire(qty_point, flv_point)`.
+`ClearToken` uses unblinded commitments; `Token` uses the live commitment
+points. A negative `ClearToken` hard-fails `NegativeTokenRetirement`, preventing
+storage-fee debt and other liabilities from being discarded. Other types
+hard-fail `TypeNotToken`.
 
 ### borrow
 
@@ -1210,7 +1238,8 @@ _args… k refund gas addr_ → ø
 
 Asynchronous message-send. Pops operands top-first:
 
-1. `addr` (32-byte String) — target [`ActorID::Hash`](#addresses).
+1. `addr` (String) — a bare 32-byte hash or an exact encoded `ActorID`:
+   `0x00 || hash[32]` or `0x01 || code_len:u64-le || constructor_code`.
 2. `gas` (`Int253`) — gas allotment.
 3. `refund` (32-byte String) — bounce predicate point.
 4. `k` (`Int253`) — args count.
@@ -1222,7 +1251,9 @@ Splits the frame's `last_anchor` (see §Anchors): the `left` half becomes the me
 The send's identity is the canonical 32-byte `MessageID = H(b"flamevm.message.id" ‖ Message.encode())` — `Message::id()`. The wire encoding `Message.encode()` writes the fields in fixed order:
 
 1. `anchor` — 32 raw bytes.
-2. `target` — canonical `ActorID` (Hash or Constructor) via `ActorID::encode`, with the variant force-canonicalized so a Hash form and a Constructor form of the same actor produce identical bytes.
+2. `target` — `ActorID::encode` preserving its Hash or Constructor variant.
+   Constructor code must survive until first delivery, so the two forms that
+   route to the same registry key intentionally have different message bytes.
 3. `caller` — `0x00` for None, `0x01 ‖ ActorID::encode(canonical)` for Some.
 4. `refund_predicate` — 32-byte compressed Ristretto.
 5. `gas` — little-endian u64.
@@ -1230,7 +1261,10 @@ The send's identity is the canonical 32-byte `MessageID = H(b"flamevm.message.id
 
 The merkle leaf for `TxEntry::Send` commits to this single 32-byte MessageID, just as `TxEntry::Output(Cell)`'s leaf commits to `Cell::id()`. Uniqueness is inherited from `anchor`: every distinct send carries a distinct anchor, hence a distinct MessageID.
 
-Available in both contexts. Hard-fails `MalformedAddress` on wrong-size addr or refund, `NonPortableInSend` on non-portable args, `InvalidBitrange` on negative/overflowing allotments.
+Available in both contexts. Hard-fails `MalformedAddress` when `addr` is neither
+a bare hash nor one complete canonical `ActorID`, or when `refund` has the wrong
+size; `NonPortableInSend` on non-portable args; and `InvalidBitrange` on a
+negative or overflowing gas allotment.
 
 On internal-tx failure during delivery, consensus seals the message payload into a fresh cell under `refund_predicate` and emits it as an Output effect — see the design.
 
@@ -1241,7 +1275,9 @@ _args… k gas addr_ → _results… k'_
 Synchronous actor-to-actor call. Same operand shape as [`send`](#send) minus
 `refund` and, likewise, no method selector. A caller that wants the callee to
 purchase storage passes Flame among the ordinary arguments; allocation remains
-the callee's explicit decision.
+the callee's explicit decision. A constructor-form address is accepted but
+canonicalized to its hash for lookup: unlike first `send` delivery, `call` does
+not deploy an absent actor.
 
 **Re-entrancy:** the state-checkout lock closes issues with re-entracy: state is reachable **only** via `load`, which acquires the lock, and there is no peek-state opcode, so a half-applied update is never observable — a re-entrant `call`/`load` into an actor that has already `load`ed its state fails `ActorEmpty` (→ `0` marker for `call`). The lock does **not** enforce checks-effects-interactions ordering *within* a load/save window: holding a loaded state across a `call`/`send`/`open` is legal, but anything `save`d afterward is a pre-call snapshot — authors must `save` (or fully discharge) before calling out. Nested call depth is capped at `MAX_CALL_DEPTH` (64); deeper entry fails `CallDepthExceeded` (→ `0` marker for `call`, hard-fail for `open`/`signcall`).
 
@@ -1319,7 +1355,9 @@ On success, atomically:
 3. adds or coalesces a lease for the current actor at
    `current_height + LEASE_DURATION_CORE_BLOCKS`;
 4. emits `TxEntry::StoragePurchase { actor, bytes, expiry_height, fee_sparks }`;
-5. pushes `ClearToken(-fee_sparks, FLAME_FLAVOR)` followed by `1`.
+5. pushes `ClearToken(-fee_sparks, FLAME_FLAVOR)` followed by `1`; and
+6. raises the current frame's transient-memory cap, if needed, to
+   `TRANSIENT_MEMORY_CAPACITY_MULTIPLIER × capacity(current_height)`.
 
 The negative token must be balanced with actual Flame before transaction
 finalization. The storage-purchase effect burns that amount rather than paying a
@@ -1426,9 +1464,11 @@ Pushes the current call's total gas budget cap (the value set at frame creation,
 ø → _n_
 
 Pushes the current call's transient-memory cap —
-`TRANSIENT_MEMORY_CAPACITY_MULTIPLIER × current capacity` for actor frames, the
-caller-specified `bytes` operand for `CellOpen` frames, or the explicit limit
-passed at the outermost frame. Available in either context.
+`TRANSIENT_MEMORY_CAPACITY_MULTIPLIER × max(current capacity, charged usage)` at
+actor-frame entry, the caller-specified `bytes` operand for `CellOpen` frames,
+or the explicit limit passed at the outermost frame. A successful `addstorage`
+can raise an actor frame's cap during execution; it never lowers the cap.
+Available in either context.
 
 **Memory accounting.** Each frame meters its transient growth against the cap with a monotonic high-water counter: `pushstr` literals, `append`, `writezeros`, and `tread` charge the bytes they add; drops do **not** release budget (the cap bounds total growth, keeping accounting O(1) and rollback-free — the counter dies with the frame). Exceeding the cap hard-fails `MemLimitExceeded`. Further growth ops (Dict inserts, stack depth) join the same charging seam as they are calibrated.
 
@@ -1436,22 +1476,26 @@ passed at the outermost frame. Available in either context.
 
 _h_ → _n_
 
-Pops a nonnegative future core-block height and pushes the current actor's
-leased capacity in bytes at that height:
+Pops a nonnegative current or future core-block height and pushes the current
+actor's leased capacity in bytes at that height:
 
 ```text
 capacity(h) = STORAGE_UNIT_BYTES
             * sum(lease.units where lease.expiry_height > h)
 ```
 
-The query is read-only and does not expose the lease list. Heights below the
-current core-block height return zero. Outside actor execution also returns zero.
+The query is read-only and does not expose the lease list. A negative or
+non-`u64` height hard-fails `InvalidBitrange`; a height below the current
+core-block height hard-fails `StorageHeightInPast`. Outside actor execution it
+hard-fails `OpcodeRequiresActorContext` (or `RegistryUnavailable` when no actor
+registry was supplied).
 
-### Chain-info instructions  *(all planned)*
+### Chain-info instructions
 
-These opcodes read from the consensus-supplied `BlockContext`. Historical
-height-parameterized opcodes enforce the 100-block maturity window — querying
-`h > current_height − 100` hard-fails `BlockHeightImmature`.
+`height` reads the implemented consensus-supplied `BlockContext`. The historical
+opcodes `blockhash`, `blockburn`, `blockweight`, `blockrate`, and `chainstate`
+below remain planned: their bytes are reserved but currently fail
+`UnknownOpcode`. Their proposed 100-block maturity rule is not active.
 
 ### height
 

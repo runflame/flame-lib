@@ -21,15 +21,12 @@ mod verifier;
 mod vm;
 
 pub use actor::{
-    code_root, empty_state, grace_window, state_root,
-    vbyte_size, Actor, ActorID, ActorRegistry,
-    VbytePool,
-    GRACE_BLOCKS_CAP,
-    VBYTES_PER_BLOCK, VBYTE_MATURITY_BLOCKS,
+    code_root, empty_state, state_root, vbyte_size, ActorID, ActorRegistry, StoragePurchase,
+    TRANSIENT_MEMORY_CAPACITY_MULTIPLIER,
 };
 pub use address::Address;
 pub use message::{Message, MessageID};
-pub use cell::{TaprootProof, Cell, Predicate, PredicateTree};
+pub use cell::{CellID, TaprootProof, Cell, Predicate, PredicateTree};
 pub use constraints::{
     Commitment, CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,
 };
@@ -43,16 +40,15 @@ pub use ops::Instruction;
 pub use script::{ScriptBuilder, Script};
 pub use prover::Prover;
 pub use string::String;
-pub use token::{
-    flavor_from_actor, BYTES_FLAVOR, ClearToken, FLAME_FLAVOR, Token, WideToken,
-};
+pub use token::{flavor_from_actor, ClearToken, FLAME_FLAVOR, Token, WideToken};
 pub use value::Value;
 pub use verifier::Verifier;
 
 pub use tx::{
-    Env, ExternalTx, InternalTx, Limits, SigningInstructions, TxEntry, TxHeader, TxID,
+    ExternalTx, InternalTx, Limits, SigningInstructions, TxEntry, TxHeader, TxID,
     TxLog, TxMetrics, UnsignedTx,
 };
+pub use vm::{Anchor, BlockContext};
 
 // Re-export the wire-format traits so downstream crates don't need
 // a direct `readerwriter` dep. Most flamevm types implement these

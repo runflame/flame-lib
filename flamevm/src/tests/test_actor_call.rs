@@ -9,9 +9,10 @@ use crate::{empty_state, state_root, ActorID, ActorRegistry, Int253};
 /// Derives the actor's id from the script bytes (treats `script`
 /// as a stand-in for the constructor — real deployments would
 /// hash the actual constructor that produces this state).
-fn deploy_recv(reg: &mut MemRegistry, script: Vec<u8>, vbytes: u64) -> ActorID {
+fn deploy_recv(reg: &mut MemRegistry, script: Vec<u8>, capacity: u64) -> ActorID {
     let id = ActorID::Hash(ActorID::Constructor(script.clone()).to_hash());
-    reg.deploy(id.clone(), script, empty_state(), vbytes, 0).expect("deploy");
+    reg.deploy(id.clone(), script, empty_state(), capacity)
+        .expect("deploy");
     id
 }
 
@@ -32,19 +33,18 @@ fn vm_for_actor(actor: ActorID, script: Vec<u8>) -> VM {
             1_000_000,
             0,
             0,
-        ).with_anchor(Anchor([0u8; 32])),
+        )
+        .with_anchor(Anchor([0u8; 32])),
     )
 }
 
 /// Helper: builds bytecode that invokes `op_call` with `k=0` args
 /// (plain single-action callee — no selector). Spec stack
-/// (bottom→top): `k gas bytestoken addr call`.
+/// (bottom→top): `k gas addr call`.
 fn call_script(target: &ActorID, gas: u64) -> Vec<u8> {
     ScriptBuilder::new()
-        .push_int(0u64)                                // k = 0 args
-        .push_int(gas)                                 // gas
-        .push_int(BYTES_FLAVOR)
-        .pushtoken()                                   // zero-byte token
+        .push_int(0u64) // k = 0 args
+        .push_int(gas) // gas
         .push_str(String::from(target.to_hash().to_vec())) // addr (32-byte)
         .call()
         .to_bytecode()
@@ -55,11 +55,9 @@ fn call_script(target: &ActorID, gas: u64) -> Vec<u8> {
 /// dispatch-coded callees.
 fn call_with_selector(target: &ActorID, sel: u64, gas: u64) -> Vec<u8> {
     ScriptBuilder::new()
-        .push_int(sel)                                 // selector arg (top)
-        .push_int(1u64)                                // k = 1 arg
+        .push_int(sel) // selector arg (top)
+        .push_int(1u64) // k = 1 arg
         .push_int(gas)
-        .push_int(BYTES_FLAVOR)
-        .pushtoken()                                   // zero-byte token
         .push_str(String::from(target.to_hash().to_vec()))
         .call()
         .to_bytecode()
@@ -72,60 +70,24 @@ fn nop_recv() -> Vec<u8> {
 }
 
 #[test]
-fn call_consumes_bytes_token_and_credits_callee() {
+fn call_rejects_nonportable_argument() {
     let mut reg = MemRegistry::new();
     let callee = deploy_recv(&mut reg, nop_recv(), 100);
-    let caller = deploy_recv(&mut reg, ScriptBuilder::new().nop().nop().to_bytecode(), 100);
+    let caller = deploy_recv(
+        &mut reg,
+        ScriptBuilder::new().nop().nop().to_bytecode(),
+        100,
+    );
     let mut vm = vm_for_actor(caller, ScriptBuilder::new().call().to_bytecode());
     vm.current_call.stack = vec![
-        Value::Int253(Int253::ZERO),
+        Value::ClearToken(ClearToken::new(Int253::from(-1i64), FLAME_FLAVOR)),
+        Value::Int253(Int253::ONE),
         Value::Int253(Int253::from(10_000u64)),
-        Value::ClearToken(ClearToken::new(Int253::from(50u64), BYTES_FLAVOR)),
-        Value::String(String::from(callee.to_hash().to_vec())),
-    ];
-
-    vm.step_internal_with_registry(&mut reg).expect("call");
-
-    assert_eq!(reg.actor_vbytes(&callee).unwrap(), 150);
-    assert_eq!(vm.current_call.newbytes, 50);
-}
-
-#[test]
-fn call_rejects_non_bytes_flavor() {
-    let mut reg = MemRegistry::new();
-    let callee = deploy_recv(&mut reg, nop_recv(), 100);
-    let caller = deploy_recv(&mut reg, ScriptBuilder::new().nop().nop().to_bytecode(), 100);
-    let mut vm = vm_for_actor(caller, ScriptBuilder::new().call().to_bytecode());
-    vm.current_call.stack = vec![
-        Value::Int253(Int253::ZERO),
-        Value::Int253(Int253::from(10_000u64)),
-        Value::ClearToken(ClearToken::new(Int253::ZERO, FLAME_FLAVOR)),
         Value::String(String::from(callee.to_hash().to_vec())),
     ];
 
     let err = vm.step_internal_with_registry(&mut reg).unwrap_err();
-
-    assert!(matches!(err, VMError::InvalidBytesFlavor));
-    assert_eq!(reg.actor_vbytes(&callee).unwrap(), 100);
-}
-
-#[test]
-fn call_rejects_negative_bytes_quantity() {
-    let mut reg = MemRegistry::new();
-    let callee = deploy_recv(&mut reg, nop_recv(), 100);
-    let caller = deploy_recv(&mut reg, ScriptBuilder::new().nop().nop().to_bytecode(), 100);
-    let mut vm = vm_for_actor(caller, ScriptBuilder::new().call().to_bytecode());
-    vm.current_call.stack = vec![
-        Value::Int253(Int253::ZERO),
-        Value::Int253(Int253::from(10_000u64)),
-        Value::ClearToken(ClearToken::new(Int253::from(-1i64), BYTES_FLAVOR)),
-        Value::String(String::from(callee.to_hash().to_vec())),
-    ];
-
-    let err = vm.step_internal_with_registry(&mut reg).unwrap_err();
-
-    assert!(matches!(err, VMError::InvalidBitrange));
-    assert_eq!(reg.actor_vbytes(&callee).unwrap(), 100);
+    assert!(matches!(err, VMError::NonPortableInCall));
 }
 
 #[test]
@@ -191,8 +153,13 @@ fn call_to_checked_out_actor_blocked() {
     // the lock; `resolve_method` returns `ActorEmpty`.
     let mut reg = MemRegistry::new();
     let id = ActorID::Hash([0xa1; 32]);
-    reg.deploy(id.clone(), ScriptBuilder::new().nop().to_bytecode(), empty_state(), 10_000, 0)
-        .expect("deploy");
+    reg.deploy(
+        id.clone(),
+        ScriptBuilder::new().nop().to_bytecode(),
+        empty_state(),
+        10_000,
+    )
+    .expect("deploy");
     // Check the state out, as a live frame mid-update would.
     reg.actor_mut(&id).expect("present").state = None;
 
@@ -203,7 +170,11 @@ fn call_to_checked_out_actor_blocked() {
             match &vm.current_call.stack[0] {
                 Value::Int253(i) => {
                     assert_eq!(*i, Int253::from(0u64), "block marker");
-                    assert_eq!(vm.txlog.len(), 1, "blocked re-entry must not emit side effects");
+                    assert_eq!(
+                        vm.txlog.len(),
+                        1,
+                        "blocked re-entry must not emit side effects"
+                    );
                     return;
                 }
                 _ => panic!("expected Int253 marker"),
@@ -238,7 +209,7 @@ fn reentrant_call_succeeds_when_state_not_held() {
     };
     // A's code: a dispatch blob — method 0 → a_recv, method 1 → a_method1.
     let a_code = dispatch_code(&[(0, a_recv.clone()), (1, a_method1)]);
-    reg.deploy(a_id.clone(), a_code, empty_state(), 1_000_000, 0)
+    reg.deploy(a_id.clone(), a_code, empty_state(), 1_000_000)
         .expect("deploy A");
 
     // B.recv: call A.method1, drop A's [count, success].
@@ -249,16 +220,17 @@ fn reentrant_call_succeeds_when_state_not_held() {
         p.to_bytecode()
     };
     // B has only recv (method 0) → its code is the recv script directly.
-    reg.deploy(b_id.clone(), b_recv, empty_state(), 1_000_000, 0)
+    reg.deploy(b_id.clone(), b_recv, empty_state(), 1_000_000)
         .expect("deploy B");
 
     let mut vm = vm_for_actor(a_id, a_recv);
     while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
 
     // A.method1 ran via the re-entry → its Data entry is in the txlog.
-    let logged = vm.txlog.iter().any(|e| -> bool {
-        matches!(e, TxEntry::Data(_))
-    });
+    let logged = vm
+        .txlog
+        .iter()
+        .any(|e| -> bool { matches!(e, TxEntry::Data(_)) });
     assert!(logged, "re-entrant A.method1 must have run (and logged)");
 }
 
@@ -315,7 +287,8 @@ fn call_grant_exceeding_caller_budget_is_out_of_gas() {
             100,
             0,
             0,
-        ).with_anchor(Anchor([0u8; 32])),
+        )
+        .with_anchor(Anchor([0u8; 32])),
     );
     let err = loop {
         match vm.step_internal_with_registry(&mut reg) {
@@ -350,7 +323,8 @@ fn call_refunds_leftover_gas_to_caller() {
     let remaining = vm.current_call.gas_limit - vm.current_call.gas_used;
     assert!(
         remaining > 1_000_000 - 100,
-        "leftover grant must be refunded; remaining = {}", remaining
+        "leftover grant must be refunded; remaining = {}",
+        remaining
     );
 }
 
@@ -379,7 +353,8 @@ fn reentrant_view_of_mid_update_state_is_blocked() {
         p
     };
     let a_code = dispatch_code(&[(0, a_recv.clone()), (1, a_method1)]);
-    reg.deploy(a_id.clone(), a_code, empty_state(), 1_000_000, 0).expect("deploy A");
+    reg.deploy(a_id.clone(), a_code, empty_state(), 1_000_000)
+        .expect("deploy A");
 
     // B.recv: call A.method1 — blocked (A checked out) → single `0`
     // marker, drop it once; B exits cleanly.
@@ -388,7 +363,8 @@ fn reentrant_view_of_mid_update_state_is_blocked() {
         p.push_instr(Instruction::Drop);
         p.to_bytecode()
     };
-    reg.deploy(b_id.clone(), b_recv, empty_state(), 1_000_000, 0).expect("deploy B");
+    reg.deploy(b_id.clone(), b_recv, empty_state(), 1_000_000)
+        .expect("deploy B");
 
     let mut vm = vm_for_actor(a_id, a_recv);
     while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
@@ -400,7 +376,10 @@ fn reentrant_view_of_mid_update_state_is_blocked() {
         .iter()
         .filter(|e| matches!(e, TxEntry::ActorSave { .. }))
         .count();
-    assert_eq!(a_saves, 1, "only A.recv's save; the view re-entry was blocked");
+    assert_eq!(
+        a_saves, 1,
+        "only A.recv's save; the view re-entry was blocked"
+    );
 }
 
 /// Call depth is structurally capped: a self-recursing actor stops at
@@ -416,7 +395,8 @@ fn call_depth_is_capped() {
         p.push_instr(Instruction::Drop);
         p.to_bytecode()
     };
-    reg.deploy(id.clone(), recv.clone(), empty_state(), 1_000_000, 0).expect("deploy");
+    reg.deploy(id.clone(), recv.clone(), empty_state(), 1_000_000)
+        .expect("deploy");
     let mut vm = vm_for_actor(id, recv);
     // Must TERMINATE (depth cap bottoms out the recursion, which then
     // unwinds via failure markers) rather than hang or blow the stack.
@@ -467,18 +447,25 @@ fn setcode_upgrade_end_to_end() {
         .return_()
         .to_bytecode();
     let c1 = dispatch_code(&[(0, v1_handler), (1, upgrade_handler)]);
-    reg.deploy(a_id.clone(), c1, empty_state(), 1_000_000, 0).expect("deploy A");
+    reg.deploy(a_id.clone(), c1, empty_state(), 1_000_000)
+        .expect("deploy A");
 
     // Driver R: call A.0, call A.1 (upgrade), call A.0 — drop markers.
     let mut driver = ScriptBuilder::parse(&call_with_selector(&a_id, 0, 100_000)).expect("parse");
     driver.push_instr(Instruction::Drop);
     driver.push_instr(Instruction::Drop);
-    for instr in ScriptBuilder::parse(&call_with_selector(&a_id, 1, 100_000)).expect("parse").into_instructions() {
+    for instr in ScriptBuilder::parse(&call_with_selector(&a_id, 1, 100_000))
+        .expect("parse")
+        .into_instructions()
+    {
         driver.push_instr(instr);
     }
     driver.push_instr(Instruction::Drop);
     driver.push_instr(Instruction::Drop);
-    for instr in ScriptBuilder::parse(&call_with_selector(&a_id, 0, 100_000)).expect("parse").into_instructions() {
+    for instr in ScriptBuilder::parse(&call_with_selector(&a_id, 0, 100_000))
+        .expect("parse")
+        .into_instructions()
+    {
         driver.push_instr(instr);
     }
     driver.push_instr(Instruction::Drop);
@@ -498,12 +485,22 @@ fn setcode_upgrade_end_to_end() {
             _ => None,
         })
         .collect();
-    assert_eq!(datas, vec![b"v1".as_slice(), b"v2".as_slice()], "old code then NEW code ran");
+    assert_eq!(
+        datas,
+        vec![b"v1".as_slice(), b"v2".as_slice()],
+        "old code then NEW code ran"
+    );
     assert!(
-        vm.txlog.iter().any(|e| matches!(e, TxEntry::SetCode { .. })),
+        vm.txlog
+            .iter()
+            .any(|e| matches!(e, TxEntry::SetCode { .. })),
         "SetCode effect recorded"
     );
-    assert_eq!(reg.actor(&a_id).unwrap().code, c2, "registry holds the new code");
+    assert_eq!(
+        reg.actor(&a_id).unwrap().code,
+        c2,
+        "registry holds the new code"
+    );
 }
 
 /// A failed sub-call burns the entire gas grant (spec §gas): the parent
@@ -512,7 +509,11 @@ fn setcode_upgrade_end_to_end() {
 fn failed_call_burns_full_grant() {
     let mut reg = MemRegistry::new();
     // B: runs a couple of instructions, then fails.
-    let b_code = ScriptBuilder::new().nop().push_int(0u64).verify().to_bytecode();
+    let b_code = ScriptBuilder::new()
+        .nop()
+        .push_int(0u64)
+        .verify()
+        .to_bytecode();
     let b = deploy_recv(&mut reg, b_code, 1_000);
     // A: call B with a 5_000 grant, drop the single failure marker.
     let a_script = {
@@ -526,8 +527,16 @@ fn failed_call_burns_full_grant() {
     // Parent budget 1_000_000 (vm_for_actor): the full 5_000 grant is
     // burned (no refund on failure) plus a handful of own instructions.
     let remaining = vm.current_call.gas_limit - vm.current_call.gas_used;
-    assert!(remaining <= 1_000_000 - 5_000, "grant must not be refunded: {}", remaining);
-    assert!(remaining > 1_000_000 - 5_100, "only the grant + own instrs spent: {}", remaining);
+    assert!(
+        remaining <= 1_000_000 - 5_000,
+        "grant must not be refunded: {}",
+        remaining
+    );
+    assert!(
+        remaining > 1_000_000 - 5_100,
+        "only the grant + own instrs spent: {}",
+        remaining
+    );
 }
 
 /// The recursion cap binds at exactly MAX_CALL_DEPTH parents on the
@@ -545,19 +554,21 @@ fn call_depth_caps_at_exactly_max() {
         .gas()
         .push_int(-200i64)
         .add() // grant = remaining − 200
-        .push_int(BYTES_FLAVOR)
-        .pushtoken() // zero-byte token
         .push_str(String::from(id.to_hash().to_vec()))
         .call()
         .drop_()
         .to_bytecode();
-    reg.deploy(id.clone(), recv.clone(), empty_state(), 1_000_000, 0).expect("deploy");
+    reg.deploy(id.clone(), recv.clone(), empty_state(), 1_000_000)
+        .expect("deploy");
     let mut vm = vm_for_actor(id.clone(), recv);
     let mut max_depth = 0;
     while let Ok(true) = vm.step_internal_with_registry(&mut reg) {
         max_depth = max_depth.max(vm.call_stack.len());
     }
-    assert_eq!(max_depth, MAX_CALL_DEPTH, "cap binds exactly at the constant");
+    assert_eq!(
+        max_depth, MAX_CALL_DEPTH,
+        "cap binds exactly at the constant"
+    );
 }
 
 #[test]
@@ -607,13 +618,11 @@ fn f1_failed_subcall_load_does_not_destroy_actor() {
     // A.recv: call X (k=0, gas=5_000), drop the failure marker so
     // A's frame exits clean (stack empty → no StackNotClean).
     let a_recv = ScriptBuilder::new()
-        .push_int(0u64)                              // k = 0 args
-        .push_int(5_000u64)                          // gas
-        .push_int(BYTES_FLAVOR)
-        .pushtoken()                                 // zero-byte token
+        .push_int(0u64) // k = 0 args
+        .push_int(5_000u64) // gas
         .push_str(String::from(x_id.to_hash().to_vec())) // addr
         .call()
-        .drop_()                                     // drop failure marker (0)
+        .drop_() // drop failure marker (0)
         .to_bytecode();
     let a_id = deploy_recv(&mut reg, a_recv, 10_000);
 
@@ -625,7 +634,6 @@ fn f1_failed_subcall_load_does_not_destroy_actor() {
         anchor: Anchor([0x42; 32]),
         payload: Vec::new(),
         gas: 100_000,
-        vbytes: 0,
         refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     };
     let _ = VM::execute_internal(dummy_header(), msg, &mut reg, &block)
@@ -634,7 +642,10 @@ fn f1_failed_subcall_load_does_not_destroy_actor() {
     // F1 invariant: X survives the failed sub-call. Pre-fix, X's
     // mark would have persisted past the rollback boundary, and
     // tx-end `commit_tx_destructions` would have destroyed X.
-    assert!(reg.exists(&x_id), "X must still exist after the failed sub-call");
+    assert!(
+        reg.exists(&x_id),
+        "X must still exist after the failed sub-call"
+    );
     assert!(
         !reg.actor(&x_id).is_some_and(|a| a.is_checked_out()),
         "X's load-mark must be cleared by the call-frame rollback",
@@ -669,13 +680,17 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
         .verify()
         .to_bytecode();
     let x_id = deploy_recv(&mut reg, evil_recv, 10_000);
-    let root_before = state_root(reg.actor(&x_id).expect("X exists").state.as_ref().expect("present"));
+    let root_before = state_root(
+        reg.actor(&x_id)
+            .expect("X exists")
+            .state
+            .as_ref()
+            .expect("present"),
+    );
 
     let a_recv = ScriptBuilder::new()
         .push_int(0u64)
         .push_int(5_000u64)
-        .push_int(BYTES_FLAVOR)
-        .pushtoken()
         .push_str(String::from(x_id.to_hash().to_vec()))
         .call()
         .drop_()
@@ -689,11 +704,10 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
         anchor: Anchor([0x42; 32]),
         payload: Vec::new(),
         gas: 100_000,
-        vbytes: 0,
         refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     };
-    let result = VM::execute_internal(dummy_header(), msg, &mut reg, &block)
-        .expect("outer tx succeeds");
+    let result =
+        VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("outer tx succeeds");
 
     // F1 invariants:
     let x = reg.actor(&x_id).expect("X must still exist after rollback");
@@ -712,9 +726,11 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
     let x_save_count = result
         .txlog
         .iter()
-        .filter(|e| matches!(e,
-            TxEntry::ActorSave { actor, .. } if actor == &x_id
-        ))
+        .filter(|e| {
+            matches!(e,
+                TxEntry::ActorSave { actor, .. } if actor == &x_id
+            )
+        })
         .count();
     assert_eq!(
         x_save_count, 0,
@@ -739,20 +755,24 @@ fn f3_save_failure_rolls_back_and_preserves_actor() {
     // `save` now accepts any *portable* Value, so a non-Dict no longer
     // fails. Trigger the save failure with a non-portable value (a Merlin).
     let evil_recv = ScriptBuilder::new()
-        .load()                                // check out state, [state]
-        .drop_()                               // drop it (empty state is droppable)
+        .load() // check out state, [state]
+        .drop_() // drop it (empty state is droppable)
         .push_str(String::from(b"x".to_vec())) // ["x"]
-        .transcript()                          // [Merlin] — non-portable
-        .save()                                // NonPortableInState → frame fails
+        .transcript() // [Merlin] — non-portable
+        .save() // NonPortableInState → frame fails
         .to_bytecode();
     let x_id = deploy_recv(&mut reg, evil_recv, 10_000);
-    let root_before = state_root(reg.actor(&x_id).expect("X exists").state.as_ref().expect("present"));
+    let root_before = state_root(
+        reg.actor(&x_id)
+            .expect("X exists")
+            .state
+            .as_ref()
+            .expect("present"),
+    );
 
     let a_recv = ScriptBuilder::new()
         .push_int(0u64)
         .push_int(5_000u64)
-        .push_int(BYTES_FLAVOR)
-        .pushtoken()
         .push_str(String::from(x_id.to_hash().to_vec()))
         .call()
         .drop_()
@@ -766,7 +786,6 @@ fn f3_save_failure_rolls_back_and_preserves_actor() {
         anchor: Anchor([0x42; 32]),
         payload: Vec::new(),
         gas: 100_000,
-        vbytes: 0,
         refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     };
     let _ = VM::execute_internal(dummy_header(), msg, &mut reg, &block)
@@ -795,20 +814,26 @@ fn save_emits_actorsave_with_full_state() {
     let id = ActorID::Hash([0xab; 32]);
     let state = empty_state();
     let expected_root = state_root(&state);
-    reg.deploy(id.clone(), recv.clone(), state, 10_000, 0).expect("deploy");
+    reg.deploy(id.clone(), recv.clone(), state, 10_000)
+        .expect("deploy");
 
     let mut vm = vm_for_actor(id.clone(), recv);
     while vm.step_internal_with_registry(&mut reg).expect("step ok") {}
 
-    let save = vm.txlog.iter().find_map(|e| match e {
-        TxEntry::ActorSave { actor, state } =>
-            Some((actor.clone(), state_root(state))),
-        _ => None,
-    }).expect("ActorSave entry present");
+    let save = vm
+        .txlog
+        .iter()
+        .find_map(|e| match e {
+            TxEntry::ActorSave { actor, state } => Some((actor.clone(), state_root(state))),
+            _ => None,
+        })
+        .expect("ActorSave entry present");
     assert_eq!(save.0, id);
     // The state is whatever was loaded then re-saved — same root.
     assert_eq!(save.1, expected_root, "state.root() matches deployed state");
-    let save_count = vm.txlog.iter()
+    let save_count = vm
+        .txlog
+        .iter()
         .filter(|e| matches!(e, TxEntry::ActorSave { .. }))
         .count();
     assert_eq!(save_count, 1);

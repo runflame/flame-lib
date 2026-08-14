@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 # TODO: consider removing flamevm as dependency
 flamevm = { path = "../flamevm" }
-types = { path = "../types" }
+flamechain = { path = "../flamechain" }
 
 # BTC dependencies
 corepc-client = { version = "0.16.0", features = ["client-sync"] }

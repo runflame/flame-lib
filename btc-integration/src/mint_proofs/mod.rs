@@ -20,7 +20,7 @@ mod tests {
     use corepc_client::bitcoin::{Amount, ScriptBuf, TxOut};
     use ed25519_dalek::SigningKey;
     use flamevm::Predicate;
-    use types::{BlockHash, FlameNetwork};
+    use flamechain::{BlockHash, FlameNetwork};
 
     fn proof(flag: bool) -> MintingProofData {
         MintingProofData {

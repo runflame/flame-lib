@@ -141,6 +141,8 @@ const OP_CALL: u8 = 0xd1;
 const OP_LOAD: u8 = 0xd2;
 const OP_SAVE: u8 = 0xd3;
 const OP_SETCODE: u8 = 0xd4;
+const OP_ADDSTORAGE: u8 = 0xd5;
+const OP_QUOTESTORAGE: u8 = 0xd6;
 
 // 0xeX — Frame introspection
 const OP_SELFID: u8 = 0xe0;
@@ -148,14 +150,15 @@ const OP_ANCHOR: u8 = 0xe1;
 const OP_CALLERID: u8 = 0xe2;
 const OP_GAS: u8 = 0xe4;
 const OP_GASLIMIT: u8 = 0xe5;
-const OP_BYTES: u8 = 0xe6;
+const OP_USAGE: u8 = 0xe6;
 const OP_MEMLIMIT: u8 = 0xe7;
-const OP_NEWBYTES: u8 = 0xe8;
+const OP_CAPACITY: u8 = 0xe8;
 
 // 0xfX — Tx & chain info (chain-info opcodes 0xf2-0xf7 are reserved
 // for future implementation; the parser routes them through `Ext`.)
 const OP_TIMELOCK: u8 = 0xf0;
 const OP_VERSION: u8 = 0xf1;
+const OP_HEIGHT: u8 = 0xf2;
 
 // ── Instruction enum ─────────────────────────────────────────────────
 
@@ -247,6 +250,8 @@ pub enum Instruction {
     Load,                  // ø load → value   (actor state, any Value)
     Save,                  // value save → ø
     Setcode,               // code setcode → ø  (replace actor code blob)
+    AddStorage,            // q addstorage → {debt 1 | 0}
+    QuoteStorage,          // q quotestorage → {fee 1 | 0}
     Signtx,                // cell signtx → items… k
     Signcall,               // cell script sig gas bytes args… m signcall → results… k'
     Timelock,              // ø timelock → n {0|1}
@@ -254,11 +259,12 @@ pub enum Instruction {
     Selfid,                // ø selfid → s
     Anchor,                // ø anchor → s
     Gas,                   // ø gas → n
-    Bytes,                 // ø bytes → n
+    Usage,                 // ø usage → n
     Callerid,              // ø callerid → s
     Gaslimit,              // ø gaslimit → n
     Memlimit,              // ø memlimit → n
-    Newbytes,              // ø newbytes → n
+    Capacity,              // h capacity → n
+    Height,                // ø height → n
     Ext(u8),               // unknown opcode byte; produced by the parser for any unassigned tag
 }
 
@@ -383,6 +389,8 @@ impl Encodable for Instruction {
             Instruction::Load => op(w, OP_LOAD),
             Instruction::Save => op(w, OP_SAVE),
             Instruction::Setcode => op(w, OP_SETCODE),
+            Instruction::AddStorage => op(w, OP_ADDSTORAGE),
+            Instruction::QuoteStorage => op(w, OP_QUOTESTORAGE),
             Instruction::Signtx => op(w, OP_SIGNTX),
             Instruction::Signcall => op(w, OP_SIGNCALL),
             Instruction::Timelock => op(w, OP_TIMELOCK),
@@ -390,11 +398,12 @@ impl Encodable for Instruction {
             Instruction::Selfid => op(w, OP_SELFID),
             Instruction::Anchor => op(w, OP_ANCHOR),
             Instruction::Gas => op(w, OP_GAS),
-            Instruction::Bytes => op(w, OP_BYTES),
+            Instruction::Usage => op(w, OP_USAGE),
             Instruction::Callerid => op(w, OP_CALLERID),
             Instruction::Gaslimit => op(w, OP_GASLIMIT),
             Instruction::Memlimit => op(w, OP_MEMLIMIT),
-            Instruction::Newbytes => op(w, OP_NEWBYTES),
+            Instruction::Capacity => op(w, OP_CAPACITY),
+            Instruction::Height => op(w, OP_HEIGHT),
             Instruction::Ext(b) => op(w, *b),
         }
     }
@@ -532,6 +541,8 @@ impl Instruction {
             OP_LOAD => Ok(Instruction::Load),
             OP_SAVE => Ok(Instruction::Save),
             OP_SETCODE => Ok(Instruction::Setcode),
+            OP_ADDSTORAGE => Ok(Instruction::AddStorage),
+            OP_QUOTESTORAGE => Ok(Instruction::QuoteStorage),
             OP_SIGNTX => Ok(Instruction::Signtx),
             OP_SIGNCALL => Ok(Instruction::Signcall),
             OP_TIMELOCK => Ok(Instruction::Timelock),
@@ -539,11 +550,12 @@ impl Instruction {
             OP_SELFID => Ok(Instruction::Selfid),
             OP_ANCHOR => Ok(Instruction::Anchor),
             OP_GAS => Ok(Instruction::Gas),
-            OP_BYTES => Ok(Instruction::Bytes),
+            OP_USAGE => Ok(Instruction::Usage),
             OP_CALLERID => Ok(Instruction::Callerid),
             OP_GASLIMIT => Ok(Instruction::Gaslimit),
             OP_MEMLIMIT => Ok(Instruction::Memlimit),
-            OP_NEWBYTES => Ok(Instruction::Newbytes),
+            OP_CAPACITY => Ok(Instruction::Capacity),
+            OP_HEIGHT => Ok(Instruction::Height),
             _ => Ok(Instruction::Ext(byte)),
         }
     }
@@ -692,11 +704,11 @@ mod tests {
     #[test]
     fn ext_opcode_for_unknown_bytes() {
         // 0x4f remains unassigned (0x4e is keccak256, 0x50 is abs).
-        // 0xf2..=0xf7 are reserved for the planned chain-info family
-        // (height/blockhash/blockburn/blockweight/blockrate/chainstate).
+        // 0xf3..=0xf7 remain reserved for the chain-info family after
+        // 0xf2 was assigned to height.
         // 0xff is a sentinel "definitely unassigned" byte for fuzzing
         // future extensions.
-        let unused = [0x4f, 0xf2, 0xff];
+        let unused = [0x4f, 0xf3, 0xff];
         for b in unused {
             let mut r: &[u8] = &[b];
             let parsed = Instruction::parse(&mut r).expect("parses");

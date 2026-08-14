@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
-use types::{BlockHash, FlameNetwork};
+use flamechain::{BlockHash, FlameNetwork};
 
 use super::{IndexerWorker, IndexerWorkerError};
 use crate::mint_proofs::indexer::{

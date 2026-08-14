@@ -4,9 +4,10 @@ This document defines the consensus rules for persistent actor storage. VM
 opcode encodings and stack behavior are specified in
 [flamevm.md](flamevm.md).
 
-**Status:** specified but not yet implemented. The lease market, revised
-message encoding, and storage opcodes must activate together; the legacy
-transferable-vbyte mechanism is not part of this specification.
+The `flamechain` actor registry and the FlameVM storage opcodes implement this
+lease model. The legacy transferable-vbyte mechanism is not part of these
+consensus rules; any network activation still requires one protocol version to
+switch the storage state, message operands, and opcodes together.
 
 Actors lease storage by burning Flame. Storage is not a token: a lease cannot
 be transferred, shortened, or refunded. Every lease lasts exactly one storage
@@ -69,12 +70,13 @@ consensus `u64` values; every conversion and update is checked.
 The chain state contains:
 
 - `available_storage_units`, the unleased reserve;
-- an expiry index containing every outstanding lease; and
+- a derived expiry index containing every outstanding lease; and
 - for each actor, an ordered list of `(expiry_height, units)` leases.
 
 Leases with the same actor and expiry height must be coalesced. The expiry index
 survives actor destruction because destroying an actor does not refund its
-unexpired leases.
+unexpired leases. It is a cache derived from the committed per-actor lease
+lists; block validation checks that both representations match before commit.
 
 At the beginning of core block `h`, before executing transactions:
 
@@ -123,6 +125,19 @@ provisionally so it can purchase its first lease, but its creating transaction
 commits only if the same invariant holds at the end. Failure rolls back the
 actor, purchases, burns, and all other transaction effects.
 
+Transient memory does not count toward persistent usage. At actor-frame entry,
+the VM sets its memory cap to:
+
+```text
+TRANSIENT_MEMORY_CAPACITY_MULTIPLIER * max(usage, capacity(current_height))
+```
+
+The `usage` term is a bootstrap allowance: a provisional constructor has no
+lease yet but needs enough memory to execute `addstorage`. A successful
+`addstorage` raises the current frame's cap, if necessary, to the multiplier
+times its new current capacity. The cap never shrinks during that frame, and
+the bootstrap allowance does not relax the transaction-end capacity check.
+
 ## Pricing
 
 Let:
@@ -159,6 +174,14 @@ A request is unavailable when:
 The final unit is therefore never purchasable: its quoted price is
 mathematically unbounded.
 
+This endpoint-price formula is deliberately **not path independent**. Splitting
+one large request into many minimum-size purchases pays the successive marginal
+prices and is cheaper than pricing the whole batch at its final, highest price.
+That is equivalent to adopting a discrete harmonic marginal-price curve, not a
+sybil-resistant bulk premium. If bulk and split purchases must cost exactly the
+same, this formula must be replaced before activation by a state-potential
+delta; per-actor or per-transaction purchase limits do not solve the sybil case.
+
 ## Purchasing and quoting
 
 Only an actor may purchase storage. It may fund itself from Flame in its state,
@@ -177,7 +200,8 @@ current_height + LEASE_DURATION_CORE_BLOCKS
 It emits a storage-purchase effect and returns
 `ClearToken(-fee_sparks, FLAME_FLAVOR)`. The transaction must balance that debt
 with actual Flame. A successful storage-purchase effect burns the balanced
-amount irrevocably; minters do not collect it.
+amount irrevocably; minters do not collect it. `retire` rejects negative clear
+tokens, so the debt cannot be erased instead of balanced.
 
 `quotestorage` is advisory, not a reservation. Any intervening successful
 purchase changes the reserve and therefore the result of a later `addstorage`.
@@ -199,9 +223,10 @@ q addstorage       -> { flame_debt 1 | 0 }
 
 `height` returns the current core-block height during an internal transaction
 and zero throughout an external transaction. `usage` returns the current
-actor's charged usage. `capacity(h)` returns its capacity at future height `h`;
-negative and past heights hard-fail. `usage` and `capacity` require actor
-context.
+actor's charged usage. `capacity(h)` returns its capacity at current or future
+height `h`. Negative or non-`u64` heights hard-fail `InvalidBitrange`, and a
+height below the current block hard-fails `StorageHeightInPast`. `usage` and
+`capacity` require actor context and a registry.
 
 When state is checked out by `load`, `usage` continues to describe the checked-
 out committed state until `save` supplies its replacement. `save` measures the

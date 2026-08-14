@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use corepc_client::bitcoin::{ScriptBuf, TxOut};
 use ed25519_dalek::VerifyingKey;
 use flamevm::Predicate;
-use types::{BlockHash, FlameNetwork};
+use flamechain::{BlockHash, FlameNetwork};
 
 use crate::mint_proofs::core::creation::mint_proof_to_script;
 use crate::mint_proofs::parse_mint_proof_output;

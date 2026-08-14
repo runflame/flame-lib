@@ -17,7 +17,7 @@ pub mod prelude {
     pub use crate::rpc::BtcBlockTip;
     use crate::{mint_proofs, rpc};
     pub use corepc_client::client_sync::Auth as BitcoinRpcAuth;
-    pub use types::{BlockHash, FlameNetwork};
+    pub use flamechain::{BlockHash, FlameNetwork};
 
     pub type MintProofSenderV31 = MintProofSender<rpc::Core31RpcApi>;
     pub type MintProofIndexerV31 = MintProofIndexer<

@@ -15,7 +15,7 @@ use crate::cell::{TaprootProof, Cell, CellID, Predicate};
 use crate::constraints::Commitment;
 use crate::fees::CheckedFee;
 use crate::token::{
-    flavor_from_actor, flavor_from_predicate, BYTES_FLAVOR, FLAME_FLAVOR,
+    flavor_from_actor, flavor_from_predicate, FLAME_FLAVOR,
 };
 use crate::tx::{TxEntry, TxID};
 use crate::{
@@ -358,9 +358,6 @@ pub struct CallFrame {
     pub(crate) mem_limit: u64,
     pub(crate) mem_used: u64,
 
-    /// Vbytes delivered with this call (queryable by `newbytes` opcode).
-    pub(crate) newbytes: u64,
-
     /// Anchor that should replace `VM.last_anchor` when control
     /// returns to this frame from a child call. Populated at call
     /// entry as the `right` half of the parent's anchor split (the
@@ -404,9 +401,9 @@ impl CallFrame {
         kind: CallKind,
         gas_limit: u64,
         mem_limit: u64,
-        newbytes: u64,
+        _newbytes: u64,
     ) -> Self {
-        Self::from_code(Script::Transparent(instructions), kind, gas_limit, mem_limit, newbytes)
+        Self::from_code(Script::Transparent(instructions), kind, gas_limit, mem_limit, 0)
     }
 
     /// Builds a CallFrame that decodes raw `bytecode` on demand — no
@@ -416,9 +413,9 @@ impl CallFrame {
         kind: CallKind,
         gas_limit: u64,
         mem_limit: u64,
-        newbytes: u64,
+        _newbytes: u64,
     ) -> Self {
-        Self::from_code(Script::Opaque(bytecode), kind, gas_limit, mem_limit, newbytes)
+        Self::from_code(Script::Opaque(bytecode), kind, gas_limit, mem_limit, 0)
     }
 
     /// Sets this frame's starting anchor (todo #4). Chained at the
@@ -433,7 +430,7 @@ impl CallFrame {
         kind: CallKind,
         gas_limit: u64,
         mem_limit: u64,
-        newbytes: u64,
+        _newbytes: u64,
     ) -> Self {
         Self {
             stack: Vec::new(),
@@ -446,7 +443,6 @@ impl CallFrame {
             gas_used: 0,
             mem_limit,
             mem_used: 0,
-            newbytes,
             post_call_anchor: None,
             snap_txlog_len: 0,
             snap_deferred_sigs_len: 0,
@@ -621,28 +617,53 @@ impl VM {
         registry: &mut dyn ActorRegistry,
         block: &BlockContext,
     ) -> Result<TxResult, VMError> {
+        registry.push_checkpoint();
+        let target = message.target.clone();
+
         // Deploy-on-first-delivery (spec §Actors): a Constructor-form
         // target carries the actor's code on the wire and the id
         // commits to it (`id = H(bytes)`), so the first message to a
         // not-yet-deployed actor instantiates it — code = constructor
-        // bytes, empty state, funded by the message's vbytes.
+        // bytes and empty state. The actor remains provisional until it buys
+        // enough storage during this transaction.
         if !registry.exists(&message.target) {
             if let ActorID::Constructor(bytes) = &message.target {
-                registry.deploy(
+                if let Err(e) = registry.deploy(
                     message.target.clone(),
                     bytes.clone(),
                     empty_state(),
-                    message.vbytes,
-                    block.height,
-                )?;
+                ) {
+                    registry.pop_checkpoint_rollback();
+                    return Err(e);
+                }
             }
-        } else if message.vbytes != 0 {
-            registry.credit_vbytes(&message.target, message.vbytes, block.height)?;
         }
-        let script = registry.load_code(&message.target)?;
-        let mem_limit = registry.actor_vbytes(&message.target)?.saturating_mul(4);
+        let script = match registry.load_code(&message.target) {
+            Ok(script) => script,
+            Err(e) => {
+                registry.pop_checkpoint_rollback();
+                return Err(e);
+            }
+        };
+        let usage = match registry.actor_usage(&message.target) {
+            Ok(v) => v,
+            Err(e) => {
+                registry.pop_checkpoint_rollback();
+                return Err(e);
+            }
+        };
+        let capacity = match registry.actor_capacity(&message.target, block.height) {
+            Ok(v) => v,
+            Err(e) => {
+                registry.pop_checkpoint_rollback();
+                return Err(e);
+            }
+        };
+        let mem_limit = usage
+            .max(capacity)
+            .saturating_mul(registry.transient_memory_multiplier());
         // MessageID is the canonical hash of the whole send (anchor,
-        // target, caller, method, payload, gas, vbytes, refund
+        // target, caller, payload, gas, refund
         // predicate) — analogous to CellID for Output. Capture
         // before the move below.
         let send_id = *message.id().as_bytes();
@@ -657,7 +678,7 @@ impl VM {
             kind,
             message.gas,
             mem_limit,
-            message.vbytes,
+            0,
         )
         .with_anchor(anchor);
         // Deliver the message payload onto the recv's stack (in payload
@@ -675,14 +696,6 @@ impl VM {
         // brought this tx into existence.
         vm.txlog.push(TxEntry::Receive(send_id));
 
-        // Tx-level checkpoint: if the script aborts at the root
-        // frame (no caller to swallow into a failure marker), the
-        // registry must roll back any mutations the failed run
-        // wrote. Symmetric with per-frame checkpointing inside
-        // `step`. Without this, an op_save that succeeded then a
-        // later opcode that errored at root would persist the save
-        // even though the tx aborts.
-        registry.push_checkpoint();
         let mut run_err: Option<VMError> = None;
         loop {
             match vm.step_internal_with_registry(registry) {
@@ -698,8 +711,16 @@ impl VM {
             registry.pop_checkpoint_rollback();
             return Err(e);
         }
+        for actor in registry.commit_tx_destructions() {
+            vm.txlog.push(TxEntry::ActorDestroy { actor });
+        }
+        if registry.exists(&target) {
+            if let Err(e) = registry.validate_actor_storage(&target, block.height) {
+                registry.pop_checkpoint_rollback();
+                return Err(e);
+            }
+        }
         registry.pop_checkpoint_commit();
-        let _cleared = registry.commit_tx_destructions(block.height);
         Ok(vm.into_result(Vec::new(), None))
     }
 
@@ -1024,6 +1045,8 @@ impl VM {
             I::Load => self.op_load(registry),
             I::Save => self.op_save(registry),
             I::Setcode => self.op_setcode(registry),
+            I::AddStorage => self.op_addstorage(registry),
+            I::QuoteStorage => self.op_quotestorage(registry),
             I::Signtx => self.op_signtx(),
             I::Signcall => self.op_signcall(),
 
@@ -1033,12 +1056,13 @@ impl VM {
             I::Selfid => self.op_selfid(),
             I::Anchor => self.op_anchor(),
             I::Gas => self.op_gas(),
-            I::Bytes => self.op_bytes(registry),
+            I::Usage => self.op_usage(registry),
             I::Callerid => self.op_callerid(),
-            // gaslimit / memlimit / newbytes → frame budget fields.
+            // gaslimit / memlimit → frame budget fields.
             I::Gaslimit => { self.push_value(Value::Int253(Int253::from(self.current_call.gas_limit))); Ok(()) }
             I::Memlimit => { self.push_value(Value::Int253(Int253::from(self.current_call.mem_limit))); Ok(()) }
-            I::Newbytes => { self.push_value(Value::Int253(Int253::from(self.current_call.newbytes))); Ok(()) }
+            I::Capacity => self.op_capacity(registry),
+            I::Height => { self.push_value(Value::Int253(Int253::from(self.block_height))); Ok(()) }
 
             I::Ext(b) => Err(VMError::UnknownOpcode(b)),
         }?;
@@ -1965,6 +1989,22 @@ impl VM {
         array32(&s.to_bytes()).ok_or(VMError::MalformedAddress)
     }
 
+    /// Actor destinations accept the compact legacy 32-byte hash or an exact
+    /// canonical `ActorID` encoding. The latter preserves constructor code for
+    /// deploy-on-first-delivery.
+    fn pop_actor_id(&mut self) -> Result<ActorID, VMError> {
+        let bytes = self.pop_value()?.to_string()?.to_bytes_vec();
+        if let Some(hash) = array32(&bytes) {
+            return Ok(ActorID::Hash(hash));
+        }
+        let mut reader = bytes.as_slice();
+        let actor = ActorID::decode(&mut reader).map_err(|_| VMError::MalformedAddress)?;
+        if !reader.is_empty() {
+            return Err(VMError::MalformedAddress);
+        }
+        Ok(actor)
+    }
+
     fn op_nop(&mut self) -> Result<(), VMError> {
         Ok(())
     }
@@ -2085,6 +2125,10 @@ impl VM {
         let val = self.pop_value()?;
         match val {
             Value::ClearToken(t) => {
+                if t.qty().is_negative() {
+                    self.push_value(Value::ClearToken(t));
+                    return Err(VMError::NegativeTokenRetirement);
+                }
                 let qty_commit = Commitment::unblinded(t.qty());
                 let flv_commit = Commitment::unblinded(t.flv());
                 self.txlog.push(TxEntry::Retire(
@@ -2373,7 +2417,7 @@ impl VM {
             },
             gas,
             /*mem_limit=*/ bytes,
-            /*newbytes=*/ bytes,
+            /*legacy_newbytes=*/ 0,
         )
         .with_anchor(child_anchor);
         for v in cell.payload {
@@ -2402,23 +2446,6 @@ impl VM {
             .to_u64()
             .ok_or(VMError::InvalidBitrange)?;
         Ok((gas, bytes))
-    }
-
-    /// Pops a virtual-byte ClearToken then `gas`, validates the token's
-    /// canonical flavor and non-negative `u64` quantity, and returns the
-    /// original bearer with its scalar quantity.
-    fn pop_gas_bytes_token(&mut self) -> Result<(u64, u64, ClearToken), VMError> {
-        let token = self.pop_value()?.to_clear_token()?;
-        if token.flv() != BYTES_FLAVOR {
-            return Err(VMError::InvalidBytesFlavor);
-        }
-        let bytes = token.qty().to_u64().ok_or(VMError::InvalidBitrange)?;
-        let gas = self
-            .pop_value()?
-            .to_int253()?
-            .to_u64()
-            .ok_or(VMError::InvalidBitrange)?;
-        Ok((gas, bytes, token))
     }
 
     /// Builds a `TaprootProof` from the four stack-popped pieces. `neighbors`
@@ -2454,7 +2481,7 @@ impl VM {
         })
     }
 
-    /// _args… k refund gas bytestoken addr_ **send** → ø
+    /// _args… k refund gas addr_ **send** → ø
     ///
     /// Queues a [`Message`] for the consensus layer to instantiate as a
     /// future internal tx and emits a `TxEntry::Send`. The anchor is
@@ -2462,8 +2489,12 @@ impl VM {
     /// is no VM-level method operand; a selector, when used, is an
     /// ordinary payload argument (ADR 0020).
     fn op_send(&mut self) -> Result<(), VMError> {
-        let target = ActorID::Hash(self.pop_string_32()?);
-        let (gas, vbytes, _token) = self.pop_gas_bytes_token()?;
+        let target = self.pop_actor_id()?;
+        let gas = self
+            .pop_value()?
+            .to_int253()?
+            .to_u64()
+            .ok_or(VMError::InvalidBitrange)?;
         let refund_predicate = Predicate::opaque(
             curve25519_dalek::ristretto::CompressedRistretto(self.pop_string_32()?),
         );
@@ -2489,14 +2520,13 @@ impl VM {
             anchor,
             payload: args,
             gas,
-            vbytes,
             refund_predicate,
         };
         self.txlog.push(TxEntry::Send(message));
         Ok(())
     }
 
-    /// _args… k gas bytestoken addr_ **call** → _results… k' 1 | 0_
+    /// _args… k gas addr_ **call** → _results… k' 1 | 0_
     ///
     /// Synchronous actor-to-actor call. Re-entry is gated by actor-state
     /// presence: a checked-out callee soft-fails with `0`; otherwise
@@ -2508,14 +2538,21 @@ impl VM {
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<(), VMError> {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
-        let callee = ActorID::Hash(self.pop_string_32()?);
-        let (gas, vbytes, _token) = self.pop_gas_bytes_token()?;
+        let callee = self.pop_actor_id()?.to_canonical();
+        let gas = self
+            .pop_value()?
+            .to_int253()?
+            .to_u64()
+            .ok_or(VMError::InvalidBitrange)?;
         // Debit the grant from the caller (see op_open). A caller that
         // can't afford the grant hard-fails OutOfGas — its own budget
         // is exhausted, not a soft "callee unavailable" marker.
         self.current_call.charge_gas(gas)?;
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
+        if args.iter().any(|v| !v.is_portable()) {
+            return Err(VMError::NonPortableInCall);
+        }
 
         // Pre-frame setup. Any failure here ("cannot enter callee")
         // converts to a `0` failure marker on the caller's stack —
@@ -2527,11 +2564,12 @@ impl VM {
             if self.call_stack.len() >= MAX_CALL_DEPTH {
                 return Err(VMError::CallDepthExceeded);
             }
-            if vbytes != 0 {
-                registry.credit_vbytes(&callee, vbytes, self.block_height)?;
-            }
             let script = registry.load_code(&callee)?;
-            let mem_limit = registry.actor_vbytes(&callee)?.saturating_mul(4);
+            let usage = registry.actor_usage(&callee)?;
+            let capacity = registry.actor_capacity(&callee, self.block_height)?;
+            let mem_limit = usage
+                .max(capacity)
+                .saturating_mul(registry.transient_memory_multiplier());
             let caller = self
                 .current_call
                 .kind
@@ -2568,7 +2606,7 @@ impl VM {
             },
             gas,
             mem_limit,
-            vbytes,
+            0,
         )
         .with_anchor(callee_anchor);
         for v in args {
@@ -2639,6 +2677,7 @@ impl VM {
         // Moves the state back in; errors `SaveWithoutLoad` if the
         // actor isn't checked out (no matching `load`).
         registry.save_state(&actor, state)?;
+        registry.validate_actor_storage(&actor, self.block_height)?;
         // Structural effect. State-machine replay applies these
         // last-write-wins per actor; the merkle leaf hashes
         // `state_root(state)`, while the entry carries the full state
@@ -2665,7 +2704,74 @@ impl VM {
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
         let code = self.pop_value()?.to_string()?.to_bytes_vec();
         registry.set_code(&actor, code.clone())?;
+        registry.validate_actor_storage(&actor, self.block_height)?;
         self.txlog.push(TxEntry::SetCode { actor, code });
+        Ok(())
+    }
+
+    /// _q_ **addstorage** → _debt 1 | 0_. Invalid market requests are
+    /// soft failures; type, context, and host invariant errors are hard.
+    fn op_addstorage(
+        &mut self,
+        registry: Option<&mut dyn ActorRegistry>,
+    ) -> Result<(), VMError> {
+        let actor = ActorID::Hash(self.require_actor()?.to_hash());
+        let request = self.pop_value()?.to_int253()?;
+        let Some(bytes) = request.to_u64() else {
+            self.push_value(Value::Int253(Int253::ZERO));
+            return Ok(());
+        };
+        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
+        let Some(purchase) = registry.purchase_storage(&actor, bytes, self.block_height)? else {
+            self.push_value(Value::Int253(Int253::ZERO));
+            return Ok(());
+        };
+        if purchase.fee_sparks.is_zero() || purchase.fee_sparks.is_negative() {
+            return Err(VMError::StorageArithmeticOverflow);
+        }
+        self.txlog.push(TxEntry::StoragePurchase {
+            actor: actor.clone(),
+            bytes,
+            expiry_height: purchase.expiry_height,
+            fee_sparks: purchase.fee_sparks,
+        });
+        self.push_value(Value::ClearToken(ClearToken::new(
+            -purchase.fee_sparks,
+            FLAME_FLAVOR,
+        )));
+        self.push_value(Value::Int253(Int253::ONE));
+
+        // A provisional constructor starts with no capacity. Once its first
+        // lease is bought, let subsequent instructions use the corresponding
+        // transient-memory allowance.
+        let capacity = registry.actor_capacity(&actor, self.block_height)?;
+        self.current_call.mem_limit = self.current_call.mem_limit.max(
+            capacity.saturating_mul(registry.transient_memory_multiplier()),
+        );
+        Ok(())
+    }
+
+    /// _q_ **quotestorage** → _fee 1 | 0_. Read-only counterpart to
+    /// [`Self::op_addstorage`].
+    fn op_quotestorage(
+        &mut self,
+        registry: Option<&mut dyn ActorRegistry>,
+    ) -> Result<(), VMError> {
+        let actor = self.require_actor()?.clone();
+        let request = self.pop_value()?.to_int253()?;
+        let Some(bytes) = request.to_u64() else {
+            self.push_value(Value::Int253(Int253::ZERO));
+            return Ok(());
+        };
+        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
+        match registry.quote_storage(&actor, bytes, self.block_height)? {
+            Some(quote) if !quote.fee_sparks.is_zero() && !quote.fee_sparks.is_negative() => {
+                self.push_value(Value::Int253(quote.fee_sparks));
+                self.push_value(Value::Int253(Int253::ONE));
+            }
+            Some(_) => return Err(VMError::StorageArithmeticOverflow),
+            None => self.push_value(Value::Int253(Int253::ZERO)),
+        }
         Ok(())
     }
 
@@ -2742,17 +2848,35 @@ impl VM {
         Ok(())
     }
 
-    /// **bytes** → _n_  Pushes the current actor's remaining
-    /// persistent vbyte balance. Internal-only (requires a registry
-    /// and an actor identity).
-    fn op_bytes(
+    /// **usage** → _n_.
+    fn op_usage(
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<(), VMError> {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let actor = self.require_actor()?;
-        let balance = registry.actor_vbytes(actor)?;
-        self.push_value(Value::Int253(Int253::from(balance)));
+        let usage = registry.actor_usage(actor)?;
+        self.push_value(Value::Int253(Int253::from(usage)));
+        Ok(())
+    }
+
+    /// _height_ **capacity** → _bytes_.
+    fn op_capacity(
+        &mut self,
+        registry: Option<&mut dyn ActorRegistry>,
+    ) -> Result<(), VMError> {
+        let actor = self.require_actor()?.clone();
+        let height = self
+            .pop_value()?
+            .to_int253()?
+            .to_u64()
+            .ok_or(VMError::InvalidBitrange)?;
+        if height < self.block_height {
+            return Err(VMError::StorageHeightInPast);
+        }
+        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
+        let capacity = registry.actor_capacity(&actor, height)?;
+        self.push_value(Value::Int253(Int253::from(capacity)));
         Ok(())
     }
 

@@ -13,7 +13,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
-use types::{BlockHash, FlameNetwork};
+use flamechain::{BlockHash, FlameNetwork};
 
 use crate::MintingProof;
 use crate::mint_proofs::indexer::worker::IndexerWorker;

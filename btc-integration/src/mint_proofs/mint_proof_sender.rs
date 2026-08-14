@@ -12,7 +12,7 @@ use corepc_client::{
 use ed25519_dalek::VerifyingKey;
 use flamevm::Predicate;
 use thiserror::Error;
-use types::{BlockHash, FlameNetwork};
+use flamechain::{BlockHash, FlameNetwork};
 
 #[derive(Debug, Error)]
 pub enum MintProofSendError {

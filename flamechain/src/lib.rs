@@ -1,5 +1,17 @@
 use std::fmt;
 
+pub mod block;
+pub mod mempool;
+pub mod storage;
+pub mod utreexo;
+
+pub use block::{
+    AppliedBlock, Block, BlockHeader, BlockLimits, BlockTx, Blockchain, ChainError, ChainParams,
+    ExecutionKind, ExecutionRecord, ReorgOutcome, StateCommitment,
+};
+pub use mempool::{Mempool, MempoolEntry, MempoolError, MempoolPolicy, RebaseReport};
+pub use storage::{Lease, SPARKS_PER_FLAME, StorageError, StorageParams};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum FlameNetwork {

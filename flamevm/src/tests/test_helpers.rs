@@ -13,22 +13,17 @@
 // "defined multiple times".
 pub use super::super::*;
 
-pub(crate) use super::mem_registry::{MemEnv, MemRegistry};
+pub(crate) use super::mem_registry::MemRegistry;
 
+pub use crate::{
+    CheckedFee, CommitmentWitness, Constraint, Expression, Instruction, PredicateTree, Prover,
+    Script, ScriptBuilder, SecretConstraint, Token, Value, Variable, Verifier, WideToken,
+    FLAME_FLAVOR, MAX_FEE,
+};
 pub use bulletproofs::PedersenGens;
 pub use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
-pub use crate::{
-    Prover, Verifier,
-    ScriptBuilder, Script,
-    Token, WideToken, Value,
-    PredicateTree, VbytePool,
-    Instruction,
-    BYTES_FLAVOR, CheckedFee, FLAME_FLAVOR, MAX_FEE,
-    CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,
-};
 
-/// Registry whose `resolve_method` always returns the same script and
-/// whose actors have zero vbytes.
+/// Registry whose `load_code` always returns the same script.
 pub(crate) struct StubRegistry {
     pub script: Vec<u8>,
 }
@@ -42,8 +37,34 @@ impl ActorRegistry for StubRegistry {
         unimplemented!("StubRegistry::set_code — use MemRegistry")
     }
 
-    fn actor_vbytes(&self, _actor: &ActorID) -> Result<u64, VMError> {
+    fn actor_usage(&self, _actor: &ActorID) -> Result<u64, VMError> {
         Ok(0)
+    }
+
+    fn actor_capacity(&self, _actor: &ActorID, _height: u64) -> Result<u64, VMError> {
+        Ok(0)
+    }
+
+    fn quote_storage(
+        &self,
+        _actor: &ActorID,
+        _bytes: u64,
+        _height: u64,
+    ) -> Result<Option<crate::actor::StoragePurchase>, VMError> {
+        Ok(None)
+    }
+
+    fn purchase_storage(
+        &mut self,
+        _actor: &ActorID,
+        _bytes: u64,
+        _height: u64,
+    ) -> Result<Option<crate::actor::StoragePurchase>, VMError> {
+        Ok(None)
+    }
+
+    fn validate_actor_storage(&self, _actor: &ActorID, _height: u64) -> Result<(), VMError> {
+        Ok(())
     }
 
     fn exists(&self, _actor: &ActorID) -> bool {
@@ -57,11 +78,7 @@ impl ActorRegistry for StubRegistry {
     fn load_state(&mut self, _id: &ActorID) -> Result<Value, VMError> {
         unimplemented!("StubRegistry::load_state — use MemRegistry for state-touching tests")
     }
-    fn save_state(
-        &mut self,
-        _id: &ActorID,
-        _state: Value,
-    ) -> Result<(), VMError> {
+    fn save_state(&mut self, _id: &ActorID, _state: Value) -> Result<(), VMError> {
         unimplemented!("StubRegistry::save_state — use MemRegistry for state-touching tests")
     }
     fn push_checkpoint(&mut self) {
@@ -70,37 +87,19 @@ impl ActorRegistry for StubRegistry {
     fn pop_checkpoint_commit(&mut self) {}
     fn pop_checkpoint_rollback(&mut self) {}
 
-    fn commit_tx_destructions(&mut self, _current_height: u64) -> usize {
-        0
-    }
-    fn deploy(
-        &mut self,
-        _id: ActorID,
-        _code: Vec<u8>,
-        _state: Value,
-        _vbytes: u64,
-        _height: u64,
-    ) -> Result<(), VMError> {
-        unimplemented!("StubRegistry::deploy — use MemRegistry")
-    }
-    fn credit_vbytes(
-        &mut self,
-        _id: &ActorID,
-        _amount: u64,
-        _current_height: u64,
-    ) -> Result<(), VMError> {
-        unimplemented!("StubRegistry::credit_vbytes — use MemRegistry")
-    }
-    fn tick_block(&mut self, _height: u64) -> Vec<ActorID> {
+    fn commit_tx_destructions(&mut self) -> Vec<ActorID> {
         Vec::new()
     }
-    fn vbyte_pool(&self) -> &VbytePool {
-        unimplemented!("StubRegistry::vbyte_pool — use MemRegistry")
+    fn deploy(&mut self, _id: ActorID, _code: Vec<u8>, _state: Value) -> Result<(), VMError> {
+        unimplemented!("StubRegistry::deploy — use MemRegistry")
     }
 }
 
 pub(crate) fn dummy_header() -> TxHeader {
-    TxHeader { version: 1, locktime: 0 }
+    TxHeader {
+        version: 1,
+        locktime: 0,
+    }
 }
 
 pub(crate) fn dummy_message(gas: u64) -> Message {
@@ -110,7 +109,6 @@ pub(crate) fn dummy_message(gas: u64) -> Message {
         anchor: Anchor([0u8; 32]),
         payload: Vec::new(),
         gas,
-        vbytes: 0,
         // Test fixture: NUMS-unspendable predicate as the refund
         // sink. No real bounce path exercised by the tests that
         // call `dummy_message`; this just satisfies the field.
@@ -126,7 +124,16 @@ pub(crate) fn vm_with_script(script: Vec<u8>) -> VM {
     };
     VM::new(
         dummy_header(),
-        CallFrame::new(ScriptBuilder::parse(&script).expect("script parses").into_instructions(), kind, 1_000_000, 0, 0).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(
+            ScriptBuilder::parse(&script)
+                .expect("script parses")
+                .into_instructions(),
+            kind,
+            1_000_000,
+            0,
+            0,
+        )
+        .with_anchor(Anchor([0u8; 32])),
     )
 }
 
@@ -195,7 +202,10 @@ pub(crate) fn assert_stack(mut builder: ScriptBuilder, expected_top_first: &[Int
 
 /// `i64` convenience over [`assert_stack`].
 pub(crate) fn assert_stack_ints(builder: ScriptBuilder, expected_top_first: &[i64]) {
-    let v: Vec<Int253> = expected_top_first.iter().map(|&x| Int253::from(x)).collect();
+    let v: Vec<Int253> = expected_top_first
+        .iter()
+        .map(|&x| Int253::from(x))
+        .collect();
     assert_stack(builder, &v);
 }
 
@@ -243,7 +253,6 @@ pub(crate) fn msg_to(actor: ActorID) -> Message {
         anchor: Anchor([0u8; 32]),
         payload: Vec::new(),
         gas: 1_000_000,
-        vbytes: 0,
         refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     }
 }
@@ -251,7 +260,10 @@ pub(crate) fn msg_to(actor: ActorID) -> Message {
 /// Like [`msg_to`] but carries a single top-of-stack selector arg
 /// (ADR 0020 dispatch convention).
 pub(crate) fn msg_with_sel(actor: ActorID, sel: u64) -> Message {
-    Message { payload: vec![Value::Int253(Int253::from(sel))], ..msg_to(actor) }
+    Message {
+        payload: vec![Value::Int253(Int253::from(sel))],
+        ..msg_to(actor)
+    }
 }
 
 /// Deploys an actor whose code is `recv` (id derived from the code, a
@@ -259,7 +271,8 @@ pub(crate) fn msg_with_sel(actor: ActorID, sel: u64) -> Message {
 /// Bucket-C fixture: deploy, then `deliver` and read the effect log.
 pub(crate) fn deploy_actor(reg: &mut MemRegistry, recv: Vec<u8>) -> ActorID {
     let id = ActorID::Hash(ActorID::Constructor(recv.clone()).to_hash());
-    reg.deploy(id.clone(), recv, empty_state(), 1_000_000, 0).expect("deploy");
+    reg.deploy(id.clone(), recv, empty_state(), 1_000_000)
+        .expect("deploy");
     id
 }
 
@@ -270,8 +283,6 @@ pub(crate) fn call_to(target: &ActorID) -> ScriptBuilder {
     ScriptBuilder::new()
         .push_int(0u64) // k = 0
         .push_int(50_000u64) // gas
-        .push_int(BYTES_FLAVOR)
-        .pushtoken() // zero-byte token
         .push_str(String::from(target.to_hash().to_vec()))
         .call()
 }
@@ -283,8 +294,6 @@ pub(crate) fn call_with_sel(target: &ActorID, sel: u64) -> ScriptBuilder {
         .push_int(sel) // selector arg (top)
         .push_int(1u64) // k = 1
         .push_int(50_000u64) // gas
-        .push_int(BYTES_FLAVOR)
-        .pushtoken() // zero-byte token
         .push_str(String::from(target.to_hash().to_vec()))
         .call()
 }
@@ -339,7 +348,15 @@ pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
     };
-    let child = CallFrame::new(ScriptBuilder::parse(&script).expect("script parses").into_instructions(), child_kind, 500, 0, 0);
+    let child = CallFrame::new(
+        ScriptBuilder::parse(&script)
+            .expect("script parses")
+            .into_instructions(),
+        child_kind,
+        500,
+        0,
+        0,
+    );
     let mut vm = VM::new(dummy_header(), parent);
     let p = mem::replace(&mut vm.current_call, child);
     vm.call_stack.push(p);
@@ -418,12 +435,7 @@ pub(crate) fn build_multi_leaf_predicate(
     let secret = Scalar::from(internal_secret);
     let x_point = RISTRETTO_BASEPOINT_TABLE * &secret;
     let internal_key = x_point.compress();
-    let tree = PredicateTree::new(
-        Some(internal_key),
-        programs,
-        TEST_BLINDING_KEY,
-    )
-    .unwrap();
+    let tree = PredicateTree::new(Some(internal_key), programs, TEST_BLINDING_KEY).unwrap();
     let cp = tree.taproot_proof_for(program_index).unwrap();
     (tree, cp)
 }
@@ -444,7 +456,16 @@ pub(crate) fn vm_internal_with_actor(script: Vec<u8>, actor: ActorID) -> VM {
     };
     VM::new(
         dummy_header(),
-        CallFrame::new(ScriptBuilder::parse(&script).expect("script parses").into_instructions(), kind, 1_000_000, 0, 0).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(
+            ScriptBuilder::parse(&script)
+                .expect("script parses")
+                .into_instructions(),
+            kind,
+            1_000_000,
+            0,
+            0,
+        )
+        .with_anchor(Anchor([0u8; 32])),
     )
 }
 
@@ -458,10 +479,7 @@ pub(crate) fn make_stub_delegate() -> StubDelegate {
 
 /// Drives `vm.step_external(delegate)` until done or error,
 /// returning the error if any. Doesn't call finalize.
-pub(crate) fn drive_external(
-    vm: &mut VM,
-    delegate: &mut StubDelegate,
-) -> Result<(), VMError> {
+pub(crate) fn drive_external(vm: &mut VM, delegate: &mut StubDelegate) -> Result<(), VMError> {
     while vm.step_external(delegate)? {}
     Ok(())
 }
@@ -471,7 +489,15 @@ pub(crate) fn drive_external(
 pub(crate) fn vm_external_with_script(script: Vec<u8>) -> VM {
     VM::new(
         dummy_header(),
-        CallFrame::new(ScriptBuilder::parse(&script).expect("script parses").into_instructions(), CallKind::ExternalRoot, 1_000_000, 0, 0),
+        CallFrame::new(
+            ScriptBuilder::parse(&script)
+                .expect("script parses")
+                .into_instructions(),
+            CallKind::ExternalRoot,
+            1_000_000,
+            0,
+            0,
+        ),
     )
 }
 
@@ -523,7 +549,15 @@ pub(crate) fn decode_cell_dropping_ok(bytes: &[u8]) -> Result<(), VMError> {
 pub(crate) fn run_external_workflow(script: Vec<u8>) -> VM {
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(ScriptBuilder::parse(&script).expect("script parses").into_instructions(), CallKind::ExternalRoot, 1_000_000, 0, 0),
+        CallFrame::new(
+            ScriptBuilder::parse(&script)
+                .expect("script parses")
+                .into_instructions(),
+            CallKind::ExternalRoot,
+            1_000_000,
+            0,
+            0,
+        ),
     );
     let mut delegate = StubDelegate::new();
     while vm.step_external(&mut delegate).expect("step_external ok") {}
@@ -541,9 +575,7 @@ pub(crate) struct StubDelegate {
 impl StubDelegate {
     pub(crate) fn new() -> Self {
         Self {
-            cs: bulletproofs::r1cs::Verifier::new(
-                merlin::Transcript::new(b"flamevm.test.stub"),
-            ),
+            cs: bulletproofs::r1cs::Verifier::new(merlin::Transcript::new(b"flamevm.test.stub")),
             batch: musig::BatchVerifier::new(rand::thread_rng()),
         }
     }
@@ -567,7 +599,6 @@ impl Delegate for StubDelegate {
     ) -> Result<(CompressedRistretto, bulletproofs::r1cs::Variable), VMError> {
         unreachable!("StubDelegate::commit_variable should not be called in Phase-10 tests");
     }
-
 }
 
 /// Helper: build a VM in external context with a witness-bearing
@@ -610,9 +641,7 @@ pub(crate) fn signing_keypair(secret: u64) -> (CompressedRistretto, Scalar) {
 /// Helper: build a script that consumes one cell via input+signtx
 /// and then no-ops the popped payload + count. Returns the script
 /// bytes and the consumed cell's id.
-pub(crate) fn make_signtx_script_with_cell(
-    vk: CompressedRistretto,
-) -> (Vec<u8>, CellID) {
+pub(crate) fn make_signtx_script_with_cell(vk: CompressedRistretto) -> (Vec<u8>, CellID) {
     let cell = Cell::new(
         Predicate::opaque(vk),
         Anchor([0x42; 32]),
@@ -622,9 +651,9 @@ pub(crate) fn make_signtx_script_with_cell(
     let script = ScriptBuilder::new()
         .push_str(String::from(encode_cell_to_bytes(&cell)))
         .input()
-        .signtx()    // pushes 1 Int253 (payload) + count 1
-        .drop_()     // drop count
-        .drop_()     // drop payload Int253
+        .signtx() // pushes 1 Int253 (payload) + count 1
+        .drop_() // drop count
+        .drop_() // drop payload Int253
         .to_bytecode();
     (script, cell_id)
 }
@@ -639,14 +668,8 @@ pub(crate) fn make_open_token(
     qty_blind: u64,
     flv_blind: u64,
 ) -> Token {
-    let q = Commitment::blinded_with_factor(
-        Int253::from(qty_value),
-        Scalar::from(qty_blind),
-    );
-    let f = Commitment::blinded_with_factor(
-        Int253::from(flv_value),
-        Scalar::from(flv_blind),
-    );
+    let q = Commitment::blinded_with_factor(Int253::from(qty_value), Scalar::from(qty_blind));
+    let f = Commitment::blinded_with_factor(Int253::from(flv_value), Scalar::from(flv_blind));
     Token::new(q, f)
 }
 
@@ -821,32 +844,16 @@ pub(crate) fn build_confidential_nm_program(
 }
 
 /// Build the Open `(qty, flv)` commitments for an input spec.
-pub(crate) fn open_commitments(
-    inp: &NMInputSpec,
-) -> (Commitment, Commitment) {
-    let q = Commitment::blinded_with_factor(
-        Int253::from(inp.qty),
-        Scalar::from(inp.qty_blind),
-    );
-    let f = Commitment::blinded_with_factor(
-        Int253::from(inp.flv),
-        Scalar::from(inp.flv_blind),
-    );
+pub(crate) fn open_commitments(inp: &NMInputSpec) -> (Commitment, Commitment) {
+    let q = Commitment::blinded_with_factor(Int253::from(inp.qty), Scalar::from(inp.qty_blind));
+    let f = Commitment::blinded_with_factor(Int253::from(inp.flv), Scalar::from(inp.flv_blind));
     (q, f)
 }
 
 /// Build the Open `(qty, flv)` commitments for an output spec.
-pub(crate) fn open_commitments_for_output(
-    out: &NMOutputSpec,
-) -> (Commitment, Commitment) {
-    let q = Commitment::blinded_with_factor(
-        Int253::from(out.qty),
-        Scalar::from(out.qty_blind),
-    );
-    let f = Commitment::blinded_with_factor(
-        Int253::from(out.flv),
-        Scalar::from(out.flv_blind),
-    );
+pub(crate) fn open_commitments_for_output(out: &NMOutputSpec) -> (Commitment, Commitment) {
+    let q = Commitment::blinded_with_factor(Int253::from(out.qty), Scalar::from(out.qty_blind));
+    let f = Commitment::blinded_with_factor(Int253::from(out.flv), Scalar::from(out.flv_blind));
     (q, f)
 }
 
@@ -864,9 +871,7 @@ pub(crate) fn push_taproot_proof_to_program(
             .push_str(String::from(h.to_vec()))
             .push_int(i as u64);
     }
-    program = program
-        .push_int(cp.neighbors.len() as u64)
-        .dict();
+    program = program.push_int(cp.neighbors.len() as u64).dict();
     program = program
         .push_str(String::from(cp.position.clone()))
         .push_str(String::from(cp.program.clone()));
@@ -894,11 +899,8 @@ pub(crate) fn build_input_cell(inp: &NMInputSpec) -> (Cell, TaprootProof) {
     // runs in an isolated frame, so the leaf must explicitly return
     // its single-Token payload to the caller.
     let leaf = vec![0x01, 0xa4];
-    let tree = PredicateTree::scripts_only(
-        vec![leaf],
-        input_blinding_for(inp),
-    )
-    .expect("scripts_only tree builds");
+    let tree = PredicateTree::scripts_only(vec![leaf], input_blinding_for(inp))
+        .expect("scripts_only tree builds");
     let cp = tree.taproot_proof_for(0).expect("taproot_proof for leaf 0");
     let pred_point = tree.point;
     let cell = Cell::new(
@@ -929,11 +931,7 @@ pub(crate) fn input_blinding_for(inp: &NMInputSpec) -> [u8; 32] {
 /// has the predicate point + Token qty/flv commitment points
 /// the spec asked for. Catches the predicate/token-pairing
 /// inversion that a naive `txlog.len()` check would miss.
-pub(crate) fn assert_nm_txlog(
-    result: &TxResult,
-    inputs: &[NMInputSpec],
-    outputs: &[NMOutputSpec],
-) {
+pub(crate) fn assert_nm_txlog(result: &TxResult, inputs: &[NMInputSpec], outputs: &[NMOutputSpec]) {
     // Length check first — keeps the messages short on shape
     // bugs (wrong count) before walking entry-by-entry.
     assert_eq!(
@@ -949,10 +947,9 @@ pub(crate) fn assert_nm_txlog(
     for (i, inp) in inputs.iter().enumerate() {
         let expected_id = build_input_cell(inp).0.id();
         match &result.txlog[1 + i] {
-            TxEntry::Input(id) => assert_eq!(
-                *id, expected_id,
-                "txlog[{}] input cell_id mismatch", 1 + i
-            ),
+            TxEntry::Input(id) => {
+                assert_eq!(*id, expected_id, "txlog[{}] input cell_id mismatch", 1 + i)
+            }
             _ => panic!("txlog[{}] must be Input", 1 + i),
         }
     }
@@ -978,9 +975,9 @@ pub(crate) fn assert_nm_txlog(
     // running anchor is `Anchor(last_input.id()).split().1`. Each
     // output then splits it again: left → output.anchor, right →
     // next iteration's parent.
-    let last_input_id = build_input_cell(
-        inputs.last().expect("at least one input")
-    ).0.id();
+    let last_input_id = build_input_cell(inputs.last().expect("at least one input"))
+        .0
+        .id();
     let (_, mut expected_anchor) = Anchor(last_input_id).split();
     for (j, out) in outputs.iter().enumerate() {
         let expected_pred = output_predicate_point(out.predicate_tag);
@@ -992,7 +989,8 @@ pub(crate) fn assert_nm_txlog(
                     c.predicate.to_point(),
                     expected_pred,
                     "output[{}] predicate mismatch (idx {})",
-                    j, idx
+                    j,
+                    idx
                 );
                 // Split the running parent anchor; the left half is
                 // what this output's `anchor` field commits to, the
@@ -1025,9 +1023,7 @@ pub(crate) fn assert_nm_txlog(
                             j
                         );
                     }
-                    _ => panic!(
-                        "output[{}] payload[0] must be Token", j
-                    ),
+                    _ => panic!("output[{}] payload[0] must be Token", j),
                 }
             }
             _ => panic!("txlog[{}] must be Output", idx),
@@ -1058,21 +1054,19 @@ pub(crate) fn assert_nm_txlog(
 /// need to be a real cap (likely something like `4 * tx_vbytes`)
 /// — every confidential test would otherwise hit
 /// `MemoryCapExceeded` on the first allocation.
-pub(crate) fn run_confidential_nm(
-    inputs: &[NMInputSpec],
-    outputs: &[NMOutputSpec],
-) -> TxResult {
+pub(crate) fn run_confidential_nm(inputs: &[NMInputSpec], outputs: &[NMOutputSpec]) -> TxResult {
     let pc_gens = PedersenGens::default();
     let program = build_confidential_nm_program(inputs, outputs);
     let prover_result =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
-            .expect("prove ok");
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0).expect("prove ok");
     let txid_p = prover_result.txid;
     // The prover-side TxResult already exposes the full txlog —
     // assert against it so any divergence between prover and
     // verifier views is independently visible.
     assert_nm_txlog(&prover_result, inputs, outputs);
-    let TxResult { bytecode, proof, .. } = prover_result;
+    let TxResult {
+        bytecode, proof, ..
+    } = prover_result;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     let result = Verifier::verify(

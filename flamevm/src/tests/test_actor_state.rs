@@ -4,17 +4,16 @@
 
 use super::test_helpers::*;
 
-use crate::{empty_state, ActorID, Dict, Env, Int253, Limits, VBYTE_MATURITY_BLOCKS};
+use crate::{empty_state, ActorID, Dict, Int253, StoragePurchase};
 
 /// Builds an empty state with a single `recv` method that runs the
 /// caller-supplied bytes. Returns (state, id).
-fn deploy_with_recv(reg: &mut MemRegistry, recv: Vec<u8>, vbytes: u64, height: u64)
-    -> ActorID
-{
+fn deploy_with_recv(reg: &mut MemRegistry, recv: Vec<u8>, capacity: u64, _height: u64) -> ActorID {
     // The recv bytes ARE the actor's code; state starts empty. Id is
     // derived from the code (stand-in for the real constructor).
     let id = ActorID::Hash(ActorID::Constructor(recv.clone()).to_hash());
-    reg.deploy(id.clone(), recv, empty_state(), vbytes, height).expect("deploy");
+    reg.deploy(id.clone(), recv, empty_state(), capacity)
+        .expect("deploy");
     id
 }
 
@@ -36,84 +35,81 @@ fn vm_for(actor: ActorID, script: Vec<u8>) -> VM {
             1_000_000,
             0,
             0,
-        ).with_anchor(Anchor([0u8; 32])),
+        )
+        .with_anchor(Anchor([0u8; 32])),
     )
 }
 
 /// Facade roundtrip (internal): deploy an actor with a `recv`, run a
-/// Message through `Message::execute_tx` against a read-only `MemEnv`,
-/// then `apply_changes`. Exercises lifecycle step 4.
+/// Message through the direct checkpointed internal-execution facade.
 #[test]
 fn facade_internal_execute_tx_roundtrip() {
     let mut reg = MemRegistry::new();
     let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
-    let mut env = MemEnv { registry: reg, height: 0 };
+    let mut reg = reg;
     let msg = Message {
         target: id,
         caller: None,
         anchor: Anchor([1u8; 32]),
         payload: Vec::new(),
         gas: 1_000,
-        vbytes: 0,
         refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     };
     let itx = msg
-        .execute_tx(Limits { gas: 1_000_000, mem: 0 }, &env)
+        .execute_tx(&mut reg, &BlockContext { height: 0 })
         .expect("execute_tx");
     // Header + Receive are emitted before the recv body runs.
-    assert!(itx.log().entries().len() >= 2, "header + receive at minimum");
-    assert!(itx.metrics().gas_used > 0, "internal metering reported via TxMetrics");
-    // env was read-only during execution; apply effects afterwards (the
-    // nop recv saves no state, so this replays nothing).
-    env.apply_changes(itx.log());
+    assert!(
+        itx.log().entries().len() >= 2,
+        "header + receive at minimum"
+    );
+    assert!(
+        itx.metrics().gas_used > 0,
+        "internal metering reported via TxMetrics"
+    );
 }
 
-/// Deploy-on-first-delivery edge: a second message to the same
-/// Constructor-form target deploys only once; subsequent deliveries
-/// credit their byte-token quantity to the existing actor.
+/// A provisional constructor can buy its own capacity, and later constructor-
+/// form deliveries reuse the same actor instead of redeploying it.
 #[test]
-fn second_constructor_send_does_not_redeploy() {
+fn constructor_buys_storage_and_is_reused() {
     let mut reg = MemRegistry::new();
-    let code = ScriptBuilder::new().nop().to_bytecode();
+    reg.set_storage_quote(Some(StoragePurchase {
+        fee_sparks: Int253::from(77u64),
+        expiry_height: 52_500,
+    }));
+    let code = ScriptBuilder::new()
+        .push_int(1_024u64)
+        .addstorage()
+        .drop_()
+        .merge()
+        .drop_()
+        .drop_()
+        .to_bytecode();
     let target = ActorID::Constructor(code.clone());
-    let canonical = ActorID::Hash(target.to_hash());
-    let mk = |vbytes| Message {
+    let canonical = target.to_canonical();
+    let mk = || Message {
         target: target.clone(),
         caller: None,
         anchor: Anchor([0x07; 32]),
-        payload: Vec::new(),
+        payload: vec![Value::ClearToken(ClearToken::new(
+            Int253::from(77u64),
+            FLAME_FLAVOR,
+        ))],
         gas: 10_000,
-        vbytes,
         refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     };
     let block = BlockContext { height: 1 };
-    VM::execute_internal(dummy_header(), mk(777), &mut reg, &block).expect("first");
-    VM::execute_internal(dummy_header(), mk(500), &mut reg, &block).expect("second");
+    let first = VM::execute_internal(dummy_header(), mk(), &mut reg, &block).unwrap();
+    let second = VM::execute_internal(dummy_header(), mk(), &mut reg, &block).unwrap();
     let a = reg.actor(&canonical).expect("deployed once");
-    assert_eq!(a.vbytes, 1_277, "second delivery credits the existing actor");
     assert_eq!(a.code, code);
-}
-
-/// Deploy-on-first-delivery edge: a zero-vbyte constructor send still
-/// deploys (with an empty storage budget).
-#[test]
-fn constructor_send_with_zero_vbytes_deploys() {
-    let mut reg = MemRegistry::new();
-    let code = ScriptBuilder::new().nop().to_bytecode();
-    let target = ActorID::Constructor(code.clone());
-    let msg = Message {
-        target: target.clone(),
-        caller: None,
-        anchor: Anchor([0x08; 32]),
-        payload: Vec::new(),
-        gas: 10_000,
-        vbytes: 0,
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-    };
-    let block = BlockContext { height: 0 };
-    VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("deploy+run");
-    let a = reg.actor(&ActorID::Hash(target.to_hash())).expect("deployed");
-    assert_eq!(a.vbytes, 0);
+    assert_eq!(a.capacity, 2_048);
+    for result in [first, second] {
+        assert!(result.txlog.iter().any(
+            |entry| matches!(entry, TxEntry::StoragePurchase { actor, .. } if actor == &canonical)
+        ));
+    }
 }
 
 #[test]
@@ -170,7 +166,9 @@ fn load_in_external_root_errors_actor_context() {
             0,
         ),
     );
-    let err = vm.step_internal_with_registry(&mut reg).expect_err("must error");
+    let err = vm
+        .step_internal_with_registry(&mut reg)
+        .expect_err("must error");
     assert!(matches!(err, VMError::OpcodeRequiresActorContext));
 }
 
@@ -195,7 +193,9 @@ fn second_load_errors_actor_empty() {
     let script = ScriptBuilder::new().load().load().to_bytecode();
     let mut vm = vm_for(id, script);
     assert!(vm.step_internal_with_registry(&mut reg).expect("first"));
-    let err = vm.step_internal_with_registry(&mut reg).expect_err("must error");
+    let err = vm
+        .step_internal_with_registry(&mut reg)
+        .expect_err("must error");
     assert!(matches!(err, VMError::ActorEmpty));
 }
 
@@ -207,24 +207,10 @@ fn load_against_checked_out_actor_errors() {
     reg.actor_mut(&id).expect("present").state = None;
 
     let mut vm = vm_for(id, ScriptBuilder::new().load().to_bytecode());
-    let err = vm.step_internal_with_registry(&mut reg).expect_err("must error");
+    let err = vm
+        .step_internal_with_registry(&mut reg)
+        .expect_err("must error");
     assert!(matches!(err, VMError::ActorEmpty));
-}
-
-#[test]
-fn load_against_frozen_actor_errors() {
-    let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
-    // Force-freeze the actor.
-    {
-        let a = reg.actor_mut(&id).expect("present");
-        a.vbytes = 0;
-        a.frozen_since = Some(10);
-    }
-
-    let mut vm = vm_for(id, ScriptBuilder::new().load().to_bytecode());
-    let err = vm.step_internal_with_registry(&mut reg).expect_err("must error");
-    assert!(matches!(err, VMError::ActorFrozen));
 }
 
 #[test]
@@ -234,7 +220,11 @@ fn save_without_load_errors() {
 
     // Script: push:0, dict, save. Save runs without a prior
     // load → SaveWithoutLoad error.
-    let script = ScriptBuilder::new().push_int(0u64).dict().save().to_bytecode();
+    let script = ScriptBuilder::new()
+        .push_int(0u64)
+        .dict()
+        .save()
+        .to_bytecode();
     let mut vm = vm_for(id, script);
     // 2 instructions before save: pushint8(0), dict.
     for i in 0..2 {
@@ -262,24 +252,26 @@ fn save_accepts_arbitrary_portable_dict_shape() {
     reg.actor_mut(&id).expect("present").state = None;
 
     // Script: push:0; dict; save. Empty Dict, no wrapper shape.
-    let script = ScriptBuilder::new().push_int(0u64).dict().save().to_bytecode();
+    let script = ScriptBuilder::new()
+        .push_int(0u64)
+        .dict()
+        .save()
+        .to_bytecode();
     let mut vm = vm_for(id, script);
     for _ in 0..3 {
         vm.step_internal_with_registry(&mut reg).expect("step ok");
     }
     // Save succeeded; an ActorSave entry is in the txlog.
-    let save_count = vm.txlog.iter()
+    let save_count = vm
+        .txlog
+        .iter()
         .filter(|e| matches!(e, TxEntry::ActorSave { .. }))
         .count();
     assert_eq!(save_count, 1);
 }
 
 #[test]
-fn load_then_dismantle_self_destructs_and_queues_vbytes() {
-    // Self-destruct end-to-end: recv `load`s its (droppable) state and
-    // `drop`s it — explicitly destroying the state recursively leaves
-    // the actor empty, which execute_internal's tx-end hook reaps,
-    // queuing its vbytes for release at height + maturity.
+fn load_then_dismantle_emits_actor_destroy() {
     let mut reg = MemRegistry::new();
     let id = deploy_with_recv(
         &mut reg,
@@ -296,14 +288,18 @@ fn load_then_dismantle_self_destructs_and_queues_vbytes() {
         anchor: Anchor([0x07; 32]),
         payload: Vec::new(),
         gas: 1_000_000,
-        vbytes: 0,
         refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     };
-    VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("ok");
+    let result = VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("ok");
 
-    assert!(!reg.exists(&id), "dismantled state self-destructs the actor");
-    let release_at = 100 + VBYTE_MATURITY_BLOCKS;
-    assert_eq!(reg.vbyte_pool().maturing.get(&release_at).copied().unwrap_or(0), 10_000);
+    assert!(
+        !reg.exists(&id),
+        "dismantled state self-destructs the actor"
+    );
+    assert!(result
+        .txlog
+        .iter()
+        .any(|entry| matches!(entry, TxEntry::ActorDestroy { actor } if actor == &id)));
 }
 
 /// Conservation: a non-zero token in actor state survives a
@@ -321,7 +317,7 @@ fn token_survives_load_save_roundtrip_exactly_once() {
     let state = Value::Dict(d);
     let recv = ScriptBuilder::new().load().save().to_bytecode();
     let id = ActorID::Hash(ActorID::Constructor(recv.clone()).to_hash());
-    reg.deploy(id.clone(), recv, state, 10_000, 0).expect("deploy");
+    reg.deploy(id.clone(), recv, state, 10_000).expect("deploy");
 
     let msg = Message {
         target: id.clone(),
@@ -329,7 +325,6 @@ fn token_survives_load_save_roundtrip_exactly_once() {
         anchor: Anchor([0x11; 32]),
         payload: Vec::new(),
         gas: 100_000,
-        vbytes: 0,
         refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     };
     let block = BlockContext { height: 0 };
@@ -349,35 +344,6 @@ fn token_survives_load_save_roundtrip_exactly_once() {
         }
         other => panic!("unexpected state shape: {:?}", other),
     }
-}
-
-/// Deploy-on-first-delivery: a message addressed to a Constructor-form
-/// id instantiates the actor (code = constructor bytes, empty state,
-/// funded by the message's vbytes), then dispatches into it.
-#[test]
-fn constructor_send_deploys_then_runs() {
-    let mut reg = MemRegistry::new();
-    let code = ScriptBuilder::new().nop().to_bytecode();
-    let target = ActorID::Constructor(code.clone());
-    let canonical = ActorID::Hash(target.to_hash());
-    assert!(!reg.exists(&target));
-
-    let msg = Message {
-        target: target.clone(),
-        caller: None,
-        anchor: Anchor([0x07; 32]),
-        payload: Vec::new(),
-        gas: 10_000,
-        vbytes: 777,
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-    };
-    let block = BlockContext { height: 42 };
-    VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("deploy+run");
-
-    let a = reg.actor(&canonical).expect("actor deployed");
-    assert_eq!(a.code, code);
-    assert_eq!(a.vbytes, 777);
-    assert_eq!(a.last_activation_height, 42);
 }
 
 /// A Hash-form target that doesn't exist still fails — only the
@@ -407,7 +373,7 @@ fn dismantle_token_bearing_state_requires_retire() {
     );
     let state = Value::Dict(state_dict);
     let id = ActorID::Hash([0x09; 32]);
-    reg.deploy(id.clone(), recv, state, 10_000, 0).expect("deploy");
+    reg.deploy(id.clone(), recv, state, 10_000).expect("deploy");
 
     let block = BlockContext { height: 100 };
     let msg = Message {
@@ -416,7 +382,6 @@ fn dismantle_token_bearing_state_requires_retire() {
         anchor: Anchor([0x09; 32]),
         payload: Vec::new(),
         gas: 1_000_000,
-        vbytes: 0,
         refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     };
     let err = VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect_err("must error");
@@ -430,7 +395,12 @@ fn load_without_discharge_errors_stack_not_clean() {
     // Dict is left on the stack at frame end → StackNotClean (rolled
     // back). A missing `save` is never a silent self-destruct.
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().load().to_bytecode(), 10_000, 0);
+    let id = deploy_with_recv(
+        &mut reg,
+        ScriptBuilder::new().load().to_bytecode(),
+        10_000,
+        0,
+    );
     let block = BlockContext { height: 100 };
     let msg = Message {
         target: id.clone(),
@@ -438,7 +408,6 @@ fn load_without_discharge_errors_stack_not_clean() {
         anchor: Anchor([0x08; 32]),
         payload: Vec::new(),
         gas: 1_000_000,
-        vbytes: 0,
         refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     };
     let err = VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect_err("must error");
@@ -467,7 +436,6 @@ fn load_followed_by_save_preserves_actor() {
         anchor: Anchor([0x02; 32]),
         payload: Vec::new(),
         gas: 1_000_000,
-        vbytes: 0,
         refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     };
     VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("ok");
@@ -486,7 +454,7 @@ fn load_followed_by_save_preserves_actor() {
 /// nothing about which Send produced it.
 ///
 /// MessageID is the canonical hash of the entire Send (anchor, target,
-/// caller, method, payload, gas, vbytes, refund predicate) — not just
+/// caller, payload, gas, refund predicate) — not just
 /// the anchor — so the comparison rebuilds the expected MessageID from
 /// the originating `Message`.
 #[test]
@@ -508,15 +476,18 @@ fn receive_committed_as_first_effect_after_header() {
         anchor: Anchor(known_anchor),
         payload: Vec::new(),
         gas: 1_000_000,
-        vbytes: 0,
         refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
     };
     let expected_send_id = *msg.id().as_bytes();
-    let result = VM::execute_internal(dummy_header(), msg, &mut reg, &block)
-        .expect("execute_internal ok");
+    let result =
+        VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("execute_internal ok");
 
     // txlog[0] = Header, txlog[1] = Receive(send_id).
-    assert!(result.txlog.len() >= 2, "txlog too short: {}", result.txlog.len());
+    assert!(
+        result.txlog.len() >= 2,
+        "txlog too short: {}",
+        result.txlog.len()
+    );
     assert!(matches!(result.txlog[0], TxEntry::Header(_)));
     match &result.txlog[1] {
         TxEntry::Receive(send_id) => {
@@ -552,7 +523,6 @@ fn receive_makes_internal_txid_bind_to_send_anchor() {
             anchor: Anchor(anchor_bytes),
             payload: Vec::new(),
             gas: 1_000_000,
-            vbytes: 0,
             refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
         };
         VM::execute_internal(dummy_header(), msg, &mut reg, &block)

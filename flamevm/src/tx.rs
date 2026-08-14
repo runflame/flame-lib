@@ -43,6 +43,26 @@ pub struct ExternalTx {
 }
 
 impl ExternalTx {
+    /// Header committed by this transaction.
+    pub fn header(&self) -> TxHeader {
+        self.header
+    }
+
+    /// Canonical VM bytecode carried by this transaction.
+    pub fn script(&self) -> &[u8] {
+        &self.script
+    }
+
+    /// Aggregate signature bytes used by block witness commitments.
+    pub fn signature_bytes(&self) -> [u8; 64] {
+        self.signature.to_bytes()
+    }
+
+    /// R1CS proof bytes used by block witness commitments.
+    pub fn proof_bytes(&self) -> Vec<u8> {
+        self.proof.to_bytes()
+    }
+
     /// Lifecycle step 3: verify the signed transaction — run the opaque
     /// program, check the proof and the aggregate signature — and return
     /// its effects. Bulletproof generators are managed inside the crate.
@@ -94,6 +114,13 @@ impl TxLog {
     /// Iterates the effect entries.
     pub fn iter(&self) -> std::slice::Iter<'_, TxEntry> {
         self.0.iter()
+    }
+
+    /// Consumes the log and returns its ordered effects. Consensus code uses
+    /// this to move linear cells and messages into the block transition
+    /// without cloning bearer values.
+    pub fn into_entries(self) -> Vec<TxEntry> {
+        self.0
     }
 }
 
@@ -202,34 +229,26 @@ impl InternalTx {
     pub fn metrics(&self) -> TxMetrics {
         self.metrics
     }
-}
 
-/// Read-only handle to the chain's actor state for running one internal
-/// transaction. [`Message::execute_tx`] runs against a fresh
-/// [`Env::working_copy`]; the env itself is untouched until
-/// [`Env::apply_changes`] replays the resulting effects.
-pub trait Env {
-    /// A fresh mutable working copy of the actor registry for one tx.
-    fn working_copy(&self) -> Box<dyn ActorRegistry>;
-    /// Current block height (block context for the internal tx).
-    fn height(&self) -> u64;
-    /// Applies an internal transaction's effects to this state.
-    fn apply_changes(&mut self, log: &TxLog);
+    /// Consumes the result and returns its effect log.
+    pub fn into_log(self) -> TxLog {
+        self.log
+    }
 }
 
 impl Message {
-    /// Lifecycle step 4: run this send as an internal transaction
-    /// against a read-only [`Env`]. Returns the effects to apply; the
-    /// env is untouched until [`Env::apply_changes`]. Internal gas/mem
-    /// derive from the Send and the target's size, so `limits` is
-    /// currently advisory.
-    pub fn execute_tx(self, _limits: Limits, env: &dyn Env) -> Result<InternalTx, VMError> {
-        let mut registry = env.working_copy();
-        let block = BlockContext { height: env.height() };
+    /// Runs one derived internal transaction directly against the chain's
+    /// checkpointed actor registry. This avoids cloning and partially replaying
+    /// consensus state; FlameVM commits or rolls back the registry atomically.
+    pub fn execute_tx(
+        self,
+        registry: &mut dyn ActorRegistry,
+        block: &BlockContext,
+    ) -> Result<InternalTx, VMError> {
         // Internal-tx header: fixed default for now — its source is part
-        // of the deferred vbytes/lifecycle design.
+        // of the block envelope design.
         let header = TxHeader { version: 1, locktime: 0 };
-        let result = VM::execute_internal(header, self, registry.as_mut(), &block)?;
+        let result = VM::execute_internal(header, self, registry, block)?;
         Ok(InternalTx {
             log: TxLog(result.txlog),
             metrics: TxMetrics {
@@ -346,6 +365,20 @@ pub enum TxEntry {
     /// Symmetric with `TxEntry::Output(Cell)`: each effect that owns
     /// an addressable artifact embeds the artifact itself.
     Send(Message),
+
+    /// Persistent storage purchased by an actor. Execution already mutated
+    /// the host atomically; this exact record commits the allocation and burn
+    /// to the transaction id without requiring consumers to re-quote it.
+    StoragePurchase {
+        actor: ActorID,
+        bytes: u64,
+        expiry_height: u64,
+        fee_sparks: Int253,
+    },
+
+    /// Deterministic removal of an actor, either by explicit state
+    /// dismantling or by the blockchain's block-boundary expiry process.
+    ActorDestroy { actor: ActorID },
 }
 
 impl TxID {
@@ -423,6 +456,15 @@ impl MerkleItem for TxEntry {
                 // delivered with.
                 t.append_message(b"send", msg.id().as_bytes());
             }
+            TxEntry::StoragePurchase { actor, bytes, expiry_height, fee_sparks } => {
+                t.append_message(b"storage.actor", &actor.to_hash());
+                t.append_message(b"storage.bytes", &bytes.to_le_bytes());
+                t.append_message(b"storage.expiry", &expiry_height.to_le_bytes());
+                t.append_message(b"storage.fee_sparks", &fee_sparks.to_bytes());
+            }
+            TxEntry::ActorDestroy { actor } => {
+                t.append_message(b"destroy.actor", &actor.to_hash());
+            }
         }
     }
 }
@@ -443,6 +485,8 @@ impl TxEntry {
     pub const TAG_ACTOR_SAVE: u8 = 9;
     pub const TAG_SET_CODE: u8 = 10;
     pub const TAG_SEND: u8 = 11;
+    pub const TAG_STORAGE_PURCHASE: u8 = 12;
+    pub const TAG_ACTOR_DESTROY: u8 = 13;
 }
 
 /// Canonical wire serialization of one effect: a tag byte followed by
@@ -509,6 +553,17 @@ impl Encodable for TxEntry {
             TxEntry::Send(msg) => {
                 w.write_u8(b"txentry.tag", Self::TAG_SEND)?;
                 msg.encode(w)
+            }
+            TxEntry::StoragePurchase { actor, bytes, expiry_height, fee_sparks } => {
+                w.write_u8(b"txentry.tag", Self::TAG_STORAGE_PURCHASE)?;
+                actor.to_canonical().encode(w)?;
+                w.write_u64(b"storage.bytes", *bytes)?;
+                w.write_u64(b"storage.expiry", *expiry_height)?;
+                write_int253(w, fee_sparks)
+            }
+            TxEntry::ActorDestroy { actor } => {
+                w.write_u8(b"txentry.tag", Self::TAG_ACTOR_DESTROY)?;
+                actor.to_canonical().encode(w)
             }
         }
     }
