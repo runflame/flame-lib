@@ -12,26 +12,31 @@ use crate::Value;
 /// wire encoder relies on for canonical output.
 ///
 /// Dicts are **never VM-copyable** (todo #5 / ADR-style: avoids
-/// variable gas for `dup`/`getdup` and the linear-leak hazard) and the
-/// `dict` / `put` / `replace` opcodes admit only **portable** values
-/// (mirroring cell payloads). The one remaining sticky flag is:
+/// variable gas for `dup`/`getdup` and the linear-leak hazard). They
+/// carry two independent sticky capability flags:
 ///
 /// - `droppable` — true iff every value ever inserted was droppable.
 ///   Once a non-droppable value enters (a `Token` — portable but
 ///   linear), the flag stays false even if later removed, so a
 ///   token-bearing dict can't be silently `drop`ped.
+/// - `portable` — true iff every value ever inserted was portable.
+///   Once a non-portable value enters, the flag stays false even if
+///   that value is later removed.
 #[derive(Clone, Debug)]
 pub struct Dict {
     entries: BTreeMap<Int253, Value>,
     droppable: bool,
+    portable: bool,
 }
 
 impl Dict {
-    /// Creates an empty dictionary. An empty dict is droppable (vacuously).
+    /// Creates an empty dictionary. A new empty dict is vacuously
+    /// droppable and portable.
     pub fn new() -> Self {
         Dict {
             entries: BTreeMap::new(),
             droppable: true,
+            portable: true,
         }
     }
 
@@ -56,10 +61,8 @@ impl Dict {
     }
 
     /// Inserts a key-value pair. O(log n). If the key already exists,
-    /// replaces the value and returns the prior one. Updates the sticky
-    /// droppable flag from the new value. Portability is gated by the
-    /// caller (the `dict`/`put`/`replace` opcodes), parallel to how
-    /// `op_cell` gates cell-payload portability.
+    /// replaces the value and returns the prior one. Updates both sticky
+    /// capability flags from the new value.
     pub fn insert(&mut self, key: Int253, value: Value) -> Option<Value> {
         self.absorb_flags(&value);
         self.entries.insert(key, value)
@@ -67,7 +70,8 @@ impl Dict {
 
     /// Inserts a key-value pair, failing if the key is already occupied.
     /// Returns the rejected value on conflict so the caller can decide
-    /// whether to discard or surface it.
+    /// whether to discard or surface it. A rejected insertion does not
+    /// update either sticky capability flag.
     #[allow(clippy::result_large_err)]
     pub fn insert_strict(&mut self, key: Int253, value: Value) -> Result<(), Value> {
         if self.entries.contains_key(&key) {
@@ -109,10 +113,10 @@ impl Dict {
     }
 
     /// Returns true iff this dict can be sealed into long-term storage.
-    /// Always true: the `dict`/`put`/`replace` opcodes reject
-    /// non-portable values at insert time (spec §Dict).
+    /// O(1): successful insertion of any non-portable value permanently
+    /// clears the cached flag.
     pub fn is_portable(&self) -> bool {
-        true
+        self.portable
     }
 
     /// Returns true iff this dict can be silently discarded by `drop`
@@ -148,16 +152,14 @@ impl Dict {
     pub(crate) fn from_entries_unchecked(entries: Vec<(Int253, Value)>) -> Self {
         let mut d = Dict::new();
         for (k, v) in entries {
-            d.absorb_flags(&v);
-            d.entries.insert(k, v);
+            let _ = d.insert(k, v);
         }
         d
     }
 
     fn absorb_flags(&mut self, v: &Value) {
-        if !v.is_droppable() {
-            self.droppable = false;
-        }
+        self.droppable &= v.is_droppable();
+        self.portable &= v.is_portable();
     }
 }
 
@@ -170,7 +172,7 @@ impl Default for Dict {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::String;
+    use crate::{Merlin, String};
 
     fn v(n: u64) -> Value { Value::Int253(Int253::from(n)) }
 
@@ -179,6 +181,7 @@ mod tests {
         let d = Dict::new();
         assert_eq!(d.len(), 0);
         assert!(d.is_empty());
+        assert!(d.is_portable());
         assert!(d.get(&Int253::from(0u64)).is_none());
     }
 
@@ -255,7 +258,43 @@ mod tests {
     fn from_values_produces_sequential_keys() {
         let d = Dict::from_values(vec![v(10), v(20), v(30)]);
         assert_eq!(d.len(), 3);
+        assert!(d.is_portable());
         let keys: Vec<_> = d.entries().map(|(k, _)| *k).collect();
         assert_eq!(keys, vec![Int253::from(0u64), Int253::from(1u64), Int253::from(2u64)]);
+    }
+
+    #[test]
+    fn portability_is_sticky() {
+        let mut d = Dict::new();
+        d.insert(Int253::ZERO, Value::Merlin(Merlin::new(b"test")));
+        assert!(!d.is_portable());
+
+        d.insert(Int253::ZERO, v(1));
+        assert!(!d.is_portable());
+        d.remove(&Int253::ZERO);
+        assert!(!d.is_portable());
+    }
+
+    #[test]
+    fn rejected_insert_does_not_clear_portability() {
+        let mut d = Dict::new();
+        d.insert(Int253::ZERO, v(1));
+        assert!(d
+            .insert_strict(Int253::ZERO, Value::Merlin(Merlin::new(b"test")))
+            .is_err());
+        assert!(d.is_portable());
+    }
+
+    #[test]
+    fn constructors_absorb_nested_portability() {
+        let child = Dict::from_values(vec![Value::Merlin(Merlin::new(b"child"))]);
+        let parent = Dict::from_values(vec![Value::Dict(child)]);
+        assert!(!parent.is_portable());
+
+        let explicit = Dict::from_entries_unchecked(vec![(
+            Int253::from(7u64),
+            Value::Merlin(Merlin::new(b"explicit")),
+        )]);
+        assert!(!explicit.is_portable());
     }
 }

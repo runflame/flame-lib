@@ -577,10 +577,9 @@ fn cell_opcode_rejects_cell_as_payload_item() {
 }
 
 #[test]
-fn dict_build_rejects_a_cell() {
-    // A cell is non-portable; trying to hide it inside a Dict now fails
-    // at `dict` construction (todo #5) — earlier than the old output
-    // gate, so a poisoned dict can never even be built.
+fn output_rejects_dict_containing_a_cell() {
+    // A stack-local Dict may hold a Cell, but its sticky portability flag
+    // prevents the whole Dict from crossing an output boundary.
     let script = ScriptBuilder::new()
         .push_int(5u64)
         .push_int(1u64)
@@ -588,7 +587,7 @@ fn dict_build_rejects_a_cell() {
         .cell()                            // cell A on stack
         .push_int(0u64)                    // key = 0
         .push_int(1u64)                    // 1 pair
-        .dict()                            // Dict { 0: cellA } — rejected here
+        .dict()                            // non-portable Dict { 0: cellA }
         .push_int(1u64)                    // outer count = 1
         .push_point([0xbb; 32])
         .output()
@@ -597,7 +596,7 @@ fn dict_build_rejects_a_cell() {
     vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
-        VMError::NonPortableInDict
+        VMError::NonPortableInOutput
     ));
 }
 
@@ -1179,4 +1178,3 @@ fn op_open_cs_blocked_when_external_context_false() {
     assert_eq!(vm.current_call.stack.len(), 1);
     assert_int(&vm.current_call.stack[0], Int253::from(0u64));
 }
-

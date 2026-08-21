@@ -532,6 +532,9 @@ fn read_value_with_depth(
 /// Writes a `Dict`. Uses the list-style encoding when keys are
 /// sequential 0, 1, 2, ...; otherwise uses the dict-style encoding.
 pub fn write_dict(w: &mut impl Writer, dict: &Dict) -> Result<(), WriteError> {
+    if !dict.is_portable() {
+        return Err(WriteError::TypeNonPortable);
+    }
     if keys_are_sequential(dict.entries().map(|(k, _)| k)) {
         write_list_prefix(w, dict.len())?;
         for (_, v) in dict.entries() {
@@ -550,8 +553,7 @@ pub fn write_dict(w: &mut impl Writer, dict: &Dict) -> Result<(), WriteError> {
 /// Writes a `Value`. Portable types (incl. non-negative `ClearToken`)
 /// serialize canonically; non-portable variants (`WideToken`, `Cell`,
 /// `Merlin`, and the stack-only constraint-system types) return
-/// `WriteError::InsufficientCapacity` — a "refuse to encode" signal.
-/// Callers consult `Value::is_portable` before encoding.
+/// `WriteError::TypeNonPortable`.
 pub fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), WriteError> {
     match val {
         Value::Int253(i) => write_int253(w, i),
@@ -575,23 +577,20 @@ pub fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), WriteError> {
             write_int253(w, &t.qty)?;
             write_int253(w, &t.flv)
         }
-        // Non-portable: widetokens / cells / merlins / CS-only types.
-        // By design these never cross the wire. `InsufficientCapacity`
-        // is the existing "refuse to encode" sentinel; higher-level
-        // callers reject them before encoding via `Value::is_portable`.
         Value::WideToken(_)
         | Value::Cell(_)
         | Value::Merlin(_)
         | Value::Variable(_)
         | Value::Expression(_)
         | Value::Constraint(_)
-        | Value::MultiscalarMul(_) => Err(WriteError::InsufficientCapacity),
+        | Value::MultiscalarMul(_) => Err(WriteError::TypeNonPortable),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Merlin;
 
     // ── Int253 canonicality: decoder rejection ───────────────────
 
@@ -673,6 +672,17 @@ mod tests {
         let mut buf = Vec::new();
         write_dict(&mut buf, &d).unwrap();
         assert!(buf[0] >= DICT_IMM_MIN && buf[0] <= DICT_IMM_MAX);
+    }
+
+    #[test]
+    fn write_dict_rejects_non_portable_before_writing() {
+        let mut d = Dict::new();
+        d.insert(Int253::ZERO, Value::Merlin(Merlin::new(b"test")));
+        d.remove(&Int253::ZERO);
+        assert!(d.is_empty());
+        let mut buf = Vec::new();
+        assert!(write_dict(&mut buf, &d).is_err());
+        assert!(buf.is_empty());
     }
 
     #[test]

@@ -139,12 +139,6 @@ pub enum VMError {
     #[error("Non-portable item in cell payload")]
     NonPortableInOutput,
 
-    /// This error occurs when a non-portable item is inserted into a Dict
-    /// (`dict` / `put` / `replace`). Dicts accept only portable values,
-    /// mirroring cell payloads — see spec §Dict.
-    #[error("Non-portable item in dict")]
-    NonPortableInDict,
-
     /// This error occurs when `signcall` sees a signature that is not 64 bytes.
     #[error("Bad signature byte length")]
     BadSignatureBytes,
@@ -177,7 +171,7 @@ pub enum VMError {
     #[error("Malformed cell encoding")]
     MalformedCellEncoding,
 
-    /// This error occurs when an actor-state Dict can't be encoded
+    /// This error occurs when an actor-state Value can't be encoded
     /// to its canonical wire form (a value variant without an
     /// encoder slipped in). Distinct from `NonPortableInState`,
     /// which is the portability gate at op_save.
@@ -262,12 +256,10 @@ pub enum VMError {
     #[error("Opcode requires predicate context")]
     OpcodeRequiresPredicateContext,
 
-    /// This error occurs when `op_save` is called with an actor-state
-    /// Dict that contains non-portable values (Cell, Merlin, Variable,
-    /// negative ClearToken, WideToken, Expression, Constraint,
-    /// MultiscalarMul). Long-term storage requires portable values
-    /// only — see `docs/flamevm.md` §save.
-    #[error("Non-portable value in actor state Dict")]
+    /// This error occurs when `op_save` is called with a non-portable
+    /// actor-state Value. For a Dict, the O(1) cached portability flag
+    /// includes every value successfully inserted into it.
+    #[error("Non-portable value in actor state")]
     NonPortableInState,
 
     /// This error occurs when a token opcode needs a live constraint system but has none.

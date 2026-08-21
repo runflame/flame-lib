@@ -53,14 +53,16 @@ when the specification, implementation, and focused regression tests agree.
    - [ ] Ensure a failed `signcall` removes its deferred signature together with
      the failed frame.
 
-4. [ ] Enforce portability recursively at every wire and storage boundary.
+4. [ ] Enforce portability at every wire and storage boundary using sticky Dict metadata.
 
    - [ ] Reject negative `ClearToken` quantities in both `read_value` and
      `write_value`; negative tokens remain stack-only intermediates.
-   - [ ] Validate decoded `Dict` members recursively instead of relying on
-     [`Dict::is_portable`](../flamevm/src/dict.rs) always returning `true`.
-   - [ ] Apply the same recursive check to cells, messages, and actor state, and
-     test nested negative tokens at more than one Dict depth.
+   - [x] Cache a sticky `portable` flag in each Dict, initialized to `true` and
+     cleared on successful insertion of a non-portable value.
+   - [x] Reconstruct the flag bottom-up in both Dict wire forms without an
+     additional recursive portability scan.
+   - [ ] Apply the O(1) Dict check at cell, message, call, and actor-state
+     boundaries, and test propagation through more than one Dict depth.
    - [ ] Audit every public constructor and unchecked decoder so the portability
      invariant does not depend only on opcode callers.
 

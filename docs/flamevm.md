@@ -159,7 +159,7 @@ Ownership: every type on the stack is always owned. FlameVM does not allow refer
 
 Plain data types: integers, byte strings, Ristretto points. These can be copied and ported.
 
-Structured data types: dicts that are used as lists, dictionaries and enum variants. Dicts are **never copyable** and admit **only portable values** (see §Dict).
+Structured data types: dicts that are used as lists, dictionaries and enum variants. Dicts are **never copyable** and cache sticky portability and droppability capabilities (see §Dict).
 
 Token types: WideToken, Token, ClearToken.
 
@@ -183,7 +183,7 @@ Encodable types (have a wire-format tag range):
 | --- | --- | --- |
 | Int253 | 0..=67 | Signed sign-magnitude integer; magnitude is a canonical Ristretto scalar (< ℓ ≈ 2²⁵²) plus an explicit sign bit. The name reflects the effective conceptual width: ⌈log₂ ℓ⌉ = 253 bits of magnitude. |
 | String | 68..=127 | Variable-length byte string. |
-| Dict | 128..=247 | Map from Int253 keys to values. List-style encoding (sequential keys 0..n-1) uses 128..=187; explicit-key form uses 188..=247. Non-portable item poisons the dict with a “non-portable” flag. |
+| Dict | 128..=247 | Map from Int253 keys to values. List-style encoding (sequential keys 0..n-1) uses 128..=187; explicit-key form uses 188..=247. Its sticky `portable` flag starts true and is cleared by insertion of a non-portable value. |
 | Point | 248 | Element of the Ristretto255 group. |
 | Token | 249 | Linear type (qty, flavor) representing an asset value, possibly encrypted. |
 | ClearToken | 250 | Linear type (qty, flavor) with cleartext values. Portable (and wire-encoded) when non-negative; a negative `ClearToken` is a non-portable intermediate. |
@@ -328,7 +328,11 @@ Dict is a versatile data structure for representing lists, dictionaries and even
 
 Keys are non-negative Ints to keep ordering non-ambiguous.
 
-**Dicts are never copyable** (todo #5): `dup`/`getdup` of a Dict value always fails `TypeNotCopyable`. This avoids variable gas for duplication and removes the hazard of a Dict silently carrying a non-droppable linear value past a `drop`. The `dict` / `put` / `replace` opcodes admit **only portable values** — a non-portable item (`Cell`, `Merlin`, `Variable`, `Constraint`, `WideToken`, negative `ClearToken`, …) is rejected at insert with `NonPortableInDict`, exactly as cell payloads are gated. So a Dict is always portable (storable). Droppability still varies: a Dict holding a `Token` (portable but linear/non-droppable) is itself non-droppable, so it can't be `drop`ped — it must be dismantled or saved.
+**Dicts are never copyable** (todo #5): `dup`/`getdup` of a Dict value always fails `TypeNotCopyable`. Each Dict carries independent sticky `portable` and `droppable` flags. A newly constructed empty Dict starts with both flags true. Every successful insertion applies `dict.portable &= value.is_portable()` and `dict.droppable &= value.is_droppable()`. Removal and replacement never restore a cleared flag; a rejected strict insertion does not change either flag.
+
+The `dict` / `put` / `replace` opcodes may insert any Value. A non-portable Dict remains usable on the stack, but `cell`, `output`, `send`, `call`, and actor-state storage reject it at their portability boundary. Checking a Dict is O(1), including when it is nested: inserting a nested Dict reads that Dict's already-cached flag. Dict values are owned and cannot be mutated through an alias, so the cached parent flag cannot become stale.
+
+The flags are runtime metadata and are not serialized. Both Dict wire forms reconstruct them bottom-up as values are decoded. A Dict admitted from a valid Cell or actor state is therefore portable; loading it does not reset or override the flag.
 
 Drilling down the nested dict preserving ownership with `get` and `put` instructions: 
 
@@ -891,7 +895,7 @@ Peeks at the top value and pushes its length: byte count for `String`, entry cou
 
 ## Dict instructions
 
-[Dict](#dict) keys are always `Int253`; values are any [Value](#types) subject to per-opcode copy/portability constraints.
+[Dict](#dict) keys are always `Int253`; values may be any [Value](#types). Insertion updates the Dict's sticky capability flags; portability is enforced only when the Dict crosses a storage or transfer boundary.
 
 ### dict
 

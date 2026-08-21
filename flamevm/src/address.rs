@@ -41,7 +41,7 @@ impl Address {
 
     /// Convenience: encode to a fresh `Vec<u8>`. Returns the
     /// `WriteError` from `Encodable::encode` (a non-portable Dict in
-    /// `args` is encoded as `InsufficientCapacity` via `try_clone`).
+    /// `args` is rejected as `InsufficientCapacity`).
     pub fn to_bytes(&self) -> Result<Vec<u8>, WriteError> {
         let mut out = Vec::new();
         self.encode(&mut out)?;
@@ -88,8 +88,8 @@ impl Encodable for Address {
                 write_value(w, &Value::Int253(*method))?;
                 // Serialization is the Rust-level data path, so use
                 // `Clone`, not the VM-level `try_clone` (dicts are
-                // non-copyable on the stack — todo #5). Dict insert
-                // already guaranteed every arg is portable/encodable.
+                // non-copyable on the stack — todo #5). `write_dict`
+                // checks the cached portability flag before encoding.
                 write_value(w, &Value::Dict(args.clone()))?;
                 write_value(w, &Value::Int253(Int253::from(*gas)))
             }

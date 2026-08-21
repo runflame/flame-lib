@@ -95,9 +95,9 @@ impl Message {
 /// 7. `payload` — little-endian u64 count, then each value's
 ///    canonical `write_value` encoding.
 ///
-/// Fails only if the underlying writer runs out of capacity —
-/// payload portability is guaranteed by `op_send`, so `write_value`
-/// never errors here in valid flow.
+/// Fails if the writer runs out of capacity or the payload contains a
+/// non-portable value. `op_send` guarantees portability in valid VM flow;
+/// direct callers receive the encoder error instead.
 impl Encodable for Message {
     fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
         self.anchor.encode(w)?;

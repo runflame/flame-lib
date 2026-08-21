@@ -85,9 +85,9 @@ fn put_on_occupied_key_errors() {
 }
 
 #[test]
-fn put_rejects_non_portable() {
-    // `put`ting a Merlin (always non-portable) into a dict fails the
-    // portability gate (todo #5), mirroring cell-payload rejection.
+fn put_marks_dict_non_portable() {
+    // Stack-local Dicts may contain non-portable values. The Dict keeps
+    // that restriction as a sticky capability flag.
     let script = ScriptBuilder::new()
         .push_int(0u64).dict()                         // {}
         .push_int(0u64)                                // key
@@ -95,10 +95,11 @@ fn put_rejects_non_portable() {
         .put()
         .to_bytecode();
     let mut vm = vm_with_script(script);
-    assert!(matches!(
-        run_to_end(&mut vm).unwrap_err(),
-        VMError::NonPortableInDict
-    ));
+    run_to_end(&mut vm).unwrap();
+    match &vm.current_call.stack[0] {
+        Value::Dict(d) => assert!(!d.is_portable()),
+        _ => panic!("expected Dict"),
+    }
 }
 
 #[test]
