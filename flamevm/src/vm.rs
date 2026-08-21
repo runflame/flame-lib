@@ -668,15 +668,17 @@ impl VM {
         // before the move below.
         let send_id = *message.id().as_bytes();
         let anchor = message.anchor;
-        let payload = message.payload;
+        let caller = message.caller.clone();
+        let gas = message.gas;
+        let payload = message.into_payload();
         let kind = CallKind::InternalRoot {
-            actor: message.target,
-            caller: message.caller,
+            actor: target.clone(),
+            caller,
         };
         let mut frame = CallFrame::from_bytecode(
             script,
             kind,
-            message.gas,
+            gas,
             mem_limit,
             0,
         )
@@ -2117,7 +2119,7 @@ impl VM {
         let val = self.pop_value()?;
         match val {
             Value::ClearToken(t) => {
-                if t.qty().is_negative() {
+                if !t.is_portable() {
                     self.push_value(Value::ClearToken(t));
                     return Err(VMError::NegativeTokenRetirement);
                 }
@@ -2247,18 +2249,6 @@ impl VM {
         Ok(self.current_call.stack.drain(start..).collect())
     }
 
-    /// Pops `n` values, asserting each is portable. Used by `cell` /
-    /// `output` to enforce the cell-payload invariant.
-    fn pop_n_portable(&mut self, n: usize) -> Result<Vec<Value>, VMError> {
-        let values = self.pop_n_values(n)?;
-        for v in &values {
-            if !v.is_portable() {
-                return Err(VMError::NonPortableInOutput);
-            }
-        }
-        Ok(values)
-    }
-
     // (TaprootProof is now constructed from distinct stack pieces; see
     // `taproot_proof_from_stack_pieces` below `op_open`. The earlier packed
     // bag-of-bytes layout was replaced per Architect's response on todo
@@ -2297,9 +2287,9 @@ impl VM {
     fn op_cell(&mut self) -> Result<(), VMError> {
         let pred = self.pop_value()?.to_point()?.to_predicate()?;
         let k = self.pop_byte_count(usize::MAX)?;
-        let payload = self.pop_n_portable(k)?;
+        let payload = self.pop_n_values(k)?;
         let anchor = self.consume_anchor()?;
-        let cell = Cell::new(pred, anchor, payload);
+        let cell = Cell::new(pred, anchor, payload)?;
         self.push_value(Value::Cell(cell));
         Ok(())
     }
@@ -2308,9 +2298,9 @@ impl VM {
     fn op_output(&mut self) -> Result<(), VMError> {
         let pred = self.pop_value()?.to_point()?.to_predicate()?;
         let k = self.pop_byte_count(usize::MAX)?;
-        let payload = self.pop_n_portable(k)?;
+        let payload = self.pop_n_values(k)?;
         let anchor = self.consume_anchor()?;
-        let cell = Cell::new(pred, anchor, payload);
+        let cell = Cell::new(pred, anchor, payload)?;
         self.txlog.push(TxEntry::Output(cell));
         Ok(())
     }
@@ -2412,7 +2402,7 @@ impl VM {
             /*legacy_newbytes=*/ 0,
         )
         .with_anchor(child_anchor);
-        for v in cell.payload {
+        for v in cell.into_payload() {
             frame.stack.push(v);
         }
         for v in args {
@@ -2493,12 +2483,6 @@ impl VM {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
 
-        for v in &args {
-            if !v.is_portable() {
-                return Err(VMError::NonPortableInSend);
-            }
-        }
-
         let anchor = self.consume_anchor()?;
         let caller = self.current_call.kind.actor().cloned();
         // Single source of truth: the full Message lives in the
@@ -2506,14 +2490,14 @@ impl VM {
         // `TxEntry::Output(Cell)`. The block builder scans these
         // entries to construct internal-tx deliveries; no separate
         // queue.
-        let message = Message {
+        let message = Message::new(
             target,
             caller,
             anchor,
-            payload: args,
+            args,
             gas,
             refund_predicate,
-        };
+        )?;
         self.txlog.push(TxEntry::Send(message));
         Ok(())
     }
@@ -2773,12 +2757,12 @@ impl VM {
     /// the cell's payload onto the stack, pushes `k`.
     fn op_signtx(&mut self) -> Result<(), VMError> {
         let cell = self.pop_value()?.to_cell()?;
-        let k = cell.payload.len();
+        let k = cell.payload().len();
         self.deferred_sigs.push(DeferredSig::TxBound {
             verification_key: cell.predicate.verification_key(),
             cell_id: cell.id(),
         });
-        for v in cell.payload {
+        for v in cell.into_payload() {
             self.push_value(v);
         }
         self.push_value(Value::Int253(Int253::from(k as u64)));
@@ -3083,31 +3067,30 @@ impl VM {
         value: Value,
         delegate: &mut D,
     ) -> Result<spacesuit::AllocatedValue, VMError> {
-        match value {
-            Value::WideToken(w) => Ok(*w.allocated()),
-            Value::Token(t) => {
-                let (_, qty_var) = delegate.commit_variable(&t.qty)?;
-                let (_, flv_var) = delegate.commit_variable(&t.flv)?;
-                let qty_assg = match t.qty.assignment() {
-                    Some(i) => Some(int253_to_signed_integer(i)?),
-                    None => None,
-                };
-                let flv_assg = t.flv.assignment().map(|i| i.to_scalar_mod_order());
-                Ok(spacesuit::AllocatedValue {
-                    q: qty_var,
-                    f: flv_var,
-                    assignment: match (qty_assg, flv_assg) {
-                        (Some(q), Some(f)) => Some(spacesuit::Value { q, f }),
-                        _ => None,
-                    },
-                })
-            }
-            Value::ClearToken(c) => {
-                let token = Token::cleartext(c.qty(), c.flv());
-                Self::value_to_allocated(Value::Token(token), delegate)
-            }
-            _ => Err(VMError::TypeNotToken),
-        }
+        let (qty, flv) = match value {
+            Value::WideToken(w) => return Ok(*w.allocated()),
+            Value::Token(t) => (t.qty, t.flv),
+            Value::ClearToken(c) => (
+                Commitment::unblinded(c.qty()),
+                Commitment::unblinded(c.flv()),
+            ),
+            _ => return Err(VMError::TypeNotToken),
+        };
+        let (_, qty_var) = delegate.commit_variable(&qty)?;
+        let (_, flv_var) = delegate.commit_variable(&flv)?;
+        let qty_assg = match qty.assignment() {
+            Some(i) => Some(int253_to_signed_integer(i)?),
+            None => None,
+        };
+        let flv_assg = flv.assignment().map(|i| i.to_scalar_mod_order());
+        Ok(spacesuit::AllocatedValue {
+            q: qty_var,
+            f: flv_var,
+            assignment: match (qty_assg, flv_assg) {
+                (Some(q), Some(f)) => Some(spacesuit::Value { q, f }),
+                _ => None,
+            },
+        })
     }
 
     /// _anytokens… commitments… m n_ **mix** → _tokens_

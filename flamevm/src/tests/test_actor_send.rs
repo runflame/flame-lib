@@ -41,7 +41,7 @@ fn send_commits_message_fields() {
     assert_eq!(message.refund_predicate.to_point().as_bytes(), &refund);
     assert_eq!(message.anchor, Anchor([0u8; 32]).split().0);
     assert!(matches!(
-        message.payload.as_slice(),
+        message.payload(),
         [Value::Int253(value)] if *value == Int253::from(3u64)
     ));
 }
@@ -68,7 +68,7 @@ fn send_payload_changes_transaction_id() {
     let second = deploy_actor(&mut reg, send_script(&target, [0; 32], 9, 1));
     let first = deliver(&mut reg, msg_to(first));
     let second = deliver(&mut reg, msg_to(second));
-    let payload_int = |log: &[TxEntry]| match sends(log)[0].payload.as_slice() {
+    let payload_int = |log: &[TxEntry]| match sends(log)[0].payload() {
         [Value::Int253(value)] => *value,
         other => panic!("unexpected payload: {:?}", other),
     };
@@ -96,11 +96,18 @@ fn send_rejects_malformed_addresses() {
 }
 
 #[test]
-fn send_rejects_nonportable_payload() {
+fn send_rejects_nested_nonportable_payload() {
     let actor = ActorID::Hash([0x11; 32]);
     let mut vm = vm_internal_with_actor(ScriptBuilder::new().send().to_bytecode(), actor);
-    vm.current_call.stack = vec![
+    let mut inner = Dict::new();
+    inner.insert(
+        Int253::ZERO,
         Value::ClearToken(ClearToken::new(Int253::from(-1i64), FLAME_FLAVOR)),
+    );
+    let mut outer = Dict::new();
+    outer.insert(Int253::ZERO, Value::Dict(inner));
+    vm.current_call.stack = vec![
+        Value::Dict(outer),
         Value::Int253(Int253::ONE),
         Value::String(String::from(vec![0u8; 32])),
         Value::Int253(Int253::ONE),
@@ -128,10 +135,6 @@ fn external_send_has_no_caller() {
     );
     vm.last_anchor = Some(Anchor([0xaa; 32]));
     while vm.step_internal().unwrap() {}
-    assert!(matches!(
-        vm.txlog
-            .iter()
-            .find(|entry| matches!(entry, TxEntry::Send(_))),
-        Some(TxEntry::Send(Message { caller: None, .. }))
-    ));
+    let message = sends(&vm.txlog)[0];
+    assert!(message.caller.is_none());
 }

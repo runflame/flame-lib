@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::{code_root, state_root, ActorID, ActorRegistry};
 use crate::cell::{Cell, CellID};
-use crate::encoding::{write_int253, write_value};
+use crate::encoding::{write_admitted_value, write_int253};
 use crate::errors::VMError;
 use crate::script::ScriptBuilder;
 use crate::prover::Prover;
@@ -542,7 +542,7 @@ impl Encodable for TxEntry {
             TxEntry::ActorSave { actor, state } => {
                 w.write_u8(b"txentry.tag", Self::TAG_ACTOR_SAVE)?;
                 actor.to_canonical().encode(w)?;
-                write_value(w, state)
+                write_admitted_value(w, state)
             }
             TxEntry::SetCode { actor, code } => {
                 w.write_u8(b"txentry.tag", Self::TAG_SET_CODE)?;

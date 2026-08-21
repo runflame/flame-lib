@@ -7,7 +7,8 @@ use crate::cell::Predicate;
 use crate::crypto::Point;
 use crate::dict::Dict;
 use crate::encoding::{
-    read_list_prefix, read_string, read_value, write_list_prefix, write_value,
+    read_list_prefix, read_string, read_value, write_admitted_value,
+    write_list_prefix,
 };
 use crate::int253::Int253;
 use crate::string::String;
@@ -40,8 +41,7 @@ impl Address {
     pub const TAG_MESSAGE_TARGET: u8 = 0x01;
 
     /// Convenience: encode to a fresh `Vec<u8>`. Returns the
-    /// `WriteError` from `Encodable::encode` (a non-portable Dict in
-    /// `args` is rejected as `InsufficientCapacity`).
+    /// `WriteError` from `Encodable::encode`.
     pub fn to_bytes(&self) -> Result<Vec<u8>, WriteError> {
         let mut out = Vec::new();
         self.encode(&mut out)?;
@@ -65,11 +65,11 @@ impl Encodable for Address {
         match self {
             Address::Predicate(p) => {
                 write_list_prefix(w, 2)?;
-                write_value(
+                write_admitted_value(
                     w,
                     &Value::Int253(Int253::from(Self::TAG_PREDICATE as u64)),
                 )?;
-                write_value(w, &Value::Point(Point::from_compressed(p.to_point())))
+                write_admitted_value(w, &Value::Point(Point::from_compressed(p.to_point())))
             }
             Address::MessageTarget {
                 dst,
@@ -78,20 +78,19 @@ impl Encodable for Address {
                 gas,
             } => {
                 write_list_prefix(w, 5)?;
-                write_value(
+                write_admitted_value(
                     w,
                     &Value::Int253(Int253::from(Self::TAG_MESSAGE_TARGET as u64)),
                 )?;
                 let mut dst_bytes = Vec::new();
                 dst.encode(&mut dst_bytes)?;
-                write_value(w, &Value::String(String::from(dst_bytes)))?;
-                write_value(w, &Value::Int253(*method))?;
+                write_admitted_value(w, &Value::String(String::from(dst_bytes)))?;
+                write_admitted_value(w, &Value::Int253(*method))?;
                 // Serialization is the Rust-level data path, so use
                 // `Clone`, not the VM-level `try_clone` (dicts are
-                // non-copyable on the stack — todo #5). `write_dict`
-                // checks the cached portability flag before encoding.
-                write_value(w, &Value::Dict(args.clone()))?;
-                write_value(w, &Value::Int253(Int253::from(*gas)))
+                // non-copyable on the stack — todo #5).
+                write_admitted_value(w, &Value::Dict(args.clone()))?;
+                write_admitted_value(w, &Value::Int253(Int253::from(*gas)))
             }
         }
     }
@@ -164,6 +163,7 @@ impl Decodable for Address {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoding::write_value;
 
     use curve25519_dalek::ristretto::CompressedRistretto;
 

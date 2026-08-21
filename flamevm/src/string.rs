@@ -228,8 +228,6 @@ impl String {
                 if !reader.is_empty() {
                     return Err(VMError::MalformedCellEncoding);
                 }
-                // VM-level gate: portable payload required (op_input).
-                cell.validate_portable()?;
                 Ok(cell)
             }
             _ => Err(VMError::MalformedCellEncoding),

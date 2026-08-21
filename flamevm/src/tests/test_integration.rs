@@ -103,14 +103,8 @@ fn if_else_takes_branch_by_selector_arg() {
     let id = deploy_actor(&mut reg, recv);
 
     // Deliver with a truthy payload arg, then a falsy one.
-    let truthy = Message {
-        payload: vec![Value::Int253(Int253::from(1u64))],
-        ..msg_to(id.clone())
-    };
-    let falsy = Message {
-        payload: vec![Value::Int253(Int253::from(0u64))],
-        ..msg_to(id)
-    };
+    let truthy = msg_with_sel(id.clone(), 1);
+    let falsy = msg_with_sel(id, 0);
     assert_eq!(
         data_trace(&deliver(&mut reg, truthy)),
         vec![b"then".to_vec()]

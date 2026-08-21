@@ -103,17 +103,18 @@ pub(crate) fn dummy_header() -> TxHeader {
 }
 
 pub(crate) fn dummy_message(gas: u64) -> Message {
-    Message {
-        target: ActorID::Hash([0u8; 32]),
-        caller: None,
-        anchor: Anchor([0u8; 32]),
-        payload: Vec::new(),
+    Message::new(
+        ActorID::Hash([0u8; 32]),
+        None,
+        Anchor([0u8; 32]),
+        Vec::new(),
         gas,
         // Test fixture: NUMS-unspendable predicate as the refund
         // sink. No real bounce path exercised by the tests that
         // call `dummy_message`; this just satisfies the field.
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-    }
+        Predicate::opaque(Predicate::unspendable_key()),
+    )
+    .expect("message payload is portable")
 }
 
 /// Builds a VM running `script` as the entry Run of an InternalRoot.
@@ -247,23 +248,29 @@ pub(crate) fn deliver_err(reg: &mut MemRegistry, msg: Message) -> VMError {
 /// Builds a minimal internal `Message` targeting `actor` with no
 /// payload — the common Bucket-C delivery fixture.
 pub(crate) fn msg_to(actor: ActorID) -> Message {
-    Message {
-        target: actor,
-        caller: None,
-        anchor: Anchor([0u8; 32]),
-        payload: Vec::new(),
-        gas: 1_000_000,
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-    }
+    Message::new(
+        actor,
+        None,
+        Anchor([0u8; 32]),
+        Vec::new(),
+        1_000_000,
+        Predicate::opaque(Predicate::unspendable_key()),
+    )
+    .expect("message payload is portable")
 }
 
 /// Like [`msg_to`] but carries a single top-of-stack selector arg
 /// (ADR 0020 dispatch convention).
 pub(crate) fn msg_with_sel(actor: ActorID, sel: u64) -> Message {
-    Message {
-        payload: vec![Value::Int253(Int253::from(sel))],
-        ..msg_to(actor)
-    }
+    Message::new(
+        actor,
+        None,
+        Anchor([0u8; 32]),
+        vec![Value::Int253(Int253::from(sel))],
+        1_000_000,
+        Predicate::opaque(Predicate::unspendable_key()),
+    )
+    .expect("message payload is portable")
 }
 
 /// Deploys an actor whose code is `recv` (id derived from the code, a
@@ -445,6 +452,7 @@ pub use crate::token::flavor_from_actor as test_flavor_from_actor;
 /// Convenience: builds a Token via the cleartext constructor for tests.
 pub(crate) fn make_cleartext_token(qty: u64, flv: u64) -> Token {
     Token::cleartext(Int253::from(qty), Int253::from(flv))
+        .expect("u64 quantity is in range")
 }
 
 /// Builds a VM running `script` under InternalRoot with a specific
@@ -519,19 +527,15 @@ pub(crate) fn fixture_cell() -> Cell {
         Value::Int253(Int253::from(7u64)),
         Value::String(String::from(b"hello".to_vec())),
     ];
-    Cell::new(predicate, anchor, payload)
+    Cell::new(predicate, anchor, payload).expect("fixture payload is portable")
 }
 
-/// Helper: `Cell::decode` returns a `Cell` on success, which lacks
-/// `Debug`. This wrapper drops the cell so tests can use the usual
-/// `.unwrap_err()` shape on a `Debug`-able result. Returns
-/// `MalformedCellEncoding` on any parse failure OR non-portable
-/// payload — i.e. the same gate `op_input` applies.
+/// Helper: decode and discard a Cell so tests can use a simple
+/// `Result<(), VMError>` assertion shape.
 pub(crate) fn decode_cell_dropping_ok(bytes: &[u8]) -> Result<(), VMError> {
     let mut r: &[u8] = bytes;
-    let cell = <Cell as readerwriter::Decodable>::decode(&mut r)
+    <Cell as readerwriter::Decodable>::decode(&mut r)
         .map_err(|_| VMError::MalformedCellEncoding)?;
-    cell.validate_portable()?;
     Ok(())
 }
 
@@ -646,7 +650,8 @@ pub(crate) fn make_signtx_script_with_cell(vk: CompressedRistretto) -> (Vec<u8>,
         Predicate::opaque(vk),
         Anchor([0x42; 32]),
         vec![Value::Int253(Int253::from(0u64))], // single Int253 payload
-    );
+    )
+    .expect("payload is portable");
     let cell_id = cell.id();
     let script = ScriptBuilder::new()
         .push_str(String::from(encode_cell_to_bytes(&cell)))
@@ -907,7 +912,8 @@ pub(crate) fn build_input_cell(inp: &NMInputSpec) -> (Cell, TaprootProof) {
         Predicate::opaque(pred_point),
         Anchor(inp.anchor),
         vec![Value::Token(token)],
-    );
+    )
+    .expect("payload is portable");
     (cell, cp)
 }
 
@@ -1003,12 +1009,12 @@ pub(crate) fn assert_nm_txlog(result: &TxResult, inputs: &[NMInputSpec], outputs
                 );
                 expected_anchor = split_right;
                 assert_eq!(
-                    c.payload.len(),
+                    c.payload().len(),
                     1,
                     "output[{}] payload must contain exactly 1 Token",
                     j
                 );
-                match &c.payload[0] {
+                match &c.payload()[0] {
                     Value::Token(t) => {
                         assert_eq!(
                             t.qty.to_point(),

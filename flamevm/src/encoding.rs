@@ -48,6 +48,20 @@ use crate::string::String;
 use crate::token::{ClearToken, Token};
 use crate::value::Value;
 
+/// Failure to encode a VM [`Value`]. Writer failures are exclusively
+/// capacity failures; `UnsupportedType` means the value has no byte format.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ValueEncodeError {
+    Writer(WriteError),
+    UnsupportedType,
+}
+
+impl From<WriteError> for ValueEncodeError {
+    fn from(error: WriteError) -> Self {
+        Self::Writer(error)
+    }
+}
+
 // ── Tag constants ─────────────────────────────────────────────────
 
 // Int253
@@ -511,18 +525,16 @@ fn read_value_with_depth(
             let flv = Commitment::Closed(CompressedRistretto(flv_bytes));
             Ok(Some(Value::Token(Token::new(qty, flv))))
         }
-        // ClearToken (portable when non-negative): tag + cleartext qty
-        // + flv as compact `Int253`s.
+        // ClearToken: tag + cleartext qty + flv as compact `Int253`s.
+        // Portability is a domain-boundary rule, not a decoding rule.
         CLEAR_TOKEN_TAG => {
             let qty = read_int253(r)?;
             let flv = read_int253(r)?;
             Ok(Some(Value::ClearToken(ClearToken::new(qty, flv))))
         }
-        // WideToken is non-portable (confidential, may be negative) and
-        // never crosses the wire.
+        // WideToken has no implemented representation.
         WIDE_TOKEN_TAG => Err(ReadError::InvalidFormat),
-        // Unimplemented portable types — payload size unknown, signal
-        // to caller (kept for Phase-17 / future encodings).
+        // Allocated but unimplemented tags — payload size unknown.
         OBJECT_TAG | MERLIN_TAG => Ok(None),
         // Reserved and extension tags are not yet defined.
         _ => Err(ReadError::InvalidFormat),
@@ -531,10 +543,10 @@ fn read_value_with_depth(
 
 /// Writes a `Dict`. Uses the list-style encoding when keys are
 /// sequential 0, 1, 2, ...; otherwise uses the dict-style encoding.
-pub fn write_dict(w: &mut impl Writer, dict: &Dict) -> Result<(), WriteError> {
-    if !dict.is_portable() {
-        return Err(WriteError::TypeNonPortable);
-    }
+pub(crate) fn write_dict(
+    w: &mut impl Writer,
+    dict: &Dict,
+) -> Result<(), ValueEncodeError> {
     if keys_are_sequential(dict.entries().map(|(k, _)| k)) {
         write_list_prefix(w, dict.len())?;
         for (_, v) in dict.entries() {
@@ -550,32 +562,33 @@ pub fn write_dict(w: &mut impl Writer, dict: &Dict) -> Result<(), WriteError> {
     Ok(())
 }
 
-/// Writes a `Value`. Portable types (incl. non-negative `ClearToken`)
-/// serialize canonically; non-portable variants (`WideToken`, `Cell`,
-/// `Merlin`, and the stack-only constraint-system types) return
-/// `WriteError::TypeNonPortable`.
-pub fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), WriteError> {
+/// Writes a canonically encodable `Value` without applying domain-level
+/// portability policy. Negative ClearTokens and representable non-portable
+/// Dicts are accepted; VM-only variants with no byte format return
+/// [`ValueEncodeError::UnsupportedType`].
+pub(crate) fn write_value(
+    w: &mut impl Writer,
+    val: &Value,
+) -> Result<(), ValueEncodeError> {
     match val {
-        Value::Int253(i) => write_int253(w, i),
-        Value::String(s) => write_string(w, s),
+        Value::Int253(i) => Ok(write_int253(w, i)?),
+        Value::String(s) => Ok(write_string(w, s)?),
         Value::Dict(d) => write_dict(w, d),
         Value::Point(p) => {
             w.write_u8(b"point.tag", POINT_TAG)?;
-            w.write(b"point.data", &p.to_bytes())
+            Ok(w.write(b"point.data", &p.to_bytes())?)
         }
         // Token (portable): tag + qty point (32 B) + flv point (32 B).
         Value::Token(t) => {
             w.write_u8(b"token.tag", TOKEN_TAG)?;
             w.write(b"token.qty", t.qty.to_point().as_bytes())?;
-            w.write(b"token.flv", t.flv.to_point().as_bytes())
+            Ok(w.write(b"token.flv", t.flv.to_point().as_bytes())?)
         }
-        // ClearToken (portable when non-negative — the `is_portable`
-        // gate upstream ensures only those reach here): tag + cleartext
-        // qty + flv as compact `Int253`s.
+        // ClearToken: tag + cleartext qty + flv as compact `Int253`s.
         Value::ClearToken(t) => {
             w.write_u8(b"cleartoken.tag", CLEAR_TOKEN_TAG)?;
             write_int253(w, &t.qty)?;
-            write_int253(w, &t.flv)
+            Ok(write_int253(w, &t.flv)?)
         }
         Value::WideToken(_)
         | Value::Cell(_)
@@ -583,7 +596,22 @@ pub fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), WriteError> {
         | Value::Variable(_)
         | Value::Expression(_)
         | Value::Constraint(_)
-        | Value::MultiscalarMul(_) => Err(WriteError::TypeNonPortable),
+        | Value::MultiscalarMul(_) => Err(ValueEncodeError::UnsupportedType),
+    }
+}
+
+/// Writes a value already admitted to a domain whose invariant guarantees a
+/// canonical representation. This does not perform a portability check.
+pub(crate) fn write_admitted_value(
+    w: &mut impl Writer,
+    val: &Value,
+) -> Result<(), WriteError> {
+    match write_value(w, val) {
+        Ok(()) => Ok(()),
+        Err(ValueEncodeError::Writer(error)) => Err(error),
+        Err(ValueEncodeError::UnsupportedType) => {
+            unreachable!("domain-admitted value has no canonical encoding")
+        }
     }
 }
 
@@ -675,14 +703,15 @@ mod tests {
     }
 
     #[test]
-    fn write_dict_rejects_non_portable_before_writing() {
+    fn write_dict_ignores_sticky_portability_metadata() {
         let mut d = Dict::new();
         d.insert(Int253::ZERO, Value::Merlin(Merlin::new(b"test")));
         d.remove(&Int253::ZERO);
         assert!(d.is_empty());
+        assert!(!d.is_portable());
         let mut buf = Vec::new();
-        assert!(write_dict(&mut buf, &d).is_err());
-        assert!(buf.is_empty());
+        write_dict(&mut buf, &d).unwrap();
+        assert_eq!(buf, vec![LIST_IMM_MIN]);
     }
 
     #[test]
@@ -737,10 +766,58 @@ mod tests {
 
     #[test]
     fn read_value_widetoken_tag_rejects() {
-        // WideToken is non-portable: tag 0xfb is always a wire error.
+        // WideToken has no implemented value encoding: tag 0xfb is invalid.
         let buf = vec![WIDE_TOKEN_TAG];
         let mut r = buf.as_slice();
         assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
+    }
+
+    #[test]
+    fn negative_cleartoken_encoding_is_domain_neutral() {
+        let value = Value::ClearToken(ClearToken::new(
+            Int253::from(-1i64),
+            Int253::ZERO,
+        ));
+        let mut encoded = Vec::new();
+        write_value(&mut encoded, &value).unwrap();
+
+        let mut r = encoded.as_slice();
+        let decoded = read_value(&mut r).unwrap().unwrap();
+        assert!(r.is_empty());
+        assert!(!decoded.is_portable());
+        match decoded {
+            Value::ClearToken(token) => {
+                assert_eq!(token.qty(), Int253::from(-1i64));
+                assert_eq!(token.flv(), Int253::ZERO);
+            }
+            other => panic!("expected ClearToken, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn nested_nonportable_dict_roundtrips_for_diagnostics() {
+        let mut inner = Dict::new();
+        inner.insert(
+            Int253::ZERO,
+            Value::ClearToken(ClearToken::new(Int253::from(-1i64), Int253::ZERO)),
+        );
+        let mut outer = Dict::new();
+        outer.insert(Int253::ZERO, Value::Dict(inner));
+
+        let mut encoded = Vec::new();
+        write_value(&mut encoded, &Value::Dict(outer)).unwrap();
+        let decoded = read_value(&mut encoded.as_slice()).unwrap().unwrap();
+        assert!(!decoded.is_portable());
+    }
+
+    #[test]
+    fn unsupported_value_is_not_reported_as_writer_capacity() {
+        let mut encoded = Vec::new();
+        assert_eq!(
+            write_value(&mut encoded, &Value::Merlin(Merlin::new(b"test"))),
+            Err(ValueEncodeError::UnsupportedType)
+        );
+        assert!(encoded.is_empty());
     }
 
     #[test]
@@ -752,7 +829,7 @@ mod tests {
         let original = Value::Token(Token::cleartext(
             Int253::from(123u64),
             Int253::from(7u64),
-        ));
+        ).expect("test quantity is in range"));
         let mut buf = Vec::new();
         write_value(&mut buf, &original).expect("encodes");
         // Wire shape: 1 tag byte + 32 qty bytes + 32 flv bytes.

@@ -326,7 +326,8 @@ mod tests {
             Predicate::opaque(Predicate::unspendable_key()),
             Anchor([7; 32]),
             vec![],
-        );
+        )
+        .expect("empty payload is portable");
         let id = cell.id();
         let output = TxLog::from(vec![
             TxEntry::Header(TxHeader {

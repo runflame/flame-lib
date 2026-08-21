@@ -305,7 +305,8 @@ fn phase20_two_txbound_verifies_with_multisig() {
         Predicate::opaque(vk1),
         Anchor([0xa1; 32]),
         vec![Value::Int253(Int253::from(0u64))],
-    );
+    )
+    .expect("payload is portable");
     let cell1_id = cell1.id();
     let cell1_bytes = encode_cell_to_bytes(&cell1);
 
@@ -313,7 +314,8 @@ fn phase20_two_txbound_verifies_with_multisig() {
         Predicate::opaque(vk2),
         Anchor([0xa2; 32]),
         vec![Value::Int253(Int253::from(0u64))],
-    );
+    )
+    .expect("payload is portable");
     let cell2_id = cell2.id();
     let cell2_bytes = encode_cell_to_bytes(&cell2);
 

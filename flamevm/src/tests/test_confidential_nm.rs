@@ -538,7 +538,7 @@ fn confidential_1_to_1_with_fee() {
     match &prover_result.txlog[3] {
         TxEntry::Output(c) => {
             assert_eq!(c.predicate.to_point(), out_pred);
-            let token = match &c.payload[0] {
+            let token = match &c.payload()[0] {
                 Value::Token(t) => t,
                 _ => panic!("output payload[0] must be Token"),
             };

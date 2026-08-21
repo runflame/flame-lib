@@ -211,11 +211,10 @@ impl Value {
         match self {
             Value::Int253(_) | Value::String(_) | Value::Point(_) => true,
             Value::Dict(d) => d.is_portable(),
-            Value::ClearToken(t) => !t.qty().is_negative(),
-            // `Token` is portable per design — every `Token`
-            // instance is range-proven non-negative at construction
-            // (via the encrypted opcode paths or `Token::cleartext`),
-            // so the portability invariant holds by construction.
+            Value::ClearToken(t) => t.is_portable(),
+            // `Token` is portable by construction: public cleartext
+            // construction enforces its range, while commitment-based
+            // construction is restricted to trusted crate paths.
             Value::Token(_) => true,
             _ => false,
         }

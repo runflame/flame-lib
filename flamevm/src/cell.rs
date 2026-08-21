@@ -9,7 +9,10 @@ use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 use readerwriter::{Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer};
 
-use crate::encoding::{read_list_prefix, read_string, read_value, write_list_prefix, write_value};
+use crate::encoding::{
+    read_list_prefix, read_string, read_value, write_admitted_value,
+    write_list_prefix, write_value,
+};
 use crate::errors::VMError;
 use crate::vm::Anchor;
 use crate::{Point, String, Value};
@@ -500,15 +503,31 @@ pub struct Cell {
     pub predicate: Predicate,
     /// 32-byte anchor — derived by ratcheting from the prior anchor.
     pub anchor: Anchor,
-    /// Payload values; each must be portable (enforced at construction).
-    pub payload: Vec<Value>,
+    /// Immutable payload, admitted only through checked Cell construction.
+    payload: Vec<Value>,
 }
 
 impl Cell {
-    /// Constructs a cell. Caller is responsible for portability and
-    /// anchor uniqueness; this constructor doesn't re-check.
-    pub fn new(predicate: Predicate, anchor: Anchor, payload: Vec<Value>) -> Self {
-        Cell { predicate, anchor, payload }
+    /// Constructs a cell, rejecting any non-portable payload item.
+    pub fn new(
+        predicate: Predicate,
+        anchor: Anchor,
+        payload: Vec<Value>,
+    ) -> Result<Self, VMError> {
+        if payload.iter().any(|v| !v.is_portable()) {
+            return Err(VMError::NonPortableInOutput);
+        }
+        Ok(Cell { predicate, anchor, payload })
+    }
+
+    /// Borrows the immutable payload.
+    pub fn payload(&self) -> &[Value] {
+        &self.payload
+    }
+
+    /// Consumes the cell and returns its payload.
+    pub fn into_payload(self) -> Vec<Value> {
+        self.payload
     }
 
     /// Unique content identity of this cell — commits to its predicate,
@@ -516,8 +535,7 @@ impl Cell {
     /// `signtx`/`signcall` signed message. Uniqueness comes from the anchor;
     /// the payload bytes are bound so the id is a true content commitment.
     ///
-    /// Panics on a payload value with no canonical encoder; `op_cell` /
-    /// `op_output` reject non-portable payloads upstream.
+    /// Cannot fail: all Cell construction paths admit only portable values.
     pub fn id(&self) -> [u8; 32] {
         let mut t = Transcript::new(b"flamevm.cell.id");
         t.append_message(b"predicate", self.predicate.to_point().as_bytes());
@@ -545,44 +563,29 @@ impl Cell {
     pub fn to_bytes(&self) -> Vec<u8> {
         self.encode_to_vec()
     }
-
-    /// Validates that every payload value is portable. Pure VM-level
-    /// check, distinct from parsing — `Decodable::decode` accepts any
-    /// well-formed cell shape; this is the gate `op_input` applies on
-    /// cells coming off the witness path.
-    pub fn validate_portable(&self) -> Result<(), VMError> {
-        for v in &self.payload {
-            if !v.is_portable() {
-                return Err(VMError::MalformedCellEncoding);
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Canonical wire form: a list-style `Dict` with three entries —
 /// predicate (`Point`), anchor (32-byte `String`), payload (nested
-/// list-style `Dict` of values). The `Decodable` side accepts any
-/// well-formed shape; portability of payload values is a separate
-/// VM-level gate, see [`Cell::validate_portable`].
+/// list-style `Dict` of values). Encoding is representation-only; Cell
+/// construction owns the portability invariant.
 impl Encodable for Cell {
     fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
         write_list_prefix(w, 3)?;
         let pred_point = Point::from_compressed(self.predicate.to_point());
-        write_value(w, &Value::Point(pred_point))?;
-        write_value(w, &Value::String(String::from(self.anchor.0.to_vec())))?;
+        write_admitted_value(w, &Value::Point(pred_point))?;
+        write_admitted_value(w, &Value::String(String::from(self.anchor.0.to_vec())))?;
         write_list_prefix(w, self.payload.len())?;
         for v in &self.payload {
-            write_value(w, v)?;
+            write_admitted_value(w, v)?;
         }
         Ok(())
     }
 }
 
-/// Reads the canonical wire form. Pure parse — accepts any
-/// well-formed cell shape regardless of payload portability;
-/// callers that require portable payloads call
-/// [`Cell::validate_portable`] after decoding (`op_input` does).
+/// Reads the canonical wire form, then admits the decoded payload through
+/// [`Cell::new`]. This top-level Cell-domain check is independent of parsing;
+/// nested Dict checks remain O(1) through their sticky metadata.
 ///
 /// `ReadError::InvalidFormat` on:
 /// - outer shape != list-Dict of exactly 3 entries,
@@ -622,7 +625,7 @@ impl Decodable for Cell {
                 _ => return Err(ReadError::InvalidFormat),
             }
         }
-        Ok(Cell::new(predicate, anchor, payload))
+        Cell::new(predicate, anchor, payload).map_err(|_| ReadError::InvalidFormat)
     }
 }
 

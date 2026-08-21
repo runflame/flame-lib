@@ -47,14 +47,15 @@ fn facade_internal_execute_tx_roundtrip() {
     let mut reg = MemRegistry::new();
     let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
     let mut reg = reg;
-    let msg = Message {
-        target: id,
-        caller: None,
-        anchor: Anchor([1u8; 32]),
-        payload: Vec::new(),
-        gas: 1_000,
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-    };
+    let msg = Message::new(
+        id,
+        None,
+        Anchor([1u8; 32]),
+        Vec::new(),
+        1_000,
+        Predicate::opaque(Predicate::unspendable_key()),
+    )
+    .expect("message payload is portable");
     let itx = msg
         .execute_tx(&mut reg, &BlockContext { height: 0 })
         .expect("execute_tx");
@@ -88,16 +89,19 @@ fn constructor_buys_storage_and_is_reused() {
         .to_bytecode();
     let target = ActorID::Constructor(code.clone());
     let canonical = target.to_canonical();
-    let mk = || Message {
-        target: target.clone(),
-        caller: None,
-        anchor: Anchor([0x07; 32]),
-        payload: vec![Value::ClearToken(ClearToken::new(
-            Int253::from(77u64),
-            FLAME_FLAVOR,
-        ))],
-        gas: 10_000,
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
+    let mk = || {
+        Message::new(
+            target.clone(),
+            None,
+            Anchor([0x07; 32]),
+            vec![Value::ClearToken(ClearToken::new(
+                Int253::from(77u64),
+                FLAME_FLAVOR,
+            ))],
+            10_000,
+            Predicate::opaque(Predicate::unspendable_key()),
+        )
+        .expect("message payload is portable")
     };
     let block = BlockContext { height: 1 };
     let first = VM::execute_internal(dummy_header(), mk(), &mut reg, &block).unwrap();
@@ -271,6 +275,29 @@ fn save_accepts_arbitrary_portable_dict_shape() {
 }
 
 #[test]
+fn save_rejects_nested_nonportable_state() {
+    let mut reg = MemRegistry::new();
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
+    reg.actor_mut(&id).expect("present").state = None;
+
+    let mut inner = Dict::new();
+    inner.insert(
+        Int253::ZERO,
+        Value::ClearToken(ClearToken::new(Int253::from(-1i64), FLAME_FLAVOR)),
+    );
+    let mut outer = Dict::new();
+    outer.insert(Int253::ZERO, Value::Dict(inner));
+
+    let mut vm = vm_for(id.clone(), ScriptBuilder::new().save().to_bytecode());
+    vm.current_call.stack.push(Value::Dict(outer));
+    assert!(matches!(
+        vm.step_internal_with_registry(&mut reg),
+        Err(VMError::NonPortableInState)
+    ));
+    assert!(reg.actor(&id).expect("present").is_checked_out());
+}
+
+#[test]
 fn load_then_dismantle_emits_actor_destroy() {
     let mut reg = MemRegistry::new();
     let id = deploy_with_recv(
@@ -282,14 +309,15 @@ fn load_then_dismantle_emits_actor_destroy() {
     assert!(reg.exists(&id));
 
     let block = BlockContext { height: 100 };
-    let msg = Message {
-        target: id.clone(),
-        caller: None,
-        anchor: Anchor([0x07; 32]),
-        payload: Vec::new(),
-        gas: 1_000_000,
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-    };
+    let msg = Message::new(
+        id.clone(),
+        None,
+        Anchor([0x07; 32]),
+        Vec::new(),
+        1_000_000,
+        Predicate::opaque(Predicate::unspendable_key()),
+    )
+    .expect("message payload is portable");
     let result = VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("ok");
 
     assert!(
@@ -319,14 +347,15 @@ fn token_survives_load_save_roundtrip_exactly_once() {
     let id = ActorID::Hash(ActorID::Constructor(recv.clone()).to_hash());
     reg.deploy(id.clone(), recv, state, 10_000).expect("deploy");
 
-    let msg = Message {
-        target: id.clone(),
-        caller: None,
-        anchor: Anchor([0x11; 32]),
-        payload: Vec::new(),
-        gas: 100_000,
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-    };
+    let msg = Message::new(
+        id.clone(),
+        None,
+        Anchor([0x11; 32]),
+        Vec::new(),
+        100_000,
+        Predicate::opaque(Predicate::unspendable_key()),
+    )
+    .expect("message payload is portable");
     let block = BlockContext { height: 0 };
     VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("run");
 
@@ -376,14 +405,15 @@ fn dismantle_token_bearing_state_requires_retire() {
     reg.deploy(id.clone(), recv, state, 10_000).expect("deploy");
 
     let block = BlockContext { height: 100 };
-    let msg = Message {
-        target: id.clone(),
-        caller: None,
-        anchor: Anchor([0x09; 32]),
-        payload: Vec::new(),
-        gas: 1_000_000,
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-    };
+    let msg = Message::new(
+        id.clone(),
+        None,
+        Anchor([0x09; 32]),
+        Vec::new(),
+        1_000_000,
+        Predicate::opaque(Predicate::unspendable_key()),
+    )
+    .expect("message payload is portable");
     let err = VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect_err("must error");
     assert!(matches!(err, VMError::TypeNotDroppable));
     assert!(reg.exists(&id), "rolled back — balance intact");
@@ -402,14 +432,15 @@ fn load_without_discharge_errors_stack_not_clean() {
         0,
     );
     let block = BlockContext { height: 100 };
-    let msg = Message {
-        target: id.clone(),
-        caller: None,
-        anchor: Anchor([0x08; 32]),
-        payload: Vec::new(),
-        gas: 1_000_000,
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-    };
+    let msg = Message::new(
+        id.clone(),
+        None,
+        Anchor([0x08; 32]),
+        Vec::new(),
+        1_000_000,
+        Predicate::opaque(Predicate::unspendable_key()),
+    )
+    .expect("message payload is portable");
     let err = VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect_err("must error");
     assert!(matches!(err, VMError::StackNotClean));
     // Rolled back — the actor is intact and available.
@@ -430,14 +461,15 @@ fn load_followed_by_save_preserves_actor() {
     );
 
     let block = BlockContext { height: 100 };
-    let msg = Message {
-        target: id.clone(),
-        caller: None,
-        anchor: Anchor([0x02; 32]),
-        payload: Vec::new(),
-        gas: 1_000_000,
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-    };
+    let msg = Message::new(
+        id.clone(),
+        None,
+        Anchor([0x02; 32]),
+        Vec::new(),
+        1_000_000,
+        Predicate::opaque(Predicate::unspendable_key()),
+    )
+    .expect("message payload is portable");
     VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("ok");
 
     // Actor still present; state checked back in (not self-destructed).
@@ -470,14 +502,15 @@ fn receive_committed_as_first_effect_after_header() {
     );
     let block = BlockContext { height: 100 };
     let known_anchor = [0xab; 32];
-    let msg = Message {
-        target: id.clone(),
-        caller: None,
-        anchor: Anchor(known_anchor),
-        payload: Vec::new(),
-        gas: 1_000_000,
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-    };
+    let msg = Message::new(
+        id.clone(),
+        None,
+        Anchor(known_anchor),
+        Vec::new(),
+        1_000_000,
+        Predicate::opaque(Predicate::unspendable_key()),
+    )
+    .expect("message payload is portable");
     let expected_send_id = *msg.id().as_bytes();
     let result =
         VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("execute_internal ok");
@@ -517,14 +550,15 @@ fn receive_makes_internal_txid_bind_to_send_anchor() {
             0,
         );
         let block = BlockContext { height: 100 };
-        let msg = Message {
-            target: id,
-            caller: None,
-            anchor: Anchor(anchor_bytes),
-            payload: Vec::new(),
-            gas: 1_000_000,
-            refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-        };
+        let msg = Message::new(
+            id,
+            None,
+            Anchor(anchor_bytes),
+            Vec::new(),
+            1_000_000,
+            Predicate::opaque(Predicate::unspendable_key()),
+        )
+        .expect("message payload is portable");
         VM::execute_internal(dummy_header(), msg, &mut reg, &block)
             .expect("execute_internal ok")
             .txid

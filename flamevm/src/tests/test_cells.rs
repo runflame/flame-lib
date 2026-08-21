@@ -19,7 +19,8 @@ fn cell_decode_rejects_payload_count_bomb() {
         Predicate::opaque(CompressedRistretto([2u8; 32])),
         Anchor([0u8; 32]),
         Vec::new(),
-    );
+    )
+    .expect("empty payload is portable");
     let mut bytes = cell.to_bytes();
     assert_eq!(*bytes.last().unwrap(), 128, "empty-payload list prefix");
     bytes.pop();
@@ -74,11 +75,7 @@ fn cell_opcode_builds_a_cell_and_ratchets_anchor() {
 
 #[test]
 fn cell_opcode_rejects_non_portable_payload() {
-    // Build a ClearToken (linear, can be non-portable if qty < 0;
-    // even zero-qty cleartoken is non-portable only if qty < 0 — but
-    // ClearToken is still considered non-portable when we push it
-    // because is_portable returns true for zero-qty.
-    // Instead test with a `Merlin` (always non-portable).
+    // Merlin is always non-portable.
     let script = ScriptBuilder::new()
         .push_str(String::from(Vec::<u8>::new())) // empty label
         .transcript()                                  // → Merlin (non-portable)
@@ -91,6 +88,24 @@ fn cell_opcode_rejects_non_portable_payload() {
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::NonPortableInOutput
+    ));
+}
+
+#[test]
+fn cell_constructor_rejects_nested_non_portable_payload() {
+    let mut inner = Dict::new();
+    inner.insert(Int253::ZERO, Value::Merlin(Merlin::new(b"test")));
+    let mut outer = Dict::new();
+    outer.insert(Int253::ZERO, Value::Dict(inner));
+    assert!(!outer.is_portable());
+
+    assert!(matches!(
+        Cell::new(
+            Predicate::opaque(CompressedRistretto([2u8; 32])),
+            Anchor([0u8; 32]),
+            vec![Value::Dict(outer)],
+        ),
+        Err(VMError::NonPortableInOutput)
     ));
 }
 
@@ -260,7 +275,8 @@ fn open_preserves_alloc_witnesses_via_script_string() {
         Predicate::opaque(pred_point),
         Anchor([0xa1; 32]),
         vec![],
-    );
+    )
+    .expect("empty payload is portable");
     let cell_bytes = encode_cell_to_bytes(&cell);
 
     // Outer ScriptBuilder:
@@ -538,7 +554,7 @@ fn taproot_proof_for_out_of_range_index_errors() {
 fn output_rejects_cell_as_payload_item() {
     // Build cell A on stack. Then try: count=1, predicate_point, output
     //   — the output op pops pred + count + 1 payload item (cell A)
-    //     and `pop_n_portable` must reject cell A.
+    //     and checked Cell construction must reject cell A.
     let script = ScriptBuilder::new()
         .push_int(5u64)
         .push_int(1u64)
@@ -649,6 +665,34 @@ fn cell_decode_rejects_wrong_anchor_length() {
         .expect("write payload prefix");
     let err = decode_cell_dropping_ok(&bytes).unwrap_err();
     assert!(matches!(err, VMError::MalformedCellEncoding));
+}
+
+#[test]
+fn cell_decode_rejects_nested_nonportable_payload_at_cell_boundary() {
+    let mut inner = Dict::new();
+    inner.insert(
+        Int253::ZERO,
+        Value::ClearToken(ClearToken::new(Int253::from(-1i64), FLAME_FLAVOR)),
+    );
+    let mut outer = Dict::new();
+    outer.insert(Int253::ZERO, Value::Dict(inner));
+
+    let mut bytes = Vec::new();
+    write_list_prefix(&mut bytes, 3).unwrap();
+    write_value(
+        &mut bytes,
+        &Value::Point(Point::from_bytes([0xaa; 32])),
+    )
+    .unwrap();
+    write_value(
+        &mut bytes,
+        &Value::String(String::from(vec![0u8; 32])),
+    )
+    .unwrap();
+    write_list_prefix(&mut bytes, 1).unwrap();
+    write_value(&mut bytes, &Value::Dict(outer)).unwrap();
+
+    assert!(decode_cell_dropping_ok(&bytes).is_err());
 }
 
 #[test]
@@ -907,8 +951,8 @@ fn external_tx_one_input_one_output_via_signtx() {
     let output_cell_anchor = match &vm.txlog[2] {
         TxEntry::Output(c) => {
             // Output payload was [Int253(42)].
-            assert_eq!(c.payload.len(), 1);
-            match &c.payload[0] {
+            assert_eq!(c.payload().len(), 1);
+            match &c.payload()[0] {
                 Value::Int253(i) => assert_eq!(*i, Int253::from(42u64)),
                 _ => panic!("output payload[0] must be Int253(42)"),
             }
@@ -967,7 +1011,8 @@ fn external_tx_two_inputs_two_outputs_via_open() {
         Predicate::opaque(tree1.point),
         Anchor([0xa1; 32]),
         vec![Value::Int253(Int253::from(11u64))],
-    );
+    )
+    .expect("payload is portable");
     let cell1_id = cell1.id();
     let cell1_bytes = encode_cell_to_bytes(&cell1);
 
@@ -976,7 +1021,8 @@ fn external_tx_two_inputs_two_outputs_via_open() {
         Predicate::opaque(tree2.point),
         Anchor([0xa2; 32]),
         vec![Value::Int253(Int253::from(22u64))],
-    );
+    )
+    .expect("payload is portable");
     let cell2_id = cell2.id();
     let cell2_bytes = encode_cell_to_bytes(&cell2);
 
@@ -1052,14 +1098,14 @@ fn external_tx_two_inputs_two_outputs_via_open() {
 
     // Output 1's payload is [Int253(9)], predicate matches what we
     // pushed.
-    assert_eq!(out1.payload.len(), 1);
-    match &out1.payload[0] {
+    assert_eq!(out1.payload().len(), 1);
+    match &out1.payload()[0] {
         Value::Int253(i) => assert_eq!(*i, Int253::from(9u64)),
         _ => panic!("out1.payload[0] must be Int253(9)"),
     }
     assert_eq!(out1.predicate.to_point().as_bytes(), &out1_pred_bytes);
-    assert_eq!(out2.payload.len(), 1);
-    match &out2.payload[0] {
+    assert_eq!(out2.payload().len(), 1);
+    match &out2.payload()[0] {
         Value::Int253(i) => assert_eq!(*i, Int253::from(10u64)),
         _ => panic!("out2.payload[0] must be Int253(10)"),
     }

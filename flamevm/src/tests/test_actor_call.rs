@@ -70,7 +70,7 @@ fn nop_recv() -> Vec<u8> {
 }
 
 #[test]
-fn call_rejects_nonportable_argument() {
+fn call_rejects_nested_nonportable_argument() {
     let mut reg = MemRegistry::new();
     let callee = deploy_recv(&mut reg, nop_recv(), 100);
     let caller = deploy_recv(
@@ -79,8 +79,15 @@ fn call_rejects_nonportable_argument() {
         100,
     );
     let mut vm = vm_for_actor(caller, ScriptBuilder::new().call().to_bytecode());
-    vm.current_call.stack = vec![
+    let mut inner = Dict::new();
+    inner.insert(
+        Int253::ZERO,
         Value::ClearToken(ClearToken::new(Int253::from(-1i64), FLAME_FLAVOR)),
+    );
+    let mut outer = Dict::new();
+    outer.insert(Int253::ZERO, Value::Dict(inner));
+    vm.current_call.stack = vec![
+        Value::Dict(outer),
         Value::Int253(Int253::ONE),
         Value::Int253(Int253::from(10_000u64)),
         Value::String(String::from(callee.to_hash().to_vec())),
@@ -628,14 +635,15 @@ fn f1_failed_subcall_load_does_not_destroy_actor() {
 
     // Run via execute_internal targeting A.
     let block = BlockContext { height: 100 };
-    let msg = Message {
-        target: a_id,
-        caller: None,
-        anchor: Anchor([0x42; 32]),
-        payload: Vec::new(),
-        gas: 100_000,
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-    };
+    let msg = Message::new(
+        a_id,
+        None,
+        Anchor([0x42; 32]),
+        Vec::new(),
+        100_000,
+        Predicate::opaque(Predicate::unspendable_key()),
+    )
+    .expect("message payload is portable");
     let _ = VM::execute_internal(dummy_header(), msg, &mut reg, &block)
         .expect("outer tx succeeds (A drops the inner failure marker)");
 
@@ -698,14 +706,15 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
     let a_id = deploy_recv(&mut reg, a_recv, 10_000);
 
     let block = BlockContext { height: 100 };
-    let msg = Message {
-        target: a_id,
-        caller: None,
-        anchor: Anchor([0x42; 32]),
-        payload: Vec::new(),
-        gas: 100_000,
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-    };
+    let msg = Message::new(
+        a_id,
+        None,
+        Anchor([0x42; 32]),
+        Vec::new(),
+        100_000,
+        Predicate::opaque(Predicate::unspendable_key()),
+    )
+    .expect("message payload is portable");
     let result =
         VM::execute_internal(dummy_header(), msg, &mut reg, &block).expect("outer tx succeeds");
 
@@ -780,14 +789,15 @@ fn f3_save_failure_rolls_back_and_preserves_actor() {
     let a_id = deploy_recv(&mut reg, a_recv, 10_000);
 
     let block = BlockContext { height: 100 };
-    let msg = Message {
-        target: a_id,
-        caller: None,
-        anchor: Anchor([0x42; 32]),
-        payload: Vec::new(),
-        gas: 100_000,
-        refund_predicate: Predicate::opaque(Predicate::unspendable_key()),
-    };
+    let msg = Message::new(
+        a_id,
+        None,
+        Anchor([0x42; 32]),
+        Vec::new(),
+        100_000,
+        Predicate::opaque(Predicate::unspendable_key()),
+    )
+    .expect("message payload is portable");
     let _ = VM::execute_internal(dummy_header(), msg, &mut reg, &block)
         .expect("outer tx succeeds (failure swallowed into marker)");
 

@@ -457,7 +457,7 @@ impl Blockchain {
                 Ok(result) => (ExecutionKind::Internal, result.into_log()),
                 Err(_) => (
                     ExecutionKind::InternalFailed,
-                    Self::bounce_log(failed_message),
+                    Self::bounce_log(failed_message)?,
                 ),
             };
             self.apply_log(&mut work, &hasher, &log, &[], &mut sends, &mut seen_outputs)?;
@@ -495,17 +495,23 @@ impl Blockchain {
         })
     }
 
-    fn bounce_log(message: Message) -> TxLog {
+    fn bounce_log(message: Message) -> Result<TxLog, ChainError> {
         let receive = *message.id().as_bytes();
         let (anchor, _) = message.anchor.split();
-        TxLog::from(vec![
+        let refund_predicate = message.refund_predicate.clone();
+        let payload = message.into_payload();
+        Ok(TxLog::from(vec![
             TxEntry::Header(TxHeader {
                 version: 1,
                 locktime: 0,
             }),
             TxEntry::Receive(receive),
-            TxEntry::Output(Cell::new(message.refund_predicate, anchor, message.payload)),
-        ])
+            TxEntry::Output(Cell::new(
+                refund_predicate,
+                anchor,
+                payload,
+            )?),
+        ]))
     }
 
     fn destruction_log(height: u64, destroyed: DestroyedActor) -> Result<TxLog, ChainError> {
@@ -530,7 +536,7 @@ impl Blockchain {
                     Self::retire_stored_value(value, entries)?;
                 }
             }
-            Value::ClearToken(token) if token.qty().is_negative() => {
+            Value::ClearToken(token) if !token.is_portable() => {
                 return Err(VMError::NonPortableInState.into());
             }
             Value::ClearToken(token) if !token.qty().is_zero() => entries.push(TxEntry::Retire(
@@ -538,7 +544,10 @@ impl Blockchain {
                 Commitment::unblinded(token.flv()).to_point(),
             )),
             Value::Token(token) => {
-                entries.push(TxEntry::Retire(token.qty.to_point(), token.flv.to_point()))
+                entries.push(TxEntry::Retire(
+                    token.qty().to_point(),
+                    token.flv().to_point(),
+                ))
             }
             Value::Int253(_) | Value::String(_) | Value::Point(_) | Value::ClearToken(_) => {}
             _ => return Err(VMError::NonPortableInState.into()),

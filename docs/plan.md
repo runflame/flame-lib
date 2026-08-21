@@ -53,18 +53,38 @@ when the specification, implementation, and focused regression tests agree.
    - [ ] Ensure a failed `signcall` removes its deferred signature together with
      the failed frame.
 
-4. [ ] Enforce portability at every wire and storage boundary using sticky Dict metadata.
+4. [x] Enforce portability at domain transitions using sticky Dict metadata.
 
-   - [ ] Reject negative `ClearToken` quantities in both `read_value` and
-     `write_value`; negative tokens remain stack-only intermediates.
+   - [x] Keep generic value encoding representation-only. A negative
+     `ClearToken`, and a Dict containing one, can be encoded and decoded for
+     diagnostics; the codec does not decide whether that value may enter a
+     persistent or asynchronous domain.
    - [x] Cache a sticky `portable` flag in each Dict, initialized to `true` and
      cleared on successful insertion of a non-portable value.
-   - [x] Reconstruct the flag bottom-up in both Dict wire forms without an
-     additional recursive portability scan.
-   - [ ] Apply the O(1) Dict check at cell, message, call, and actor-state
-     boundaries, and test propagation through more than one Dict depth.
-   - [ ] Audit every public constructor and unchecked decoder so the portability
-     invariant does not depend only on opcode callers.
+   - [x] Reconstruct the flag from decoded members in both Dict wire forms
+     without an additional recursive portability scan. Historical taint is not
+     serialized: debug round-trips preserve the represented members, not a
+     sticky flag left by a member that was later removed.
+   - [x] Make Cell payloads immutable and reject non-portable values in the
+     public constructor using the O(1) Dict flag.
+   - [x] Route `Cell::decode` through the same Cell-domain admission rule. A
+     top-level payload scan is sufficient because each nested Dict lookup is
+     O(1); this is a Cell check, not an encoding check.
+   - [x] Make Message payloads immutable and admit them only through a checked
+     constructor.
+   - [x] Apply the O(1) Dict check at synchronous actor calls and at VM and
+     registry actor-state save/deploy boundaries.
+   - [x] Test Message/send, call, Cell decode, and actor-state admission with
+     nested non-portable Dicts.
+   - [x] Restrict public `Token` construction so every `Token` is portable by
+     construction. Portability must not depend on whether a commitment happens
+     to carry a prover-only opening.
+   - [x] Audit public construction and decoding paths. Dict entries and
+     Cell/Message payloads are private; Cell/Message constructors and Cell
+     decoding admit payloads; raw Token construction is crate-private and its
+     public cleartext constructor enforces the quantity range. ClearToken,
+     Address, and TxLog remain policy-neutral in-memory carriers; the receiving
+     Cell, Message, call, or actor-state boundary performs admission.
 
 5. [ ] Reconcile canonical wire and opcode contracts.
 

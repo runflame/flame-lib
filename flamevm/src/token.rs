@@ -30,33 +30,40 @@ pub const FLAME_FLAVOR: Int253 = Int253::ZERO;
 #[derive(Clone, Debug)]
 pub struct Token {
     /// Pedersen commitment to the asset's quantity (≥ 0).
-    pub qty: Commitment,
+    pub(crate) qty: Commitment,
     /// Pedersen commitment to the asset's flavor scalar.
-    pub flv: Commitment,
+    pub(crate) flv: Commitment,
 }
 
 impl Token {
     /// Builds a `Token` from already-constructed commitments. Used
-    /// by the encrypted opcode branches (`borrow`, `mix`).
-    pub fn new(qty: Commitment, flv: Commitment) -> Self {
+    /// by the decoder and encrypted opcode branches (`borrow`, `mix`).
+    pub(crate) fn new(qty: Commitment, flv: Commitment) -> Self {
         Token { qty, flv }
     }
 
     /// Builds a `Token` from cleartext `Int253`s by wrapping each in an
-    /// **unblinded** open commitment. Useful for tests, for the
-    /// cleartext branch of `issue`, and as a stable on-stack
-    /// representation that scripts can carry forward through the
-    /// confidential opcodes without surfacing the cleartext.
+    /// **unblinded** open commitment. Useful for tests and host code that
+    /// needs a stable on-stack representation for confidential opcodes.
     ///
-    /// Caller responsibility: `qty` should be non-negative. Opcodes
-    /// that create Tokens via this path (only `issue`'s cleartext
-    /// branch and tests) enforce non-negativity at the call site;
-    /// the constructor itself does not.
-    pub fn cleartext(qty: Int253, flv: Int253) -> Self {
-        Token {
+    /// Returns `None` unless `qty` is in the unsigned 64-bit range
+    /// proven by the confidential token machinery.
+    pub fn cleartext(qty: Int253, flv: Int253) -> Option<Self> {
+        qty.to_u64()?;
+        Some(Token {
             qty: Commitment::unblinded(qty),
             flv: Commitment::unblinded(flv),
-        }
+        })
+    }
+
+    /// Pedersen commitment to the asset's quantity.
+    pub fn qty(&self) -> &Commitment {
+        &self.qty
+    }
+
+    /// Pedersen commitment to the asset's flavor scalar.
+    pub fn flv(&self) -> &Commitment {
+        &self.flv
     }
 }
 
@@ -124,6 +131,11 @@ impl ClearToken {
     /// Read-only access to the cleartext flavor.
     pub fn flv(&self) -> Int253 {
         self.flv
+    }
+
+    /// True iff this token may enter a persistent or transfer domain.
+    pub fn is_portable(&self) -> bool {
+        !self.qty.is_negative()
     }
 
     /// `true` iff `qty == 0` (drop-eligible per spec.md `drop`).

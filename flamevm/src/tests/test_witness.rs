@@ -20,12 +20,13 @@ fn input_string_cell_preserves_open_commitments() {
         Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x42; 32]),
         vec![Value::Token(token)],
-    );
+    )
+    .expect("payload is portable");
     let mut vm = vm_external_with_script(Vec::new());
     vm.push_value(Value::String(String::cell(cell)));
     vm.op_input().expect("input ok");
     match &vm.current_call.stack[0] {
-        Value::Cell(c) => match &c.payload[0] {
+        Value::Cell(c) => match &c.payload()[0] {
             Value::Token(t) => {
                 assert!(
                     t.qty.witness().is_some(),
@@ -51,13 +52,14 @@ fn input_string_opaque_yields_closed_commitments() {
         Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x42; 32]),
         vec![Value::Token(token)],
-    );
+    )
+    .expect("payload is portable");
     let cell_bytes = cell.to_bytes();
     let mut vm = vm_external_with_script(Vec::new());
     vm.push_value(Value::String(String::from(cell_bytes)));
     vm.op_input().expect("input ok");
     match &vm.current_call.stack[0] {
-        Value::Cell(c) => match &c.payload[0] {
+        Value::Cell(c) => match &c.payload()[0] {
             Value::Token(t) => {
                 assert!(
                     t.qty.witness().is_none(),
@@ -85,12 +87,14 @@ fn input_string_cell_and_opaque_yield_same_cell_id() {
         Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x42; 32]),
         vec![Value::Token(token1)],
-    );
+    )
+    .expect("payload is portable");
     let cell2 = Cell::new(
         Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x42; 32]),
         vec![Value::Token(token2)],
-    );
+    )
+    .expect("payload is portable");
     let cell_bytes = cell2.to_bytes();
 
     let mut vm_p = vm_external_with_script(Vec::new());
@@ -121,7 +125,8 @@ fn string_cell_clone_preserves_cell() {
         Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x55; 32]),
         vec![Value::Token(token)],
-    );
+    )
+    .expect("payload is portable");
     let id = cell.id();
     let s = String::cell(cell);
     let cloned = s.clone();

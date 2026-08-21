@@ -692,10 +692,41 @@ impl ActorRegistry for ActorStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flamevm::{ActorRegistry, empty_state};
+    use flamevm::{
+        ActorRegistry, ClearToken, Dict, FLAME_FLAVOR, Int253, Value,
+        empty_state,
+    };
 
     fn actor() -> ActorID {
         ActorID::Hash([7; 32])
+    }
+
+    fn nested_nonportable_state() -> Value {
+        let mut inner = Dict::new();
+        inner.insert(
+            Int253::ZERO,
+            Value::ClearToken(ClearToken::new(Int253::from(-1i64), FLAME_FLAVOR)),
+        );
+        let mut outer = Dict::new();
+        outer.insert(Int253::ZERO, Value::Dict(inner));
+        Value::Dict(outer)
+    }
+
+    #[test]
+    fn actor_state_boundaries_reject_nested_nonportable_dicts() {
+        let mut store = ActorStore::new(StorageParams::default()).unwrap();
+        assert!(matches!(
+            store.deploy(actor(), vec![0], nested_nonportable_state()),
+            Err(VMError::NonPortableInState)
+        ));
+
+        store.deploy(actor(), vec![0], empty_state()).unwrap();
+        store.load_state(&actor()).unwrap();
+        assert!(matches!(
+            store.save_state(&actor(), nested_nonportable_state()),
+            Err(VMError::NonPortableInState)
+        ));
+        assert!(matches!(store.load_state(&actor()), Err(VMError::ActorEmpty)));
     }
 
     #[test]

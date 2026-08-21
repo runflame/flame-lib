@@ -5,7 +5,8 @@ use readerwriter::{Encodable, WriteError, Writer};
 
 use crate::actor::ActorID;
 use crate::cell::Predicate;
-use crate::encoding::write_value;
+use crate::encoding::write_admitted_value;
+use crate::errors::VMError;
 use crate::value::Value;
 use crate::vm::Anchor;
 
@@ -53,7 +54,7 @@ pub struct Message {
 
     /// Args to deliver to the method's stack. Walked at delivery time
     /// and pushed in payload order before the dispatched method runs.
-    pub payload: Vec<Value>,
+    payload: Vec<Value>,
 
     /// Gas allotment committed by the originator. Fully consumed
     /// regardless of internal-tx outcome (no refunds for sends per
@@ -67,6 +68,39 @@ pub struct Message {
 }
 
 impl Message {
+    /// Constructs a message, rejecting values that cannot cross into the
+    /// asynchronous execution domain.
+    pub fn new(
+        target: ActorID,
+        caller: Option<ActorID>,
+        anchor: Anchor,
+        payload: Vec<Value>,
+        gas: u64,
+        refund_predicate: Predicate,
+    ) -> Result<Self, VMError> {
+        if payload.iter().any(|v| !v.is_portable()) {
+            return Err(VMError::NonPortableInSend);
+        }
+        Ok(Self {
+            target,
+            caller,
+            anchor,
+            payload,
+            gas,
+            refund_predicate,
+        })
+    }
+
+    /// Borrows the immutable payload.
+    pub fn payload(&self) -> &[Value] {
+        &self.payload
+    }
+
+    /// Consumes the message and returns its payload.
+    pub fn into_payload(self) -> Vec<Value> {
+        self.payload
+    }
+
     /// Unique ID identifying the message that spawns the internal transaction.
     /// Note: MessageID is not the same as TxID, which can only be determined after
     /// processing the message.
@@ -88,16 +122,14 @@ impl Message {
 ///    bytes.
 /// 3. `caller` — `0x00` for None, `0x01 ‖ ActorID::encode(canonical)`
 ///    for Some.
-/// 4. `method` — `write_int253`.
-/// 5. `refund_predicate` — 32-byte compressed Ristretto (via
+/// 4. `refund_predicate` — 32-byte compressed Ristretto (via
 ///    `Predicate: Encodable`).
-/// 6. `gas` — little-endian u64.
-/// 7. `payload` — little-endian u64 count, then each value's
+/// 5. `gas` — little-endian u64.
+/// 6. `payload` — little-endian u64 count, then each value's
 ///    canonical `write_value` encoding.
 ///
-/// Fails if the writer runs out of capacity or the payload contains a
-/// non-portable value. `op_send` guarantees portability in valid VM flow;
-/// direct callers receive the encoder error instead.
+/// Fails only if the writer runs out of capacity. Portability is enforced by
+/// [`Message::new`] before a payload enters the asynchronous domain.
 impl Encodable for Message {
     fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
         self.anchor.encode(w)?;
@@ -115,7 +147,7 @@ impl Encodable for Message {
         w.write_u64(b"send.gas", self.gas)?;
         w.write_u64(b"send.payload.len", self.payload.len() as u64)?;
         for v in &self.payload {
-            write_value(w, v).map_err(|_| WriteError::InsufficientCapacity)?;
+            write_admitted_value(w, v)?;
         }
         Ok(())
     }
@@ -127,19 +159,22 @@ mod tests {
 
     use curve25519_dalek::ristretto::CompressedRistretto;
 
+    use crate::{ClearToken, Dict, Int253, FLAME_FLAVOR};
+
     fn dummy_predicate() -> Predicate {
         Predicate::opaque(CompressedRistretto([0u8; 32]))
     }
 
     fn fixture_message(anchor: Anchor) -> Message {
-        Message {
-            target: ActorID::Hash([0x11; 32]),
-            caller: None,
+        Message::new(
+            ActorID::Hash([0x11; 32]),
+            None,
             anchor,
-            payload: Vec::new(),
-            gas: 1_000,
-            refund_predicate: dummy_predicate(),
-        }
+            Vec::new(),
+            1_000,
+            dummy_predicate(),
+        )
+        .expect("empty payload is portable")
     }
 
     #[test]
@@ -165,5 +200,28 @@ mod tests {
         m1.caller = Some(ctor);
         m2.caller = Some(hash_form);
         assert_eq!(m1.id(), m2.id(), "canonical caller form must dominate");
+    }
+
+    #[test]
+    fn new_rejects_nested_nonportable_payload() {
+        let mut inner = Dict::new();
+        inner.insert(
+            Int253::ZERO,
+            Value::ClearToken(ClearToken::new(Int253::from(-1i64), FLAME_FLAVOR)),
+        );
+        let mut outer = Dict::new();
+        outer.insert(Int253::ZERO, Value::Dict(inner));
+
+        assert!(matches!(
+            Message::new(
+                ActorID::Hash([0x11; 32]),
+                None,
+                Anchor([0x22; 32]),
+                vec![Value::Dict(outer)],
+                1_000,
+                dummy_predicate(),
+            ),
+            Err(VMError::NonPortableInSend)
+        ));
     }
 }

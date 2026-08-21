@@ -173,11 +173,18 @@ Portable types: can be stored in a UTXO or permanent storage.
 
 Copyable types: can be copied or dropped.
 
+Portability is a business-logic capability, not a serialization property.
+Generic value codecs describe representation only. For example, a negative
+`ClearToken`, or a Dict containing one, may be encoded and decoded for
+diagnostics even though Cell, Message, call, and actor-state admission reject
+it. A type may also be non-portable and have no implemented value encoding;
+these are separate questions.
+
 Tuples are not distinct types, but a name for passing multiple items on the stack and through calls. During VM execution any tuple is simply a number of items on stack.
 
 Optionals are not distinct types, but a convention to return tuple (values…, 1) or (0). Instruction `verify` can be used to "unwrap optional" and fail immediately if the result is missing.
 
-Encodable types (have a wire-format tag range):
+Value tag allocation. A reserved tag does not imply that an encoder exists:
 
 | Type | Tag(s) | Description |
 | --- | --- | --- |
@@ -186,25 +193,39 @@ Encodable types (have a wire-format tag range):
 | Dict | 128..=247 | Map from Int253 keys to values. List-style encoding (sequential keys 0..n-1) uses 128..=187; explicit-key form uses 188..=247. Its sticky `portable` flag starts true and is cleared by insertion of a non-portable value. |
 | Point | 248 | Element of the Ristretto255 group. |
 | Token | 249 | Linear type (qty, flavor) representing an asset value, possibly encrypted. |
-| ClearToken | 250 | Linear type (qty, flavor) with cleartext values. Portable (and wire-encoded) when non-negative; a negative `ClearToken` is a non-portable intermediate. |
-| WideToken | 251 | Linear type representing a possibly-negative encrypted Token. |
-| Object | 252 | Linear handle to a cell or external commitment. |
-| Merlin | 253 | Instance of a Merlin transcript. |
+| ClearToken | 250 | Linear type (qty, flavor) with cleartext values. Portable when non-negative. Both signs have the same representation; a negative `ClearToken` is a non-portable intermediate rejected at domain admission. |
+| WideToken | 251 | Allocated tag; no current value encoding. The type is a CS-bound, possibly-negative token. |
+| Object | 252 | Allocated for a future object value; no current `Value` variant or encoding. |
+| Merlin | 253 | Allocated tag; no current value encoding for transcript state. |
 | (reserved) | 254 | Reserved tag. |
 | (extension) | 255 | Extension prefix; sub-tag follows. |
 
-Stack-only types (non-portable, never encoded on the wire):
+Stack-only types (non-portable and without an implemented `Value` encoding):
 
 | Type | Description |
 | --- | --- |
+| WideToken | Possibly-negative encrypted token tied to the current constraint system. |
+| Merlin | Mutable transcript state tied to the current execution. |
 | Variable | Secret value in the constraint system, tied to a Pedersen commitment. |
 | Expression | Linear combination of variables. |
 | Constraint | Logical combination of boolean conditions. |
 | MultiscalarMul | Lazy `sum(s_i · P_i)` accumulator; consumed by `verify` which appends it to the same batch as Schnorr/Musig sigs (assertion: `sum == identity`). |
 
-### Encoding**
+### Encoding
 
-Every value has exactly one canonical wire byte sequence. The first byte is a type+width tag; within each type, width classes carve the value range into disjoint, offset-based sub-ranges so the encoder has no choice about which tag to use.
+Every value supported by the generic codec has exactly one canonical byte
+sequence. The first byte is a type+width tag; within each type, width classes
+carve the value range into disjoint, offset-based sub-ranges so the encoder has
+no choice about which tag to use.
+
+The generic codec does not enforce portability. It accepts representable
+non-portable values, including negative `ClearToken`s and Dicts whose current
+members are representable but non-portable. Admission into a Cell, Message,
+synchronous actor call, or actor state is checked by that domain's
+business-logic boundary. At the `readerwriter` layer, writes fail only when the
+destination lacks capacity, so encoding an admitted, representable value into
+a `Vec<u8>` is infallible. VM-only variants without an implemented encoding are
+outside this codec's input domain rather than rejected for being non-portable.
 
 **Group-element validation is lazy.** `Point` (`POINT_TAG`) and `Token` (`TOKEN_TAG`) bytes are accepted at decode **without** Ristretto decompression — they land as `Point::Opaque` / `Commitment::Closed` and are validated only at first cryptographic use (signature batch, `verify_taproot_proof`, CS decompression), where an invalid element fails the proof. A structurally-invalid group element may therefore sit inside a committed Cell / actor-state / Send until used; this is deliberate (it preserves byte-identical prover/verifier round-tripping and keeps decode allocation-free), not a malleability hole — the 32 bytes are canonical, and any non-decompressable element is unusable. **Length-prefixed counts (list/dict/string payloads) are always bounded against remaining input before allocation** (`Cell::decode` payload count, `pushstr`/`ActorID` lengths), so a small hostile prefix cannot force a large allocation.
 
@@ -230,9 +251,9 @@ Tag namespace (one byte, 256 values total):
 248        Point      (32-byte compressed Ristretto)
 249        Token      (32-byte qty commitment point + 32-byte flv commitment point)
 250        ClearToken (cleartext qty Int253 + flv Int253)
-251        WideToken  (non-portable; never encoded on the wire)
-252        Object
-253        Merlin
+251        WideToken  (assigned tag; Value encoding not implemented)
+252        Object     (assigned tag; Value encoding not implemented)
+253        Merlin     (assigned tag; Value encoding not implemented)
 254        reserved
 255        extension (sub-tag follows)
 ```
@@ -332,7 +353,14 @@ Keys are non-negative Ints to keep ordering non-ambiguous.
 
 The `dict` / `put` / `replace` opcodes may insert any Value. A non-portable Dict remains usable on the stack, but `cell`, `output`, `send`, `call`, and actor-state storage reject it at their portability boundary. Checking a Dict is O(1), including when it is nested: inserting a nested Dict reads that Dict's already-cached flag. Dict values are owned and cannot be mutated through an alias, so the cached parent flag cannot become stale.
 
-The flags are runtime metadata and are not serialized. Both Dict wire forms reconstruct them bottom-up as values are decoded. A Dict admitted from a valid Cell or actor state is therefore portable; loading it does not reset or override the flag.
+The flags are runtime metadata and are not serialized. Both Dict byte forms
+reconstruct them bottom-up from the members that are decoded. This preserves
+the capability of a Dict that still contains a non-portable member, but not its
+history: if a Dict was poisoned and the offending member was removed, a debug
+encode/decode round-trip produces a fresh Dict whose flag reflects only the
+remaining members. Persistent domains reject the sticky-false Dict before
+encoding, so serialized Cell, Message, and actor-state values never rely on
+historical taint surviving the byte representation.
 
 Drilling down the nested dict preserving ownership with `get` and `put` instructions: 
 
@@ -355,7 +383,12 @@ integral sparks.
 
 WideToken: encrypted token without a range proof on quantity (could be negative). Non-portable: cannot be stored.
 
-Token: encrypted token with a proven non-negative qty, 
+Token: encrypted token with a proven non-negative quantity. `Token` is portable
+by construction: all construction paths must establish the range/provenance
+invariant before creating the type. `Value::is_portable` therefore does not
+inspect a commitment opening. In particular, portability cannot depend on
+whether the prover holds `Commitment::Open` while the verifier holds the same
+point as `Commitment::Closed`.
 
 ## Actors
 
@@ -393,6 +426,12 @@ it.
 ## Messages
 
 Messages execute “method calls” asynchronously. Each message contains a predicate for bouncing its arguments in case of actor failure. If the method called through a message returns any values, the call fails and the original arguments are bounced.
+
+A Message's payload is immutable and is created through a checked constructor.
+Construction scans its top-level values and rejects any non-portable item;
+checking a nested Dict is O(1) through its sticky `portable` flag. Message
+encoding is representation-only and relies on this prior asynchronous-domain
+admission.
 
 Not only users, but also actors can send async messages to each other. This allows an actor to commit intermediate results between transactions.
 
@@ -1196,7 +1235,7 @@ Materializes a `cell` handle from the String on top of the stack. Seeds the fram
 
 **Opaque path (verifier).** The verifier pushes `String::Opaque(cell_bytes)`. `to_cell()` runs `Cell::decode`, producing `Commitment::Closed` everywhere. The verifier-side CS rebuilds the commitments from points only.
 
-Both paths produce the same `cell.id()` and the same `TxEntry::Input` (the txlog is byte-canonical regardless of which String variant the prover chose).
+Both paths produce the same `cell.id()` and the same `TxEntry::Input` (the txlog is byte-canonical regardless of which String variant the prover chose). Cell payloads are immutable after construction. The public `Cell::new` constructor rejects any non-portable top-level item, including a Dict whose sticky `portable` flag has been cleared. `Cell::decode` applies the same admission rule after representation decoding. That top-level Cell-domain scan is intentional and sufficient: nested Dict portability is an O(1) lookup of the flag reconstructed while decoding, not a recursive walk. Generic `read_value` itself remains policy-neutral and may decode values that no Cell may contain.
 
 **The VM does not consult any Utreexo accumulator.** The caller must validate the supplied bytes against the Utreexo proof outside the VM before invoking the script. The txlog entry commits the script's reliance on that external check.
 
@@ -1252,6 +1291,10 @@ Asynchronous message-send. Pops operands top-first:
 
 Splits the frame's `last_anchor` (see §Anchors): the `left` half becomes the message's `anchor`, the `right` half replaces `last_anchor`. Hard-fails `AnchorMissing` if no anchor has been claimed yet. Emits `TxEntry::Send(Message)` — the full `Message` lives in the entry, symmetric with `TxEntry::Output(Cell)`. There is no separate "sends queue"; the block builder reads `TxEntry::Send` records from the TxLog when constructing internal-tx deliveries. The originator's actor id (if any) becomes the message's `caller`.
 
+The payload is admitted by `Message::new`, not by `Message::encode`.
+`Message::new` scans top-level arguments and uses the sticky Dict flag for O(1)
+nested checks; once constructed, the payload cannot be replaced.
+
 The send's identity is the canonical 32-byte `MessageID = H(b"flamevm.message.id" ‖ Message.encode())` — `Message::id()`. The wire encoding `Message.encode()` writes the fields in fixed order:
 
 1. `anchor` — 32 raw bytes.
@@ -1282,6 +1325,10 @@ purchase storage passes Flame among the ordinary arguments; allocation remains
 the callee's explicit decision. A constructor-form address is accepted but
 canonicalized to its hash for lookup: unlike first `send` delivery, `call` does
 not deploy an absent actor.
+
+Before entering the callee, `call` rejects every non-portable argument with
+`NonPortableInCall`. This is a top-level scan; a nested Dict is checked in O(1)
+through its sticky flag.
 
 **Re-entrancy:** the state-checkout lock closes issues with re-entracy: state is reachable **only** via `load`, which acquires the lock, and there is no peek-state opcode, so a half-applied update is never observable — a re-entrant `call`/`load` into an actor that has already `load`ed its state fails `ActorEmpty` (→ `0` marker for `call`). The lock does **not** enforce checks-effects-interactions ordering *within* a load/save window: holding a loaded state across a `call`/`send`/`open` is legal, but anything `save`d afterward is a pre-call snapshot — authors must `save` (or fully discharge) before calling out. Nested call depth is capped at `MAX_CALL_DEPTH` (64); deeper entry fails `CallDepthExceeded` (→ `0` marker for `call`, hard-fail for `open`/`signcall`).
 
@@ -1318,6 +1365,11 @@ Pops the state `Value`, **validates portability**, measures the prospective acto
 **State is any portable Value.** The author structures state however they like (a Dict, an Int, a Token, …).
 
 **Portability is the canonical storage gate.** Portable values: `Int253`, `String`, `Point`, `Dict` of portable, non-negative `ClearToken`, `Token`. Non-portable values (`Cell`, `Merlin`, `Variable`, `Expression`, `Constraint`, `MultiscalarMul`, `WideToken`, negative `ClearToken`) hard-fail `NonPortableInState`.
+
+The registry repeats this check on direct save and deploy entry points, so the
+actor-state invariant does not depend on `op_save` being the caller. As at the
+other domain boundaries, nested Dicts are checked through their cached flag and
+state encoding performs no portability validation.
 
 ### setcode
 

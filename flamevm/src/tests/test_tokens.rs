@@ -7,11 +7,35 @@ use super::test_helpers::*;
 #[test]
 fn token_cleartext_constructor_packs_unblinded_commitments() {
     let t = make_cleartext_token(123, 7);
-    assert_eq!(t.qty.assignment(), Some(Int253::from(123u64)));
-    assert_eq!(t.flv.assignment(), Some(Int253::from(7u64)));
+    assert_eq!(t.qty().assignment(), Some(Int253::from(123u64)));
+    assert_eq!(t.flv().assignment(), Some(Int253::from(7u64)));
     // Witness uses zero blinding.
-    let (_, b) = t.qty.witness().expect("open commitment");
+    let (_, b) = t.qty().witness().expect("open commitment");
     assert_eq!(b, Scalar::ZERO);
+}
+
+#[test]
+fn token_cleartext_constructor_rejects_out_of_range_qty() {
+    let flv = Int253::from(7u64);
+    assert!(Token::cleartext(Int253::from(-1i64), flv).is_none());
+    assert!(
+        Token::cleartext(Int253::from(u128::from(u64::MAX) + 1), flv).is_none()
+    );
+}
+
+#[test]
+fn negative_cleartoken_can_be_allocated_without_becoming_a_token() {
+    let pc_gens = PedersenGens::default();
+    let mut prover = Prover::new(&pc_gens);
+    let allocated = VM::value_to_allocated(
+        Value::ClearToken(ClearToken::new(Int253::from(-5i64), Int253::from(7u64))),
+        &mut prover,
+    )
+    .expect("negative ClearToken is a valid mix input");
+    assert_eq!(
+        allocated.assignment.expect("cleartext assignment").q,
+        -spacesuit::SignedInteger::from(5u64)
+    );
 }
 
 #[test]
@@ -37,7 +61,9 @@ fn cleartoken_nonzero_qty_is_not_droppable() {
 
 #[test]
 fn cleartoken_negative_qty_is_non_portable() {
-    let v = Value::ClearToken(ClearToken::new(Int253::from(-1i64), Int253::from(7u64)));
+    let token = ClearToken::new(Int253::from(-1i64), Int253::from(7u64));
+    assert!(!token.is_portable());
+    let v = Value::ClearToken(token);
     assert!(!v.is_portable());
     // Still non-copyable.
     assert!(!v.is_copyable());
@@ -45,7 +71,9 @@ fn cleartoken_negative_qty_is_non_portable() {
 
 #[test]
 fn cleartoken_positive_qty_is_portable() {
-    let v = Value::ClearToken(ClearToken::new(Int253::from(5u64), Int253::from(7u64)));
+    let token = ClearToken::new(Int253::from(5u64), Int253::from(7u64));
+    assert!(token.is_portable());
+    let v = Value::ClearToken(token);
     assert!(v.is_portable());
 }
 
@@ -414,7 +442,8 @@ fn issuepriv_prove_then_verify_end_to_end() {
         Predicate::opaque(pred_point),
         Anchor([0xa1; 32]),
         vec![],
-    );
+    )
+    .expect("empty payload is portable");
     let cell_bytes = encode_cell_to_bytes(&cell);
 
     // Outer:

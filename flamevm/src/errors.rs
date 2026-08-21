@@ -210,12 +210,12 @@ pub enum VMError {
     #[error("op_save without a matching op_load (actor not checked out)")]
     SaveWithoutLoad,
 
-    /// This error occurs when a send payload value has no canonical encoder.
+    /// This error occurs when a value cannot enter an asynchronous Message.
     #[error("Non-portable value in send payload")]
     NonPortableInSend,
 
-    /// Synchronous calls may only transfer values with canonical portable
-    /// encodings; liabilities and VM-local objects cannot cross frames.
+    /// Synchronous calls may only transfer portable values; liabilities and
+    /// VM-local objects cannot cross frames.
     #[error("Non-portable value in call arguments")]
     NonPortableInCall,
 
