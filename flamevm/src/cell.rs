@@ -557,7 +557,7 @@ impl Cell {
     }
 
     /// Canonical wire bytes — thin wrapper over `Encodable::encode_to_vec`
-    /// for callers that want an owned `Vec<u8>` (e.g. `String::Cell`
+    /// for callers that want an owned `Vec<u8>` (e.g. a cell String witness
     /// serialization). Cannot fail: `Vec<u8>` is an infallible writer
     /// and payload entries are guaranteed portable by construction.
     pub fn to_bytes(&self) -> Vec<u8> {

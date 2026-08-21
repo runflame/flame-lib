@@ -2265,7 +2265,7 @@ impl VM {
 
     /// _string_ **input** → _cell_
     ///
-    /// External-only. The prover pushes a `String::Cell(c)` carrying
+    /// External-only. The prover pushes a `StringWitness::Cell(c)` carrying
     /// open commitments on Token payloads; the verifier pushes
     /// `String::Opaque(cell_bytes)` and `to_cell()` decodes to closed
     /// commitments. No separate witness operand — witnesses ride the
@@ -2279,7 +2279,7 @@ impl VM {
         // input + outputs sequence) is replaced. See spec §Anchors.
         self.last_anchor = Some(Anchor(cell.id()));
         self.txlog.push(TxEntry::Input(cell.id()));
-        self.push_value(Value::Cell(cell));
+        self.push_value(Value::Cell(Box::new(cell)));
         Ok(())
     }
 
@@ -2290,7 +2290,7 @@ impl VM {
         let payload = self.pop_n_values(k)?;
         let anchor = self.consume_anchor()?;
         let cell = Cell::new(pred, anchor, payload)?;
-        self.push_value(Value::Cell(cell));
+        self.push_value(Value::Cell(Box::new(cell)));
         Ok(())
     }
 
@@ -2950,7 +2950,7 @@ impl VM {
     /// `scalar` — `string → expr`. Pops a String, downcasts to
     /// `Int253` via `String::to_scalar`, pushes `Expression::Constant`.
     /// For `String::Opaque(bytes)`, the bytes are parsed as a
-    /// canonical sign-magnitude Int253. For `String::Scalar(i)`, the
+    /// canonical sign-magnitude Int253. For `StringWitness::Scalar(i)`, the
     /// witness is extracted directly.
     fn op_scalar(&mut self) -> Result<(), VMError> {
         self.require_external()?;

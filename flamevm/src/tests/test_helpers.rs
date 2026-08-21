@@ -786,7 +786,7 @@ pub(crate) fn build_confidential_nm_program(
     //                    taproot_proof pieces + push:0 + open. ──
     for inp in inputs {
         let (cell, cp) = build_input_cell(inp);
-        // pushstr String::Cell(c) — prover-side witness carrier
+        // pushstr String::cell(c) — prover-side witness carrier
         // (Token's open commitments ride along into op_input).
         // The verifier-side equivalent is `String::from(cell.to_bytes())`.
         program = program.push_str(String::cell(cell));

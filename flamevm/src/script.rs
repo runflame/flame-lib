@@ -123,8 +123,8 @@ impl ScriptBuilder {
 
     /// `pushstr` (0x19) carrying a witness-bearing sub-script. The
     /// prover pushes the inner ScriptBuilder's instructions (witness
-    /// slots intact) wrapped in `String::Script`; downstream
-    /// `op_open` / `op_signcall` walk those
+    /// slots intact) wrapped in `String::Witness(StringWitness::Script)`;
+    /// downstream `op_open` / `op_signcall` walk those
     /// instructions directly. Verifier-side bytecode encodes to
     /// the compiled bytes of `inner.to_bytecode()`, so both sides
     /// see the same wire form.

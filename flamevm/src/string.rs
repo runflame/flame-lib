@@ -16,12 +16,21 @@ use crate::script::{Script, ScriptBuilder};
 pub enum String {
     /// Plain byte buffer — the verifier's view.
     Opaque(Vec<u8>),
+    /// Prover-only typed data, boxed so the common `Opaque` string stays
+    /// the size of a `Vec<u8>`.
+    Witness(Box<StringWitness>),
+}
+
+/// Prover-side typed payload carried by [`String::Witness`]. Every variant
+/// has the same canonical byte representation as an opaque String.
+#[derive(Clone, Debug)]
+pub enum StringWitness {
     /// Point witness (Opaque / Commitment / Predicate). Encodes to
     /// the canonical 32-byte compressed point regardless of variant;
     /// see [`Point`].
     Point(Point),
     /// Scalar witness (cleartext `Int253`); encodes to 32 bytes.
-    Scalar(Box<Int253>),
+    Scalar(Int253),
     /// Prover-side sub-script: a decoded instruction stream with
     /// witness slots intact. Encodes to the compiled bytecode.
     /// Consumed by `op_open` / `op_signcall` via
@@ -32,9 +41,36 @@ pub enum String {
     /// quantities/flavors on its Token payloads. Encodes to the
     /// canonical cell bytes — verifier sees `Opaque(bytes)` and
     /// decodes via `Cell::decode` to closed commitments. Consumed
-    /// by `op_input` via [`String::to_cell`], which moves the cell
-    /// straight out of the box.
-    Cell(Box<Cell>),
+    /// by `op_input` via [`String::to_cell`], which moves the cell out
+    /// of the enclosing witness box.
+    Cell(Cell),
+}
+
+impl StringWitness {
+    fn to_bytes_vec(&self) -> Vec<u8> {
+        match self {
+            Self::Point(p) => p.to_bytes().to_vec(),
+            Self::Scalar(s) => s.to_bytes().to_vec(),
+            Self::Script(instrs) => compile_instructions(instrs),
+            Self::Cell(c) => c.to_bytes(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Point(_) | Self::Scalar(_) => 32,
+            Self::Script(instrs) => compile_instructions(instrs).len(),
+            Self::Cell(c) => c.to_bytes().len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Script(instrs) => instrs.is_empty(),
+            // Point / Scalar are 32 bytes; Cell has a non-empty header.
+            _ => false,
+        }
+    }
 }
 
 impl String {
@@ -42,22 +78,22 @@ impl String {
 
     /// Constructs a witness-bearing Point-String.
     pub fn point(p: Point) -> String {
-        String::Point(p)
+        String::Witness(Box::new(StringWitness::Point(p)))
     }
 
-    /// Convenience: wrap a `Commitment` as a `String::Point(Point::Commitment)`.
+    /// Convenience: wrap a `Commitment` as a point witness.
     pub fn commitment(c: Commitment) -> String {
-        String::Point(Point::commitment(c))
+        Self::point(Point::commitment(c))
     }
 
     /// Constructs a witness-bearing Scalar-String.
     pub fn scalar<T: Into<Int253>>(s: T) -> String {
-        String::Scalar(Box::new(s.into()))
+        String::Witness(Box::new(StringWitness::Scalar(s.into())))
     }
 
-    /// Convenience: wrap a `Predicate` as a `String::Point(Point::Predicate)`.
+    /// Convenience: wrap a `Predicate` as a point witness.
     pub fn predicate(p: Predicate) -> String {
-        String::Point(Point::predicate(p))
+        Self::point(Point::predicate(p))
     }
 
     /// Constructs a witness-bearing Script-String. Used by the
@@ -65,7 +101,7 @@ impl String {
     /// (e.g. inner `alloc(Some(_))` calls) and will later be
     /// consumed by `run` / `switch` / `signcall`.
     pub fn script(instructions: Vec<Instruction>) -> String {
-        String::Script(instructions)
+        String::Witness(Box::new(StringWitness::Script(instructions)))
     }
 
     /// Constructs a witness-bearing Cell-String. Used by the prover
@@ -73,7 +109,7 @@ impl String {
     /// carry `Commitment::Open` quantities/flavors. The verifier-side
     /// equivalent is `String::Opaque(cell.to_bytes())`.
     pub fn cell(c: Cell) -> String {
-        String::Cell(Box::new(c))
+        String::Witness(Box::new(StringWitness::Cell(c)))
     }
 
     // ── Byte views ──────────────────────────────────────────────
@@ -104,10 +140,7 @@ impl String {
     pub fn to_bytes_vec(&self) -> Vec<u8> {
         match self {
             String::Opaque(d) => d.clone(),
-            String::Point(p) => p.to_bytes().to_vec(),
-            String::Scalar(s) => s.to_bytes().to_vec(),
-            String::Script(instrs) => compile_instructions(instrs),
-            String::Cell(c) => c.to_bytes(),
+            String::Witness(w) => w.to_bytes_vec(),
         }
     }
 
@@ -117,9 +150,7 @@ impl String {
     pub fn len(&self) -> usize {
         match self {
             String::Opaque(d) => d.len(),
-            String::Point(_) | String::Scalar(_) => 32,
-            String::Script(instrs) => compile_instructions(instrs).len(),
-            String::Cell(c) => c.to_bytes().len(),
+            String::Witness(w) => w.len(),
         }
     }
 
@@ -127,9 +158,7 @@ impl String {
     pub fn is_empty(&self) -> bool {
         match self {
             String::Opaque(d) => d.is_empty(),
-            String::Script(instrs) => instrs.is_empty(),
-            // Point / Scalar are 32 bytes; Cell has a non-empty header.
-            _ => false,
+            String::Witness(w) => w.is_empty(),
         }
     }
 
@@ -140,28 +169,32 @@ impl String {
     /// `Opaque` parses 32 bytes as `Commitment::Closed`.
     pub fn to_commitment(self) -> Result<Commitment, VMError> {
         match self {
-            String::Point(p) => p.to_commitment(),
+            String::Witness(w) => match *w {
+                StringWitness::Point(p) => p.to_commitment(),
+                _ => Err(VMError::TypeNotString),
+            },
             String::Opaque(data) => {
                 let bytes = array32(&data).ok_or(VMError::TypeNotString)?;
                 Ok(Commitment::Closed(
                     curve25519_dalek::ristretto::CompressedRistretto(bytes),
                 ))
             }
-            _ => Err(VMError::TypeNotString),
         }
     }
 
     /// Downcasts to an `Int253`. For `Opaque`, parses the bytes as a
     /// canonical 32-byte sign-magnitude `Int253`. For
-    /// `String::Scalar(i)`, returns the witness directly.
+    /// `StringWitness::Scalar(i)`, returns the witness directly.
     pub fn to_scalar(self) -> Result<Int253, VMError> {
         match self {
-            String::Scalar(i) => Ok(*i),
+            String::Witness(w) => match *w {
+                StringWitness::Scalar(i) => Ok(i),
+                _ => Err(VMError::InvalidInt253Encoding),
+            },
             String::Opaque(data) => {
                 let bytes = array32(&data).ok_or(VMError::InvalidInt253Encoding)?;
                 Int253::from_bytes(bytes).ok_or(VMError::InvalidInt253Encoding)
             }
-            _ => Err(VMError::InvalidInt253Encoding),
         }
     }
 
@@ -175,11 +208,13 @@ impl String {
     /// across the isolated call frame.
     pub fn to_instructions(self) -> Result<Vec<Instruction>, VMError> {
         match self {
-            String::Script(instrs) => Ok(instrs),
+            String::Witness(w) => match *w {
+                StringWitness::Script(instrs) => Ok(instrs),
+                _ => Err(VMError::TypeNotString),
+            },
             String::Opaque(data) => Ok(
                 ScriptBuilder::parse(&data)?.into_instructions(),
             ),
-            _ => Err(VMError::TypeNotString),
         }
     }
 
@@ -188,9 +223,11 @@ impl String {
     /// bytecode the verifier decodes on demand (no parse). See ADR 0015.
     pub(crate) fn into_script(self) -> Result<Script, VMError> {
         match self {
-            String::Script(instrs) => Ok(Script::Transparent(instrs)),
+            String::Witness(w) => match *w {
+                StringWitness::Script(instrs) => Ok(Script::Transparent(instrs)),
+                _ => Err(VMError::TypeNotString),
+            },
             String::Opaque(data) => Ok(Script::Opaque(data)),
-            _ => Err(VMError::TypeNotString),
         }
     }
 
@@ -199,18 +236,20 @@ impl String {
     /// `Opaque` parses 32 bytes as `Predicate::Opaque`.
     pub fn to_predicate(self) -> Result<Predicate, VMError> {
         match self {
-            String::Point(p) => p.to_predicate(),
+            String::Witness(w) => match *w {
+                StringWitness::Point(p) => p.to_predicate(),
+                _ => Err(VMError::InvalidPoint),
+            },
             String::Opaque(data) => {
                 let bytes = array32(&data).ok_or(VMError::InvalidPoint)?;
                 Ok(Predicate::opaque(
                     curve25519_dalek::ristretto::CompressedRistretto(bytes),
                 ))
             }
-            _ => Err(VMError::InvalidPoint),
         }
     }
 
-    /// Downcasts to a `Cell`. For `String::Cell(c)`, returns the
+    /// Downcasts to a `Cell`. For `StringWitness::Cell(c)`, returns the
     /// witness-bearing cell directly (Token payloads keep their
     /// `Commitment::Open` quantities/flavors). For `Opaque`, decodes
     /// the canonical wire bytes via `Cell::decode` (yields
@@ -220,7 +259,10 @@ impl String {
     /// Used by `op_input`.
     pub fn to_cell(self) -> Result<Cell, VMError> {
         match self {
-            String::Cell(b) => Ok(*b),
+            String::Witness(w) => match *w {
+                StringWitness::Cell(cell) => Ok(cell),
+                _ => Err(VMError::MalformedCellEncoding),
+            },
             String::Opaque(data) => {
                 let mut reader: &[u8] = &data;
                 let cell = <Cell as readerwriter::Decodable>::decode(&mut reader)
@@ -230,7 +272,6 @@ impl String {
                 }
                 Ok(cell)
             }
-            _ => Err(VMError::MalformedCellEncoding),
         }
     }
 
@@ -356,7 +397,7 @@ impl From<Vec<u8>> for String {
 
 // ── Internal: compile a Script-string's instruction stream to its
 // canonical bytecode (the same bytes the verifier would see). Used
-// by `to_bytes_vec` and `len` for `String::Script`. ─────────────
+// by `to_bytes_vec` and `len` for `StringWitness::Script`. ──────
 
 fn compile_instructions(instrs: &[Instruction]) -> Vec<u8> {
     let mut out = Vec::new();

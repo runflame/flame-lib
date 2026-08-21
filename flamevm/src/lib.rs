@@ -39,7 +39,7 @@ pub use msm::MultiscalarMul;
 pub use ops::Instruction;
 pub use script::{ScriptBuilder, Script};
 pub use prover::Prover;
-pub use string::String;
+pub use string::{String, StringWitness};
 pub use token::{flavor_from_actor, ClearToken, FLAME_FLAVOR, Token, WideToken};
 pub use value::Value;
 pub use verifier::Verifier;

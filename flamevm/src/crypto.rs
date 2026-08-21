@@ -83,7 +83,9 @@ impl Point {
     }
 }
 
-/// A Merlin transcript wrapper. Linear (non-copyable, non-droppable).
+/// A Merlin transcript wrapper. The transcript is boxed so this VM stack
+/// value remains pointer-sized; code that owns a transcript directly can use
+/// `merlin::Transcript` without this wrapper. Non-copyable in VM semantics.
 ///
 /// User-supplied labels are passed directly to the underlying
 /// `Transcript` API. This relies on the `dynamic-labels` feature of
@@ -94,7 +96,7 @@ impl Point {
 /// copyability, which `is_copyable` denies.
 #[derive(Clone)]
 pub struct Merlin {
-    transcript: Transcript,
+    transcript: Box<Transcript>,
 }
 
 /// Opaque, state-dependent fingerprint: clones the transcript and
@@ -102,7 +104,7 @@ pub struct Merlin {
 /// print the same id without revealing or disturbing the real state.
 impl core::fmt::Debug for Merlin {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let mut probe = self.transcript.clone();
+        let mut probe = (*self.transcript).clone();
         let mut id = [0u8; 8];
         probe.challenge_bytes(b"flamevm.merlin.debug", &mut id);
         write!(f, "Merlin{{0x{:016x}}}", u64::from_be_bytes(id))
@@ -112,7 +114,9 @@ impl core::fmt::Debug for Merlin {
 impl Merlin {
     /// Creates a fresh transcript bound to `label`.
     pub fn new(label: &[u8]) -> Self {
-        Merlin { transcript: Transcript::new(label) }
+        Merlin {
+            transcript: Box::new(Transcript::new(label)),
+        }
     }
 
     /// Appends `data` to the transcript under `label`. Used by the

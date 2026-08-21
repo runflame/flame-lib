@@ -485,7 +485,7 @@ fn confidential_1_to_1_with_fee() {
     let (q_out, f_out) = open_commitments_for_output(&out);
 
     let mut program = ScriptBuilder::new();
-    // Consume the input cell — push the witness-bearing String::Cell
+    // Consume the input cell — push the witness-bearing StringWitness::Cell
     // so the Token's open commitments survive into the CS.
     program = program.push_str(String::cell(cell));
     program = program.input();

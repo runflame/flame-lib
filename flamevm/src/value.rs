@@ -20,7 +20,7 @@ impl Value {
     /// Downcast to Point.
     pub fn to_point(self)       -> Result<Point, VMError>      { match self { Value::Point(x) => Ok(x),      _ => Err(VMError::TypeNotPoint) } }
     /// Downcast to Cell.
-    pub fn to_cell(self)        -> Result<Cell, VMError>       { match self { Value::Cell(x) => Ok(x),       _ => Err(VMError::TypeNotCell) } }
+    pub fn to_cell(self)        -> Result<Cell, VMError>       { match self { Value::Cell(x) => Ok(*x),      _ => Err(VMError::TypeNotCell) } }
     /// Downcast to Merlin transcript.
     pub fn to_merlin(self)      -> Result<Merlin, VMError>     { match self { Value::Merlin(x) => Ok(x),     _ => Err(VMError::TypeNotMerlin) } }
     /// Downcast to Variable.
@@ -140,6 +140,22 @@ impl Value {
     }
 }
 
+#[cfg(all(test, target_pointer_width = "64"))]
+mod layout_tests {
+    use core::mem::size_of;
+
+    use super::Value;
+    use crate::{Merlin, SecretConstraint, String, WideToken};
+
+    #[test]
+    fn large_value_variants_stay_indirect() {
+        assert_eq!(size_of::<Merlin>(), size_of::<Box<()>>());
+        assert_eq!(size_of::<String>(), size_of::<Vec<u8>>());
+        assert!(size_of::<SecretConstraint>() <= 3 * size_of::<usize>());
+        assert_eq!(size_of::<Value>(), size_of::<WideToken>());
+    }
+}
+
 /// Possible values on the stack machine.
 ///
 /// `Clone` is the Rust-level deep copy (used for snapshots, storage,
@@ -155,13 +171,11 @@ pub enum Value {
     Token(Token),
     WideToken(WideToken),
     ClearToken(ClearToken),
-    Cell(Cell),
+    Cell(Box<Cell>),
     Merlin(Merlin),
     Variable(Variable),
     Expression(Expression),
     Constraint(Constraint),
-    /// Deferred multi-scalar multiplication; consumed by `verify`
-    /// which adds it to the same batch as Schnorr/Musig sigs.
     MultiscalarMul(MultiscalarMul),
 }
 

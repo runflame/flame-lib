@@ -184,6 +184,15 @@ Tuples are not distinct types, but a name for passing multiple items on the stac
 
 Optionals are not distinct types, but a convention to return tuple (values…, 1) or (0). Instruction `verify` can be used to "unwrap optional" and fail immediately if the result is missing.
 
+**Implementation layout (not consensus).** Heap-indirection keeps the Rust
+`Value` enum compact without changing VM semantics: `Merlin` boxes its
+`Transcript`, `Value::Cell` boxes the otherwise unchanged `Cell`, secret
+equality constraints box both `Expression`s, and `String` boxes all typed
+`StringWitness` variants while leaving `Opaque(Vec<u8>)` inline. On the current
+64-bit build this makes `Value` 96 bytes, equal to its largest remaining inline
+variant (`WideToken`). Rust layout and byte counts are implementation details;
+the canonical wire representation is unchanged.
+
 Value tag allocation. A reserved tag does not imply that an encoder exists:
 
 | Type | Tag(s) | Description |
@@ -292,16 +301,16 @@ Strings are used to represent arbitrary-length binary data, programs and cryptog
 
 Each string acts as a builder and a reader.
 
-**Prover-side witness variants.** On the prover side a String may carry a typed witness payload that encodes to the same canonical wire bytes the verifier sees but preserves the underlying witness data through `dup` / `open` / `signcall` / `call` / payload-pour boundaries:
+**Prover-side witness variants.** `String` has two in-memory shapes: `String::Opaque(Vec<u8>)` and `String::Witness(Box<StringWitness>)`. Boxing the uncommon witness shape keeps every `String` the size of a `Vec`. The witness encodes to the same canonical bytes the verifier sees while preserving typed data through `dup` / `open` / `signcall` / `call` / payload-pour boundaries:
 
-- `String::Point(Point)` — point-shaped witness; the inner [`Point`](#point) is `Opaque`, `Commitment(Open(value, blinding))` (used before `commit`, `scalar`, `expr`), or `Predicate(p)` (used before `signtx`, `signcall`, `cell`, `output`).
-- `String::Scalar(int)` — used before `scalar`.
-- `String::Script(instructions)` — used before `open` / `signcall` / `call`.
-- `String::Cell(c)` — used before `input`, carrying open commitments on Token payloads.
+- `StringWitness::Point(Point)` — point-shaped witness; the inner [`Point`](#point) is `Opaque`, `Commitment(Open(value, blinding))` (used before `commit`, `scalar`, `expr`), or `Predicate(p)` (used before `signtx`, `signcall`, `cell`, `output`).
+- `StringWitness::Scalar(int)` — used before `scalar`.
+- `StringWitness::Script(instructions)` — used before `open` / `signcall` / `call`.
+- `StringWitness::Cell(c)` — used before `input`, carrying open commitments on Token payloads.
 
 The verifier always sees `String::Opaque(bytes)`; the downcasts (`to_commitment`, `to_scalar`, `to_predicate`, `to_instructions`, `to_cell`) handle both shapes uniformly. There is no separate witness queue or per-opcode witness operand — witnesses ride on the pushed value itself.
 
-**`pushpoint` also carries witnesses.** Because the `pushpoint` instruction's in-memory operand is a `Point` (not a raw `[u8; 32]`), the prover can attach a `Point::Commitment` / `Point::Predicate` witness to a literal point pushed via `pushpoint` — not only via `pushstr` + `String::Point`. The wire encoding stays the canonical 32 bytes regardless.
+**`pushpoint` also carries witnesses.** Because the `pushpoint` instruction's in-memory operand is a `Point` (not a raw `[u8; 32]`), the prover can attach a `Point::Commitment` / `Point::Predicate` witness to a literal point pushed via `pushpoint` — not only via `pushstr` + `String::point`. The wire encoding stays the canonical 32 bytes regardless.
 
 ### Point
 
@@ -900,13 +909,13 @@ the rollback model described above.
 
 _s_ → _expr_
 
-Pops a 32-byte String, downcasts to `Int253` via `String::to_scalar`, pushes `Expression::Constant(int)`. Witness-bearing `String::Scalar(i)` extracts the witness directly; `String::Opaque(bytes)` parses canonical sign-magnitude bytes.
+Pops a 32-byte String, downcasts to `Int253` via `String::to_scalar`, pushes `Expression::Constant(int)`. Witness-bearing `StringWitness::Scalar(i)` extracts the witness directly; `String::Opaque(bytes)` parses canonical sign-magnitude bytes.
 
 ### commit
 
 _s_ → _var_
 
-Pops a 32-byte String, downcasts to a [Commitment](#types), wraps in `Variable { commitment }`. Verifier: `String::Opaque(point bytes)` → `Commitment::Closed(point)`. Prover: `String::Point(Point::Commitment(Open(witness)))` preserves the witness. Downstream [`expr`](#expr) binds the variable into the CS.
+Pops a 32-byte String, downcasts to a [Commitment](#types), wraps in `Variable { commitment }`. Verifier: `String::Opaque(point bytes)` → `Commitment::Closed(point)`. Prover: `StringWitness::Point(Point::Commitment(Open(witness)))` preserves the witness. Downstream [`expr`](#expr) binds the variable into the CS.
 
 ### alloc
 
@@ -1231,7 +1240,7 @@ _s_ → _cell_
 
 Materializes a `cell` handle from the String on top of the stack. Seeds the frame's `last_anchor` to `Anchor(cell.id())` (the input cell's id is a spend-once unique source — see §Anchors), unconditionally replacing any prior value. Emits `TxEntry::Input(cell_id)`.
 
-**Witness path (prover).** The prover pushes `String::Cell(c)` whose Token payloads still carry `Commitment::Open` quantities and flavors. `to_cell()` extracts the cell directly, so open commitments survive into downstream `mix`/`commit` without a separate witness queue.
+**Witness path (prover).** The prover pushes `StringWitness::Cell(c)` through `String::cell(c)`; its Token payloads still carry `Commitment::Open` quantities and flavors. `to_cell()` extracts the cell directly, so open commitments survive into downstream `mix`/`commit` without a separate witness queue.
 
 **Opaque path (verifier).** The verifier pushes `String::Opaque(cell_bytes)`. `to_cell()` runs `Cell::decode`, producing `Commitment::Closed` everywhere. The verifier-side CS rebuilds the commitments from points only.
 
@@ -1263,7 +1272,7 @@ Verifies the Taproot proof against the cell's predicate:
 
 1. Pops `k` (Int253) and `args` (k portable values).
 2. Pops `bytes` and `gas` as `Int253` (transient-memory and gas allotments).
-3. Pops `script` (String) — the revealed leaf bytes (or witness-bearing `String::Script` on the prover).
+3. Pops `script` (String) — the revealed leaf bytes (or witness-bearing `StringWitness::Script` on the prover).
 4. Pops `position` (String, bit-packed path), `neighbors` (list-Dict of 32-byte Strings, leaf-to-root), `internal_key` (Point).
 5. Pops `cell`.
 6. Constructs a `TaprootProof` and verifies `predicate.verify_taproot_proof` — checks the Merkle root and the tweaked-key relation `P = X + h(X, M)·B`.

@@ -47,8 +47,8 @@ pub enum Constraint {
 /// Subtype of `Constraint` that excludes the `::Cleartext` case.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SecretConstraint {
-    /// Equality between two expressions. Created by `eq`.
-    Eq(Expression, Expression),
+    /// Equality between two boxed expressions. Created by `eq`.
+    Eq(Box<Expression>, Box<Expression>),
 
     /// Conjunction: each must evaluate to true. Created by `and`.
     And(Box<SecretConstraint>, Box<SecretConstraint>),
@@ -106,7 +106,10 @@ impl Constraint {
     pub fn eq(e1: Expression, e2: Expression) -> Self {
         match (e1, e2) {
             (Expression::Constant(a), Expression::Constant(b)) => Constraint::Cleartext(a == b),
-            (e1, e2) => Constraint::Secret(SecretConstraint::Eq(e1, e2)),
+            (e1, e2) => Constraint::Secret(SecretConstraint::Eq(
+                Box::new(e1),
+                Box::new(e2),
+            )),
         }
     }
 
@@ -178,7 +181,7 @@ impl SecretConstraint {
                 let assignment = expr1
                     .eval()
                     .and_then(|x| expr2.eval().map(|y| (x - y).to_scalar_mod_order()));
-                Ok((expr1.to_r1cs_lc() - expr2.to_r1cs_lc(), assignment))
+                Ok(((*expr1).to_r1cs_lc() - (*expr2).to_r1cs_lc(), assignment))
             }
             SecretConstraint::And(c1, c2) => {
                 let (a, a_assg) = c1.flatten(cs)?;
@@ -580,15 +583,21 @@ mod tests {
         );
         assert_eq!(
             Constraint::eq(e1.clone(), e2.clone()),
-            Constraint::Secret(SecretConstraint::Eq(e1.clone(), e2.clone()))
+            Constraint::Secret(SecretConstraint::Eq(
+                Box::new(e1.clone()),
+                Box::new(e2.clone())
+            ))
         );
         assert_eq!(
             Constraint::eq(e2.clone(), e1.clone()),
-            Constraint::Secret(SecretConstraint::Eq(e2.clone(), e1.clone()))
+            Constraint::Secret(SecretConstraint::Eq(
+                Box::new(e2.clone()),
+                Box::new(e1.clone())
+            ))
         );
 
-        let s1 = SecretConstraint::Eq(e1.clone(), e2.clone());
-        let s2 = SecretConstraint::Eq(e2.clone(), e2.clone());
+        let s1 = SecretConstraint::Eq(Box::new(e1.clone()), Box::new(e2.clone()));
+        let s2 = SecretConstraint::Eq(Box::new(e2.clone()), Box::new(e2.clone()));
         let c1 = Constraint::Secret(s1.clone());
         let c2 = Constraint::Secret(s2.clone());
         // and(cleartext(true), other) => other

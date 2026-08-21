@@ -232,7 +232,7 @@ fn open_with_wrong_program_hard_fails() {
 }
 
 /// Prover-side: the unlock script pushed as the taproot_proof's
-/// `program` component can be a `String::Script(instrs)` carrying
+/// `program` component can be a `StringWitness::Script(instrs)` carrying
 /// witnesses. `op_open` verifies the taproot_proof against the cell's
 /// predicate (the bytes must match the leaf stored in the
 /// predicate tree), then uses `program_str.to_instructions()` so
