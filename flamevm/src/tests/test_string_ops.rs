@@ -71,6 +71,21 @@ fn read_bits_n_257_hard_fails() {
     ));
 }
 
+#[test]
+fn read_bits_negative_count_hard_fails() {
+    let mut vm = vm_with_script(
+        ScriptBuilder::new()
+            .push_str(s(&[]))
+            .push_int(-1i64)
+            .read_bits()
+            .to_bytecode(),
+    );
+    assert!(matches!(
+        run_to_end(&mut vm).unwrap_err(),
+        VMError::IndexOutOfRange
+    ));
+}
+
 /// Canonical curve order ℓ (Ristretto subgroup order) — first byte
 /// non-canonical when interpreted as a scalar magnitude.
 const ELL_LE: [u8; 32] = [

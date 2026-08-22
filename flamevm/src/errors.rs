@@ -143,6 +143,10 @@ pub enum VMError {
     #[error("Signature verification failed")]
     SignatureVerificationFailed,
 
+    /// An immediately checked Pedersen opening does not match its Token.
+    #[error("Token commitment opening mismatch")]
+    CommitmentOpeningMismatch,
+
     /// This error occurs when an instruction requires a Point.
     #[error("Item is not a Point")]
     TypeNotPoint,

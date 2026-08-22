@@ -281,13 +281,100 @@ Sub-varint (used inside `STR_VAR` / `LIST_VAR` / `DICT_VAR`):
 sub-tag 0  1 LE byte    value = b              range 0..=255
 sub-tag 1  2 LE bytes   value = 256 + w        range 256..=65_791
 sub-tag 2  4 LE bytes   value = 65_792 + w     range 65_792..≈4.3e9
-sub-tag 3  8 LE bytes   value = 4_295_032_608 + w
+sub-tag 3  8 LE bytes   value = 4_295_033_088 + w
 ```
 
 Canonicality checks performed at decode time:
 
 1. `INT_PFULL` / `INT_NFULL`: the 32-byte payload encodes the value as-is. The decoder rejects values that could have been encoded in a narrower width class.
 2. `DICT_*` payload whose keys are `0..n-1` is rejected — the list-style encoding is shorter.
+
+#### Canonical encoding vectors
+
+Hex strings below contain no separators and all multibyte integers are little-endian. `xx×N` means byte `xx` repeated `N` times; `||` means concatenation. These vectors are also pinned by the Rust tests.
+
+Sub-varint width boundaries:
+
+| Value | Hex |
+| ---: | --- |
+| 0 | `0000` |
+| 255 | `00ff` |
+| 256 | `010000` |
+| 65,791 | `01ffff` |
+| 65,792 | `0200000000` |
+| 4,295,033,087 | `02ffffffff` |
+| 4,295,033,088 | `030000000000000000` |
+| `u64::MAX` | `03fffefefffeffffff` |
+
+Container prefix boundary (payload omitted):
+
+| Prefix | Count | Hex |
+| --- | ---: | --- |
+| String | 58 | `7e` |
+| String | 59 | `7f0000` |
+| List Dict | 58 | `ba` |
+| List Dict | 59 | `bb0000` |
+| Explicit Dict | 58 | `f6` |
+| Explicit Dict | 59 | `f70000` |
+
+`Int253` width boundaries:
+
+| Value | Hex |
+| ---: | --- |
+| 0 | `00` |
+| 58 | `3a` |
+| 59 | `3b00` |
+| 314 | `3bff` |
+| 315 | `3c00000000` |
+| 4,294,967,610 | `3cffffffff` |
+| 4,294,967,611 | `3d0000000000000000` |
+| `4,294,967,611 + 2^64 - 1` | `3dffffffffffffffff` |
+| `4,294,967,611 + 2^64` | `3e3b01000001000000010000000000000000000000000000000000000000000000` |
+| -1 | `3f` |
+| -2 | `4000` |
+| -257 | `40ff` |
+| -258 | `4100000000` |
+| -4,294,967,553 | `41ffffffff` |
+| -4,294,967,554 | `420000000000000000` |
+| `-(4,294,967,554 + 2^64 - 1)` | `42ffffffffffffffff` |
+| `-(4,294,967,554 + 2^64)` | `430201000001000000010000000000000000000000000000000000000000000080` |
+
+One vector for every currently supported value tag:
+
+| Value | Hex |
+| --- | --- |
+| `Int253(7)` | `07` |
+| `String(aabb)` | `46aabb` |
+| list Dict `{0: 1, 1: 2}` | `820102` |
+| explicit Dict `{2: 3}` | `bd0203` |
+| `Point(11×32)` | `f8 || 11×32` |
+| `Token(qty=22×32, flv=33×32)` | `f9 || 22×32 || 33×32` |
+| `ClearToken(qty=-1, flv=0)` | `fa3f00` |
+
+Canonical `pushint` opcode width boundaries:
+
+| Value | Bytecode hex |
+| ---: | --- |
+| 0 | `00` |
+| 15 | `0f` |
+| 16 | `1010` |
+| 255 | `10ff` |
+| 256 | `120001` |
+| 65,535 | `12ffff` |
+| 65,536 | `140000010000000000` |
+| `2^64 - 1` | `14ffffffffffffffff` |
+| `2^64` | `1600000000000000000100000000000000` |
+| `2^128 - 1` | `16ffffffffffffffffffffffffffffffff` |
+| `2^128` | `180000000000000000000000000000000001000000000000000000000000000000` |
+| -1 | `1101` |
+| -255 | `11ff` |
+| -256 | `130001` |
+| -65,535 | `13ffff` |
+| -65,536 | `150000010000000000` |
+| `-(2^64 - 1)` | `15ffffffffffffffff` |
+| `-2^64` | `1700000000000000000100000000000000` |
+| `-(2^128 - 1)` | `17ffffffffffffffffffffffffffffffff` |
+| `-2^128` | `180000000000000000000000000000000001000000000000000000000000000080` |
 
 ### Int253
 
@@ -524,7 +611,7 @@ FlameVM splits anchors at the source: every consume site produces two cryptograp
 Each instruction is a one-byte **opcode** optionally followed by **immediate data** encoded inline in the bytecode. Stack effects are written in left-to-right bottom-to-top order: in `a b → c`, `b` is the top of the stack on entry, `c` is the top on exit.
 
 **Context column.** The **Ctx** column in the instruction table marks opcodes that fail outside their supported context:
-- **ext.** — external-only. Hard-fails `ExternalOnly` from internal context. Covers `input`, the constraint-system opcodes (`scalar`, `commit`, `alloc`, `expr`, `range`), and the CS-consuming opcodes (`mix`, `decrypt`, `fee`). Branch-polymorphic opcodes (`borrow`, `eq`, `add`, `and`, `or`) keep a blank Ctx marker; their CS-branch restriction is in the per-opcode prose.
+- **ext.** — external-only. Hard-fails `ExternalOnly` from internal context. Covers `input`, the constraint-system opcodes (`scalar`, `commit`, `alloc`, `expr`, `range`), and the CS-consuming opcodes (`mix`, `fee`). Branch-polymorphic opcodes (`borrow`, `eq`, `add`, `and`, `or`) keep a blank Ctx marker; their CS-branch restriction is in the per-opcode prose. `decrypt` also has a blank marker: it batches its checks externally and performs them immediately internally.
 - **int.** — internal-only. Needs a registry handle. Covers `call`, `load`, `save`, and the chain-info family.
 - *(blank)* — works in either context. Most opcodes, including `send` (which emits messages from external txs too).
 
@@ -605,7 +692,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 97 | [merge](#merge) | | a b → {c 1 \| a b 0} | Combine two same-flavor cleartokens; soft-fail on flavor mismatch. |
 | 98 | [split](#split) | | a q → a' b | Split quantity `q` off a cleartoken. |
 | 99 | [mix](#mix) | ext. | tokens… cmts… m n → tokens | Cloak: prove `m` input tokens balance `n` output commitments per flavor. |
-| 9a | [decrypt](#decrypt) | ext. | T f' f q' q → CT | Open an encrypted Token to a ClearToken using cleartext openings. |
+| 9a | [decrypt](#decrypt) | | T f f' q q' → CT | Open an encrypted Token to a ClearToken using cleartext openings. |
 | 9b | [fee](#fee) | ext. | qty → −WT | Pay tx fee in the native Flame flavor; push the balancing WideToken debt to net out via `mix`. |
 |    | **Control flow** | | | |
 | a0 | [verify](#verify) | | x → ø | Assert: hard-fail if int is zero, enforce a Constraint, or batch an MSM. |
@@ -666,6 +753,28 @@ A **soft fail** is an in-band signal: the opcode pushes an optional shape
 about whether failed operands are retained; storage request opcodes consume `q`
 on either branch. The two kinds are noted per opcode.
 
+Canonical failure-shape vectors (stack order is bottom-to-top):
+
+| Opcode and absent/failing input | Output stack | Consumed on zero branch |
+| --- | --- | --- |
+| `readbits`: `String(aa), 16` | `String(aa), 0` | count |
+| `readint`: `String(aa×31)` | `String(aa×31), 0` | nothing else |
+| `readstr`: `String(01), 5` | `String(01), 0` | count |
+| `readpoint`: `String(00×31)` | `String(00×31), 0` | nothing else |
+| `replace`: `{ }, 5, 7` (no prior value) | `{5: 7}, 0` | key and new value enter the Dict |
+| `getopt`: `{ }, 5` | `{ }, 0` | key |
+| `getdup`: `{ }, 5` | `{ }, 0` | key |
+| `first` / `last`: `{ }` | `{ }, 0` | nothing else |
+| `next`: `{1: 7}, 1` | `{1: 7}, 0` | search key |
+| `merge`: `CT(1,7), CT(2,8)` | `CT(1,7), CT(2,8), 0` | neither token |
+| unavailable `addstorage` / `quotestorage`: `q` | `0` | request `q` |
+| failed entered `call`: `A, B` with `k=2` | `A, B, 2, 0` | address and gas; arguments are restored and count is re-emitted |
+| failed entered `open`: `Cell, A, B` with `k=2` | `Cell, A, B, 2, 0` | proof/script/gas operands; Cell and arguments are restored, count excludes Cell |
+| failed entered `signcall`: `Cell, A, B` with `k=2` | `Cell, A, B, 2, 0` | script/signature/gas operands; Cell and arguments are restored, count excludes Cell |
+
+Thus count and lookup-key operands do not need restitution: they are copyable
+control data, not linear values. The source String, Dict, tokens, Cell, and call
+arguments follow the exact shapes above.
 
 ### Stack instructions
 
@@ -752,7 +861,7 @@ _s n_ → _s' x 1_ | _s 0_
 
 Reads `n ≤ 256` bits **LSB-first within each byte** into bits `0..n-1` of a fresh `Int253`. The sign bit at position 255 is set only when `n = 256` and the input bit 255 is `1`; for `n < 256` the result is non-negative.
 
-Soft-fails on insufficient bytes, magnitude ≥ ℓ (reachable only when `n ≥ 253`), or negative zero (only when `n = 256`). **Hard-fails when `n > 256`** (programmer error).
+Soft-fails on insufficient bytes, magnitude ≥ ℓ (reachable only when `n ≥ 253`), or negative zero (only when `n = 256`). A negative or greater-than-256 count hard-fails `IndexOutOfRange`.
 
 ### readint
 
@@ -776,7 +885,7 @@ Reads 32 bytes as a [Point](#point). Soft-fail on insufficient bytes.
 
 _s x n_ → _s'_
 
-Appends the low `n` bits of `x`'s canonical 32-byte representation as bytes (LSB-first). `n` must be a multiple of 8 and `≤ 256`; **hard-fails** `BitCountOutOfRange` otherwise. The sign bit (bit 255) is written iff `n = 256`.
+Appends the low `n` bits of `x`'s canonical 32-byte representation as bytes (LSB-first). `n` must be a multiple of 8 and `≤ 256`. A negative or greater-than-256 count hard-fails `IndexOutOfRange`; a non-byte-aligned count hard-fails `BitCountOutOfRange`. The sign bit (bit 255) is written iff `n = 256`.
 
 ### writeint
 
@@ -824,7 +933,7 @@ Bitwise XOR of two strings. Same length rule and failure mode as [`bitor`](#bito
 
 _a n_ → _b c_
 
-Shifts bits of `a` left by `n ≤ 256`. `b` has the same length as `a`; `c` carries the displaced bits as a zero-padded-left string of `ceil(n/8)` bytes. Hard-fails `BitCountOutOfRange` if `n > 256`. Byte 0 is most significant.
+Shifts bits of `a` left by `n ≤ 256`. `b` has the same length as `a`; `c` carries the displaced bits as a zero-padded-left string of `ceil(n/8)` bytes. A negative or greater-than-256 count hard-fails `IndexOutOfRange`. Byte 0 is most significant.
 
 ### shiftright
 
@@ -909,7 +1018,7 @@ Mirror of [`and`](#and) for disjunction.
 
 **Rollback on call failure.** Every CS-touching opcode (`scalar`,
 `commit`, `alloc`, `expr`, `range`, `eq` via `verify`, `mix`,
-`decrypt`, `fee`) appends to the delegate's R1CS. On `call` /
+`fee`) appends to the delegate's R1CS. On `call` /
 `open` / `signcall` entry the VM checkpoints the R1CS via
 `bulletproofs::r1cs::CheckpointableConstraintSystem::checkpoint`;
 on call failure the child's CS contributions (witness vectors,
@@ -1144,9 +1253,11 @@ Hard-fails `MixDegenerate` if `m == 0` or `n == 0`.
 
 ### decrypt
 
-_T f' f q' q_ → _CT_
+_T f f' q q'_ → _CT_
 
-Pops the cleartext blinding/value pairs (`q' q` for quantity, `f' f` for flavor) and the encrypted `Token`. Verifies that the supplied openings reconstruct the Token's commitment points; pushes a `ClearToken(q, f)` on success. Hard-fails on commitment mismatch.
+The stack is bottom-to-top `Token, f, f', q, q'`, so the VM pops `q'`, `q`, `f'`, `f`, then `Token`. It verifies that the supplied openings reconstruct the Token's commitment points and pushes `ClearToken(q, f)` on success.
+
+External execution appends the two opening equations to the transaction's randomized batch; an invalid opening surfaces as `BatchSignatureVerificationFailed` at final verification. Internal execution checks both equations immediately because internal transactions have no deferred batch; an invalid point hard-fails `InvalidPoint`, and a mismatch hard-fails `CommitmentOpeningMismatch`. In a nested call, either immediate error follows the ordinary call rollback path and restores the caller's entry arguments.
 
 ## Control-flow instructions
 

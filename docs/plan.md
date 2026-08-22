@@ -94,24 +94,22 @@ when the specification, implementation, and focused regression tests agree.
      Address, and TxLog remain policy-neutral in-memory carriers; the receiving
      Cell, Message, call, or actor-state boundary performs admission.
 
-5. [ ] Reconcile canonical wire and opcode contracts.
+5. [x] Reconcile canonical wire and opcode contracts.
 
-   - [ ] Change the sub-varint U64 base in [flamevm.md](flamevm.md) from
-     `4_295_032_608` to the implemented contiguous value `4_295_033_088`, then
-     pin the boundary with golden vectors.
-   - [ ] Choose and specify one `decrypt` stack order. The document says
-     `T f' f q' q`; the implementation and tests use `T f f' q q'`.
-   - [ ] Decide whether invalid `decrypt` openings fail synchronously or only at
-     final batch verification, then align code, rollback behavior, and prose.
+   - [x] Specify the implemented contiguous sub-varint U64 base
+     `4_295_033_088` and pin every sub-varint and container-prefix boundary.
+   - [x] Specify and test `decrypt` stack order `T f f' q q'`.
+   - [x] Defer invalid `decrypt` openings to final batch verification externally,
+     check them immediately internally, and test nested-call argument restitution.
    - [x] Correct the `call`/`open`/`signcall` diagrams to include success
      `results... k 1`, clean fall-through `0 1`, and failure restitution
      `entry-values... n 0`.
-   - [ ] Replace the global claim that soft failure preserves every operand with
-     exact per-opcode stack shapes; decide whether count/key operands consumed by
-     `readstr` and `getopt` should be restored.
-   - [ ] Align documented error variants for bit-count bounds with the actual
+   - [x] Replace the global claim that soft failure preserves every operand with
+     exact per-opcode stack shapes. Copyable count/key operands consumed by
+     `readstr`, `getopt`, and related optional opcodes are not restored.
+   - [x] Align documented error variants for bit-count bounds with the actual
      `IndexOutOfRange`/`BitCountOutOfRange` behavior.
-   - [ ] Add cross-implementation vectors for all width boundaries, failure
+   - [x] Add cross-implementation vectors for all width boundaries, failure
      shapes, and supported value tags.
 
 6. [ ] Make memory and gas accounting non-bypassable.

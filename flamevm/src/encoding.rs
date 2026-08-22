@@ -27,7 +27,7 @@
 //! sub-tag 0  1 LE byte    value = b                  range 0..=255
 //! sub-tag 1  2 LE bytes   value = 256 + w            range 256..=65_791
 //! sub-tag 2  4 LE bytes   value = 65_792 + w         range up to ≈4.3e9
-//! sub-tag 3  8 LE bytes   value = 4_295_032_608 + w  range up to ≈1.8e19
+//! sub-tag 3  8 LE bytes   value = 4_295_033_088 + w  range up to `u64::MAX`
 //! ```
 //!
 //! `INT_PFULL` / `INT_NFULL` reject values that fit in a narrower
@@ -430,8 +430,8 @@ fn keys_are_sequential<'a>(keys: impl Iterator<Item = &'a Int253>) -> bool {
 const MAX_DEPTH: u32 = 64;
 
 /// Reads a `Value`.
-/// Returns `Ok(None)` for recognized but unimplemented type tags
-/// (tokens, objects, merlin, etc.).
+/// Returns `Ok(None)` for the recognized but unimplemented Object and Merlin
+/// tags. WideToken and unknown tags are invalid; Token and ClearToken decode.
 /// Returns `Err` for malformed data, non-canonical encodings, or
 /// resource-exhausting input (excessive nesting, oversized counts).
 pub fn read_value(r: &mut impl Reader) -> Result<Option<Value>, ReadError> {
@@ -619,6 +619,140 @@ pub(crate) fn write_admitted_value(
 mod tests {
     use super::*;
     use crate::Merlin;
+
+    fn bytes(hex: &str) -> Vec<u8> {
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let s = core::str::from_utf8(pair).expect("ASCII hex");
+                u8::from_str_radix(s, 16).expect("valid hex")
+            })
+            .collect()
+    }
+
+    fn assert_int_wire(value: Int253, expected_hex: &str) {
+        let mut encoded = Vec::new();
+        write_int253(&mut encoded, &value).expect("Vec has capacity");
+        assert_eq!(encoded, bytes(expected_hex));
+        let mut input = encoded.as_slice();
+        assert_eq!(read_int253(&mut input).expect("canonical vector"), value);
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn golden_subvarint_width_boundaries() {
+        for (value, expected) in [
+            (0, "0000"),
+            (255, "00ff"),
+            (256, "010000"),
+            (65_791, "01ffff"),
+            (65_792, "0200000000"),
+            (4_295_033_087, "02ffffffff"),
+            (4_295_033_088, "030000000000000000"),
+            (u64::MAX, "03fffefefffeffffff"),
+        ] {
+            let mut encoded = Vec::new();
+            write_subvarint(&mut encoded, value).expect("Vec has capacity");
+            assert_eq!(encoded, bytes(expected));
+            let mut input = encoded.as_slice();
+            assert_eq!(read_subvarint(&mut input).expect("canonical vector"), value);
+            assert!(input.is_empty());
+        }
+    }
+
+    #[test]
+    fn golden_container_prefix_boundary() {
+        for (kind, count, expected) in [
+            (0, 58, "7e"),
+            (0, 59, "7f0000"),
+            (1, 58, "ba"),
+            (1, 59, "bb0000"),
+            (2, 58, "f6"),
+            (2, 59, "f70000"),
+        ] {
+            let mut encoded = Vec::new();
+            match kind {
+                0 => {
+                    let value = String::from(vec![0u8; count]);
+                    write_string(&mut encoded, &value).expect("Vec has capacity");
+                    encoded.truncate(encoded.len() - count);
+                }
+                1 => write_list_prefix(&mut encoded, count).expect("Vec has capacity"),
+                _ => write_dict_prefix(&mut encoded, count).expect("Vec has capacity"),
+            }
+            assert_eq!(encoded, bytes(expected));
+        }
+    }
+
+    #[test]
+    fn golden_int253_width_boundaries() {
+        let positive_full = Int253::from(PU64_BASE as u128 + u64::MAX as u128 + 1);
+        let negative_full = -Int253::from(NU64_BASE as u128 + u64::MAX as u128 + 1);
+        for (value, expected) in [
+            (Int253::ZERO, "00"),
+            (Int253::from(58u64), "3a"),
+            (Int253::from(59u64), "3b00"),
+            (Int253::from(314u64), "3bff"),
+            (Int253::from(315u64), "3c00000000"),
+            (Int253::from(PU32_TOP), "3cffffffff"),
+            (Int253::from(PU64_BASE), "3d0000000000000000"),
+            (Int253::from(PU64_BASE) + Int253::from(u64::MAX), "3dffffffffffffffff"),
+            (positive_full, "3e3b01000001000000010000000000000000000000000000000000000000000000"),
+            (Int253::from(-1i64), "3f"),
+            (Int253::from(-2i64), "4000"),
+            (Int253::from(-257i64), "40ff"),
+            (Int253::from(-258i64), "4100000000"),
+            (-Int253::from(NU32_TOP), "41ffffffff"),
+            (-Int253::from(NU64_BASE), "420000000000000000"),
+            (-(Int253::from(NU64_BASE) + Int253::from(u64::MAX)), "42ffffffffffffffff"),
+            (negative_full, "430201000001000000010000000000000000000000000000000000000000000080"),
+        ] {
+            assert_int_wire(value, expected);
+        }
+    }
+
+    #[test]
+    fn golden_supported_value_tags() {
+        let values = [
+            (Value::Int253(Int253::from(7u64)), "07".to_owned()),
+            (Value::String(String::from(vec![0xaa, 0xbb])), "46aabb".to_owned()),
+            (
+                Value::Dict(Dict::from_values(vec![
+                    Value::Int253(Int253::ONE),
+                    Value::Int253(Int253::from(2u64)),
+                ])),
+                "820102".to_owned(),
+            ),
+            ({
+                let mut dict = Dict::new();
+                dict.insert(Int253::from(2u64), Value::Int253(Int253::from(3u64)));
+                Value::Dict(dict)
+            }, "bd0203".to_owned()),
+            (
+                Value::Point(Point::from_compressed(CompressedRistretto([0x11; 32]))),
+                format!("f8{}", "11".repeat(32)),
+            ),
+            (
+                Value::Token(Token::new(
+                    Commitment::Closed(CompressedRistretto([0x22; 32])),
+                    Commitment::Closed(CompressedRistretto([0x33; 32])),
+                )),
+                format!("f9{}{}", "22".repeat(32), "33".repeat(32)),
+            ),
+            (
+                Value::ClearToken(ClearToken::new(Int253::from(-1i64), Int253::ZERO)),
+                "fa3f00".to_owned(),
+            ),
+        ];
+        for (value, expected) in values {
+            let mut encoded = Vec::new();
+            write_value(&mut encoded, &value).expect("supported value encodes");
+            assert_eq!(encoded, bytes(&expected));
+            let mut input = encoded.as_slice();
+            assert!(read_value(&mut input).expect("canonical vector").is_some());
+            assert!(input.is_empty());
+        }
+    }
 
     // ── Int253 canonicality: decoder rejection ───────────────────
 

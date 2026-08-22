@@ -234,7 +234,7 @@ pub enum Instruction {
     Merge,                 // a b merge → {c 1 | a b 0}
     Split,                 // a q split → a' b
     Mix,                   // tokens… cmts… m n mix → tokens
-    Decrypt,               // T f' f q' q decrypt → CT
+    Decrypt,               // T f f' q q' decrypt → CT
     Verify,                // x verify → ø
     Fee,                   // qty fee → -WT
     Label(u32),            // ø label:n → ø  (operand: label number)
@@ -705,6 +705,53 @@ fn parse_pushint_full(reader: &mut impl Reader) -> Result<Instruction, VMError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bytes(hex: &str) -> Vec<u8> {
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(core::str::from_utf8(pair).unwrap(), 16).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn golden_pushint_width_boundaries() {
+        let u64_next = Int253::from(u64::MAX as u128 + 1);
+        let u128_top = Int253::from(u128::MAX);
+        let u128_next = Int253::from(u128::MAX) + Int253::ONE;
+        for (value, expected) in [
+            (Int253::ZERO, "00"),
+            (Int253::from(15u64), "0f"),
+            (Int253::from(16u64), "1010"),
+            (Int253::from(255u64), "10ff"),
+            (Int253::from(256u64), "120001"),
+            (Int253::from(65_535u64), "12ffff"),
+            (Int253::from(65_536u64), "140000010000000000"),
+            (Int253::from(u64::MAX), "14ffffffffffffffff"),
+            (u64_next, "1600000000000000000100000000000000"),
+            (u128_top, "16ffffffffffffffffffffffffffffffff"),
+            (u128_next, "180000000000000000000000000000000001000000000000000000000000000000"),
+            (Int253::from(-1i64), "1101"),
+            (Int253::from(-255i64), "11ff"),
+            (-Int253::from(256u64), "130001"),
+            (-Int253::from(65_535u64), "13ffff"),
+            (-Int253::from(65_536u64), "150000010000000000"),
+            (-Int253::from(u64::MAX), "15ffffffffffffffff"),
+            (-u64_next, "1700000000000000000100000000000000"),
+            (-u128_top, "17ffffffffffffffffffffffffffffffff"),
+            (-u128_next, "180000000000000000000000000000000001000000000000000000000000000080"),
+        ] {
+            let encoded = Instruction::PushInt(value).encode_to_vec();
+            assert_eq!(encoded, bytes(expected));
+            let mut input = encoded.as_slice();
+            match Instruction::parse(&mut input).expect("canonical vector") {
+                Instruction::PushInt(decoded) => assert_eq!(decoded, value),
+                other => panic!("expected PushInt, got {:?}", other),
+            }
+            assert!(input.is_empty());
+        }
+    }
 
     #[test]
     fn alloc_witness_is_discarded_in_bytecode() {

@@ -189,9 +189,51 @@ fn commit_in_internal_context_errors_external_only() {
 }
 
 #[test]
-fn decrypt_in_internal_context_errors_external_only() {
+fn decrypt_checks_matching_opening_immediately_in_internal_context() {
+    let q = Int253::from(100u64);
+    let f = Int253::from(7u64);
+    let q_blind = Int253::from(11u64);
+    let f_blind = Int253::from(13u64);
+    let token = Token::new(
+        Commitment::blinded_with_factor(q, Scalar::from(11u64)),
+        Commitment::blinded_with_factor(f, Scalar::from(13u64)),
+    );
     let mut vm = vm_with_script(ScriptBuilder::new().decrypt().to_bytecode());
-    let err = run_to_end(&mut vm).unwrap_err();
-    assert!(matches!(err, VMError::ExternalOnly));
+    for value in [
+        Value::Token(token),
+        Value::Int253(f),
+        Value::Int253(f_blind),
+        Value::Int253(q),
+        Value::Int253(q_blind),
+    ] {
+        vm.push_value(value);
+    }
+
+    vm.step_internal().expect("matching opening succeeds immediately");
+    assert!(matches!(vm.current_call.stack.as_slice(), [Value::ClearToken(_)]));
 }
 
+#[test]
+fn decrypt_rejects_wrong_opening_immediately_in_internal_context() {
+    let q = Int253::from(100u64);
+    let f = Int253::from(7u64);
+    let token = Token::new(
+        Commitment::blinded_with_factor(q, Scalar::from(11u64)),
+        Commitment::blinded_with_factor(f, Scalar::from(13u64)),
+    );
+    let mut vm = vm_with_script(ScriptBuilder::new().decrypt().to_bytecode());
+    for value in [
+        Value::Token(token),
+        Value::Int253(f),
+        Value::Int253(Int253::from(99u64)),
+        Value::Int253(q),
+        Value::Int253(Int253::from(11u64)),
+    ] {
+        vm.push_value(value);
+    }
+
+    assert!(matches!(
+        vm.step_internal(),
+        Err(VMError::CommitmentOpeningMismatch)
+    ));
+}

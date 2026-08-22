@@ -121,6 +121,58 @@ fn failed_call_stack(
 }
 
 #[test]
+fn failed_internal_decrypt_restores_call_arguments() {
+    let q = Int253::from(100u64);
+    let f = Int253::from(7u64);
+    let q_blind = Int253::from(11u64);
+    let wrong_f_blind = Int253::from(99u64);
+    let token = Token::new(
+        Commitment::blinded_with_factor(q, Scalar::from(11u64)),
+        Commitment::blinded_with_factor(f, Scalar::from(13u64)),
+    );
+    let expected_token = Value::Token(token.clone());
+
+    let mut reg = MemRegistry::new();
+    let callee = deploy_recv(
+        &mut reg,
+        ScriptBuilder::new().decrypt().to_bytecode(),
+        10_000,
+    );
+    let caller_script = ScriptBuilder::new()
+        .push_int(f)
+        .push_int(wrong_f_blind)
+        .push_int(q)
+        .push_int(q_blind)
+        .push_int(5u64)
+        .push_int(100_000u64)
+        .push_str(String::from(callee.to_hash().to_vec()))
+        .call()
+        .to_bytecode();
+    let caller = deploy_recv(&mut reg, caller_script.clone(), 10_000);
+    let mut vm = vm_for_actor(caller, caller_script);
+    vm.push_value(Value::Token(token));
+
+    while vm.call_stack.is_empty() {
+        vm.step_internal_with_registry(&mut reg).expect("enter callee");
+    }
+    while !vm.call_stack.is_empty() {
+        vm.step_internal_with_registry(&mut reg)
+            .expect("decrypt failure is converted to call failure");
+    }
+
+    assert_eq!(vm.current_call.stack.len(), 7);
+    assert_same_bearer(&vm.current_call.stack[0], &expected_token);
+    for (actual, expected) in vm.current_call.stack[1..5]
+        .iter()
+        .zip([f, wrong_f_blind, q, q_blind])
+    {
+        assert_int(actual, expected);
+    }
+    assert_int(&vm.current_call.stack[5], Int253::from(5u64));
+    assert_int(&vm.current_call.stack[6], Int253::ZERO);
+}
+
+#[test]
 fn call_rejects_nested_nonportable_argument() {
     let mut reg = MemRegistry::new();
     let callee = deploy_recv(&mut reg, nop_recv(), 100);

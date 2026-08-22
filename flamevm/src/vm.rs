@@ -1543,9 +1543,9 @@ impl VM {
 
     /// _s n_ **readbits** → _s' x 1_ | _s 0_
     ///
-    /// Reads `n ≤ 256` bits LSB-first into a fresh `Int253`. Hard-fails
-    /// when `n > 256` (programmer error); soft-fails on short input,
-    /// non-canonical magnitude, or negative zero.
+    /// Reads `n ≤ 256` bits LSB-first into a fresh `Int253`. A negative or
+    /// greater-than-256 count hard-fails `IndexOutOfRange`; short input,
+    /// non-canonical magnitude, or negative zero soft-fails.
     fn op_read_bits(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(256)?;
         let s = self.pop_value()?.to_string()?;
@@ -1650,7 +1650,8 @@ impl VM {
     /// Appends the low `n` bits of `x` (LSB-first) to `s`. `n` must be
     /// a multiple of 8 and ≤ 256. Sign bit included iff `n = 256`.
     fn op_write_bits(&mut self) -> Result<(), VMError> {
-        // Hard-fail at n > 256 (script abort) via the `pop_byte_count` cap.
+        // Invalid signed/range counts fail through `pop_byte_count`; byte
+        // misalignment has the more specific error below.
         let n = self.pop_byte_count(256)?;
         if n % 8 != 0 {
             return Err(VMError::BitCountOutOfRange);
@@ -3336,24 +3337,15 @@ impl VM {
     /// supplying their cleartext values (`f`, `q`) and Pedersen
     /// blinding factors (`f'`, `q'`).
     ///
-    /// Each Pedersen-opening — `token.qty == q*B + q'*B_blinding` and
-    /// `token.flv == f*B + f'*B_blinding` — is rewritten as the MSM
-    /// assertion `q*B + q'*B_blinding − token.qty == 0` (and likewise
-    /// for `flv`) and appended to the delegate's `BatchVerifier` as
-    /// two independent statements. The actual multi-scalar
-    /// multiplication runs once per tx at finalize, alongside the
-    /// Schnorr / MuSig / MSM batch — same lane and rollback story as
-    /// `op_verify` for `MultiscalarMul`. So a wrong `(q, q', f, f')`
-    /// surfaces as `BatchSignatureVerificationFailed` at finalize,
-    /// not synchronously here.
+    /// External execution appends both opening equations to the delegate's
+    /// batch and checks them at transaction finalization. Internal execution
+    /// checks both equations immediately because it has no deferred batch.
     ///
     /// All four scalar operands (`f`, `f'`, `q`, `q'`) are popped as
     /// `Int253`. The Token is popped last (deepest on stack). The
-    /// `ClearToken(q, f)` push happens unconditionally — the
-    /// soundness of the `q, f` declaration is the deferred batch
-    /// check above.
+    /// `ClearToken(q, f)` is pushed only after the applicable check is queued
+    /// or completed.
     fn op_decrypt<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
-        self.require_external()?;
         use bulletproofs::PedersenGens;
         let q_blind = self.pop_value()?.to_int253()?;
         let q_value = self.pop_value()?.to_int253()?;
@@ -3364,28 +3356,35 @@ impl VM {
             _ => return Err(VMError::TypeNotToken),
         };
         let gens = PedersenGens::default();
-        // Append two independent statements:
-        //   q*B + q'*B_blinding + (-1)*token.qty.to_point() == identity
-        //   f*B + f'*B_blinding + (-1)*token.flv.to_point() == identity
-        // Each gets its own random factor from the batch verifier, so
-        // they can't cancel each other or other batched statements.
-        // `B` is the Ristretto basepoint (PedersenGens default), so the
-        // value scalar rides on the BatchVerifier's basepoint lane.
-        let neg_one = -Scalar::ONE;
         let qty_point = token.qty.to_point().decompress();
         let flv_point = token.flv.to_point().decompress();
-        musig::BatchVerification::append(
-            delegate.batch_verifier(),
-            q_value.to_scalar_mod_order(),
-            [q_blind.to_scalar_mod_order(), neg_one],
-            [Some(gens.B_blinding), qty_point],
-        );
-        musig::BatchVerification::append(
-            delegate.batch_verifier(),
-            f_value.to_scalar_mod_order(),
-            [f_blind.to_scalar_mod_order(), neg_one],
-            [Some(gens.B_blinding), flv_point],
-        );
+        if self.is_external() {
+            // Each equation gets its own random batch factor, so it cannot
+            // cancel another opening or an unrelated signature statement.
+            let neg_one = -Scalar::ONE;
+            musig::BatchVerification::append(
+                delegate.batch_verifier(),
+                q_value.to_scalar_mod_order(),
+                [q_blind.to_scalar_mod_order(), neg_one],
+                [Some(gens.B_blinding), qty_point],
+            );
+            musig::BatchVerification::append(
+                delegate.batch_verifier(),
+                f_value.to_scalar_mod_order(),
+                [f_blind.to_scalar_mod_order(), neg_one],
+                [Some(gens.B_blinding), flv_point],
+            );
+        } else {
+            let qty_point = qty_point.ok_or(VMError::InvalidPoint)?;
+            let flv_point = flv_point.ok_or(VMError::InvalidPoint)?;
+            let expected_qty = gens.B * q_value.to_scalar_mod_order()
+                + gens.B_blinding * q_blind.to_scalar_mod_order();
+            let expected_flv = gens.B * f_value.to_scalar_mod_order()
+                + gens.B_blinding * f_blind.to_scalar_mod_order();
+            if expected_qty != qty_point || expected_flv != flv_point {
+                return Err(VMError::CommitmentOpeningMismatch);
+            }
+        }
         self.push_value(Value::ClearToken(ClearToken::new(q_value, f_value)));
         Ok(())
     }
