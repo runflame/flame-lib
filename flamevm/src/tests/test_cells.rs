@@ -4,6 +4,7 @@
 
 use super::test_helpers::*;
 use crate::encoding::{write_list_prefix, write_value};
+use crate::state_root;
 
 /// `Cell::decode` must reject an oversized payload-count prefix before
 /// allocating — a tiny hostile input claiming billions of payload items
@@ -362,6 +363,73 @@ fn open_passes_args_after_payload() {
     assert_eq!(vm.current_call.stack.len(), 2);
     assert_int(&vm.current_call.stack[0], Int253::from(0u64));
     assert_int(&vm.current_call.stack[1], Int253::from(1u64));
+}
+
+#[test]
+fn failed_open_restores_cell_and_explicit_bearers() {
+    let inner = ScriptBuilder::new().push_int(0u64).verify().to_bytecode();
+    let (tree, proof) = build_predicate_with_program(&inner, 12);
+    let payload_token = Token::cleartext(Int253::from(31u64), FLAME_FLAVOR).unwrap();
+    let cell = Cell::new(
+        Predicate::opaque(tree.point),
+        Anchor([0x31; 32]),
+        vec![Value::Token(payload_token.clone())],
+    )
+    .expect("token payload is portable");
+    let cell_id = cell.id();
+
+    let clear = ClearToken::new(Int253::from(37u64), FLAME_FLAVOR);
+    let dict_token = Token::cleartext(Int253::from(41u64), FLAME_FLAVOR).unwrap();
+    let mut dict = Dict::new();
+    dict.insert(Int253::ZERO, Value::Token(dict_token.clone()));
+    let expected_dict_root = state_root(&Value::Dict(dict.clone()));
+
+    let mut neighbors = Dict::new();
+    for (i, neighbor) in proof.neighbors.iter().enumerate() {
+        neighbors.insert(
+            Int253::from(i as u64),
+            Value::String(String::from(neighbor.to_vec())),
+        );
+    }
+    let mut vm = vm_with_script(ScriptBuilder::new().open().to_bytecode());
+    vm.last_anchor = Some(Anchor([0x42; 32]));
+    vm.current_call.stack = vec![
+        Value::Cell(Box::new(cell)),
+        Value::Point(Point::from_compressed(proof.internal_key)),
+        Value::Dict(neighbors),
+        Value::String(String::from(proof.position)),
+        Value::String(String::from(proof.program)),
+        Value::Int253(Int253::from(10_000u64)),
+        Value::ClearToken(clear.clone()),
+        Value::Dict(dict),
+        Value::Int253(Int253::from(2u64)),
+    ];
+
+    run_to_end(&mut vm).unwrap();
+
+    assert_eq!(vm.current_call.stack.len(), 5);
+    let Value::Cell(restored_cell) = &vm.current_call.stack[0] else {
+        panic!("expected restored Cell");
+    };
+    assert_eq!(restored_cell.id(), cell_id);
+    assert!(matches!(
+        restored_cell.payload(),
+        [Value::Token(token)] if token.qty() == payload_token.qty() && token.flv() == payload_token.flv()
+    ));
+    assert!(matches!(
+        &vm.current_call.stack[1],
+        Value::ClearToken(token) if token.qty() == clear.qty() && token.flv() == clear.flv()
+    ));
+    assert_eq!(state_root(&vm.current_call.stack[2]), expected_dict_root);
+    let Value::Dict(restored_dict) = &vm.current_call.stack[2] else {
+        panic!("expected restored Dict");
+    };
+    assert!(matches!(
+        restored_dict.get(&Int253::ZERO),
+        Some(Value::Token(token)) if token.qty() == dict_token.qty() && token.flv() == dict_token.flv()
+    ));
+    assert_int(&vm.current_call.stack[3], Int253::from(2u64));
+    assert_int(&vm.current_call.stack[4], Int253::ZERO);
 }
 
 #[test]

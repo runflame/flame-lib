@@ -67,6 +67,59 @@ fn nop_recv() -> Vec<u8> {
     ScriptBuilder::new().nop().to_bytecode()
 }
 
+fn assert_same_bearer(actual: &Value, expected: &Value) {
+    match (actual, expected) {
+        (Value::Token(a), Value::Token(b)) => {
+            assert_eq!(a.qty(), b.qty());
+            assert_eq!(a.flv(), b.flv());
+        }
+        (Value::ClearToken(a), Value::ClearToken(b)) => {
+            assert_eq!(a.qty(), b.qty());
+            assert_eq!(a.flv(), b.flv());
+        }
+        (Value::Dict(a), Value::Dict(b)) => {
+            assert_eq!(a.len(), b.len());
+            for ((ak, av), (bk, bv)) in a.entries().zip(b.entries()) {
+                assert_eq!(ak, bk);
+                assert_same_bearer(av, bv);
+            }
+        }
+        _ => panic!("bearer shape changed: {:?} != {:?}", actual, expected),
+    }
+}
+
+fn failed_call_stack(
+    child: Vec<u8>,
+    arg: Value,
+    gas: u64,
+    exhaust_after_entry: bool,
+) -> Vec<Value> {
+    let mut reg = MemRegistry::new();
+    let callee = deploy_recv(&mut reg, child, 10_000);
+    let caller_script = ScriptBuilder::new()
+        .push_int(1u64)
+        .push_int(gas)
+        .push_str(String::from(callee.to_hash().to_vec()))
+        .call()
+        .to_bytecode();
+    let caller = deploy_recv(&mut reg, caller_script.clone(), 10_000);
+    let mut vm = vm_for_actor(caller, caller_script);
+    vm.push_value(arg);
+
+    let mut entered = false;
+    for _ in 0..64 {
+        vm.step_internal_with_registry(&mut reg).expect("step ok");
+        if exhaust_after_entry && !entered && !vm.call_stack.is_empty() {
+            vm.current_call.gas_limit = vm.current_call.gas_used;
+        }
+        entered |= !vm.call_stack.is_empty();
+        if entered && vm.call_stack.is_empty() {
+            return vm.current_call.stack;
+        }
+    }
+    panic!("failed call did not return within 64 steps");
+}
+
 #[test]
 fn call_rejects_nested_nonportable_argument() {
     let mut reg = MemRegistry::new();
@@ -873,10 +926,105 @@ fn call_to_unknown_actor_rejected_with_marker() {
 }
 
 #[test]
-fn entered_call_failure_restores_token_argument() {
+fn entered_call_failure_matrix_restores_portable_bearers() {
+    let token = Value::Token(Token::cleartext(Int253::from(11u64), Int253::from(13u64)).unwrap());
+    let clear = Value::ClearToken(ClearToken::new(Int253::from(17u64), FLAME_FLAVOR));
+    let mut inner = Dict::new();
+    inner.insert(Int253::ZERO, token.clone());
+    inner.insert(Int253::ONE, clear.clone());
+    let mut outer = Dict::new();
+    outer.insert(Int253::ZERO, Value::Dict(inner));
+    let nested = Value::Dict(outer);
+
+    let cases = vec![
+        (
+            ScriptBuilder::new().push_int(0u64).verify().to_bytecode(),
+            token,
+            5_000,
+            false,
+        ),
+        (
+            ScriptBuilder::new()
+                .drop_()
+                .push_int(0u64)
+                .return_()
+                .to_bytecode(),
+            clear.clone(),
+            5_000,
+            true,
+        ),
+        (Vec::new(), nested, 5_000, false),
+        (
+            ScriptBuilder::new().push_int(2u64).return_().to_bytecode(),
+            clear,
+            5_000,
+            false,
+        ),
+    ];
+
+    for (child, bearer, gas, exhaust_after_entry) in cases {
+        let stack = failed_call_stack(child, bearer.clone(), gas, exhaust_after_entry);
+        assert_eq!(stack.len(), 3);
+        assert_same_bearer(&stack[0], &bearer);
+        assert_int(&stack[1], Int253::ONE);
+        assert_int(&stack[2], Int253::ZERO);
+    }
+}
+
+#[test]
+fn nested_call_failure_restores_one_original_bearer() {
     let mut reg = MemRegistry::new();
-    let failing = ScriptBuilder::new().push_int(0u64).verify().to_bytecode();
-    let callee = deploy_recv(&mut reg, failing, 10_000);
+    let c = deploy_recv(
+        &mut reg,
+        ScriptBuilder::new().push_int(0u64).verify().to_bytecode(),
+        10_000,
+    );
+    let b_script = ScriptBuilder::new()
+        .push_int(1u64)
+        .push_int(5_000u64)
+        .push_str(String::from(c.to_hash().to_vec()))
+        .call()
+        .to_bytecode();
+    let b = deploy_recv(&mut reg, b_script, 10_000);
+    let a_script = ScriptBuilder::new()
+        .push_int(1u64)
+        .push_int(100_000u64)
+        .push_str(String::from(b.to_hash().to_vec()))
+        .call()
+        .to_bytecode();
+    let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
+    let mut vm = vm_for_actor(a, a_script);
+
+    let token = Value::Token(Token::cleartext(Int253::from(23u64), FLAME_FLAVOR).unwrap());
+    let mut dict = Dict::new();
+    dict.insert(Int253::ZERO, token);
+    let bearer = Value::Dict(dict);
+    vm.push_value(bearer.clone());
+
+    let mut entered = false;
+    for _ in 0..64 {
+        vm.step_internal_with_registry(&mut reg).expect("step ok");
+        entered |= !vm.call_stack.is_empty();
+        if entered && vm.call_stack.is_empty() {
+            break;
+        }
+    }
+    assert!(entered && vm.call_stack.is_empty());
+
+    assert_eq!(vm.current_call.stack.len(), 3);
+    assert_same_bearer(&vm.current_call.stack[0], &bearer);
+    assert_int(&vm.current_call.stack[1], Int253::ONE);
+    assert_int(&vm.current_call.stack[2], Int253::ZERO);
+}
+
+#[test]
+fn successful_call_discards_escrow_copy() {
+    let mut reg = MemRegistry::new();
+    let callee = deploy_recv(
+        &mut reg,
+        ScriptBuilder::new().push_int(1u64).return_().to_bytecode(),
+        10_000,
+    );
     let caller_script = ScriptBuilder::new()
         .push_int(1u64)
         .push_int(5_000u64)
@@ -885,23 +1033,15 @@ fn entered_call_failure_restores_token_argument() {
         .to_bytecode();
     let caller = deploy_recv(&mut reg, caller_script.clone(), 10_000);
     let mut vm = vm_for_actor(caller, caller_script);
-    let token = Token::cleartext(Int253::from(11u64), Int253::from(13u64)).unwrap();
-    vm.push_value(Value::Token(token.clone()));
+    let token = Value::Token(Token::cleartext(Int253::from(29u64), FLAME_FLAVOR).unwrap());
+    vm.push_value(token.clone());
 
-    let mut entered = false;
-    loop {
+    while !vm.current_call.is_finished() || !vm.call_stack.is_empty() {
         vm.step_internal_with_registry(&mut reg).expect("step ok");
-        entered |= !vm.call_stack.is_empty();
-        if entered && vm.call_stack.is_empty() {
-            break;
-        }
     }
 
     assert_eq!(vm.current_call.stack.len(), 3);
-    assert!(matches!(
-        &vm.current_call.stack[0],
-        Value::Token(t) if t.qty() == token.qty() && t.flv() == token.flv()
-    ));
+    assert_same_bearer(&vm.current_call.stack[0], &token);
     assert_int(&vm.current_call.stack[1], Int253::ONE);
-    assert_int(&vm.current_call.stack[2], Int253::ZERO);
+    assert_int(&vm.current_call.stack[2], Int253::ONE);
 }

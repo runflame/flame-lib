@@ -756,6 +756,30 @@ mod tests {
     }
 
     #[test]
+    fn nested_purchase_commit_is_undone_by_outer_rollback() {
+        let mut store = ActorStore::new(StorageParams::default()).unwrap();
+        let other = ActorID::Hash([8; 32]);
+        store.deploy(actor(), vec![0], empty_state()).unwrap();
+        store.deploy(other.clone(), vec![0], empty_state()).unwrap();
+        let before_pool = store.available_units();
+        let before_root = store.actor_root();
+
+        store.push_checkpoint();
+        store.purchase_storage(&actor(), 1_024, 0).unwrap().unwrap();
+        store.push_checkpoint();
+        store.purchase_storage(&other, 2_048, 0).unwrap().unwrap();
+        store.pop_checkpoint_commit();
+        assert_eq!(store.available_units(), before_pool - 3);
+
+        store.pop_checkpoint_rollback();
+        assert_eq!(store.available_units(), before_pool);
+        assert_eq!(store.actor_root(), before_root);
+        assert_eq!(store.actor_capacity(&actor(), 0).unwrap(), 0);
+        assert_eq!(store.actor_capacity(&other, 0).unwrap(), 0);
+        store.assert_supply(0).unwrap();
+    }
+
+    #[test]
     fn expiry_recycles_without_redeploying_tombstone() {
         let mut store = ActorStore::new(StorageParams::default()).unwrap();
         store.deploy(actor(), vec![0], empty_state()).unwrap();

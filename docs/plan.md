@@ -4,7 +4,7 @@ This list is ordered by dependency and risk. Resolve conservation and consensus
 semantics before optimizing or extending the system. A task is complete only
 when the specification, implementation, and focused regression tests agree.
 
-1. [ ] Make synchronous call failure preserve ownership.
+1. [x] Make synchronous call failure preserve ownership.
 
    - [x] Define one rule for values moved into `call`, `open`, and `signcall`:
      a failed operation must restore each entry-owned value to the caller, or
@@ -29,9 +29,13 @@ when the specification, implementation, and focused regression tests agree.
      arity, nested rollback, and Token restoration. Downward call arguments are
      portable-only; non-portable liabilities may return upward but cannot be
      delegated to another callee.
-   - [ ] Expand the failure matrix to every portable bearer/container shape,
-     retain explicit upward-return tests for non-portable liabilities, and add
-     a storage-pool conservation test across nested and outer rollback.
+   - [x] Cover `Token`, positive `ClearToken`, nested token-bearing `Dict`, and
+     contextual `Cell` restitution across entered failure, out-of-gas, dirty
+     EOF, bad return arity, nested unwind, `open`, and `signcall`. Retain
+     explicit upward returns for negative `ClearToken` and `WideToken`, prove a
+     successful call discards its hidden escrow copy, and verify storage pool,
+     lease, expiry-index, capacity, and actor-root conservation across nested
+     commit followed by outer rollback.
 
 2. [x] Make asynchronous message failure conserve payload assets.
 

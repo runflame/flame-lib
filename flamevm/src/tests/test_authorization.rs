@@ -112,6 +112,46 @@ fn signcall_records_explicit_sig_and_runs_program() {
 }
 
 #[test]
+fn failed_signcall_restores_cell_and_argument_and_signature_checkpoint() {
+    let program = ScriptBuilder::new().push_int(0u64).verify().to_bytecode();
+    let (verification_key, signature) = signcall_signature(&program, 44);
+    let cell = Cell::new(
+        Predicate::opaque(verification_key),
+        Anchor([0x44; 32]),
+        Vec::new(),
+    )
+    .expect("empty payload is portable");
+    let cell_id = cell.id();
+    let token = Token::cleartext(Int253::from(43u64), FLAME_FLAVOR).unwrap();
+
+    let mut vm = vm_external_with_script(ScriptBuilder::new().signcall().to_bytecode());
+    vm.last_anchor = Some(Anchor([0x42; 32]));
+    vm.current_call.stack = vec![
+        Value::Cell(Box::new(cell)),
+        Value::String(String::from(program)),
+        Value::String(String::from(signature.to_vec())),
+        Value::Int253(Int253::from(10_000u64)),
+        Value::Token(token.clone()),
+        Value::Int253(Int253::ONE),
+    ];
+
+    run_external_to_end(&mut vm).unwrap();
+
+    assert!(vm.deferred_sigs.is_empty());
+    assert_eq!(vm.current_call.stack.len(), 4);
+    assert!(matches!(
+        &vm.current_call.stack[0],
+        Value::Cell(cell) if cell.id() == cell_id
+    ));
+    assert!(matches!(
+        &vm.current_call.stack[1],
+        Value::Token(restored) if restored.qty() == token.qty() && restored.flv() == token.flv()
+    ));
+    assert_int(&vm.current_call.stack[2], Int253::ONE);
+    assert_int(&vm.current_call.stack[3], Int253::ZERO);
+}
+
+#[test]
 fn signcall_message_binds_only_to_program_not_to_cell() {
     // Two different cells running the same program produce
     // identical deferred-sig messages — confirms architect's
