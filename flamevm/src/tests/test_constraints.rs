@@ -21,7 +21,6 @@ fn eq_external_strings_peek_compare_not_cs_lift() {
             CallKind::ExternalRoot,
             1_000_000,
             0,
-            0,
         ),
     );
     let mut prover = Prover::new(&pc_gens);

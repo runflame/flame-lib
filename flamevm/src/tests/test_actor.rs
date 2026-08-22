@@ -4,8 +4,8 @@ use readerwriter::{Decodable, ReadError};
 
 use super::mem_registry::MemRegistry;
 use crate::{
-    empty_state, state_root, vbyte_size, ActorID, ActorRegistry, Dict, Int253, String, VMError,
-    Value,
+    code_state_bytes, empty_state, state_root, ActorID, ActorRegistry, Dict, Int253, String,
+    VMError, Value,
 };
 
 fn fixture_code() -> Vec<u8> {
@@ -100,10 +100,10 @@ fn charged_usage_counts_state_and_code() {
     let mut large = Dict::new();
     large.insert(Int253::ZERO, Value::String(String::from(vec![0u8; 100])));
     let large = Value::Dict(large);
-    let small_usage = vbyte_size(&code, &small).unwrap();
-    let large_usage = vbyte_size(&code, &large).unwrap();
+    let small_usage = code_state_bytes(&code, &small).unwrap();
+    let large_usage = code_state_bytes(&code, &large).unwrap();
     assert!(large_usage - small_usage >= 100);
-    assert!(vbyte_size(&[0x1d; 100], &small).unwrap() - small_usage >= 99);
+    assert!(code_state_bytes(&[0x1d; 100], &small).unwrap() - small_usage >= 99);
 }
 
 #[test]

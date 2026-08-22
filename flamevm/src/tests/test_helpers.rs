@@ -132,7 +132,6 @@ pub(crate) fn vm_with_script(script: Vec<u8>) -> VM {
             kind,
             1_000_000,
             0,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     )
@@ -350,7 +349,7 @@ pub(crate) fn dispatch_code(arms: &[(u64, Vec<u8>)]) -> Vec<u8> {
 /// exercise the inner checks (root frame would short-circuit with
 /// `ReturnAtRoot`).
 pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
-    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
+    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0);
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
@@ -361,7 +360,6 @@ pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
             .into_instructions(),
         child_kind,
         500,
-        0,
         0,
     );
     let mut vm = VM::new(dummy_header(), parent);
@@ -471,7 +469,6 @@ pub(crate) fn vm_internal_with_actor(script: Vec<u8>, actor: ActorID) -> VM {
             kind,
             1_000_000,
             0,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     )
@@ -503,7 +500,6 @@ pub(crate) fn vm_external_with_script(script: Vec<u8>) -> VM {
                 .into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
             0,
         ),
     )
@@ -559,7 +555,6 @@ pub(crate) fn run_external_workflow(script: Vec<u8>) -> VM {
                 .into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
             0,
         ),
     );
@@ -621,7 +616,6 @@ pub(crate) fn run_external_steps<'g>(
             program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
             0,
         ),
     );
@@ -1055,11 +1049,8 @@ pub(crate) fn assert_nm_txlog(result: &TxResult, inputs: &[NMInputSpec], outputs
 /// per-cell contents. Single entry point for every positive
 /// matrix test.
 ///
-/// `mem_limit = 0` is a placeholder: memory charging is not yet
-/// wired, so the cap is unused. Once it lands, this constant will
-/// need to be a real cap (likely something like `4 * tx_vbytes`)
-/// — every confidential test would otherwise hit
-/// `MemoryCapExceeded` on the first allocation.
+/// `mem_limit = 0` keeps this test helper unmetered. Production zero-limit
+/// and nested-frame semantics are tracked separately in plan item 6.
 pub(crate) fn run_confidential_nm(inputs: &[NMInputSpec], outputs: &[NMOutputSpec]) -> TxResult {
     let pc_gens = PedersenGens::default();
     let program = build_confidential_nm_program(inputs, outputs);

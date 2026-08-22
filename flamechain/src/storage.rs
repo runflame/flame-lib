@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use flamevm::{
-    ActorID, ActorRegistry, Int253, StoragePurchase, VMError, Value, code_root, state_root,
-    vbyte_size,
+    ActorID, ActorRegistry, Int253, StoragePurchase, VMError, Value, code_root,
+    code_state_bytes, state_root,
 };
 use merkle::{Hash, MerkleItem, MerkleTree};
 use merlin::Transcript;
@@ -354,7 +354,7 @@ impl ActorStore {
     }
 
     fn state_bytes(code: &[u8], state: &Value) -> Result<u64, VMError> {
-        vbyte_size(code, state)?
+        code_state_bytes(code, state)?
             .checked_sub(code.len() as u64)
             .ok_or(VMError::StorageArithmeticOverflow)
     }

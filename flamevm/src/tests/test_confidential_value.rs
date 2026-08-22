@@ -34,7 +34,6 @@ fn encrypted_borrow_produces_widetoken_and_token_pair() {
             CallKind::ExternalRoot,
             1_000_000,
             0,
-            0,
         ),
     );
     // Step until borrow has executed (5 instructions: 4 setup + borrow).
@@ -100,7 +99,6 @@ fn mix_with_single_in_single_out_balances() {
             CallKind::ExternalRoot,
             1_000_000,
             0,
-            0,
         ),
     );
     // Pre-load the Token at the bottom of the stack (mix pops it as input).
@@ -157,4 +155,3 @@ fn op_mix_n_zero_rejects() {
     let err = vm.op_mix(&mut delegate).unwrap_err();
     assert!(matches!(err, VMError::MixDegenerate));
 }
-

@@ -42,7 +42,7 @@ fn callframe_advances_through_instructions() {
     let instrs = ScriptBuilder::parse(&[0x05, 0x1c, 0x1d])
         .unwrap()
         .into_instructions();
-    let mut frame = CallFrame::new(instrs, CallKind::ExternalRoot, 0, 0, 0);
+    let mut frame = CallFrame::new(instrs, CallKind::ExternalRoot, 0, 0);
     use crate::ops::Instruction;
     assert!(matches!(
         frame.next_instruction().unwrap(),
@@ -92,7 +92,7 @@ fn dirty_stack_at_call_exit_is_an_error() {
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(Vec::new(), kind, 1000, 0, 0).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(Vec::new(), kind, 1000, 0).with_anchor(Anchor([0u8; 32])),
     );
     vm.current_call
         .stack

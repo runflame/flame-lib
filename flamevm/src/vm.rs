@@ -401,9 +401,8 @@ impl CallFrame {
         kind: CallKind,
         gas_limit: u64,
         mem_limit: u64,
-        _newbytes: u64,
     ) -> Self {
-        Self::from_code(Script::Transparent(instructions), kind, gas_limit, mem_limit, 0)
+        Self::from_code(Script::Transparent(instructions), kind, gas_limit, mem_limit)
     }
 
     /// Builds a CallFrame that decodes raw `bytecode` on demand — no
@@ -413,9 +412,8 @@ impl CallFrame {
         kind: CallKind,
         gas_limit: u64,
         mem_limit: u64,
-        _newbytes: u64,
     ) -> Self {
-        Self::from_code(Script::Opaque(bytecode), kind, gas_limit, mem_limit, 0)
+        Self::from_code(Script::Opaque(bytecode), kind, gas_limit, mem_limit)
     }
 
     /// Sets this frame's starting anchor (todo #4). Chained at the
@@ -430,7 +428,6 @@ impl CallFrame {
         kind: CallKind,
         gas_limit: u64,
         mem_limit: u64,
-        _newbytes: u64,
     ) -> Self {
         Self {
             stack: Vec::new(),
@@ -469,10 +466,6 @@ pub struct TxResult {
     /// charging is wired in.
     pub gas_used: u64,
 
-    /// Bytes allocated against the persistent vbyte cap. Always zero
-    /// until the memory-cap allocator is wired in.
-    pub vbytes_used: u64,
-
     /// Canonical bytecode of the executed script. The prover supplies
     /// this from the `ScriptBuilder`; the verifier echoes back the bytecode
     /// it received. Useful when downstream code wants to re-hash or
@@ -499,7 +492,6 @@ impl core::fmt::Debug for TxResult {
             .field("txlog.len", &self.txlog.len())
             .field("total_fee", &self.total_fee)
             .field("gas_used", &self.gas_used)
-            .field("vbytes_used", &self.vbytes_used)
             .field("bytecode.len", &self.bytecode.len())
             .field("proof_present", &self.proof.is_some())
             .field("deferred_sigs.len", &self.deferred_sigs.len())
@@ -553,7 +545,6 @@ impl VM {
                 CallKind::ExternalRoot,
                 gas_limit,
                 mem_limit,
-                0,
             ),
         );
         while vm.step_external(&mut delegate)? {}
@@ -578,7 +569,6 @@ impl VM {
                 CallKind::ExternalRoot,
                 gas_limit,
                 mem_limit,
-                0,
             ),
         );
         while vm.step_external(delegate)? {}
@@ -602,7 +592,6 @@ impl VM {
                 CallKind::ExternalRoot,
                 gas_limit,
                 mem_limit,
-                0,
             ),
         );
         while vm.step_external(delegate)? {}
@@ -680,7 +669,6 @@ impl VM {
             kind,
             gas,
             mem_limit,
-            0,
         )
         .with_anchor(anchor);
         // Deliver the message payload onto the recv's stack (in payload
@@ -791,8 +779,6 @@ impl VM {
             total_fee: self.total_fee.total(),
             // Root frame's metered gas (per-instruction; spec §gas).
             gas_used: self.current_call.gas_used,
-            // Vbytes flow is deferred (docs/flamevm.md §Design); not yet metered.
-            vbytes_used: 0,
             bytecode,
             proof,
             deferred_sigs,
@@ -1607,8 +1593,8 @@ impl VM {
     /// don't release; the cap bounds the frame's total growth, and the
     /// counter dies with the frame (failure rollback is automatic).
     /// `mem_limit == 0` means unmetered (test frames); production
-    /// frames always carry a cap (4× vbytes, the `bytes` operand, or
-    /// the root `Limits`).
+    /// frames always carry a cap (derived from actor storage,
+    /// the CellOpen `mem_limit` operand, or the root `Limits`).
     fn charge_mem(&mut self, n: usize) -> Result<(), VMError> {
         let f = &mut self.current_call;
         f.mem_used = f.mem_used.saturating_add(n as u64);
@@ -2305,14 +2291,14 @@ impl VM {
         Ok(())
     }
 
-    /// _cell ik nbrs pos script gas bytes args… k_ **open** → _results… k'_
+    /// _cell ik nbrs pos script gas memlimit args… k_ **open** → _results… k'_
     ///
     /// Verifies the taproot-proofs, then enters the unlocked script in an
     /// isolated `CellOpen` frame via [`enter_cell_open_frame`].
     fn op_open(&mut self) -> Result<(), VMError> {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
-        let (gas, bytes) = self.pop_gas_bytes()?;
+        let (gas, mem_limit) = self.pop_gas_mem_limit()?;
         // The callee's budget comes out of the caller's: debit the full
         // grant now; leftover is refunded on clean return, burned on
         // failure.
@@ -2335,18 +2321,18 @@ impl VM {
         let code = prog.into_script()?;
         // Split parent's anchor for the callee + stash post-call.
         let child_anchor = self.split_anchor_for_call()?;
-        self.enter_cell_open_frame(cell, code, gas, bytes, args, child_anchor)?;
+        self.enter_cell_open_frame(cell, code, gas, mem_limit, args, child_anchor)?;
         Ok(())
     }
 
-    /// _cell script sig gas bytes args… m_ **signcall** → _results… k'_
+    /// _cell script sig gas memlimit args… m_ **signcall** → _results… k'_
     ///
     /// Defers an Explicit signature over `script` and enters it in an
     /// isolated `CellOpen` frame via [`enter_cell_open_frame`].
     fn op_signcall(&mut self) -> Result<(), VMError> {
         let m = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(m)?;
-        let (gas, bytes) = self.pop_gas_bytes()?;
+        let (gas, mem_limit) = self.pop_gas_mem_limit()?;
         // Debit the grant from the caller (see op_open).
         self.current_call.charge_gas(gas)?;
         let sig_bytes = self.pop_value()?.to_string()?.to_bytes();
@@ -2368,7 +2354,7 @@ impl VM {
 
         let code = prog_str.into_script()?;
         let child_anchor = self.split_anchor_for_call()?;
-        self.enter_cell_open_frame(cell, code, gas, bytes, args, child_anchor)?;
+        self.enter_cell_open_frame(cell, code, gas, mem_limit, args, child_anchor)?;
         Ok(())
     }
 
@@ -2377,13 +2363,13 @@ impl VM {
     /// `cell.payload` then `args` onto the new stack, swap the
     /// parent out, and switch the active anchor to `child_anchor`
     /// (the `left` half of the parent's call-entry split). Memory
-    /// cap equals `bytes` (no actor → no `4 × vbytes` rule).
+    /// cap equals `mem_limit` because a CellOpen frame has no actor storage.
     fn enter_cell_open_frame(
         &mut self,
         cell: Cell,
         code: Script,
         gas: u64,
-        bytes: u64,
+        mem_limit: u64,
         args: Vec<Value>,
         child_anchor: Anchor,
     ) -> Result<(), VMError> {
@@ -2398,8 +2384,7 @@ impl VM {
                 external_context,
             },
             gas,
-            /*mem_limit=*/ bytes,
-            /*legacy_newbytes=*/ 0,
+            mem_limit,
         )
         .with_anchor(child_anchor);
         for v in cell.into_payload() {
@@ -2414,10 +2399,10 @@ impl VM {
         Ok(())
     }
 
-    /// Pops `bytes` then `gas` (in that order — `gas` is deeper) as
+    /// Pops `mem_limit` then `gas` (in that order — `gas` is deeper) as
     /// non-negative `u64`. Shared by `op_open` and `op_signcall`.
-    fn pop_gas_bytes(&mut self) -> Result<(u64, u64), VMError> {
-        let bytes = self
+    fn pop_gas_mem_limit(&mut self) -> Result<(u64, u64), VMError> {
+        let mem_limit = self
             .pop_value()?
             .to_int253()?
             .to_u64()
@@ -2427,7 +2412,7 @@ impl VM {
             .to_int253()?
             .to_u64()
             .ok_or(VMError::InvalidBitrange)?;
-        Ok((gas, bytes))
+        Ok((gas, mem_limit))
     }
 
     /// Builds a `TaprootProof` from the four stack-popped pieces. `neighbors`
@@ -2582,7 +2567,6 @@ impl VM {
             },
             gas,
             mem_limit,
-            0,
         )
         .with_anchor(callee_anchor);
         for v in args {

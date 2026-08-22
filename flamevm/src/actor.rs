@@ -154,7 +154,7 @@ pub fn code_root(code: &[u8]) -> [u8; 32] {
     h
 }
 
-// ── Vbyte sizing ──────────────────────────────────────────────────
+// ── Actor data sizing ─────────────────────────────────────────────
 
 /// Canonical charged size of an actor's code and state. Lease-record overhead
 /// belongs to the blockchain host because FlameVM does not own lease records.
@@ -163,7 +163,7 @@ pub fn code_root(code: &[u8]) -> [u8; 32] {
 /// encodability ≠ portability — op_save's `is_portable` check is the
 /// authoritative storage gate; this reports the rare case of a portable
 /// value that lacks an encoder.
-pub fn vbyte_size(code: &[u8], state: &Value) -> Result<u64, VMError> {
+pub fn code_state_bytes(code: &[u8], state: &Value) -> Result<u64, VMError> {
     let mut buf = Vec::new();
     write_value(&mut buf, state).map_err(|_| VMError::MalformedActorState)?;
     (code.len() as u64)
@@ -282,8 +282,8 @@ pub trait ActorRegistry {
     /// state. Called when a call frame fails (`VM::fail_current_call`)
     /// or the outermost tx fails — so a failed `load` restores the
     /// checked-out state (the actor isn't spuriously self-destructed).
-    /// The vbyte pool isn't tracked (only tx-end / per-block hooks
-    /// touch it).
+    /// Registry-owned pool, lease, and expiry-index mutations are part of
+    /// the same checkpoint and must be restored as well.
     fn pop_checkpoint_rollback(&mut self);
 
     // ── self-destruct (Q6 / ADR 0017) ──────────────────────────

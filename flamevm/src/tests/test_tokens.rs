@@ -246,7 +246,7 @@ fn issuepub_at_external_root_errors_actor_context() {
         dummy_header(),
         CallFrame::new(
             ScriptBuilder::parse(&script).expect("parse").into_instructions(),
-            CallKind::ExternalRoot, 1_000_000, 0, 0,
+            CallKind::ExternalRoot, 1_000_000, 0,
         ),
     );
     let mut delegate = make_stub_delegate();
@@ -288,12 +288,12 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
         .issuepriv()
         .push_int(1u64)
         .return_();
-    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
+    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0);
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
     };
-    let child = CallFrame::new(program.into_instructions(), child_kind, 500, 0, 0);
+    let child = CallFrame::new(program.into_instructions(), child_kind, 500, 0);
     let mut vm = VM::new(dummy_header(), parent);
     let p = core::mem::replace(&mut vm.current_call, child);
     vm.call_stack.push(p);
@@ -351,7 +351,7 @@ fn issuepriv_at_external_root_errors_predicate_context() {
         dummy_header(),
         CallFrame::new(
             ScriptBuilder::parse(&script).expect("parse").into_instructions(),
-            CallKind::ExternalRoot, 1_000_000, 0, 0,
+            CallKind::ExternalRoot, 1_000_000, 0,
         ),
     );
     let mut delegate = make_stub_delegate();
@@ -369,7 +369,7 @@ fn issuepriv_in_internal_context_yields_failure_marker() {
     // test_cells.rs.
     use crate::vm::{Anchor, CallFrame, CallKind, VM};
     use curve25519_dalek::ristretto::CompressedRistretto;
-    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
+    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0);
     let script = ScriptBuilder::new().issuepriv().to_bytecode();
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
@@ -379,7 +379,6 @@ fn issuepriv_in_internal_context_yields_failure_marker() {
         ScriptBuilder::parse(&script).expect("parse").into_instructions(),
         child_kind,
         500,
-        0,
         0,
     );
     let mut vm = VM::new(dummy_header(), parent);

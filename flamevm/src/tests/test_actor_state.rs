@@ -34,7 +34,6 @@ fn vm_for(actor: ActorID, script: Vec<u8>) -> VM {
             kind,
             1_000_000,
             0,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     )
@@ -166,7 +165,6 @@ fn load_in_external_root_errors_actor_context() {
             ScriptBuilder::new().load().into_instructions(),
             kind,
             1000,
-            0,
             0,
         ),
     );

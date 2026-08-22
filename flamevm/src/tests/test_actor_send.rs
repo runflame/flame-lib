@@ -130,7 +130,6 @@ fn external_send_has_no_caller() {
             CallKind::ExternalRoot,
             1_000_000,
             0,
-            0,
         ),
     );
     vm.last_anchor = Some(Anchor([0xaa; 32]));

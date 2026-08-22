@@ -5,9 +5,7 @@ opcode encodings and stack behavior are specified in
 [flamevm.md](flamevm.md).
 
 The `flamechain` actor registry and the FlameVM storage opcodes implement this
-lease model. The legacy transferable-vbyte mechanism is not part of these
-consensus rules; any network activation still requires one protocol version to
-switch the storage state, message operands, and opcodes together.
+lease model.
 
 Actors lease storage by burning Flame. Storage is not a token: a lease cannot
 be transferred, shortened, or refunded. Every lease lasts exactly one storage

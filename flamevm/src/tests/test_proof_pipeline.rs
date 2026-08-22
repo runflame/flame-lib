@@ -179,7 +179,6 @@ fn alloc_pushes_expression_with_witness() {
             kind,
             1_000_000,
             0,
-            0,
         ),
     );
     // One step → executes the alloc.
@@ -489,12 +488,10 @@ fn phase21_txresult_populated_for_trivial_program() {
         prover_result.txlog[0],
         TxEntry::Header(_)
     ));
-    // total_fee = 0 (no fee opcodes); gas/vbytes = 0 (resource
-    // accounting not wired yet); bytecode populated; proof Some;
+    // total_fee = 0 (no fee opcodes); bytecode populated; proof Some;
     // deferred_sigs empty; sends empty.
     assert_eq!(prover_result.total_fee, 0);
     assert!(prover_result.gas_used > 0, "per-instruction metering");
-    assert_eq!(prover_result.vbytes_used, 0);
     assert!(!prover_result.bytecode.is_empty());
     assert!(prover_result.proof.is_some());
     assert!(prover_result.deferred_sigs.is_empty());
@@ -541,7 +538,6 @@ fn phase21_total_fee_flows_through_to_txresult() {
             program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
             0,
         ),
     );

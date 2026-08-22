@@ -125,8 +125,6 @@ when the specification, implementation, and focused regression tests agree.
 
 7. [ ] Settle actor and call-context semantics.
 
-   - [ ] Remove the obsolete code-free vbyte top-up path; messages always run
-     actor code, and actors purchase their own leases with `addstorage`.
    - [ ] Decide whether `CellOpen` may `send` and, during internal execution,
      `call` an actor with the zero caller identity. Align the context table and
      handlers.
@@ -146,17 +144,9 @@ when the specification, implementation, and focused regression tests agree.
    - [ ] Build one context matrix test covering ExternalRoot, InternalRoot,
      ActorCall, and external/internal CellOpen for every restricted opcode.
 
-8. [ ] Implement the actor-storage lease market.
+8. [ ] Finish actor-storage lease coverage.
 
-   - [ ] Replace flavor-1 byte tokens and message/call byte grants with the
-     reserve and fixed-duration leases in [storage.md](storage.md).
-   - [ ] Implement checked exact pricing, `addstorage`, and `quotestorage`, with
-     pool, lease, burn, and txlog rollback at every call and transaction boundary.
-   - [ ] Implement deterministic actor usage, `usage`, `capacity`, and the
-     capacity checks in `save`, `setcode`, and provisional deployment.
-   - [ ] Process expiry and issuance before execution; produce ordered
-     end-of-block destruction transactions and retire stored tokens.
-   - [ ] Add golden vectors for quote rounding, pool boundaries, lease
+   - [ ] Add remaining golden vectors for quote rounding, pool boundaries, lease
      coalescing, expiry, destruction, wire effects, and nested rollback.
 
 9. [ ] Reconcile value capabilities and public data models.

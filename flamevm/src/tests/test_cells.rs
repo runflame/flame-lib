@@ -1201,7 +1201,7 @@ fn op_open_return_arity_mismatch_errors() {
 #[test]
 fn op_open_cs_blocked_when_external_context_false() {
     use crate::vm::{Anchor, CallFrame, CallKind, VM};
-    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
+    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0);
     // alloc is 0x62 — external-only CS op. push:0 + alloc + return.
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
@@ -1211,7 +1211,6 @@ fn op_open_cs_blocked_when_external_context_false() {
         vec![Instruction::Alloc(None)],
         child_kind,
         500,
-        0,
         0,
     );
     let mut vm = VM::new(dummy_header(), parent);

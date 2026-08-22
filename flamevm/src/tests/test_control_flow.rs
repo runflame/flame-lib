@@ -210,7 +210,7 @@ fn infinite_loop_exhausts_gas() {
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(ScriptBuilder::parse(&script).unwrap().into_instructions(), kind, 1_000, 0, 0).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(ScriptBuilder::parse(&script).unwrap().into_instructions(), kind, 1_000, 0).with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
@@ -234,7 +234,7 @@ fn skip_scan_charges_gas() {
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(ScriptBuilder::parse(&script).unwrap().into_instructions(), kind, 10, 0, 0).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(ScriptBuilder::parse(&script).unwrap().into_instructions(), kind, 10, 0).with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
@@ -268,7 +268,6 @@ fn mem_cap_bounds_cumulative_string_growth() {
             kind,
             1_000,
             /*mem_limit=*/ 100,
-            0,
         ).with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
@@ -293,7 +292,6 @@ fn mem_cap_trips_on_pushstr_append_and_tread() {
                 kind,
                 10_000,
                 cap,
-                0,
             ).with_anchor(Anchor([0u8; 32])),
         );
         run_until_tx_done(&mut vm)
@@ -395,14 +393,14 @@ fn return_transfers_values_to_parent() {
     // Child script: push:7, push:1, return (k=1).
     let child_script = ScriptBuilder::new().push_int(7u64).push_int(1u64).return_().to_bytecode();
     let parent_frame =
-        CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0, 0);
+        CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0);
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
     };
     let child_frame = CallFrame::new(
         ScriptBuilder::parse(&child_script).expect("parse").into_instructions(),
-        child_kind, 500, 0, 0,
+        child_kind, 500, 0,
     );
     let mut vm = VM::new(dummy_header(), parent_frame);
     let initial_parent = mem::replace(&mut vm.current_call, child_frame);

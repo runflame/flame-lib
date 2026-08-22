@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::actor::{vbyte_size, ActorID, ActorRegistry, StoragePurchase};
+use crate::actor::{code_state_bytes, ActorID, ActorRegistry, StoragePurchase};
 use crate::errors::VMError;
 use crate::value::Value;
 
@@ -87,7 +87,7 @@ impl MemRegistry {
         if !state.is_portable() {
             return Err(VMError::NonPortableInState);
         }
-        let committed_usage = vbyte_size(&code, &state)?;
+        let committed_usage = code_state_bytes(&code, &state)?;
         self.record_actor(key);
         self.actors.insert(
             key,
@@ -119,7 +119,7 @@ impl MemRegistry {
         }
         self.record_actor(key);
         let actor = self.actors.get_mut(&key).unwrap();
-        actor.committed_usage = vbyte_size(&actor.code, &state)?;
+        actor.committed_usage = code_state_bytes(&actor.code, &state)?;
         actor.state = Some(state);
         Ok(())
     }
@@ -139,7 +139,7 @@ impl MemRegistry {
         let key = id.to_hash();
         let actor = self.actors.get(&key).ok_or(VMError::ActorNotFound)?;
         let state = actor.state.as_ref().ok_or(VMError::ActorEmpty)?;
-        let usage = vbyte_size(&code, state)?;
+        let usage = code_state_bytes(&code, state)?;
         self.record_actor(key);
         let actor = self.actors.get_mut(&key).unwrap();
         actor.code = code;

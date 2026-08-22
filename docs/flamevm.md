@@ -608,9 +608,9 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | c0 | [input](#input) | ext. | s → cell | Materialize a cell from a Utreexo-validated input encoding. |
 | c1 | [cell](#cell) | | items… k pred → cell | Build a new cell from `k` portable items under predicate `pred`. |
 | c2 | [output](#output) | | items… k pred → ø | Like `cell`, but emits the cell directly as a tx Output. |
-| c3 | [open](#open) | | cell ik nbrs pos script gas bytes args… k → results… k' | Reveal a taproot leaf and run it in an isolated call frame. |
+| c3 | [open](#open) | | cell ik nbrs pos script gas memlimit args… k → results… k' | Reveal a taproot leaf and run it in an isolated call frame. |
 | c4 | [signtx](#signtx) | | cell → items… k | Authorize the tx with the cell predicate's signature; pour payload. |
-| c5 | [signcall](#signcall) | | cell script sig gas bytes args… m → results… k' | Run a script signed by the cell predicate in an isolated frame. |
+| c5 | [signcall](#signcall) | | cell script sig gas memlimit args… m → results… k' | Run a script signed by the cell predicate in an isolated frame. |
 |    | **Actors** | | | |
 | d0 | [send](#send) | | args… k refund gas addr → ø | Queue an asynchronous actor message. |
 | d1 | [call](#call) | int. | args… k gas addr → results… k' | Synchronously call an actor. |
@@ -1268,17 +1268,17 @@ Same construction as [`cell`](#cell) but emits an `Output` effect into the txlog
 
 ### open
 
-_cell internal_key neighbors position script gas bytes args… k_ → _results… k'_
+_cell internal_key neighbors position script gas memlimit args… k_ → _results… k'_
 
 Verifies the Taproot proof against the cell's predicate:
 
 1. Pops `k` (Int253) and `args` (k portable values).
-2. Pops `bytes` and `gas` as `Int253` (transient-memory and gas allotments).
+2. Pops `memlimit` and `gas` as `Int253` (transient-memory cap and gas allotment).
 3. Pops `script` (String) — the revealed leaf bytes (or witness-bearing `StringWitness::Script` on the prover).
 4. Pops `position` (String, bit-packed path), `neighbors` (list-Dict of 32-byte Strings, leaf-to-root), `internal_key` (Point).
 5. Pops `cell`.
 6. Constructs a `TaprootProof` and verifies `predicate.verify_taproot_proof` — checks the Merkle root and the tweaked-key relation `P = X + h(X, M)·B`.
-7. On success, creates a new isolated `CallKind::CellOpen { predicate: cell.predicate, external_context }` frame with the popped `gas` / `bytes` allotments, pours the cell's payload then the `args` onto the new frame's stack, and enters the unlocked `script`. The frame's starting anchor (the `CallFrame.anchor` field — todo #4, formerly carried in the variant) is the child-anchor split from the parent. The tx's `last_anchor` is set to that child-anchor on entry; `op_open` is intra-tx and doesn't mint anything cross-tx.
+7. On success, creates a new isolated `CallKind::CellOpen { predicate: cell.predicate, external_context }` frame with the popped `gas` allotment and transient `memlimit`, pours the cell's payload then the `args` onto the new frame's stack, and enters the unlocked `script`. The frame's starting anchor (the `CallFrame.anchor` field — todo #4, formerly carried in the variant) is the child-anchor split from the parent. The tx's `last_anchor` is set to that child-anchor on entry; `op_open` is intra-tx and doesn't mint anything cross-tx.
 
 The new frame has **no actor identity** by default — `op_load`/`op_save`/`op_call`/`op_send` all error from inside. The frame inherits CS access from the caller's context (external root → CS available; internal → not). Results return via `return k'`; leftover gas refunds to the parent.
 
@@ -1345,7 +1345,7 @@ through its sticky flag.
 
 **Emits no txlog entry.** Calls are intra-tx control flow; the structural effects produced inside the callee (`Output`, `Send`, `ActorSave`, `Issue`, `Retire`, `Fee`, `Data`) are what the state machine reads. The `(External TxID, Internal TxID)` of a tx is a merkle root over effects only — see the effect model above.
 
-Creates an isolated `CallKind::ActorCall { actor, caller }` frame (the frame's starting anchor lives in `CallFrame.anchor` — todo #4) with the popped gas allotment. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
+Creates an isolated `CallKind::ActorCall { actor, caller }` frame (the frame's starting anchor lives in `CallFrame.anchor` — todo #4) with the popped gas allotment. Its transient-memory cap is derived from the callee's own storage usage and capacity; callers supply neither storage capacity nor a memory-limit operand. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
 
 Returns via `return k'`. Hard-fails `RegistryUnavailable` outside an internal-tx execution.
 
@@ -1460,11 +1460,11 @@ The deferred signature is verified at finalize: the prover aggregates all `TxBou
 
 ### signcall
 
-_cell script sig gas bytes args… m_ → _results… k'_
+_cell script sig gas memlimit args… m_ → _results… k'_
 
 Same call-frame mechanics as [`open`](#open) — taproot reveal is replaced by signature verification:
 
-1. Pops `m` (Int253), `args` (m portable values), `bytes`, `gas`.
+1. Pops `m` (Int253), `args` (m portable values), `memlimit`, `gas`.
 2. Pops `sig` (String, exactly 64 bytes — Schnorr signature).
 3. Pops `script` (String) and `cell`.
 4. Records `DeferredSig::Explicit { verification_key: cell.predicate.point, message: signcall_message(script_bytes), signature }`. The message is built via a Merlin transcript labelled `flamevm.signcall` over the script bytes only — scripts bind themselves to further context (anchor, actor identity, tx data) via explicit checks inside the script body.

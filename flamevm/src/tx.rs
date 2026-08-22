@@ -86,7 +86,7 @@ impl ExternalTx {
 pub struct Limits {
     /// Compute (gas) budget.
     pub gas: u64,
-    /// Transient-memory cap (vbytes) for the outermost call.
+    /// Transient-memory cap in bytes for the outermost call.
     pub mem: u64,
 }
 
@@ -130,7 +130,6 @@ impl TxLog {
 pub struct TxMetrics {
     pub gas_used: u64,
     pub total_fee: u64,
-    pub vbytes_used: u64,
 }
 
 /// What the sender must aggregate-sign before broadcast. Build the
@@ -205,7 +204,6 @@ impl ScriptBuilder {
             metrics: TxMetrics {
                 gas_used: result.gas_used,
                 total_fee: result.total_fee,
-                vbytes_used: result.vbytes_used,
             },
             txbound_items,
             log: TxLog(result.txlog),
@@ -254,7 +252,6 @@ impl Message {
             metrics: TxMetrics {
                 gas_used: result.gas_used,
                 total_fee: result.total_fee,
-                vbytes_used: result.vbytes_used,
             },
         })
     }

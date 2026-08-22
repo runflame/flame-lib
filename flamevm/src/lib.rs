@@ -21,7 +21,7 @@ mod verifier;
 mod vm;
 
 pub use actor::{
-    code_root, empty_state, state_root, vbyte_size, ActorID, ActorRegistry, StoragePurchase,
+    code_root, code_state_bytes, empty_state, state_root, ActorID, ActorRegistry, StoragePurchase,
     TRANSIENT_MEMORY_CAPACITY_MULTIPLIER,
 };
 pub use address::Address;

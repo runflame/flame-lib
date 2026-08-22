@@ -12,7 +12,6 @@ fn external_vm(header: TxHeader, script: Vec<u8>, gas: u64, memory: u64) -> VM {
             CallKind::ExternalRoot,
             gas,
             memory,
-            0,
         ),
     )
 }
@@ -96,7 +95,6 @@ fn usage_and_capacity_read_actor_storage() {
             kind,
             1_000_000,
             0,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     );
@@ -115,7 +113,7 @@ fn storage_introspection_requires_registry() {
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(vec![Instruction::Usage], kind, 1_000_000, 0, 0)
+        CallFrame::new(vec![Instruction::Usage], kind, 1_000_000, 0)
             .with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
@@ -164,7 +162,6 @@ fn storage_quote_and_purchase_use_host_result() {
             },
             1_000_000,
             0,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     );
@@ -182,7 +179,6 @@ fn storage_quote_and_purchase_use_host_result() {
                 .into_instructions(),
             kind,
             1_000_000,
-            0,
             0,
         )
         .with_anchor(Anchor([0u8; 32])),

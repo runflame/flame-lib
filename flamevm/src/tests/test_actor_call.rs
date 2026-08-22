@@ -32,7 +32,6 @@ fn vm_for_actor(actor: ActorID, script: Vec<u8>) -> VM {
             kind,
             1_000_000,
             0,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     )
@@ -292,7 +291,6 @@ fn call_grant_exceeding_caller_budget_is_out_of_gas() {
             ScriptBuilder::parse(&a_script).unwrap().into_instructions(),
             kind,
             100,
-            0,
             0,
         )
         .with_anchor(Anchor([0u8; 32])),

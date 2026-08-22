@@ -244,16 +244,16 @@ pub enum Instruction {
     Input,                 // s input → cell
     Cell,                  // items… k pred cell → cell
     Output,                // items… k pred output → ø
-    Open,                  // cell ik nbrs pos script gas bytes args… k open → results… k'
-    Send,                  // args… k refund gas bytestoken addr send → ø
-    Call,                  // args… k gas bytestoken addr call → results… k'
+    Open,                  // cell ik nbrs pos script gas memlimit args… k open → results… k'
+    Send,                  // args… k refund gas addr send → ø
+    Call,                  // args… k gas addr call → results… k' 1 | 0
     Load,                  // ø load → value   (actor state, any Value)
     Save,                  // value save → ø
     Setcode,               // code setcode → ø  (replace actor code blob)
     AddStorage,            // q addstorage → {debt 1 | 0}
     QuoteStorage,          // q quotestorage → {fee 1 | 0}
     Signtx,                // cell signtx → items… k
-    Signcall,               // cell script sig gas bytes args… m signcall → results… k'
+    Signcall,               // cell script sig gas memlimit args… m signcall → results… k'
     Timelock,              // ø timelock → n {0|1}
     Version,               // ø version → n
     Selfid,                // ø selfid → s

@@ -23,7 +23,6 @@ fn vm_internal_with(
             kind,
             1_000_000,
             0,
-            0,
         )
         .with_anchor(anchor),
     )
@@ -37,7 +36,6 @@ fn vm_external(script: Vec<u8>) -> VM {
             ScriptBuilder::parse(&script).expect("parse").into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
             0,
         ),
     )
@@ -152,5 +150,4 @@ fn callerid_in_external_root_errors_actor_context() {
     let err = vm.step_internal().expect_err("must error");
     assert!(matches!(err, VMError::OpcodeRequiresActorContext));
 }
-
 
