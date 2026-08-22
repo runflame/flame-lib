@@ -288,12 +288,12 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
         .issuepriv()
         .push_int(1u64)
         .return_();
-    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500);
+    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 20_000);
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
     };
-    let child = CallFrame::new(program.into_instructions(), child_kind, 500);
+    let child = CallFrame::new(program.into_instructions(), child_kind, 20_000);
     let mut vm = VM::new(dummy_header(), parent);
     let p = core::mem::replace(&mut vm.current_call, child);
     vm.call_stack.push(p);
@@ -450,7 +450,7 @@ fn issuepriv_prove_then_verify_end_to_end() {
     //   pushpoint(internal_key);
     //   neighbors-dict; position;
     //   push_script(inner) (witness-preserving);
-    //   gas=1024;
+    //   gas=20_000;
     //   pushstr(qty_witness); k=1; open;
     //   verify; drop  (consume the success + count markers)
     let mut outer = ScriptBuilder::new()
@@ -467,7 +467,7 @@ fn issuepriv_prove_then_verify_end_to_end() {
         .dict()
         .push_str(String::from(cp.position.clone()))
         .push_script(inner)                                  // witness-bearing
-        .push_int(1024u64)                                   // gas
+        .push_int(20_000u64)                                 // gas
         .push_str(String::commitment(qty_commit.clone())) // qty witness arg
         .push_int(1u64)                                      // k = 1 arg
         .open()

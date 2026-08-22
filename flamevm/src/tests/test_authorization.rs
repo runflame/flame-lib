@@ -71,6 +71,34 @@ fn signtx_pours_payload_and_records_txbound_sig() {
 }
 
 #[test]
+fn signtx_prepays_aggregate_signature_work() {
+    let cell = Cell::new(
+        Predicate::opaque(CompressedRistretto([0xaa; 32])),
+        Anchor([0x41; 32]),
+        Vec::new(),
+    )
+    .unwrap();
+    let expected = GAS_PER_INSTRUCTION + GAS_SIGNATURE_VERIFY;
+
+    let mut vm = vm_external_with_script(ScriptBuilder::new().signtx().to_bytecode());
+    vm.current_call.stack = vec![Value::Cell(Box::new(cell.clone()))];
+    vm.current_call.gas_limit = expected;
+    let mut delegate = make_stub_delegate();
+    assert!(vm.step_external(&mut delegate).expect("exact budget succeeds"));
+    assert_eq!(vm.current_call.gas_used, expected);
+
+    let mut short = vm_external_with_script(ScriptBuilder::new().signtx().to_bytecode());
+    short.current_call.stack = vec![Value::Cell(Box::new(cell))];
+    short.current_call.gas_limit = expected - 1;
+    let mut delegate = make_stub_delegate();
+    assert!(matches!(
+        short.step_external(&mut delegate),
+        Err(VMError::OutOfGas)
+    ));
+    assert!(short.deferred_sigs.is_empty());
+}
+
+#[test]
 fn signcall_records_explicit_sig_and_runs_program() {
     // Inner script `drop, push:0, return` drains the payload and
     // exits the isolated CellOpen frame (ADR 0013).

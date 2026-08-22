@@ -10,6 +10,7 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
+use crate::MultiscalarMul;
 
 // ── Construction via arithmetic ─────────────────────────────────
 
@@ -311,6 +312,32 @@ fn verify_msm_in_internal_context_rejected() {
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
         VMError::ExternalOnly
+    ));
+}
+
+#[test]
+fn verify_msm_debits_decompression_and_finalization_work() {
+    let point = curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED;
+    let msm = MultiscalarMul::term(Scalar::ZERO, point);
+    let expected = GAS_PER_INSTRUCTION
+        + 1 // rollback/operand growth for the one-term MSM
+        + linear_gas(GAS_MSM_VERIFY_BASE, GAS_MSM_VERIFY_TERM, 1).unwrap()
+        + 2; // scalar and decompressed-point batch vectors
+
+    let mut vm = vm_external_with_script(ScriptBuilder::new().verify().to_bytecode());
+    vm.current_call.stack = vec![Value::MultiscalarMul(msm.clone())];
+    vm.current_call.gas_limit = expected;
+    let mut delegate = make_stub_delegate();
+    assert!(vm.step_external(&mut delegate).expect("exact budget succeeds"));
+    assert_eq!(vm.current_call.gas_used, expected);
+
+    let mut short = vm_external_with_script(ScriptBuilder::new().verify().to_bytecode());
+    short.current_call.stack = vec![Value::MultiscalarMul(msm)];
+    short.current_call.gas_limit = expected - 1;
+    let mut delegate = make_stub_delegate();
+    assert!(matches!(
+        short.step_external(&mut delegate),
+        Err(VMError::OutOfGas)
     ));
 }
 

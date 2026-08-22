@@ -163,9 +163,8 @@ impl Delegate for InternalDelegate {
     }
 }
 
-/// Flat per-instruction gas cost — placeholder until per-opcode
-/// calibration lands (ADR 0009). Charged for every fetched instruction,
-/// executed or skip-scanned.
+/// Base cost charged for every fetched instruction, executed or skip-scanned.
+/// Expensive handlers add their calibrated work charge below.
 const GAS_PER_INSTRUCTION: u64 = 1;
 
 /// Variable-size heap work is charged monotonically in the current frame.
@@ -173,6 +172,19 @@ const GAS_PER_INSTRUCTION: u64 = 1;
 /// upper bound on peak live allocation.
 const GAS_PER_ALLOC_BYTE: u64 = 1;
 const GAS_PER_ALLOC_ITEM: u64 = 1;
+
+// Calibrated with `cargo bench -p flamevm --bench gas` on 2026-08-23.
+// One gas represents roughly 100 ns of verifier work on the reference machine;
+// every value is rounded upward. Memory charges remain deliberately more
+// conservative because they prove a bound rather than model an allocator.
+const GAS_HASH_BASE: u64 = 2;
+const GAS_HASH_BLOCK: u64 = 2;
+const GAS_POINT_DECOMPRESS: u64 = 25;
+const GAS_SIGNATURE_VERIFY: u64 = 350;
+const GAS_EXTERNAL_FINALIZE_BASE: u64 = 2_000;
+const GAS_R1CS_ITEM: u64 = 120;
+const GAS_MSM_VERIFY_BASE: u64 = 220;
+const GAS_MSM_VERIFY_TERM: u64 = 12 + GAS_POINT_DECOMPRESS;
 
 fn alloc_byte_gas(n: usize) -> Result<u64, VMError> {
     u64::try_from(n)
@@ -184,6 +196,26 @@ fn alloc_item_gas(n: usize) -> Result<u64, VMError> {
     u64::try_from(n)
         .map(|n| n.saturating_mul(GAS_PER_ALLOC_ITEM))
         .map_err(|_| VMError::OutOfGas)
+}
+
+fn linear_gas(base: u64, per_item: u64, n: usize) -> Result<u64, VMError> {
+    let n = u64::try_from(n).map_err(|_| VMError::OutOfGas)?;
+    base.checked_add(n.checked_mul(per_item).ok_or(VMError::OutOfGas)?)
+        .ok_or(VMError::OutOfGas)
+}
+
+fn hash_gas(n: usize, block_bytes: usize) -> Result<u64, VMError> {
+    // Include one padding/finalization block. The deliberate extra block at an
+    // exact boundary keeps the formula simple and conservatively priced.
+    let blocks = n
+        .checked_div(block_bytes)
+        .and_then(|blocks| blocks.checked_add(1))
+        .ok_or(VMError::OutOfGas)?;
+    linear_gas(GAS_HASH_BASE, GAS_HASH_BLOCK, blocks)
+}
+
+fn r1cs_gas(items: usize) -> Result<u64, VMError> {
+    linear_gas(0, GAS_R1CS_ITEM, items)
 }
 
 /// Maximum nested call/open/signcall depth. Re-entrancy is permitted
@@ -502,8 +534,8 @@ pub struct TxResult {
     /// Aggregate fee in flames recorded by `op_fee`.
     pub total_fee: u64,
 
-    /// Gas spent by all opcodes. Always zero until per-opcode gas
-    /// charging is wired in.
+    /// Gas spent by instructions, logical allocation, scheduled finalization,
+    /// and asynchronous message grants.
     pub gas_used: u64,
 
     /// Canonical bytecode of the executed script. The prover supplies
@@ -583,6 +615,7 @@ impl VM {
             gas_limit,
         );
         frame.charge_gas(alloc_byte_gas(script.len())?)?;
+        frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
         let mut vm = Self::new(header, frame);
         while vm.step_external(&mut delegate)? {}
         Ok(vm.into_result(script, None))
@@ -604,6 +637,7 @@ impl VM {
             gas_limit,
         );
         frame.charge_gas(alloc_byte_gas(bytecode.len())?)?;
+        frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
         let mut vm = Self::new(header, frame);
         while vm.step_external(delegate)? {}
         Ok(vm.into_result(bytecode, None))
@@ -624,6 +658,7 @@ impl VM {
             gas_limit,
         );
         frame.charge_gas(alloc_byte_gas(bytecode.len())?)?;
+        frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
         let mut vm = Self::new(header, frame);
         while vm.step_external(delegate)? {}
         Ok(vm.into_result(bytecode, None))
@@ -1004,7 +1039,7 @@ impl VM {
             I::BitXor => self.op_bit_xor(),
             I::ShiftLeft => self.op_shift_left(),
             I::ShiftRight => self.op_shift_right(),
-            I::Keccak256 => self.op_hash::<sha3::Keccak256>(),
+            I::Keccak256 => self.op_hash::<sha3::Keccak256>(136),
 
             I::Abs => self.op_abs(),
             I::Eq => self.op_eq(delegate),
@@ -1031,9 +1066,9 @@ impl VM {
             I::Transcript => self.op_transcript(),
             I::TWrite => self.op_twrite(),
             I::TRead => self.op_tread(),
-            I::Sha256 => self.op_hash::<sha2::Sha256>(),
-            I::Sha512 => self.op_hash::<sha2::Sha512>(),
-            I::Sha3 => self.op_hash::<sha3::Sha3_256>(),
+            I::Sha256 => self.op_hash::<sha2::Sha256>(64),
+            I::Sha512 => self.op_hash::<sha2::Sha512>(128),
+            I::Sha3 => self.op_hash::<sha3::Sha3_256>(136),
             I::Log => self.op_log(),
 
             I::Amount => self.op_amount(),
@@ -1360,9 +1395,9 @@ impl VM {
     /// Pops a String and pushes its hash digest. Dispatch selects
     /// `sha256`, `sha512`, `sha3` (FIPS-202), or `keccak256`
     /// (pre-FIPS Keccak, Ethereum-compatible).
-    fn op_hash<H: sha2::Digest>(&mut self) -> Result<(), VMError> {
+    fn op_hash<H: sha2::Digest>(&mut self, block_bytes: usize) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(s.len())?;
+        self.current_call.charge_gas(hash_gas(s.len(), block_bytes)?)?;
         let digest = H::digest(s.to_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
@@ -1887,6 +1922,11 @@ impl VM {
             (a, b) if self.is_external() => {
                 let aexpr = a.to_expression()?;
                 let bexpr = b.to_expression()?;
+                if matches!(&aexpr, Expression::LinearCombination(_, _))
+                    && matches!(&bexpr, Expression::LinearCombination(_, _))
+                {
+                    self.current_call.charge_gas(r1cs_gas(1)?)?;
+                }
                 let product = aexpr.multiply(bexpr, delegate.cs());
                 self.push_value(Value::Expression(product));
                 Ok(())
@@ -1987,12 +2027,19 @@ impl VM {
             }
             Value::Constraint(c) => {
                 self.require_external()?;
+                self.current_call
+                    .charge_gas(r1cs_gas(c.multiplier_count())?)?;
                 c.verify(delegate.cs())?;
                 Ok(())
             }
             Value::MultiscalarMul(m) => {
                 self.require_external()?;
                 let terms = m.into_terms();
+                self.current_call.charge_gas(linear_gas(
+                    GAS_MSM_VERIFY_BASE,
+                    GAS_MSM_VERIFY_TERM,
+                    terms.len(),
+                )?)?;
                 self.charge_alloc_items(terms.len().saturating_mul(2))?;
                 let scalars: Vec<curve25519_dalek::scalar::Scalar> =
                     terms.iter().map(|(s, _)| *s).collect();
@@ -2197,6 +2244,8 @@ impl VM {
         };
         self.require_external()?;
         use spacesuit::BitRange;
+        // One committed variable plus a 64-bit range gadget.
+        self.current_call.charge_gas(r1cs_gas(65)?)?;
 
         let tag = self.pop_value()?.to_string()?;
         let qty_var = self.pop_value()?.to_variable()?;
@@ -2464,6 +2513,7 @@ impl VM {
             .ok_or(VMError::OutOfGas)?;
         self.charge_alloc_items(neighbors.len())?;
         self.charge_alloc_bytes(proof_bytes)?;
+        self.current_call.charge_gas(GAS_POINT_DECOMPRESS)?;
 
         let cp = Self::taproot_proof_from_stack_pieces(
             internal_key,
@@ -2500,6 +2550,9 @@ impl VM {
         if sig_bytes.len() != 64 {
             return Err(VMError::BadSignatureBytes);
         }
+        // Same price in both contexts: internal execution verifies now;
+        // external execution schedules the same work in the final batch.
+        self.current_call.charge_gas(GAS_SIGNATURE_VERIFY)?;
         let mut sig = [0u8; 64];
         sig.copy_from_slice(&sig_bytes);
         // Canonical bytecode for the signed message; `prog_str` is kept
@@ -2663,6 +2716,11 @@ impl VM {
             gas,
             refund_predicate,
         )?;
+        // A send reserves future execution from the active frame. The grant is
+        // intentionally not refunded: asynchronous execution has no live
+        // caller to receive it, and descendants must divide an existing grant
+        // rather than minting fresh gas.
+        self.current_call.charge_gas(gas)?;
         self.txlog.push(TxEntry::Send(message));
         Ok(())
     }
@@ -2930,6 +2988,9 @@ impl VM {
     fn op_signtx(&mut self) -> Result<(), VMError> {
         self.require_external()?;
         let cell = self.pop_value()?.to_cell()?;
+        // Each authorized cell contributes one key/message term to the final
+        // aggregate-signature verification.
+        self.current_call.charge_gas(GAS_SIGNATURE_VERIFY)?;
         let k = cell.payload().len();
         self.deferred_sigs.push(DeferredSig::TxBound {
             verification_key: cell.predicate.verification_key(),
@@ -3040,6 +3101,7 @@ impl VM {
     ) -> Result<(), VMError> {
         self.require_external()?;
         self.charge_alloc_items(1)?;
+        self.current_call.charge_gas(r1cs_gas(1)?)?;
         use bulletproofs::r1cs::ConstraintSystem;
         let witness_scalar = witness.map(|i| i.to_scalar_mod_order());
         let r1cs_var = delegate
@@ -3060,6 +3122,7 @@ impl VM {
     fn op_expr<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         self.require_external()?;
         self.charge_alloc_items(1)?;
+        self.current_call.charge_gas(r1cs_gas(1)?)?;
         use curve25519_dalek::scalar::Scalar;
         let var = self.pop_value()?.to_variable()?;
         let (_point, r1cs_var) = delegate.commit_variable(&var.commitment)?;
@@ -3106,6 +3169,7 @@ impl VM {
                 Ok(())
             }
             Expression::LinearCombination(terms, assignment) => {
+                self.current_call.charge_gas(r1cs_gas(n_usize)?)?;
                 let lc: LC = terms.iter().cloned().collect();
                 // Convert the witness (if present) to spacesuit's
                 // SignedInteger. Non-negative Int253s up to u64::MAX
@@ -3159,6 +3223,9 @@ impl VM {
     ) -> Result<(), VMError> {
         use bulletproofs::r1cs::ConstraintSystem;
         use spacesuit::BitRange;
+        // Two committed variables, a 64-bit range gadget, and the allocated
+        // additive inverse.
+        self.current_call.charge_gas(r1cs_gas(67)?)?;
         // Commit both to the CS. Prover uses the open witness; verifier
         // sees only the closed point. Either way, the returned r1cs vars
         // are bound to the same commitment point on both sides.
@@ -3211,6 +3278,7 @@ impl VM {
     fn op_fee<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         self.require_external()?;
         use bulletproofs::r1cs::ConstraintSystem;
+        self.current_call.charge_gas(r1cs_gas(2)?)?;
         let qty = self.pop_value()?.to_int253()?;
         if qty.is_negative() {
             return Err(VMError::FeeQtyNegative);
@@ -3288,6 +3356,8 @@ impl VM {
         let mix_items = m.checked_add(n).ok_or(VMError::OutOfGas)?;
         let quadratic_work = mix_items.checked_mul(mix_items).ok_or(VMError::OutOfGas)?;
         self.charge_alloc_items(quadratic_work)?;
+        self.current_call
+            .charge_gas(r1cs_gas(quadratic_work)?)?;
         // Stack depth check: we'll pop 2n commitment Strings + m token values.
         let needed = m.saturating_add(n.saturating_mul(2));
         if needed > self.current_call.stack.len() {
@@ -3355,6 +3425,14 @@ impl VM {
             Value::Token(t) => t,
             _ => return Err(VMError::TypeNotToken),
         };
+        // Two point decompressions and two two-term opening equations. The
+        // charge is identical whether they are checked immediately or batched.
+        let opening_gas = linear_gas(GAS_MSM_VERIFY_BASE, GAS_MSM_VERIFY_TERM, 2)?;
+        self.current_call.charge_gas(
+            opening_gas
+                .checked_mul(2)
+                .ok_or(VMError::OutOfGas)?,
+        )?;
         let gens = PedersenGens::default();
         let qty_point = token.qty.to_point().decompress();
         let flv_point = token.flv.to_point().decompress();

@@ -145,7 +145,10 @@ Transaction fees are paid in Flame and cover computation for the external
 transaction and subsequent calls within internal transactions. Actor storage is paid separately by burning
 Flame through `addstorage`. 
 
-External transaction pays for its own de-facto gas used and for additional gas requested for *sent messages*. Internal transactions cannot request or store gas beyond amount allocated at the “message send” operation at the internal transaction.
+An external transaction pays for its own execution and prepays every gas grant
+attached to its direct `send` effects. An internal transaction executes inside
+that grant and prepays any descendant sends from the same budget, so a message
+tree can divide gas but cannot amplify it.
 
 Unused gas in a message send is discarded: transaction commits to full amount of gas before doing a message send. Unused gas in a call (within internal transaction) remains with the caller and therefore not lost. 
 
@@ -1441,6 +1444,12 @@ Asynchronous message-send. Pops operands top-first:
 5. `args…` — k portable values, delivery payload. A caller may include Flame
    here for the destination actor to spend with `addstorage`.
 
+The full `gas` grant is debited from the active frame before the Send effect is
+recorded. Insufficient remaining gas hard-fails `OutOfGas` and no message is
+emitted. The grant is never refunded: asynchronous execution has no live caller
+to receive a remainder. An internal transaction therefore cannot reserve more
+gas across its own descendant sends than it received in its triggering Message.
+
 Splits the frame's `last_anchor` (see §Anchors): the `left` half becomes the message's `anchor`, the `right` half replaces `last_anchor`. Hard-fails `AnchorMissing` if no anchor has been claimed yet. Emits `TxEntry::Send(Message)` — the full `Message` lives in the entry, symmetric with `TxEntry::Output(Cell)`. There is no separate "sends queue"; the block builder reads `TxEntry::Send` records from the TxLog when constructing internal-tx deliveries. The originator's actor id (if any) becomes the message's `caller`.
 
 The payload is admitted by `Message::new`, not by `Message::encode`.
@@ -1463,7 +1472,8 @@ The merkle leaf for `TxEntry::Send` commits to this single 32-byte MessageID, ju
 Available in both contexts. Hard-fails `MalformedAddress` when `addr` is neither
 a bare hash nor one complete canonical `ActorID`, or when `refund` has the wrong
 size; `NonPortableInSend` on non-portable args; and `InvalidBitrange` on a
-negative or overflowing gas allotment.
+negative or overflowing gas allotment. It hard-fails `OutOfGas` when the active
+frame cannot prepay the requested grant.
 
 On internal-tx failure during delivery, consensus seals the message payload into a fresh cell under `refund_predicate` and emits it as an Output effect — see the design.
 
@@ -1684,13 +1694,45 @@ memory is freed; this is a deterministic logical-work bound, not a dependency
 on Rust object sizes or allocator behavior. Prover-only witness presence never
 changes gas. Exhaustion hard-fails `OutOfGas`.
 
+Expensive deterministic work is prepaid where it is requested, even when the
+actual cryptographic check is deferred until transaction finalization. External
+roots prepay proof-finalization overhead; hashing is charged by compression
+block; `open` charges point decompression; `signcall` and `signtx` charge
+signature verification; R1CS-building instructions charge estimated
+multipliers/items; and MSM/decrypt verification charges decompression plus the
+scheduled final MSM. Prover and verifier take the same charges.
+
+The current schedule was calibrated with
+`cargo bench -p flamevm --bench gas` on 2026-08-23 on an arm64 machine. One gas
+was conservatively treated as approximately 100 ns of reference verifier work.
+Representative medians were:
+
+| Work | Median |
+|---|---:|
+| SHA-256, 64 KiB | 132.45 µs |
+| SHA-512, 64 KiB | 85.12 µs |
+| SHA3-256 / Keccak-256, 64 KiB | 71.5 µs |
+| valid Ristretto decompression | 2.45 µs |
+| immediate signature verification | 33.4 µs |
+| 64-signature batch | 1.108 ms |
+| R1CS verification, 64 multipliers | 0.968 ms |
+| R1CS verification, 512 multipliers | 4.97 ms |
+| MSM finalization, 64 terms | 98.5 µs |
+| MSM finalization, 1,024 terms | 0.997 ms |
+
+The measured hash, R1CS, and MSM curves remained bounded by the selected linear
+prices over the tested ranges, so no arbitrary crypto-size cap is added. Checked
+gas multiplication and the enclosing transaction/block gas limits provide the
+bound. The logical allocation prices remain intentionally more conservative
+than measured allocator work.
+
 Call entry (`call` / `open` / `signcall`) debits the full gas grant from the
 caller. A caller that cannot afford the grant hard-fails; leftover gas is
 refunded on clean return and `gaslimit` remains the immutable creation cap. A
 failed entered call burns the grant. An actor call rejected for availability
 before entry refunds it, while a child grant too small to activate its code is
-burned. `send` does not debit the sender's frame; the message's gas grant is
-funded at delivery by the consensus layer.
+burned. `send` debits its full grant from the sender and never refunds it;
+delivery and every descendant send execute within that prepaid budget.
 
 ### usage
 

@@ -78,6 +78,27 @@ pub struct CommitmentWitness {
 }
 
 impl Constraint {
+    /// Number of R1CS multipliers materialized when this constraint is
+    /// flattened. Equality and conjunction are linear; disjunction allocates
+    /// one multiplier and negation allocates two.
+    pub(crate) fn multiplier_count(&self) -> usize {
+        fn secret_count(constraint: &SecretConstraint) -> usize {
+            match constraint {
+                SecretConstraint::Eq(_, _) => 0,
+                SecretConstraint::And(a, b) => secret_count(a).saturating_add(secret_count(b)),
+                SecretConstraint::Or(a, b) => 1usize
+                    .saturating_add(secret_count(a))
+                    .saturating_add(secret_count(b)),
+                SecretConstraint::Not(value) => 2usize.saturating_add(secret_count(value)),
+            }
+        }
+
+        match self {
+            Constraint::Cleartext(_) => 0,
+            Constraint::Secret(constraint) => secret_count(constraint),
+        }
+    }
+
     /// Generates and adds to R1CS constraints that enforce that the self evaluates to true.
     /// Implements the logic behind `verify` instruction.
     pub fn verify<CS: r1cs::RandomizableConstraintSystem>(

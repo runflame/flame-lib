@@ -211,6 +211,13 @@ logical byte/item allocation work against external or internal gas, so these
 gas ceilings also bound hostile active-memory growth. Persistent actor capacity
 continues to bound stored state only.
 
+Message gas is not created by the delivery loop. Every `send` permanently
+debits its grant from the sending frame before the effect is committed. An
+internal transaction and all of its descendant sends therefore partition the
+grant originating in an external transaction. The independent block-wide
+internal-gas and message-count limits remain conservative admission bounds for
+the serial delivery work.
+
 Storage parameters are listed in [storage.md](storage.md). Every active parameter
 set must be selected by a committed protocol version; node-local configuration
 must not silently alter consensus validity. Separate limits are easier to audit

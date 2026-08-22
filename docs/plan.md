@@ -112,7 +112,7 @@ when the specification, implementation, and focused regression tests agree.
    - [x] Add cross-implementation vectors for all width boundaries, failure
      shapes, and supported value tags.
 
-6. [ ] Make memory and gas accounting non-bypassable.
+6. [x] Make memory and gas accounting non-bypassable.
 
    - [x] Remove the separate memory limit, `memlimit` opcode, root limit,
      call operands, storage-derived multiplier, and block/mempool memory fields.
@@ -125,10 +125,12 @@ when the specification, implementation, and focused regression tests agree.
      at least `N + 1` gas.
    - [x] Keep an immutable frame-creation gas cap for `gaslimit`; refunds must not
      make the reported cap grow.
-   - [ ] Bound or debit the gas attached to `send`. An actor must not create
-     arbitrary future execution budget from a small incoming grant.
-   - [ ] Benchmark hashing, point decompression, signatures, proof operations,
-     and MSM growth/finalization, then replace flat pricing or add hard caps.
+   - [x] Debit the full gas attached to `send` from the active frame. The grant
+     is not refunded, and descendant messages must divide an existing budget.
+   - [x] Benchmark hashing, point decompression, signatures, proof operations,
+     and MSM growth/finalization. Prepay the measured hash, signature, R1CS, and
+     MSM work at the scheduling opcode; the measured curves are safely bounded
+     by linear prices, so no arbitrary crypto-size cap is needed.
 
 7. [ ] Settle actor and call-context semantics.
 

@@ -40,6 +40,50 @@ fn program_builder_emits_expected_bytecode() {
     assert_eq!(wits.len(), 3);
 }
 
+#[test]
+fn external_root_prepays_proof_finalization() {
+    let pc_gens = PedersenGens::default();
+    assert!(matches!(
+        Prover::prove(
+            &pc_gens,
+            ScriptBuilder::new(),
+            dummy_header(),
+            GAS_EXTERNAL_FINALIZE_BASE,
+        ),
+        Err(VMError::OutOfGas)
+    ));
+
+    let result = Prover::prove(
+        &pc_gens,
+        ScriptBuilder::new(),
+        dummy_header(),
+        GAS_EXTERNAL_FINALIZE_BASE + GAS_PER_INSTRUCTION,
+    )
+    .expect("base finalization plus EOF is sufficient");
+    assert_eq!(
+        result.gas_used,
+        GAS_EXTERNAL_FINALIZE_BASE + GAS_PER_INSTRUCTION,
+    );
+}
+
+#[test]
+fn alloc_prepays_one_r1cs_item() {
+    let expected = GAS_PER_INSTRUCTION + GAS_PER_ALLOC_ITEM + GAS_R1CS_ITEM;
+    let mut vm = vm_external_with_script(ScriptBuilder::new().alloc(None).to_bytecode());
+    vm.current_call.gas_limit = expected;
+    let mut delegate = make_stub_delegate();
+    assert!(vm.step_external(&mut delegate).expect("exact budget succeeds"));
+    assert_eq!(vm.current_call.gas_used, expected);
+
+    let mut short = vm_external_with_script(ScriptBuilder::new().alloc(None).to_bytecode());
+    short.current_call.gas_limit = expected - 1;
+    let mut delegate = make_stub_delegate();
+    assert!(matches!(
+        short.step_external(&mut delegate),
+        Err(VMError::OutOfGas)
+    ));
+}
+
 /// End-to-end prove/verify of `alloc(7) + alloc(3) == alloc(10)`
 /// — the smallest CS-touching script that exercises the whole
 /// pipeline. Every later CS-bound opcode wires onto the same

@@ -164,3 +164,56 @@ fn external_send_has_no_caller() {
     let message = sends(&vm.txlog)[0];
     assert!(message.caller.is_none());
 }
+
+#[test]
+fn send_debits_its_full_grant() {
+    fn gas_used(grant: u64) -> u64 {
+        let target = ActorID::Hash([0x61; 32]);
+        let mut vm = vm_internal_with_actor(
+            send_script(&target, [0; 32], 0, grant),
+            ActorID::Hash([0x60; 32]),
+        );
+        run_to_end(&mut vm).expect("send succeeds");
+        vm.current_call.gas_used
+    }
+
+    assert_eq!(gas_used(37) - gas_used(0), 37);
+}
+
+#[test]
+fn send_cannot_reserve_more_than_the_remaining_frame_gas() {
+    let grant = 100;
+    let target = ActorID::Hash([0x63; 32]);
+    let mut vm = vm_internal_with_actor(
+        send_script(&target, [0; 32], 0, grant),
+        ActorID::Hash([0x62; 32]),
+    );
+
+    // Execute the five operand pushes, then leave enough gas for the send
+    // instruction itself but one unit less than its requested grant.
+    for _ in 0..5 {
+        assert!(vm.step_internal().expect("operand push succeeds"));
+    }
+    vm.current_call.gas_limit = vm.current_call.gas_used + grant;
+
+    assert!(matches!(vm.step_internal(), Err(VMError::OutOfGas)));
+    assert!(sends(&vm.txlog).is_empty());
+}
+
+#[test]
+fn internal_send_cannot_mint_a_larger_descendant_budget() {
+    let target = ActorID::Hash([0x65; 32]);
+    let mut reg = MemRegistry::new();
+    let sender = deploy_actor(&mut reg, send_script(&target, [0; 32], 0, 500));
+    let message = Message::new(
+        sender,
+        None,
+        Anchor([0x64; 32]),
+        Vec::new(),
+        500,
+        Predicate::opaque(Predicate::unspendable_key()),
+    )
+    .expect("empty payload is portable");
+
+    assert!(matches!(deliver_err(&mut reg, message), VMError::OutOfGas));
+}
