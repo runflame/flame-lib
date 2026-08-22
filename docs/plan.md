@@ -47,15 +47,15 @@ when the specification, implementation, and focused regression tests agree.
    - [ ] Prove with tests that a message carrying each portable bearer type can
      be delivered or recovered, but never lost or recovered twice.
 
-3. [ ] Close internal signature authorization gaps.
+3. [x] Close internal signature authorization gaps.
 
-   - [ ] Make `signtx` external-only, as internal transactions have no TxID-bound
+   - [x] Make `signtx` external-only, as internal transactions have no TxID-bound
      signature finalization.
-   - [ ] Either make `signcall` external-only or verify its explicit signature
+   - [x] Verify `signcall`'s explicit signature
      during internal execution before entering the signed script.
-   - [ ] Reject arbitrary 64-byte signatures in internal execution and test both
+   - [x] Reject arbitrary 64-byte signatures in internal execution and test both
      invalid and valid signatures through the public transaction path.
-   - [ ] Ensure a failed `signcall` removes its deferred signature together with
+   - [x] Ensure a failed external `signcall` removes its deferred signature together with
      the failed frame.
 
 4. [x] Enforce portability at domain transitions using sticky Dict metadata.

@@ -611,7 +611,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | c1 | [cell](#cell) | | items… k pred → cell | Build a new cell from `k` portable items under predicate `pred`. |
 | c2 | [output](#output) | | items… k pred → ø | Like `cell`, but emits the cell directly as a tx Output. |
 | c3 | [open](#open) | | cell ik nbrs pos script gas args… k → {results… k' 1 \| cell args… k 0} | Reveal a taproot leaf and run it in an isolated call frame. |
-| c4 | [signtx](#signtx) | | cell → items… k | Authorize the tx with the cell predicate's signature; pour payload. |
+| c4 | [signtx](#signtx) | ext. | cell → items… k | Authorize the tx with the cell predicate's signature; pour payload. |
 | c5 | [signcall](#signcall) | | cell script sig gas args… m → {results… k' 1 \| cell args… m 0} | Run a script signed by the cell predicate in an isolated frame. |
 |    | **Actors** | | | |
 | d0 | [send](#send) | | args… k refund gas addr → ø | Queue an asynchronous actor message. |
@@ -1422,7 +1422,7 @@ code would exceed current capacity. On success it records
 method-agnostic and independent of the state checkout lock. Requires actor
 context.
 
-**Upgrade is author policy over a VM mechanism.** The VM provides `setcode`; *who* may call it is gated in the actor's own code. Actors authenticate by **caller identity** — `require(callerid() == GOV)` — not signatures: internal context has no constraint system or signature batch, so signature checks live at the external cell/predicate boundary. A naked `setcode` with no caller gate is an unconditionally-upgradeable (i.e. rug-able) actor — deliberately the author's call. See the design.
+**Upgrade is author policy over a VM mechanism.** The VM provides `setcode`; *who* may call it is gated in the actor's own code. Actors normally authenticate by **caller identity** — `require(callerid() == GOV)` — and may use `signcall` when immediate signature authorization is required. Internal execution has no deferred signature batch: `signcall` verifies synchronously before entering its child. A naked `setcode` with no caller gate is an unconditionally-upgradeable (i.e. rug-able) actor — deliberately the author's call. See the design.
 
 Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `TypeNotString`, `ActorNotFound`, `StorageCapacityExceeded`.
 
@@ -1483,6 +1483,11 @@ Pops the cell, records a `DeferredSig::TxBound { verification_key: cell.predicat
 
 **No new frame** — the cell-holder is authorizing the existing transaction in place.
 
+`signtx` is external-only and checks its context before consuming the Cell.
+Internal transactions have no signature envelope and their final TxID does not
+exist when the opcode executes, so the TxID-bound signature cannot be verified
+immediately. Internal authorization uses `signcall` instead.
+
 The deferred signature is verified at finalize: the prover aggregates all `TxBound` keys via MuSig and supplies the envelope signature; the verifier batches all `TxBound` items against the `flamevm.signtx` transcript bound to TxID. Errors `BatchSignatureVerificationFailed` or `MissingTxBoundSignature` at finalize.
 
 ### signcall
@@ -1496,13 +1501,22 @@ Same call-frame mechanics as [`open`](#open) — taproot reveal is replaced by s
    argument hard-fails `NonPortableInCall` before child entry.
 2. Pops `sig` (String, exactly 64 bytes — Schnorr signature).
 3. Pops `script` (String) and `cell`.
-4. Records `DeferredSig::Explicit { verification_key: cell.predicate.point, message: signcall_message(script_bytes), signature }`. The message is built via a Merlin transcript labelled `flamevm.signcall` over the script bytes only — scripts bind themselves to further context (anchor, actor identity, tx data) via explicit checks inside the script body.
-5. Snapshots rollback state before recording the deferred signature, then creates a new isolated `CallKind::CellOpen` frame matching [`open`](#open), pours payload + args, and enters the signed script.
+4. Builds `signcall_message(script_bytes)` via a Merlin transcript labelled
+   `flamevm.signcall`. Scripts bind themselves to further context (anchor,
+   actor identity, tx data) through explicit checks inside the signed program.
+5. In external execution, records `DeferredSig::Explicit` for final batch
+   verification. In internal execution, parses and verifies the signature
+   immediately against the Cell predicate; malformed bytes fail
+   `BadSignatureBytes`, while a validly encoded but incorrect signature fails
+   `SignatureVerificationFailed`. Internal execution records no deferred item.
+6. After verification or deferral, snapshots rollback state, creates the
+   isolated `CellOpen` frame, and pours payload + args into the signed script.
 
-The deferred signatures are batch-verified at finalize alongside any `signtx`
-items. Entered-child failure removes this signature and returns the original
-Cell plus explicit arguments using the same failure shape as `open`; the count
-is `m`, excluding the contextual Cell.
+External deferred signatures are batch-verified at finalize alongside any
+`signtx` items. Entered-child failure removes an external deferred signature
+and returns the original Cell plus explicit arguments using the same failure
+shape as `open`; the count is `m`, excluding the contextual Cell. Internal
+signature failure occurs before child entry and hard-fails the current frame.
 
 ### timelock
 
@@ -1650,4 +1664,4 @@ Pushes a Dict of block stats at height `n`.
 
 **Cell-open trust model.** `open`, `signcall`, and `call` all create isolated call frames: the unlocked / signed / called script runs in its own stack, gas budget, and identity scope, with no implicit access to the host's actor state, gas pool, or identity. This eliminates the confused-deputy class of bugs — an actor accepting an untrusted-source cell need not audit the predicate as a global authorization filter, because the script cannot reach the actor's state regardless of what the predicate authorizes .
 
-**`signcall` binding policy.** The deferred `signcall` signature commits to the script bytes only; the script binds itself to further context (anchor, actor identity, tx-level data) via explicit checks such as `anchor <expected> eq verify`. Binding policy lives in the author's hands — flexibility at the price of footgun.
+**`signcall` binding policy.** The `signcall` signature commits to the script bytes only, whether it is verified immediately in internal execution or deferred in external execution. The script binds itself to further context (anchor, actor identity, tx-level data) via explicit checks such as `anchor <expected> eq verify`. Binding policy lives in the author's hands — flexibility at the price of footgun.

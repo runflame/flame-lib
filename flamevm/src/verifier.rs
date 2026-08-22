@@ -19,7 +19,7 @@ fn shared_bp_gens() -> &'static BulletproofGens {
 use crate::constraints::Commitment;
 use crate::errors::VMError;
 use crate::tx::TxHeader;
-use crate::vm::{Delegate, DeferredSig, TxResult, VM};
+use crate::vm::{signcall_verification_transcript, Delegate, DeferredSig, TxResult, VM};
 
 /// Phase-11 R1CS proof verifier. Wraps `bulletproofs::r1cs::Verifier`.
 /// The verifier never sees prover witnesses — its `next_alloc_witness`
@@ -97,8 +97,7 @@ impl Verifier {
                 let starsig = musig::Signature::from_bytes(*signature)
                     .map_err(|_| VMError::BadSignatureBytes)?;
                 let vk = musig::VerificationKey::from_compressed(*verification_key);
-                let mut t = merlin::Transcript::new(b"flamevm.signcall");
-                t.append_message(b"msg", message);
+                let mut t = signcall_verification_transcript(message);
                 starsig.verify_batched(&mut t, vk, &mut verifier.batch);
             }
         }

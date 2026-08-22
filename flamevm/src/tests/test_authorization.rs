@@ -5,6 +5,43 @@
 use super::test_helpers::*;
 use crate::Limits;
 
+fn run_external_to_end(vm: &mut VM) -> Result<(), VMError> {
+    let mut delegate = make_stub_delegate();
+    while !vm.current_call.is_finished() {
+        vm.step_external(&mut delegate)?;
+    }
+    Ok(())
+}
+
+fn signcall_signature(program: &[u8], secret: u64) -> (CompressedRistretto, [u8; 64]) {
+    let (verification_key, signing_key) = signing_keypair(secret);
+    let message = VM::signcall_message(program);
+    let signature = musig::Signature::sign(
+        &mut signcall_verification_transcript(&message),
+        signing_key,
+    );
+    (verification_key, signature.to_bytes())
+}
+
+fn internal_signcall_code(
+    verification_key: CompressedRistretto,
+    program: Vec<u8>,
+    signature: [u8; 64],
+) -> Vec<u8> {
+    ScriptBuilder::new()
+        .push_int(0u64)
+        .push_point(*verification_key.as_bytes())
+        .cell()
+        .push_str(String::from(program))
+        .push_str(String::from(signature.to_vec()))
+        .push_int(10_000u64)
+        .push_int(0u64)
+        .signcall()
+        .drop_()
+        .drop_()
+        .to_bytecode()
+}
+
 #[test]
 fn signtx_pours_payload_and_records_txbound_sig() {
     // Build cell with payload [5, 7], then signtx.
@@ -16,9 +53,9 @@ fn signtx_pours_payload_and_records_txbound_sig() {
         .cell()
         .signtx()
         .to_bytecode();
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_external_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
-    run_to_end(&mut vm).unwrap();
+    run_external_to_end(&mut vm).unwrap();
     // Stack now has [5, 7, count=2].
     assert_eq!(vm.current_call.stack.len(), 3);
     assert_int(&vm.current_call.stack[2], Int253::from(2u64));
@@ -51,9 +88,9 @@ fn signcall_records_explicit_sig_and_runs_program() {
         .push_int(0u64)                                  // m = 0 args
         .signcall()
         .to_bytecode();
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_external_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
-    run_to_end(&mut vm).unwrap();
+    run_external_to_end(&mut vm).unwrap();
     // Parent stack: [count=0, success=1] from the child's clean return.
     assert_eq!(vm.current_call.stack.len(), 2);
     assert_int(&vm.current_call.stack[0], Int253::from(0u64));
@@ -93,9 +130,9 @@ fn signcall_message_binds_only_to_program_not_to_cell() {
             .push_int(0u64)
             .signcall()
             .to_bytecode();
-        let mut vm = vm_with_script(script);
+        let mut vm = vm_external_with_script(script);
         vm.last_anchor = Some(Anchor([0x42; 32]));
-        run_to_end(&mut vm).unwrap();
+        run_external_to_end(&mut vm).unwrap();
         vm.deferred_sigs.into_iter().next().unwrap()
     }
     let s1 = run_signcall(0xaa);
@@ -126,12 +163,61 @@ fn signcall_rejects_wrong_signature_length() {
         .push_int(0u64)
         .signcall()
         .to_bytecode();
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_external_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
-        run_to_end(&mut vm).unwrap_err(),
+        run_external_to_end(&mut vm).unwrap_err(),
         VMError::BadSignatureBytes
     ));
+}
+
+#[test]
+fn internal_signtx_rejects_before_consuming_cell() {
+    let cell = Cell::new(
+        Predicate::opaque(CompressedRistretto([0xaa; 32])),
+        Anchor([0x42; 32]),
+        Vec::new(),
+    )
+    .expect("empty payload is portable");
+    let mut vm = vm_with_script(ScriptBuilder::new().signtx().to_bytecode());
+    vm.current_call.stack.push(Value::Cell(Box::new(cell)));
+
+    assert!(matches!(vm.step_internal(), Err(VMError::ExternalOnly)));
+    assert_eq!(vm.current_call.stack.len(), 1);
+    assert!(matches!(vm.current_call.stack[0], Value::Cell(_)));
+    assert!(vm.deferred_sigs.is_empty());
+}
+
+#[test]
+fn internal_signcall_verifies_valid_signature_immediately() {
+    let program = ScriptBuilder::new().push_int(0u64).return_().to_bytecode();
+    let (verification_key, signature) = signcall_signature(&program, 42);
+    let mut registry = MemRegistry::new();
+    let actor = deploy_actor(
+        &mut registry,
+        internal_signcall_code(verification_key, program, signature),
+    );
+    msg_to(actor)
+        .execute_tx(&mut registry, &BlockContext { height: 0 })
+        .expect("valid internal signcall");
+}
+
+#[test]
+fn internal_signcall_rejects_invalid_signature_immediately() {
+    let program = ScriptBuilder::new().push_int(0u64).return_().to_bytecode();
+    let (verification_key, _) = signcall_signature(&program, 42);
+    let (_, wrong_signature) = signcall_signature(&program, 43);
+    let mut registry = MemRegistry::new();
+    let actor = deploy_actor(
+        &mut registry,
+        internal_signcall_code(verification_key, program, wrong_signature),
+    );
+    let error = match msg_to(actor).execute_tx(&mut registry, &BlockContext { height: 0 }) {
+        Ok(_) => panic!("invalid internal signcall must fail"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, VMError::SignatureVerificationFailed));
 }
 
 #[test]
@@ -577,11 +663,12 @@ fn signcall_selfid_errors_no_actor_context() {
         .push_int(0u64)
         .signcall()
         .to_bytecode();
-    let mut vm = vm_with_script(script);
+    let mut vm = vm_external_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
-    run_to_end(&mut vm).unwrap();
+    run_external_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 3);
     assert!(matches!(vm.current_call.stack[0], Value::Cell(_)));
     assert_int(&vm.current_call.stack[1], Int253::ZERO);
     assert_int(&vm.current_call.stack[2], Int253::ZERO);
+    assert!(vm.deferred_sigs.is_empty());
 }

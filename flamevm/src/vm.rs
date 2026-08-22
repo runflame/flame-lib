@@ -81,9 +81,10 @@ impl Decodable for Anchor {
 
 // `Predicate` lives in `cell::predicate`; re-exported via `Predicate`.
 
-/// Signature check deferred to `Delegate::finalize`. `TxBound` comes
-/// from `signtx` (aggregated MuSig verified against TxID); `Explicit`
-/// comes from `signcall` (single signature over a program transcript).
+/// External signature check deferred to transaction finalization. `TxBound`
+/// comes from external-only `signtx`; `Explicit` comes from external
+/// `signcall`. Internal `signcall` signatures are checked immediately and are
+/// never recorded here.
 #[derive(Clone, Debug)]
 pub enum DeferredSig {
     TxBound {
@@ -95,6 +96,15 @@ pub enum DeferredSig {
         message: Vec<u8>,
         signature: [u8; 64],
     },
+}
+
+/// Consensus transcript for a `signcall` signature after the program bytes
+/// have been reduced to `message`. Shared by immediate internal verification
+/// and deferred external batch verification.
+pub(crate) fn signcall_verification_transcript(message: &[u8]) -> Transcript {
+    let mut transcript = Transcript::new(b"flamevm.signcall");
+    transcript.append_message(b"msg", message);
+    transcript
 }
 
 /// Block-level immutable context (height, chain stats).
@@ -2473,7 +2483,8 @@ impl VM {
 
     /// _cell script sig gas portable-args… m_ **signcall** → _results… k'_
     ///
-    /// Defers an Explicit signature over `script` and enters it in an
+    /// Checks an Explicit signature over `script` immediately in internal
+    /// execution, or defers it for external batch verification, then enters an
     /// isolated `CellOpen` frame via [`enter_cell_open_frame`].
     fn op_signcall(&mut self) -> Result<(), VMError> {
         let m = self.pop_byte_count(usize::MAX)?;
@@ -2496,14 +2507,26 @@ impl VM {
         let msg = Self::signcall_message(&prog_str.to_bytes_vec());
         let code_bytes = prog_str.len();
         let code = prog_str.into_script()?;
-        // Snapshot cursors before recording this call's deferred signature,
+        let verification_key = cell.predicate.verification_key();
+        let external = self.is_external();
+        if !external {
+            let signature = musig::Signature::from_bytes(sig)
+                .map_err(|_| VMError::BadSignatureBytes)?;
+            let key = musig::VerificationKey::from_compressed(verification_key);
+            signature
+                .verify(&mut signcall_verification_transcript(&msg), key)
+                .map_err(|_| VMError::SignatureVerificationFailed)?;
+        }
+        // Snapshot cursors before recording an external deferred signature,
         // so a failed child removes it with the rest of the child effects.
         let child_anchor = self.split_anchor_for_call()?;
-        self.deferred_sigs.push(DeferredSig::Explicit {
-            verification_key: cell.predicate.verification_key(),
-            message: msg,
-            signature: sig,
-        });
+        if external {
+            self.deferred_sigs.push(DeferredSig::Explicit {
+                verification_key,
+                message: msg,
+                signature: sig,
+            });
+        }
         self.enter_cell_open_frame(cell, code, code_bytes, gas, args, child_anchor)?;
         Ok(())
     }
@@ -2901,9 +2924,10 @@ impl VM {
 
     /// _cell_ **signtx** → _items… k_
     ///
-    /// Defers a TxID-bound signature for the cell's predicate, pours
-    /// the cell's payload onto the stack, pushes `k`.
+    /// External-only. Defers a TxID-bound signature for the cell's predicate,
+    /// pours the cell's payload onto the stack, pushes `k`.
     fn op_signtx(&mut self) -> Result<(), VMError> {
+        self.require_external()?;
         let cell = self.pop_value()?.to_cell()?;
         let k = cell.payload().len();
         self.deferred_sigs.push(DeferredSig::TxBound {

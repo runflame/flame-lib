@@ -253,7 +253,7 @@ pub enum Instruction {
     Setcode,               // code setcode → ø  (replace actor code blob)
     AddStorage,            // q addstorage → {debt 1 | 0}
     QuoteStorage,          // q quotestorage → {fee 1 | 0}
-    Signtx,                // cell signtx → items… k
+    Signtx,                // cell signtx → items… k (external-only)
     Signcall,               // cell script sig gas portable-args… m signcall → results… k'
     Timelock,              // ø timelock → n {0|1}
     Version,               // ø version → n

@@ -134,9 +134,14 @@ pub enum VMError {
     #[error("Non-portable item in cell payload")]
     NonPortableInOutput,
 
-    /// This error occurs when `signcall` sees a signature that is not 64 bytes.
-    #[error("Bad signature byte length")]
+    /// `signcall` received the wrong byte length or a malformed signature
+    /// encoding.
+    #[error("Bad signature bytes")]
     BadSignatureBytes,
+
+    /// Immediate verification of an internal `signcall` signature failed.
+    #[error("Signature verification failed")]
+    SignatureVerificationFailed,
 
     /// This error occurs when an instruction requires a Point.
     #[error("Item is not a Point")]
