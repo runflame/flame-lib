@@ -421,6 +421,55 @@ fn return_transfers_values_to_parent() {
     assert_int(&vm.current_call.stack[2], Int253::from(1u64));
 }
 
+#[test]
+fn return_allows_negative_cleartokens_upward() {
+    let child = ScriptBuilder::new()
+        .push_int(7u64)
+        .push_int(FLAME_FLAVOR)
+        .borrow()
+        .push_int(2u64)
+        .return_()
+        .to_bytecode();
+    let mut vm = vm_with_nested_child_script(child);
+
+    while !vm.call_stack.is_empty() {
+        vm.step_internal().expect("return accepts non-portable results");
+    }
+
+    assert_eq!(vm.current_call.stack.len(), 4);
+    assert!(matches!(
+        &vm.current_call.stack[0],
+        Value::ClearToken(token)
+            if token.qty() == Int253::from(-7i64) && token.flv() == FLAME_FLAVOR
+    ));
+    assert!(matches!(&vm.current_call.stack[1], Value::ClearToken(_)));
+    assert_int(&vm.current_call.stack[2], Int253::from(2u64));
+    assert_int(&vm.current_call.stack[3], Int253::ONE);
+}
+
+#[test]
+fn return_allows_widetokens_upward() {
+    let child = ScriptBuilder::new()
+        .push_int(1u64)
+        .fee()
+        .push_int(1u64)
+        .return_()
+        .to_bytecode();
+    let mut vm = vm_with_nested_child_script(child);
+    let pc_gens = PedersenGens::default();
+    let mut prover = Prover::new(&pc_gens);
+
+    while !vm.call_stack.is_empty() {
+        vm.step_external(&mut prover)
+            .expect("return accepts non-portable results");
+    }
+
+    assert_eq!(vm.current_call.stack.len(), 3);
+    assert!(matches!(&vm.current_call.stack[0], Value::WideToken(_)));
+    assert_int(&vm.current_call.stack[1], Int253::ONE);
+    assert_int(&vm.current_call.stack[2], Int253::ONE);
+}
+
 // ── type ────────────────────────────────────────────────────
 
 #[test]

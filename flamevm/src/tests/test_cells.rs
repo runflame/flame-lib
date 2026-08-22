@@ -1135,7 +1135,8 @@ fn external_tx_two_inputs_two_outputs_via_open() {
 /// `op_open` creates an isolated CallFrame with no actor identity;
 /// `op_selfid` inside the leaf errors `OpcodeRequiresActorContext`,
 /// which the step wrapper catches. The parent recovers the locked Cell
-/// followed by `count=1, success=0`.
+/// followed by its explicit argument, `count=1, success=0`; the contextual
+/// Cell is not counted.
 #[test]
 fn op_open_selfid_errors_no_actor_context() {
     // `selfid` errors before reaching a return — that's fine, the
@@ -1150,16 +1151,19 @@ fn op_open_selfid_errors_no_actor_context() {
         .cell();
     p = push_taproot_proof_to_program(p, &cp);
     let script = p
-        .push_int(1024u64).push_int(0u64)
+        .push_int(1024u64)
+        .push_int(9u64)
+        .push_int(1u64)
         .open()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
-    assert_eq!(vm.current_call.stack.len(), 3);
+    assert_eq!(vm.current_call.stack.len(), 4);
     assert!(matches!(vm.current_call.stack[0], Value::Cell(_)));
-    assert_int(&vm.current_call.stack[1], Int253::ONE);
-    assert_int(&vm.current_call.stack[2], Int253::ZERO);
+    assert_int(&vm.current_call.stack[1], Int253::from(9u64));
+    assert_int(&vm.current_call.stack[2], Int253::ONE);
+    assert_int(&vm.current_call.stack[3], Int253::ZERO);
 }
 
 /// `op_open` leaf returning the wrong arity errors `BadReturnArity`;
@@ -1184,12 +1188,12 @@ fn op_open_return_arity_mismatch_errors() {
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 3);
     assert!(matches!(vm.current_call.stack[0], Value::Cell(_)));
-    assert_int(&vm.current_call.stack[1], Int253::ONE);
+    assert_int(&vm.current_call.stack[1], Int253::ZERO);
     assert_int(&vm.current_call.stack[2], Int253::ZERO);
 }
 
 #[test]
-fn failed_open_restores_cell_and_negative_token_argument() {
+fn open_rejects_negative_token_argument() {
     let inner = ScriptBuilder::new().push_int(0u64).verify().to_bytecode();
     let (tree, cp) = build_predicate_with_program(&inner, 0);
     let mut p = ScriptBuilder::new()
@@ -1208,16 +1212,10 @@ fn failed_open_restores_cell_and_negative_token_argument() {
         .to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
-    run_to_end(&mut vm).unwrap();
-
-    assert_eq!(vm.current_call.stack.len(), 4);
-    assert!(matches!(&vm.current_call.stack[0], Value::Cell(_)));
     assert!(matches!(
-        &vm.current_call.stack[1],
-        Value::ClearToken(t) if t.qty() == Int253::from(-7i64) && t.flv() == FLAME_FLAVOR
+        run_to_end(&mut vm),
+        Err(VMError::NonPortableInCall)
     ));
-    assert_int(&vm.current_call.stack[2], Int253::from(2u64));
-    assert_int(&vm.current_call.stack[3], Int253::ZERO);
 }
 
 /// CS context propagates: a CellOpen frame with `external_context:

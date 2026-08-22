@@ -17,7 +17,8 @@ when the specification, implementation, and focused regression tests agree.
    - [x] Fix entered-call failure. [`VM::fail_current_call`](../flamevm/src/vm.rs)
      returns the entry escrow after rollback: actor arguments, or the original
      locked Cell plus explicit `open`/`signcall` arguments. Cell payload remains
-     sealed inside the Cell and is never returned separately.
+     sealed inside the Cell and is never returned separately. The failure count
+     is the explicit argument count `k`; it excludes the contextual Cell.
    - [x] Apply the same rule to runtime errors, out-of-gas,
      `StackNotClean`, `BadReturnArity`, and explicit verification failure.
    - [x] Put every rollback checkpoint before its boundary side effects. In
@@ -25,10 +26,12 @@ when the specification, implementation, and focused regression tests agree.
      before its snapshot, and storage-pool and lease changes must roll back with
      their transaction.
    - [x] Cover pre-entry rejection, entered failure, dirty EOF, bad return
-     arity, nested rollback, Token restoration, and negative-ClearToken
-     restoration from a failed Cell call.
-   - [ ] Expand the matrix to every bearer/container shape and add a
-     storage-pool conservation test across nested and outer rollback.
+     arity, nested rollback, and Token restoration. Downward call arguments are
+     portable-only; non-portable liabilities may return upward but cannot be
+     delegated to another callee.
+   - [ ] Expand the failure matrix to every portable bearer/container shape,
+     retain explicit upward-return tests for non-portable liabilities, and add
+     a storage-pool conservation test across nested and outer rollback.
 
 2. [ ] Make asynchronous message failure conserve payload assets.
 
@@ -135,9 +138,10 @@ when the specification, implementation, and focused regression tests agree.
      table; the handlers reject ExternalRoot and CellOpen.
    - [ ] Remove the claim that `send` immediately fails for a checked-out actor,
      or add a registry check with well-defined asynchronous semantics.
-   - [ ] Decide whether to restrict `open` and `signcall` arguments. The current
-     specification and implementation intentionally accept arbitrary values,
-     including negative ClearTokens, and restore them on child failure.
+   - [x] Restrict `open` and `signcall` arguments to portable values, matching
+     actor `call` and asynchronous `send`. Keep `return` unrestricted so
+     negative ClearTokens, WideTokens, and other VM-local values can travel
+     upward for resolution by the caller.
    - [ ] Decide whether `issuepub` is valid in both `InternalRoot` and
      `ActorCall`, or only in the latter.
    - [ ] Remove the documented implicit default gas grant or add an operand form

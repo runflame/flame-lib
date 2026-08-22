@@ -402,6 +402,9 @@ pub struct CallFrame {
     /// Actor calls escrow their arguments; cell calls escrow the original
     /// locked Cell followed by their explicit arguments.
     pub(crate) snap_failure_values: Vec<Value>,
+    /// Number of explicit call arguments. For cell calls this intentionally
+    /// excludes the separately restored locked Cell.
+    pub(crate) snap_failure_arg_count: usize,
 
     /// Snapshot of the delegate's MSM/signature batch state taken
     /// when this frame's child was pushed. Restored on child
@@ -470,6 +473,7 @@ impl CallFrame {
             snap_deferred_sigs_len: 0,
             snap_total_fee: CheckedFee::zero(),
             snap_failure_values: Vec::new(),
+            snap_failure_arg_count: 0,
             snap_batch: None,
             snap_cs: None,
         }
@@ -1100,6 +1104,7 @@ impl VM {
         self.current_call.snap_batch = None;
         self.current_call.snap_cs = None;
         self.current_call.snap_failure_values.clear();
+        self.current_call.snap_failure_arg_count = 0;
     }
 
     fn finish_call(&mut self) -> Result<bool, VMError> {
@@ -1150,6 +1155,8 @@ impl VM {
             .expect("fail_current_call: outermost frame errors must propagate");
         self.current_call = parent;
         let failure_values = mem::take(&mut self.current_call.snap_failure_values);
+        let failure_arg_count = self.current_call.snap_failure_arg_count;
+        self.current_call.snap_failure_arg_count = 0;
         // Roll back side effects via the snapshots taken at call
         // entry.
         self.txlog.truncate(self.current_call.snap_txlog_len);
@@ -1180,7 +1187,7 @@ impl VM {
         if let Some(post) = self.current_call.post_call_anchor.take() {
             self.last_anchor = Some(post);
         }
-        self.push_failed_values(failure_values);
+        self.push_failed_values(failure_values, failure_arg_count);
     }
 
     /// Pushes a value onto the current call's stack.
@@ -1189,13 +1196,13 @@ impl VM {
     }
 
     /// Failure shape shared by synchronous calls: restored entry values,
-    /// their count, then the zero status marker.
-    fn push_failed_values(&mut self, values: Vec<Value>) {
-        let count = values.len();
+    /// the explicit argument count, then the zero status marker. A restored
+    /// Cell is contextual and is not included in `arg_count`.
+    fn push_failed_values(&mut self, values: Vec<Value>, arg_count: usize) {
         self.current_call.stack.extend(values);
         self.current_call
             .stack
-            .push(Value::Int253(Int253::from(count as u64)));
+            .push(Value::Int253(Int253::from(arg_count as u64)));
         self.current_call
             .stack
             .push(Value::Int253(Int253::ZERO));
@@ -2351,6 +2358,16 @@ impl VM {
         Ok(self.current_call.stack.drain(start..).collect())
     }
 
+    /// Values may return upward in any form, but only portable values may be
+    /// delegated downward into a child frame. The caller must resolve any
+    /// outstanding loan before calling another actor or predicate.
+    fn require_portable_call_args(args: &[Value]) -> Result<(), VMError> {
+        if args.iter().any(|value| !value.is_portable()) {
+            return Err(VMError::NonPortableInCall);
+        }
+        Ok(())
+    }
+
     // (TaprootProof is now constructed from distinct stack pieces; see
     // `taproot_proof_from_stack_pieces` below `op_open`. The earlier packed
     // bag-of-bytes layout was replaced per Architect's response on todo
@@ -2409,13 +2426,14 @@ impl VM {
         Ok(())
     }
 
-    /// _cell ik nbrs pos script gas args… k_ **open** → _results… k'_
+    /// _cell ik nbrs pos script gas portable-args… k_ **open** → _results… k'_
     ///
     /// Verifies the taproot-proofs, then enters the unlocked script in an
     /// isolated `CellOpen` frame via [`enter_cell_open_frame`].
     fn op_open(&mut self) -> Result<(), VMError> {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
+        Self::require_portable_call_args(&args)?;
         let gas = self.pop_gas_limit()?;
         // The callee's budget comes out of the caller's: debit the full
         // grant now; leftover is refunded on clean return, burned on
@@ -2453,13 +2471,14 @@ impl VM {
         Ok(())
     }
 
-    /// _cell script sig gas args… m_ **signcall** → _results… k'_
+    /// _cell script sig gas portable-args… m_ **signcall** → _results… k'_
     ///
     /// Defers an Explicit signature over `script` and enters it in an
     /// isolated `CellOpen` frame via [`enter_cell_open_frame`].
     fn op_signcall(&mut self) -> Result<(), VMError> {
         let m = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(m)?;
+        Self::require_portable_call_args(&args)?;
         let gas = self.pop_gas_limit()?;
         // Debit the grant from the caller (see op_open).
         self.current_call.charge_gas(gas)?;
@@ -2517,6 +2536,7 @@ impl VM {
         failure_values.push(Value::Cell(Box::new(cell.clone())));
         failure_values.extend(args.iter().cloned());
         self.current_call.snap_failure_values = failure_values;
+        self.current_call.snap_failure_arg_count = args.len();
         let external_context = self.is_external();
         let payload_len = cell.payload().len();
         let mut frame = CallFrame::from_code(
@@ -2623,7 +2643,7 @@ impl VM {
         Ok(())
     }
 
-    /// _args… k gas addr_ **call** → _results… k' 1 | args… k 0_
+    /// _portable-args… k gas addr_ **call** → _results… k' 1 | args… k 0_
     ///
     /// Synchronous actor-to-actor call. Re-entry is gated by actor-state
     /// presence: a checked-out callee returns its arguments and `k 0`; otherwise
@@ -2647,9 +2667,7 @@ impl VM {
         self.current_call.charge_gas(gas)?;
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
-        if args.iter().any(|v| !v.is_portable()) {
-            return Err(VMError::NonPortableInCall);
-        }
+        Self::require_portable_call_args(&args)?;
 
         // Pre-frame setup. Any failure here ("cannot enter callee")
         // converts to the restored arguments plus `k 0` —
@@ -2687,7 +2705,8 @@ impl VM {
                     self.current_call.gas_used =
                         self.current_call.gas_used.saturating_sub(gas);
                 }
-                self.push_failed_values(args);
+                let arg_count = args.len();
+                self.push_failed_values(args, arg_count);
                 return Ok(());
             }
         };
@@ -2695,6 +2714,7 @@ impl VM {
         self.charge_alloc_items(args.len())?;
         self.charge_clone_values(&args)?;
         self.current_call.snap_failure_values = args.clone();
+        self.current_call.snap_failure_arg_count = args.len();
 
         // Split the parent's anchor: `left` (callee_anchor) seeds
         // the callee's `last_anchor`; `right` is stashed on the

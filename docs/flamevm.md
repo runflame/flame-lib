@@ -39,6 +39,10 @@ selected values. Failed calls restore state effects, constraints, deferred
 signatures, fees, and batch-verification work to their entry checkpoints. They
 also return entry-owned values: actor calls return their arguments, while cell
 calls return the original locked Cell followed by their explicit arguments.
+All downward call arguments must be portable, just like asynchronous `send`
+payloads. Return values are unrestricted: non-portable liabilities and
+VM-local values may travel upward so the caller can resolve them, but they may
+not be delegated to another callee.
 
 Actor state is its re-entrancy lock. `load` moves state out of the registry;
 while checked out, another frame cannot enter or observe that actor. Calling
@@ -362,7 +366,7 @@ Keys are non-negative Ints to keep ordering non-ambiguous.
 
 **Dicts are never copyable** (todo #5): `dup`/`getdup` of a Dict value always fails `TypeNotCopyable`. Each Dict carries independent sticky `portable` and `droppable` flags. A newly constructed empty Dict starts with both flags true. Every successful insertion applies `dict.portable &= value.is_portable()` and `dict.droppable &= value.is_droppable()`. Removal and replacement never restore a cleared flag; a rejected strict insertion does not change either flag.
 
-The `dict` / `put` / `replace` opcodes may insert any Value. A non-portable Dict remains usable on the stack, but `cell`, `output`, `send`, `call`, and actor-state storage reject it at their portability boundary. Checking a Dict is O(1), including when it is nested: inserting a nested Dict reads that Dict's already-cached flag. Dict values are owned and cannot be mutated through an alias, so the cached parent flag cannot become stale.
+The `dict` / `put` / `replace` opcodes may insert any Value. A non-portable Dict remains usable on the stack, but `cell`, `output`, `send`, `call`, `open`, `signcall`, and actor-state storage reject it at their portability boundary. Checking a Dict is O(1), including when it is nested: inserting a nested Dict reads that Dict's already-cached flag. Dict values are owned and cannot be mutated through an alias, so the cached parent flag cannot become stale.
 
 The flags are runtime metadata and are not serialized. Both Dict byte forms
 reconstruct them bottom-up from the members that are decoded. This preserves
@@ -606,9 +610,9 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | c0 | [input](#input) | ext. | s → cell | Materialize a cell from a Utreexo-validated input encoding. |
 | c1 | [cell](#cell) | | items… k pred → cell | Build a new cell from `k` portable items under predicate `pred`. |
 | c2 | [output](#output) | | items… k pred → ø | Like `cell`, but emits the cell directly as a tx Output. |
-| c3 | [open](#open) | | cell ik nbrs pos script gas args… k → {results… k' 1 \| cell args… (k+1) 0} | Reveal a taproot leaf and run it in an isolated call frame. |
+| c3 | [open](#open) | | cell ik nbrs pos script gas args… k → {results… k' 1 \| cell args… k 0} | Reveal a taproot leaf and run it in an isolated call frame. |
 | c4 | [signtx](#signtx) | | cell → items… k | Authorize the tx with the cell predicate's signature; pour payload. |
-| c5 | [signcall](#signcall) | | cell script sig gas args… m → {results… k' 1 \| cell args… (m+1) 0} | Run a script signed by the cell predicate in an isolated frame. |
+| c5 | [signcall](#signcall) | | cell script sig gas args… m → {results… k' 1 \| cell args… m 0} | Run a script signed by the cell predicate in an isolated frame. |
 |    | **Actors** | | | |
 | d0 | [send](#send) | | args… k refund gas addr → ø | Queue an asynchronous actor message. |
 | d1 | [call](#call) | int. | args… k gas addr → {results… k' 1 \| args… k 0} | Synchronously call an actor. |
@@ -1216,6 +1220,12 @@ Atomic cross-frame return:
 5. Refunds leftover gas to the parent.
 6. Pushes the `k` items onto the parent's stack, then the count `k`, then a **success marker `1`** — the parent observes `results… k 1`. A clean run-off-the-end exit pushes `0 1`. A failed child instead restores its entry escrow followed by the escrow count and `0`; callers branch on this trailing status. Actor calls escrow their arguments. `open` and `signcall` escrow the original locked Cell plus their explicit arguments, never the Cell payload separately.
 
+`return` deliberately performs no portability check. Non-portable values,
+including negative `ClearToken`s and `WideToken`s, may move upward to the
+caller, which owns responsibility for balancing or consuming them. Every
+downward boundary (`call`, `open`, `signcall`, and asynchronous `send`) accepts
+portable values only.
+
 At the outermost call frame, `return` always errors regardless of `k`; a script terminates cleanly by running off the end of its instructions with an empty stack (jump to a trailing label to short-circuit).
 
 ### type
@@ -1271,11 +1281,12 @@ Same construction as [`cell`](#cell) but emits an `Output` effect into the txlog
 ### open
 
 _cell internal_key neighbors position script gas args… k_ →
-_{results… k' 1 | cell args… (k+1) 0}_
+_{results… k' 1 | cell args… k 0}_
 
 Verifies the Taproot proof against the cell's predicate:
 
-1. Pops `k` (Int253) and `args` (k values).
+1. Pops `k` (Int253) and `args` (k portable values). A non-portable argument
+   hard-fails `NonPortableInCall` before child entry.
 2. Pops `gas` as a non-negative `Int253` gas allotment.
 3. Pops `script` (String) — the revealed leaf bytes (or witness-bearing `StringWitness::Script` on the prover).
 4. Pops `position` (String, bit-packed path), `neighbors` (list-Dict of 32-byte Strings, leaf-to-root), `internal_key` (Point).
@@ -1287,10 +1298,11 @@ The new frame has **no actor identity** by default — `op_load`/`op_save`/`op_c
 
 Once the child is entered, any hard failure, out-of-gas condition, dirty EOF, or
 bad return arity rolls back its effects and returns the original locked `cell`
-followed by the explicit `args`, count `k+1`, and status `0`. The payload is not
+followed by the explicit `args`, their count `k`, and status `0`. The Cell is
+contextual and is not included in that count. The payload is not
 returned separately: it remains sealed in the restored Cell. Invalid operands,
-invalid proofs, insufficient caller gas, and call-depth rejection occur before
-child entry and hard-fail the current frame.
+invalid proofs, non-portable arguments, insufficient caller gas, and call-depth
+rejection occur before child entry and hard-fail the current frame.
 
 Position bits are read LSB-first within byte, zero-extended past the end; bit `0` = current hash on left, neighbor on right; bit `1` = swap.
 
@@ -1476,11 +1488,12 @@ The deferred signature is verified at finalize: the prover aggregates all `TxBou
 ### signcall
 
 _cell script sig gas args… m_ →
-_{results… k' 1 | cell args… (m+1) 0}_
+_{results… k' 1 | cell args… m 0}_
 
 Same call-frame mechanics as [`open`](#open) — taproot reveal is replaced by signature verification:
 
-1. Pops `m` (Int253), `args` (m values), and `gas`.
+1. Pops `m` (Int253), `args` (m portable values), and `gas`. A non-portable
+   argument hard-fails `NonPortableInCall` before child entry.
 2. Pops `sig` (String, exactly 64 bytes — Schnorr signature).
 3. Pops `script` (String) and `cell`.
 4. Records `DeferredSig::Explicit { verification_key: cell.predicate.point, message: signcall_message(script_bytes), signature }`. The message is built via a Merlin transcript labelled `flamevm.signcall` over the script bytes only — scripts bind themselves to further context (anchor, actor identity, tx data) via explicit checks inside the script body.
@@ -1488,7 +1501,8 @@ Same call-frame mechanics as [`open`](#open) — taproot reveal is replaced by s
 
 The deferred signatures are batch-verified at finalize alongside any `signtx`
 items. Entered-child failure removes this signature and returns the original
-Cell plus explicit arguments using the same failure shape as `open`.
+Cell plus explicit arguments using the same failure shape as `open`; the count
+is `m`, excluding the contextual Cell.
 
 ### timelock
 

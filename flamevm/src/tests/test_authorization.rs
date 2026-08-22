@@ -135,6 +135,35 @@ fn signcall_rejects_wrong_signature_length() {
 }
 
 #[test]
+fn signcall_rejects_widetoken_argument() {
+    let script = ScriptBuilder::new()
+        .push_int(0u64)
+        .push_point([0xaa; 32])
+        .cell()
+        .push_str(String::from(Vec::new()))
+        .push_str(String::from(vec![0u8; 64]))
+        .push_int(1_024u64)
+        .push_int(1u64)
+        .fee()
+        .push_int(1u64)
+        .signcall()
+        .to_bytecode();
+    let mut vm = vm_external_with_script(script);
+    vm.last_anchor = Some(Anchor([0x42; 32]));
+    let pc_gens = PedersenGens::default();
+    let mut prover = Prover::new(&pc_gens);
+
+    let err = loop {
+        match vm.step_external(&mut prover) {
+            Ok(true) => continue,
+            Ok(false) => panic!("signcall unexpectedly succeeded"),
+            Err(error) => break error,
+        }
+    };
+    assert!(matches!(err, VMError::NonPortableInCall));
+}
+
+#[test]
 fn signcall_explicit_sig_batch_verifies_correctly() {
     // Phase-14 unit test for the Explicit-deferred-sig batch path
     // that `Verifier::verify` uses. Builds a real signature over
@@ -532,7 +561,7 @@ fn phase20_signature_over_wrong_txid_rejected() {
 /// `op_signcall` creates an isolated CallFrame with no actor identity,
 /// same as `op_open` (ADR 0013). Inside the signed leaf, `op_selfid`
 /// errors `OpcodeRequiresActorContext`; the parent recovers the locked
-/// Cell followed by `count=1, success=0`.
+/// Cell followed by `count=0, success=0`; the contextual Cell is not counted.
 #[test]
 fn signcall_selfid_errors_no_actor_context() {
     let prog = ScriptBuilder::new().selfid().to_bytecode();
@@ -553,6 +582,6 @@ fn signcall_selfid_errors_no_actor_context() {
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 3);
     assert!(matches!(vm.current_call.stack[0], Value::Cell(_)));
-    assert_int(&vm.current_call.stack[1], Int253::ONE);
+    assert_int(&vm.current_call.stack[1], Int253::ZERO);
     assert_int(&vm.current_call.stack[2], Int253::ZERO);
 }

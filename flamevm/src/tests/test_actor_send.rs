@@ -120,6 +120,32 @@ fn send_rejects_nested_nonportable_payload() {
 }
 
 #[test]
+fn send_rejects_widetoken_payload() {
+    let script = ScriptBuilder::new()
+        .push_int(1u64)
+        .fee()
+        .push_int(1u64)
+        .push_str(String::from(vec![0u8; 32]))
+        .push_int(1u64)
+        .push_str(String::from(vec![0u8; 32]))
+        .send()
+        .to_bytecode();
+    let mut vm = vm_external_with_script(script);
+    vm.last_anchor = Some(Anchor([0x42; 32]));
+    let pc_gens = PedersenGens::default();
+    let mut prover = Prover::new(&pc_gens);
+
+    let err = loop {
+        match vm.step_external(&mut prover) {
+            Ok(true) => continue,
+            Ok(false) => panic!("send unexpectedly succeeded"),
+            Err(error) => break error,
+        }
+    };
+    assert!(matches!(err, VMError::NonPortableInSend));
+}
+
+#[test]
 fn external_send_has_no_caller() {
     let target = ActorID::Hash([0xdd; 32]);
     let script = send_script(&target, [0; 32], 0, 1);

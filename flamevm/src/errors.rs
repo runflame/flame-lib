@@ -209,8 +209,8 @@ pub enum VMError {
     #[error("Non-portable value in send payload")]
     NonPortableInSend,
 
-    /// Synchronous calls may only transfer portable values; liabilities and
-    /// VM-local objects cannot cross frames.
+    /// Values passed downward into synchronous calls must be portable;
+    /// liabilities and VM-local objects may only return upward.
     #[error("Non-portable value in call arguments")]
     NonPortableInCall,
 
