@@ -27,14 +27,15 @@ pub struct CommittedValue {
 
 /// Helper struct for ease of working with
 /// 2-tuples of variables and assignments
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct AllocatedValue {
     /// R1CS variable representing the quantity
     pub q: Variable,
     /// R1CS variable representing the flavor
     pub f: Variable,
-    /// Secret assignment to the above variables
-    pub assignment: Option<Value>,
+    /// Secret assignment to the above variables, boxed so an unassigned
+    /// verifier-side value keeps only a pointer-sized optional field.
+    pub assignment: Option<Box<Value>>,
 }
 
 impl Value {
@@ -54,7 +55,7 @@ impl Value {
         Ok(AllocatedValue {
             q: q_var,
             f: f_var,
-            assignment: Some(*self),
+            assignment: Some(Box::new(*self)),
         })
     }
 }
@@ -113,7 +114,7 @@ impl ProverCommittable for Value {
         let vars = AllocatedValue {
             q: q_var,
             f: f_var,
-            assignment: Some(*self),
+            assignment: Some(Box::new(*self)),
         };
         (commitments, vars)
     }

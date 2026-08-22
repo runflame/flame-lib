@@ -19,7 +19,7 @@ fn phase19_op_fee_records_txlog_and_pushes_debt() {
         panic!("fee must push a WideToken");
     };
     assert_eq!(
-        wide.allocated().assignment.expect("prover assignment").f,
+        wide.0.assignment.as_deref().expect("prover assignment").f,
         FLAME_FLAVOR.to_scalar_mod_order(),
     );
     // Txlog: Header at 0, Fee(100) at 1.

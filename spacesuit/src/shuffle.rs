@@ -63,10 +63,8 @@ pub fn value_shuffle<CS: RandomizableConstraintSystem>(
     }
     let k = x.len();
     if k == 1 {
-        let x = x[0];
-        let y = y[0];
-        cs.constrain(y.q - x.q);
-        cs.constrain(y.f - x.f);
+        cs.constrain(y[0].q - x[0].q);
+        cs.constrain(y[0].f - x[0].f);
         return Ok(());
     }
 

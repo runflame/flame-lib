@@ -145,14 +145,15 @@ mod layout_tests {
     use core::mem::size_of;
 
     use super::Value;
-    use crate::{Merlin, SecretConstraint, String, WideToken};
+    use crate::{Merlin, SecretConstraint, String, Token, WideToken};
 
     #[test]
     fn large_value_variants_stay_indirect() {
         assert_eq!(size_of::<Merlin>(), size_of::<Box<()>>());
         assert_eq!(size_of::<String>(), size_of::<Vec<u8>>());
         assert!(size_of::<SecretConstraint>() <= 3 * size_of::<usize>());
-        assert_eq!(size_of::<Value>(), size_of::<WideToken>());
+        assert_eq!(size_of::<WideToken>(), 40);
+        assert_eq!(size_of::<Value>(), size_of::<Token>());
     }
 }
 

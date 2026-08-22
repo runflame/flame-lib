@@ -188,10 +188,12 @@ Optionals are not distinct types, but a convention to return tuple (values…, 1
 `Value` enum compact without changing VM semantics: `Merlin` boxes its
 `Transcript`, `Value::Cell` boxes the otherwise unchanged `Cell`, secret
 equality constraints box both `Expression`s, and `String` boxes all typed
-`StringWitness` variants while leaving `Opaque(Vec<u8>)` inline. On the current
-64-bit build this makes `Value` 96 bytes, equal to its largest remaining inline
-variant (`WideToken`). Rust layout and byte counts are implementation details;
-the canonical wire representation is unchanged.
+`StringWitness` variants while leaving `Opaque(Vec<u8>)` inline, and
+`spacesuit::AllocatedValue` boxes its optional cleartext assignment. On the
+current 64-bit build this makes `Value` 80 bytes, equal to its largest remaining
+inline variant (`Token`), while `WideToken` is 40 bytes. Rust layout and byte
+counts are implementation details; the canonical wire representation is
+unchanged.
 
 Value tag allocation. A reserved tag does not imply that an encoder exists:
 

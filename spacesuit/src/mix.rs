@@ -14,19 +14,23 @@ use subtle::{ConditionallySelectable, ConstantTimeEq};
 /// Works for 2 inputs and 2 outputs.
 pub fn mix<CS: RandomizableConstraintSystem>(
     cs: &mut CS,
-    A: AllocatedValue,
-    B: AllocatedValue,
-    C: AllocatedValue,
-    D: AllocatedValue,
+    A: &AllocatedValue,
+    B: &AllocatedValue,
+    C: &AllocatedValue,
+    D: &AllocatedValue,
 ) -> Result<(), R1CSError> {
+    let (Aq, Af) = (A.q, A.f);
+    let (Bq, Bf) = (B.q, B.f);
+    let (Cq, Cf) = (C.q, C.f);
+    let (Dq, Df) = (D.q, D.f);
     cs.specify_randomized_constraints(move |cs| {
         let w = cs.challenge_scalar(b"mix challenge");
         let w2 = w * w;
         let w3 = w2 * w;
 
         let (_, _, mul_out) = cs.multiply(
-            (A.q - C.q) + (A.f - C.f) * w + (B.q - D.q) * w2 + (B.f - D.f) * w3,
-            C.q + (A.f - B.f) * w + (D.q - A.q - B.q) * w2 + (D.f - A.f) * w3,
+            (Aq - Cq) + (Af - Cf) * w + (Bq - Dq) * w2 + (Bf - Df) * w3,
+            Cq + (Af - Bf) * w + (Dq - Aq - Bq) * w2 + (Df - Af) * w3,
         );
 
         // multiplication output is zero
@@ -72,23 +76,23 @@ fn call_mix_gadget<CS: RandomizableConstraintSystem>(
     }
 
     // The first value of mix_in, to prepend to mix_mid for creating A inputs.
-    let first_in = mix_in[0];
+    let first_in = &mix_in[0];
     // The last value of mix_out, to append to mix_mid for creating D outputs.
-    let last_out = mix_out[k - 1];
+    let last_out = &mix_out[k - 1];
 
     // For each of the `k-1` mix gadget calls, constrain A, B, C, D:
     for (((A, B), C), D) in
         // A = (first_in||mix_mid)[i]
-        iter::once(&first_in)
-        .chain(mix_mid.iter())
-        // B = mix_in[i+1]
-        .zip(mix_in.iter().skip(1))
-        // C = mix_out[i]
-        .zip(mix_out.iter().take(k - 1))
-        // D = (mix_mid||last_out)[i]
-        .zip(mix_mid.iter().chain(iter::once(&last_out)))
+        iter::once(first_in)
+            .chain(mix_mid.iter())
+            // B = mix_in[i+1]
+            .zip(mix_in.iter().skip(1))
+            // C = mix_out[i]
+            .zip(mix_out.iter().take(k - 1))
+            // D = (mix_mid||last_out)[i]
+            .zip(mix_mid.iter().chain(iter::once(last_out)))
     {
-        mix(cs, *A, *B, *C, *D)?
+        mix(cs, A, B, C, D)?
     }
 
     Ok(())
@@ -111,7 +115,10 @@ fn make_intermediate_values<CS: RandomizableConstraintSystem>(
     inputs: &[AllocatedValue],
     cs: &mut CS,
 ) -> Result<MixIntermediateValues, R1CSError> {
-    let collected_inputs: Option<Vec<_>> = inputs.iter().map(|input| input.assignment).collect();
+    let collected_inputs: Option<Vec<_>> = inputs
+        .iter()
+        .map(|input| input.assignment.as_deref().copied())
+        .collect();
     match collected_inputs {
         Some(input_values) => {
             let (mix_in, mix_in_values) = order_by_flavor(&input_values, cs)?;
@@ -324,7 +331,7 @@ mod tests {
             let (C_com, C_var) = C.commit(&mut prover, &mut rng);
             let (D_com, D_var) = D.commit(&mut prover, &mut rng);
 
-            mix(&mut prover, A_var, B_var, C_var, D_var)?;
+            mix(&mut prover, &A_var, &B_var, &C_var, &D_var)?;
 
             let proof = prover.prove(&bp_gens)?;
             (proof, A_com, B_com, C_com, D_com)
@@ -339,7 +346,7 @@ mod tests {
         let C_var = C_com.commit(&mut verifier);
         let D_var = D_com.commit(&mut verifier);
 
-        mix(&mut verifier, A_var, B_var, C_var, D_var)?;
+        mix(&mut verifier, &A_var, &B_var, &C_var, &D_var)?;
 
         verifier.verify(&proof, &pc_gens, &bp_gens)
     }
@@ -613,12 +620,12 @@ mod tests {
         let (allocated_mid, allocated_output) = combine_by_flavor(inputs, &mut prover_cs).unwrap();
         let mid = allocated_mid
             .iter()
-            .map(|allocated| allocated.assignment)
+            .map(|allocated| allocated.assignment.as_deref().copied())
             .collect::<Option<Vec<Value>>>()
             .expect("should be a value");
         let output = allocated_output
             .iter()
-            .map(|allocated| allocated.assignment)
+            .map(|allocated| allocated.assignment.as_deref().copied())
             .collect::<Option<Vec<Value>>>()
             .expect("should be a value");
 

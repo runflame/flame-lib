@@ -83,16 +83,8 @@ impl Token {
 /// The wrapper is `pub(crate)` over the inner `AllocatedValue` to keep
 /// the spacesuit dependency from leaking into the public API; the
 /// CS-bound opcode handlers construct it directly.
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct WideToken(pub(crate) spacesuit::AllocatedValue);
-
-impl WideToken {
-    /// Accessor for the underlying R1CS variable bundle. Used by
-    /// the CS-touching opcodes and not exposed beyond the crate.
-    pub(crate) fn allocated(&self) -> &spacesuit::AllocatedValue {
-        &self.0
-    }
-}
 
 // ── ClearToken ───────────────────────────────────────────────────
 

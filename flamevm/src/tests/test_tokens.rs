@@ -33,7 +33,7 @@ fn negative_cleartoken_can_be_allocated_without_becoming_a_token() {
     )
     .expect("negative ClearToken is a valid mix input");
     assert_eq!(
-        allocated.assignment.expect("cleartext assignment").q,
+        allocated.assignment.as_deref().expect("cleartext assignment").q,
         -spacesuit::SignedInteger::from(5u64)
     );
 }

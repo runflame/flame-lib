@@ -3017,7 +3017,7 @@ impl VM {
             q: neg_qty_var,
             f: flv_var,
             assignment: match (neg_qty_assignment, flv_assignment) {
-                (Some(q), Some(f)) => Some(spacesuit::Value { q, f }),
+                (Some(q), Some(f)) => Some(Box::new(spacesuit::Value { q, f })),
                 _ => None,
             },
         });
@@ -3046,10 +3046,10 @@ impl VM {
         delegate.cs().constrain(q_var + qty_scalar);
         let f_var = delegate.cs().allocate(Some(flv_scalar)).map_err(VMError::R1CSError)?;
         delegate.cs().constrain(f_var - flv_scalar);
-        let assignment = Some(spacesuit::Value {
+        let assignment = Some(Box::new(spacesuit::Value {
             q: -spacesuit::SignedInteger::from(qty_u64),
             f: flv_scalar,
-        });
+        }));
         let wide = WideToken(spacesuit::AllocatedValue {
             q: q_var,
             f: f_var,
@@ -3068,7 +3068,7 @@ impl VM {
         delegate: &mut D,
     ) -> Result<spacesuit::AllocatedValue, VMError> {
         let (qty, flv) = match value {
-            Value::WideToken(w) => return Ok(*w.allocated()),
+            Value::WideToken(w) => return Ok(w.0),
             Value::Token(t) => (t.qty, t.flv),
             Value::ClearToken(c) => (
                 Commitment::unblinded(c.qty()),
@@ -3087,7 +3087,7 @@ impl VM {
             q: qty_var,
             f: flv_var,
             assignment: match (qty_assg, flv_assg) {
-                (Some(q), Some(f)) => Some(spacesuit::Value { q, f }),
+                (Some(q), Some(f)) => Some(Box::new(spacesuit::Value { q, f })),
                 _ => None,
             },
         })
