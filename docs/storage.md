@@ -28,7 +28,6 @@ the global pool are restricted to whole `STORAGE_UNIT_BYTES` units.
 | `MIN_LEASE_BYTES` | `1_024` |
 | `MIN_REMAINING_POOL_BYTES` | `1_024` |
 | `LEASE_RECORD_BYTES` | `16` |
-| `TRANSIENT_MEMORY_CAPACITY_MULTIPLIER` | `4` |
 | `INITIAL_PRICE_SPARKS_PER_UNIT` | `10 * SPARKS_PER_FLAME = 1_000_000_000` |
 
 One Flame is divisible into `100_000_000` sparks, analogous to satoshis in
@@ -123,18 +122,11 @@ provisionally so it can purchase its first lease, but its creating transaction
 commits only if the same invariant holds at the end. Failure rolls back the
 actor, purchases, burns, and all other transaction effects.
 
-Transient memory does not count toward persistent usage. At actor-frame entry,
-the VM sets its memory cap to:
-
-```text
-TRANSIENT_MEMORY_CAPACITY_MULTIPLIER * max(usage, capacity(current_height))
-```
-
-The `usage` term is a bootstrap allowance: a provisional constructor has no
-lease yet but needs enough memory to execute `addstorage`. A successful
-`addstorage` raises the current frame's cap, if necessary, to the multiplier
-times its new current capacity. The cap never shrinks during that frame, and
-the bootstrap allowance does not relax the transaction-end capacity check.
+Execution memory does not count toward persistent usage, and storage capacity
+does not grant execution RAM. FlameVM charges variable-size allocation work to
+the active frame's gas budget. A provisional constructor therefore needs gas,
+not a storage-derived bootstrap allowance, to execute `addstorage`. The
+transaction-end `usage <= capacity` check remains unchanged.
 
 ## Pricing
 

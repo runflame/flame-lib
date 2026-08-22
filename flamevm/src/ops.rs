@@ -7,6 +7,7 @@ use readerwriter::{Encodable, Reader, WriteError, Writer};
 use crate::crypto::Point;
 use crate::encoding::{read_subvarint, write_subvarint};
 use crate::errors::VMError;
+use core::convert::TryFrom;
 use crate::int253::Int253;
 use crate::string::String;
 
@@ -151,7 +152,7 @@ const OP_CALLERID: u8 = 0xe2;
 const OP_GAS: u8 = 0xe4;
 const OP_GASLIMIT: u8 = 0xe5;
 const OP_USAGE: u8 = 0xe6;
-const OP_MEMLIMIT: u8 = 0xe7;
+// 0xe7 was the explicit transient-memory limit and remains reserved.
 const OP_CAPACITY: u8 = 0xe8;
 
 // 0xfX — Tx & chain info (chain-info opcodes 0xf2-0xf7 are reserved
@@ -244,16 +245,16 @@ pub enum Instruction {
     Input,                 // s input → cell
     Cell,                  // items… k pred cell → cell
     Output,                // items… k pred output → ø
-    Open,                  // cell ik nbrs pos script gas memlimit args… k open → results… k'
+    Open,                  // cell ik nbrs pos script gas args… k open → results… k'
     Send,                  // args… k refund gas addr send → ø
-    Call,                  // args… k gas addr call → results… k' 1 | 0
+    Call,                  // args… k gas addr call → results… k' 1 | args… k 0
     Load,                  // ø load → value   (actor state, any Value)
     Save,                  // value save → ø
     Setcode,               // code setcode → ø  (replace actor code blob)
     AddStorage,            // q addstorage → {debt 1 | 0}
     QuoteStorage,          // q quotestorage → {fee 1 | 0}
     Signtx,                // cell signtx → items… k
-    Signcall,               // cell script sig gas memlimit args… m signcall → results… k'
+    Signcall,               // cell script sig gas args… m signcall → results… k'
     Timelock,              // ø timelock → n {0|1}
     Version,               // ø version → n
     Selfid,                // ø selfid → s
@@ -262,7 +263,6 @@ pub enum Instruction {
     Usage,                 // ø usage → n
     Callerid,              // ø callerid → s
     Gaslimit,              // ø gaslimit → n
-    Memlimit,              // ø memlimit → n
     Capacity,              // h capacity → n
     Height,                // ø height → n
     Ext(u8),               // unknown opcode byte; produced by the parser for any unassigned tag
@@ -401,7 +401,6 @@ impl Encodable for Instruction {
             Instruction::Usage => op(w, OP_USAGE),
             Instruction::Callerid => op(w, OP_CALLERID),
             Instruction::Gaslimit => op(w, OP_GASLIMIT),
-            Instruction::Memlimit => op(w, OP_MEMLIMIT),
             Instruction::Capacity => op(w, OP_CAPACITY),
             Instruction::Height => op(w, OP_HEIGHT),
             Instruction::Ext(b) => op(w, *b),
@@ -410,6 +409,26 @@ impl Encodable for Instruction {
 }
 
 impl Instruction {
+
+    /// Heap bytes needed to materialize the next decoded instruction.
+    /// Only `pushstr` is variable-sized; inspect its length prefix before
+    /// `parse` allocates the owned buffer.
+    pub(crate) fn decoded_allocation_bytes(bytes: &[u8]) -> Result<usize, VMError> {
+        let mut reader = bytes;
+        let opcode = reader
+            .read_u8()
+            .map_err(|_| VMError::UnexpectedEndOfScript)?;
+        if opcode != OP_PUSHSTR {
+            return Ok(0);
+        }
+        let len = read_subvarint(&mut reader)
+            .map_err(|_| VMError::UnexpectedEndOfScript)?;
+        let len = usize::try_from(len).map_err(|_| VMError::OutOfGas)?;
+        if len > reader.remaining_bytes() {
+            return Err(VMError::UnexpectedEndOfScript);
+        }
+        Ok(len)
+    }
 
     /// Reads exactly one Instruction (opcode + inline parameter bytes)
     /// from `reader`. Errors:
@@ -553,7 +572,6 @@ impl Instruction {
             OP_USAGE => Ok(Instruction::Usage),
             OP_CALLERID => Ok(Instruction::Callerid),
             OP_GASLIMIT => Ok(Instruction::Gaslimit),
-            OP_MEMLIMIT => Ok(Instruction::Memlimit),
             OP_CAPACITY => Ok(Instruction::Capacity),
             OP_HEIGHT => Ok(Instruction::Height),
             _ => Ok(Instruction::Ext(byte)),

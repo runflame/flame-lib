@@ -74,7 +74,6 @@ impl ExternalTx {
             &self.proof,
             self.header,
             limits.gas,
-            limits.mem,
             Some(self.signature),
         )?;
         Ok(TxLog(result.txlog))
@@ -86,8 +85,6 @@ impl ExternalTx {
 pub struct Limits {
     /// Compute (gas) budget.
     pub gas: u64,
-    /// Transient-memory cap in bytes for the outermost call.
-    pub mem: u64,
 }
 
 /// Ordered transaction effects — the canonical change set a node
@@ -186,7 +183,7 @@ impl ScriptBuilder {
     /// Bulletproof generators are managed inside the crate.
     pub fn build_tx(self, header: TxHeader, limits: Limits) -> Result<UnsignedTx, VMError> {
         let pc_gens = PedersenGens::default();
-        let result = Prover::prove(&pc_gens, self, header, limits.gas, limits.mem)?;
+        let result = Prover::prove(&pc_gens, self, header, limits.gas)?;
         let txbound_items = result
             .deferred_sigs
             .iter()

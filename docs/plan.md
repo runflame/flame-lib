@@ -6,27 +6,29 @@ when the specification, implementation, and focused regression tests agree.
 
 1. [ ] Make synchronous call failure preserve ownership.
 
-   - [ ] Define one rule for values moved into `call`, `open`, and `signcall`:
+   - [x] Define one rule for values moved into `call`, `open`, and `signcall`:
      a failed operation must restore each entry-owned value to the caller, or
      propagate failure to a transaction boundary that restores it. A successful
      enclosing transaction must never silently discard a `Token`, nonzero
      `ClearToken`, `WideToken`, `Cell`, or token-bearing `Dict`.
-   - [ ] Fix pre-entry `call` failure. Target lookup, call-depth checks, and
-     other fallible setup currently happen after arguments have been removed. A
-     returned `0` must have a defined ownership result for all of them.
-   - [ ] Fix entered-call failure. [`VM::fail_current_call`](../flamevm/src/vm.rs)
-     currently discards the complete child stack; preserve the entry escrow for
-     actor-call arguments and for the `Cell`, payload, and arguments consumed by
-     `open`/`signcall`.
-   - [ ] Apply the same rule to runtime errors, out-of-gas, out-of-memory,
+   - [x] Fix pre-entry `call` failure. Target lookup, call-depth checks, and
+     child-activation failure now return the original arguments followed by
+     `k 0`.
+   - [x] Fix entered-call failure. [`VM::fail_current_call`](../flamevm/src/vm.rs)
+     returns the entry escrow after rollback: actor arguments, or the original
+     locked Cell plus explicit `open`/`signcall` arguments. Cell payload remains
+     sealed inside the Cell and is never returned separately.
+   - [x] Apply the same rule to runtime errors, out-of-gas,
      `StackNotClean`, `BadReturnArity`, and explicit verification failure.
-   - [ ] Put every rollback checkpoint before its boundary side effects. In
+   - [x] Put every rollback checkpoint before its boundary side effects. In
      particular, a failed `signcall` must not retain the signature recorded
      before its snapshot, and storage-pool and lease changes must roll back with
      their transaction.
-   - [ ] Add a failure matrix covering pre-entry rejection, entered failure,
-     dirty EOF, bad return arity, and nested failure for every bearer type, plus
-     a storage-pool conservation test across nested and outer rollback.
+   - [x] Cover pre-entry rejection, entered failure, dirty EOF, bad return
+     arity, nested rollback, Token restoration, and negative-ClearToken
+     restoration from a failed Cell call.
+   - [ ] Expand the matrix to every bearer/container shape and add a
+     storage-pool conservation test across nested and outer rollback.
 
 2. [ ] Make asynchronous message failure conserve payload assets.
 
@@ -95,9 +97,9 @@ when the specification, implementation, and focused regression tests agree.
      `T f' f q' q`; the implementation and tests use `T f f' q q'`.
    - [ ] Decide whether invalid `decrypt` openings fail synchronously or only at
      final batch verification, then align code, rollback behavior, and prose.
-   - [ ] Correct the `call`/`open`/`signcall` diagrams to include the success
-     shape `results... k 1`, clean fall-through `0 1`, and failure `0`, or change
-     the implementation.
+   - [x] Correct the `call`/`open`/`signcall` diagrams to include success
+     `results... k 1`, clean fall-through `0 1`, and failure restitution
+     `entry-values... n 0`.
    - [ ] Replace the global claim that soft failure preserves every operand with
      exact per-opcode stack shapes; decide whether count/key operands consumed by
      `readstr` and `getopt` should be restored.
@@ -108,15 +110,16 @@ when the specification, implementation, and focused regression tests agree.
 
 6. [ ] Make memory and gas accounting non-bypassable.
 
-   - [ ] Remove the production meaning “`mem_limit == 0` is unlimited.” Zero
-     must mean no allocation, or production entry points must reject it.
-   - [ ] Charge `writebits`, `writeint`, Dict growth, stack growth, decoded
+   - [x] Remove the separate memory limit, `memlimit` opcode, root limit,
+     call operands, storage-derived multiplier, and block/mempool memory fields.
+   - [x] Charge `writebits`, `writeint`, Dict growth, stack growth, decoded
      payloads, constraint state, deferred signatures, and MSM/batch terms.
-   - [ ] Audit every allocator reachable from hostile bytecode and place a hard
-     bound where precise accounting is not worthwhile.
-   - [ ] Decide whether EOF consumes gas. Code currently charges before finding
-     EOF, so an `N`-instruction clean program needs `N + 1` gas.
-   - [ ] Keep an immutable frame-creation gas cap for `gaslimit`; refunds must not
+   - [x] Audit hostile variable-size paths and charge logical bytes/items before
+     allocation; fixed-size pushes remain bounded by the instruction charge and
+     nested depth remains hard-capped.
+   - [x] Specify that EOF consumes gas: an `N`-instruction clean program needs
+     at least `N + 1` gas.
+   - [x] Keep an immutable frame-creation gas cap for `gaslimit`; refunds must not
      make the reported cap grow.
    - [ ] Bound or debit the gas attached to `send`. An actor must not create
      arbitrary future execution budget from a small incoming grant.
@@ -132,8 +135,9 @@ when the specification, implementation, and focused regression tests agree.
      table; the handlers reject ExternalRoot and CellOpen.
    - [ ] Remove the claim that `send` immediately fails for a checked-out actor,
      or add a registry check with well-defined asynchronous semantics.
-   - [ ] Decide whether `open` and `signcall` arguments must be portable. The
-     prose says yes; the implementation intentionally accepts arbitrary values.
+   - [ ] Decide whether to restrict `open` and `signcall` arguments. The current
+     specification and implementation intentionally accept arbitrary values,
+     including negative ClearTokens, and restore them on child failure.
    - [ ] Decide whether `issuepub` is valid in both `InternalRoot` and
      `ActorCall`, or only in the latter.
    - [ ] Remove the documented implicit default gas grant or add an operand form

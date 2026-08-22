@@ -203,7 +203,7 @@ fn verify_msm_identity_succeeds_end_to_end() {
         .push_point(g_bytes)
         .mul()
         .verify();
-    let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000, 0)
+    let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000)
         .expect("prove succeeds");
     let TxResult { bytecode, proof, .. } = result;
     let proof = proof.expect("proof set");
@@ -214,7 +214,6 @@ fn verify_msm_identity_succeeds_end_to_end() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify succeeds (0*P = identity)");
@@ -237,12 +236,12 @@ fn verify_msm_negation_sum_identity_succeeds() {
         .push_point(g_bytes)
         .add()                                     // → MSM with [(-1,G), (1,G)]
         .verify();
-    let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000, 0)
+    let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000)
         .expect("prove");
     let TxResult { bytecode, proof, .. } = result;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(&pc_gens_v, bytecode, &proof, dummy_header(), 1_000_000, 0, None)
+    Verifier::verify(&pc_gens_v, bytecode, &proof, dummy_header(), 1_000_000, None)
         .expect("verify");
 }
 
@@ -260,7 +259,7 @@ fn verify_msm_nonidentity_rejected_at_batch() {
         .push_point(g_bytes)
         .mul()
         .verify();
-    let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000, 0)
+    let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000)
         .expect("prover produces proof regardless of MSM correctness");
     let TxResult { bytecode, proof, .. } = result;
     let proof = proof.expect("proof set");
@@ -271,7 +270,6 @@ fn verify_msm_nonidentity_rejected_at_batch() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect_err("verify must reject");
@@ -294,12 +292,12 @@ fn verify_msm_invalid_point_rejected_at_batch() {
         .push_point(bad)
         .mul()
         .verify();
-    let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000, 0)
+    let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000)
         .expect("prove");
     let TxResult { bytecode, proof, .. } = result;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    let err = Verifier::verify(&pc_gens_v, bytecode, &proof, dummy_header(), 1_000_000, 0, None)
+    let err = Verifier::verify(&pc_gens_v, bytecode, &proof, dummy_header(), 1_000_000, None)
         .expect_err("verify must reject");
     assert!(matches!(err, VMError::BatchSignatureVerificationFailed));
 }
@@ -321,13 +319,15 @@ fn verify_msm_in_internal_context_rejected() {
 /// Builds an outer program that consumes a cell (to seed the anchor)
 /// then opens it via the script-leaf path, with `inner` as the leaf
 /// program. Returns a ScriptBuilder ready for `Prover::prove`.
-fn open_with_inner(inner: ScriptBuilder) -> ScriptBuilder {
+fn open_with_inner(inner: ScriptBuilder, recover_failed_cell: bool) -> ScriptBuilder {
     let inner_bytes = inner.to_bytecode();
+    let recovery = ScriptBuilder::new().push_int(0u64).return_().to_bytecode();
     let tree = PredicateTree::scripts_only(
-        vec![inner_bytes.clone()],
+        vec![inner_bytes.clone(), recovery],
         TEST_BLINDING_KEY,
     ).expect("scripts_only tree");
     let cp = tree.taproot_proof_for(0).expect("cp");
+    let recovery_cp = tree.taproot_proof_for(1).expect("recovery cp");
     let pred_point = tree.point;
     let cell = Cell::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![])
         .expect("empty payload is portable");
@@ -342,15 +342,23 @@ fn open_with_inner(inner: ScriptBuilder) -> ScriptBuilder {
             .push_str(String::from(h.to_vec()))
             .push_int(i as u64);
     }
-    outer
+    outer = outer
         .push_int(cp.neighbors.len() as u64)
         .dict()
         .push_str(String::from(cp.position.clone()))
         .push_script(inner)
         .push_int(1024u64)
-        .push_int(1024u64)
         .push_int(0u64)
-        .open()
+        .open();
+    if recover_failed_cell {
+        outer = push_taproot_proof_to_program(outer.drop_().drop_(), &recovery_cp)
+            .push_int(1024u64)
+            .push_int(0u64)
+            .open()
+            .verify()
+            .drop_();
+    }
+    outer
 }
 
 /// A failed nested call that appended a *non-identity* MSM to its
@@ -379,14 +387,13 @@ fn failed_call_msm_does_not_pollute_parent_batch() {
         .verify()                              // VerifyFailed → frame unwinds
         .push_int(0u64)
         .return_();
-    let outer = open_with_inner(inner)
-        .drop_()                               // drop the `0` failure marker
+    let outer = open_with_inner(inner, true)
         // Trivially-true constraint to give the proof something to check.
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(7u64)))
         .eq()
         .verify();
-    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000)
         .expect("prove ok");
     let TxResult { bytecode, proof, .. } = result;
     let proof = proof.expect("proof set");
@@ -401,7 +408,6 @@ fn failed_call_msm_does_not_pollute_parent_batch() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify must accept — failed call's MSM was discarded");
@@ -425,11 +431,11 @@ fn clean_call_msm_propagates_to_parent_batch() {
         .verify()
         .push_int(0u64)
         .return_();
-    let outer = open_with_inner(inner)
+    let outer = open_with_inner(inner, false)
         .verify()                              // pop success marker
         .drop_();                              // drop count
 
-    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000)
         .expect("prove ok (prover always builds something)");
     let TxResult { bytecode, proof, .. } = result;
     let proof = proof.expect("proof set");
@@ -441,7 +447,6 @@ fn clean_call_msm_propagates_to_parent_batch() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect_err("verify must reject — clean call merged the 1·G MSM into the parent batch");

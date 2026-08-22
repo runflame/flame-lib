@@ -149,7 +149,7 @@ fn call_chain_interleaves_callee_then_caller_effects() {
 #[test]
 fn failed_subcall_effects_roll_back_but_caller_continues() {
     // B.recv logs "B" then hard-fails (`verify 0`). A.recv calls B
-    // (failure → `0` marker, drop it), then logs "A". B's "B" Data must
+    // (failure → `count=0, success=0`, consume both), then logs "A". B's Data must
     // be rolled back; only "A" survives — the canonical effect-rollback
     // control-flow case.
     let mut reg = MemRegistry::new();
@@ -157,7 +157,7 @@ fn failed_subcall_effects_roll_back_but_caller_continues() {
     let b_id = deploy_actor(&mut reg, b_recv);
 
     let a_recv = {
-        let p = call_to(&b_id).drop_(); // failed call pushes a single `0` marker
+        let p = call_to(&b_id).drop_().drop_();
         log_str(p, "A").to_bytecode()
     };
     let a_id = deploy_actor(&mut reg, a_recv);

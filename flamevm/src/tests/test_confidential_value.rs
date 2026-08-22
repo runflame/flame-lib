@@ -33,7 +33,6 @@ fn encrypted_borrow_produces_widetoken_and_token_pair() {
             program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
         ),
     );
     // Step until borrow has executed (5 instructions: 4 setup + borrow).
@@ -98,7 +97,6 @@ fn mix_with_single_in_single_out_balances() {
             program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
         ),
     );
     // Pre-load the Token at the bottom of the stack (mix pops it as input).

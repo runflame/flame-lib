@@ -530,6 +530,13 @@ impl Cell {
         self.payload
     }
 
+    /// Logical heap work needed to clone this cell for call-failure escrow.
+    pub(crate) fn clone_gas(&self) -> u64 {
+        self.payload.iter().fold(self.payload.len() as u64, |gas, value| {
+            gas.saturating_add(value.clone_gas())
+        })
+    }
+
     /// Unique content identity of this cell — commits to its predicate,
     /// anchor, and payload. Used as the `Output` txlog entry and as the
     /// `signtx`/`signcall` signed message. Uniqueness comes from the anchor;

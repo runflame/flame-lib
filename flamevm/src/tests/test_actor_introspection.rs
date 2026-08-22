@@ -22,7 +22,6 @@ fn vm_internal_with(
             ScriptBuilder::parse(&script).expect("parse").into_instructions(),
             kind,
             1_000_000,
-            0,
         )
         .with_anchor(anchor),
     )
@@ -36,7 +35,6 @@ fn vm_external(script: Vec<u8>) -> VM {
             ScriptBuilder::parse(&script).expect("parse").into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
         ),
     )
 }

@@ -22,7 +22,6 @@ mod vm;
 
 pub use actor::{
     code_root, code_state_bytes, empty_state, state_root, ActorID, ActorRegistry, StoragePurchase,
-    TRANSIENT_MEMORY_CAPACITY_MULTIPLIER,
 };
 pub use address::Address;
 pub use message::{Message, MessageID};

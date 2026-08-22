@@ -246,7 +246,7 @@ fn issuepub_at_external_root_errors_actor_context() {
         dummy_header(),
         CallFrame::new(
             ScriptBuilder::parse(&script).expect("parse").into_instructions(),
-            CallKind::ExternalRoot, 1_000_000, 0,
+            CallKind::ExternalRoot, 1_000_000,
         ),
     );
     let mut delegate = make_stub_delegate();
@@ -288,12 +288,12 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
         .issuepriv()
         .push_int(1u64)
         .return_();
-    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0);
+    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500);
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
     };
-    let child = CallFrame::new(program.into_instructions(), child_kind, 500, 0);
+    let child = CallFrame::new(program.into_instructions(), child_kind, 500);
     let mut vm = VM::new(dummy_header(), parent);
     let p = core::mem::replace(&mut vm.current_call, child);
     vm.call_stack.push(p);
@@ -351,7 +351,7 @@ fn issuepriv_at_external_root_errors_predicate_context() {
         dummy_header(),
         CallFrame::new(
             ScriptBuilder::parse(&script).expect("parse").into_instructions(),
-            CallKind::ExternalRoot, 1_000_000, 0,
+            CallKind::ExternalRoot, 1_000_000,
         ),
     );
     let mut delegate = make_stub_delegate();
@@ -363,13 +363,13 @@ fn issuepriv_at_external_root_errors_predicate_context() {
 fn issuepriv_in_internal_context_yields_failure_marker() {
     // CellOpen with external_context: false: `require_external()` in
     // op_issuepriv errors `ExternalOnly`. Since it's inside a nested
-    // frame, `fail_current_call` swallows the error and pushes `0`
-    // onto the parent's stack — mirrors the
+    // frame, `fail_current_call` swallows the error and pushes
+    // `[count=0, status=0]` onto the parent's stack — mirrors the
     // `op_open_cs_blocked_when_external_context_false` pattern in
     // test_cells.rs.
     use crate::vm::{Anchor, CallFrame, CallKind, VM};
     use curve25519_dalek::ristretto::CompressedRistretto;
-    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0);
+    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500);
     let script = ScriptBuilder::new().issuepriv().to_bytecode();
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
@@ -379,7 +379,6 @@ fn issuepriv_in_internal_context_yields_failure_marker() {
         ScriptBuilder::parse(&script).expect("parse").into_instructions(),
         child_kind,
         500,
-        0,
     );
     let mut vm = VM::new(dummy_header(), parent);
     let p = core::mem::replace(&mut vm.current_call, child);
@@ -387,9 +386,10 @@ fn issuepriv_in_internal_context_yields_failure_marker() {
     vm.step_internal().expect("step ok — error swallowed into marker");
     // Child frame unwound back into parent (ExternalRoot).
     assert!(vm.call_stack.is_empty());
-    // Parent now carries the `0` failure marker.
-    assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+    // Parent carries `[count=0, success=0]` (this direct child has no escrow).
+    assert_eq!(vm.current_call.stack.len(), 2);
+    assert_int(&vm.current_call.stack[0], Int253::ZERO);
+    assert_int(&vm.current_call.stack[1], Int253::ZERO);
 }
 
 #[test]
@@ -450,7 +450,7 @@ fn issuepriv_prove_then_verify_end_to_end() {
     //   pushpoint(internal_key);
     //   neighbors-dict; position;
     //   push_script(inner) (witness-preserving);
-    //   gas=1024; bytes=1024;
+    //   gas=1024;
     //   pushstr(qty_witness); k=1; open;
     //   verify; drop  (consume the success + count markers)
     let mut outer = ScriptBuilder::new()
@@ -468,7 +468,6 @@ fn issuepriv_prove_then_verify_end_to_end() {
         .push_str(String::from(cp.position.clone()))
         .push_script(inner)                                  // witness-bearing
         .push_int(1024u64)                                   // gas
-        .push_int(1024u64)                                   // bytes
         .push_str(String::commitment(qty_commit.clone())) // qty witness arg
         .push_int(1u64)                                      // k = 1 arg
         .open()
@@ -476,7 +475,7 @@ fn issuepriv_prove_then_verify_end_to_end() {
         .drop_();                                            // pops count (0)
 
     // Prove.
-    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000)
         .expect("prove ok");
     let txid_p = result.txid;
     let TxResult { bytecode, proof, .. } = result;
@@ -492,7 +491,6 @@ fn issuepriv_prove_then_verify_end_to_end() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify ok");
@@ -533,8 +531,9 @@ fn issuepriv_with_int_qty_yields_failure_marker() {
     vm.step_internal().expect("step pushstr");
     vm.step_internal().expect("step issuepriv — error swallowed into marker");
     assert!(vm.call_stack.is_empty());
-    assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+    assert_eq!(vm.current_call.stack.len(), 2);
+    assert_int(&vm.current_call.stack[0], Int253::ZERO);
+    assert_int(&vm.current_call.stack[1], Int253::ZERO);
 }
 
 #[test]

@@ -20,7 +20,6 @@ fn eq_external_strings_peek_compare_not_cs_lift() {
             prog.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
         ),
     );
     let mut prover = Prover::new(&pc_gens);
@@ -48,7 +47,7 @@ fn range_proof_accepts_in_range_value() {
         .eq()
         .verify();
     let _pp =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0).expect("prove succeeds");
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
         bytecode, proof, ..
     } = _pp;
@@ -60,7 +59,6 @@ fn range_proof_accepts_in_range_value() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify succeeds");
@@ -79,7 +77,7 @@ fn range_proof_rejects_out_of_range_value() {
         .alloc(Some(Int253::from(512u64)))
         .eq()
         .verify();
-    let result = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0);
+    let result = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000);
     // The prover may succeed (constructs a proof with bad witness)
     // and the verifier rejects, OR the prover errors directly.
     // Either way, the full pipeline must reject. Cover both
@@ -100,7 +98,6 @@ fn range_proof_rejects_out_of_range_value() {
                 &proof,
                 dummy_header(),
                 1_000_000,
-                0,
                 None,
             )
             .expect_err("verifier must reject out-of-range proof");
@@ -121,7 +118,7 @@ fn range_bit_count_zero_rejected() {
         .alloc(Some(Int253::from(0u64)))
         .eq()
         .verify();
-    let err = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0).unwrap_err();
+    let err = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).unwrap_err();
     assert!(matches!(err, VMError::BitCountOutOfRange));
 }
 
@@ -136,7 +133,7 @@ fn range_bit_count_above_64_rejected() {
         .alloc(Some(Int253::from(1u64)))
         .eq()
         .verify();
-    let err = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0).unwrap_err();
+    let err = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).unwrap_err();
     assert!(matches!(err, VMError::BitCountOutOfRange));
 }
 
@@ -158,7 +155,7 @@ fn constraint_and_overload_combines_two_constraints() {
         .and()
         .verify();
     let _pp =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0).expect("prove succeeds");
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
         bytecode, proof, ..
     } = _pp;
@@ -170,7 +167,6 @@ fn constraint_and_overload_combines_two_constraints() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify succeeds");
@@ -191,7 +187,7 @@ fn constraint_or_overload_combines_two_constraints() {
         .or()
         .verify();
     let _pp =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0).expect("prove succeeds");
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
         bytecode, proof, ..
     } = _pp;
@@ -203,7 +199,6 @@ fn constraint_or_overload_combines_two_constraints() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify succeeds");
@@ -220,7 +215,7 @@ fn constraint_not_overload_negates_constraint() {
         .not()
         .verify();
     let _pp =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0).expect("prove succeeds");
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
         bytecode, proof, ..
     } = _pp;
@@ -232,7 +227,6 @@ fn constraint_not_overload_negates_constraint() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify succeeds");
@@ -252,7 +246,7 @@ fn constraint_and_with_false_branch_rejected() {
         .eq()
         .and()
         .verify();
-    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
         .expect("prove succeeds (constructs proof of unsatisfiable constraint)");
     let TxResult {
         bytecode, proof, ..
@@ -265,7 +259,6 @@ fn constraint_and_with_false_branch_rejected() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .unwrap_err();
@@ -297,11 +290,16 @@ fn range_in_internal_context_errors_external_only() {
 /// itself (`input` then `open`) so the script runs under a real
 /// `last_anchor`. The outer program returns the inner's failure
 /// or success marker on the stack for the caller's continuation.
-fn open_with_inner(inner: ScriptBuilder) -> ScriptBuilder {
+fn open_with_inner(inner: ScriptBuilder, recover_failed_cell: bool) -> ScriptBuilder {
     let inner_bytes = inner.to_bytecode();
-    let tree = PredicateTree::scripts_only(vec![inner_bytes.clone()], TEST_BLINDING_KEY)
-        .expect("scripts_only tree");
+    let recovery = ScriptBuilder::new().push_int(0u64).return_().to_bytecode();
+    let tree = PredicateTree::scripts_only(
+        vec![inner_bytes.clone(), recovery],
+        TEST_BLINDING_KEY,
+    )
+    .expect("scripts_only tree");
     let cp = tree.taproot_proof_for(0).expect("cp");
+    let recovery_cp = tree.taproot_proof_for(1).expect("recovery cp");
     let pred_point = tree.point;
     let cell = Cell::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![])
         .expect("empty payload is portable");
@@ -314,15 +312,23 @@ fn open_with_inner(inner: ScriptBuilder) -> ScriptBuilder {
     for (i, h) in cp.neighbors.iter().enumerate() {
         outer = outer.push_str(String::from(h.to_vec())).push_int(i as u64);
     }
-    outer
+    outer = outer
         .push_int(cp.neighbors.len() as u64)
         .dict()
         .push_str(String::from(cp.position.clone()))
         .push_script(inner)
         .push_int(1024u64)
-        .push_int(1024u64)
         .push_int(0u64)
-        .open()
+        .open();
+    if recover_failed_cell {
+        outer = push_taproot_proof_to_program(outer.drop_().drop_(), &recovery_cp)
+            .push_int(1024u64)
+            .push_int(0u64)
+            .open()
+            .verify()
+            .drop_();
+    }
+    outer
 }
 
 /// A failed `open` whose child allocated an *unsatisfiable* R1CS
@@ -350,8 +356,7 @@ fn failed_call_unsat_cs_does_not_pollute_parent_proof() {
         .verify() // VerifyFailed → unwind
         .push_int(0u64)
         .return_();
-    let outer = open_with_inner(inner)
-        .drop_() // discard `0` failure marker
+    let outer = open_with_inner(inner, true)
         // Parent's own constraint: 7 + 3 == 10 — satisfiable.
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
@@ -359,7 +364,7 @@ fn failed_call_unsat_cs_does_not_pollute_parent_proof() {
         .alloc(Some(Int253::from(10u64)))
         .eq()
         .verify();
-    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0).expect("prove ok");
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000).expect("prove ok");
     let TxResult {
         bytecode, proof, ..
     } = result;
@@ -375,7 +380,6 @@ fn failed_call_unsat_cs_does_not_pollute_parent_proof() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify must accept — failed call's CS contributions rolled back");
@@ -398,11 +402,11 @@ fn clean_call_cs_alloc_propagates_to_parent_proof() {
         .verify()
         .push_int(0u64)
         .return_();
-    let outer = open_with_inner(inner)
+    let outer = open_with_inner(inner, false)
         .verify() // pop success marker (1)
         .drop_(); // drop count
 
-    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000)
         .expect("prover always builds something");
     let TxResult {
         bytecode, proof, ..
@@ -416,7 +420,6 @@ fn clean_call_cs_alloc_propagates_to_parent_proof() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect_err("verify must reject — child's unsat constraint inherited cleanly");
@@ -486,8 +489,7 @@ fn failed_call_rolls_back_every_state_lane() {
         .push_int(0u64)
         .return_(); // unreachable
 
-    let outer = open_with_inner(inner)
-        .drop_() // discard `0` failure marker
+    let outer = open_with_inner(inner, true)
         // Parent's own satisfiable constraint: 7 + 3 == 10.
         .alloc(Some(Int253::from(7u64)))
         .alloc(Some(Int253::from(3u64)))
@@ -496,7 +498,7 @@ fn failed_call_rolls_back_every_state_lane() {
         .eq()
         .verify();
 
-    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0).expect("prove ok");
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000).expect("prove ok");
     let txid_p = result.txid;
 
     // ── TxLog assertion: rollback truncated all child entries ──
@@ -541,7 +543,6 @@ fn failed_call_rolls_back_every_state_lane() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None, // no txbound sig — if a TxBound leaked, verify rejects with MissingTxBoundSignature
     )
     .expect("verify must accept — every rollback lane fired");

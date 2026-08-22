@@ -497,7 +497,6 @@ impl ScriptBuilder {
     pub fn usage(mut self) -> Self { self.instructions.push(Instruction::Usage); self }
     pub fn callerid(mut self) -> Self { self.instructions.push(Instruction::Callerid); self }
     pub fn gaslimit(mut self) -> Self { self.instructions.push(Instruction::Gaslimit); self }
-    pub fn memlimit(mut self) -> Self { self.instructions.push(Instruction::Memlimit); self }
     pub fn capacity(mut self) -> Self { self.instructions.push(Instruction::Capacity); self }
     pub fn height(mut self) -> Self { self.instructions.push(Instruction::Height); self }
 }

@@ -492,7 +492,6 @@ fn confidential_1_to_1_with_fee() {
     program = push_taproot_proof_to_program(program, &cp);
     program = program
         .push_int(1024u64) // gas
-        .push_int(1024u64) // bytes
         .push_int(0u64)    // k args
         .open()
         .verify()          // assert success marker
@@ -515,7 +514,7 @@ fn confidential_1_to_1_with_fee() {
         .output();
 
     let prover_result =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
             .expect("prove ok");
 
     // total_fee picked up the cleartext amount.
@@ -559,7 +558,6 @@ fn confidential_1_to_1_with_fee() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify ok");
@@ -595,7 +593,6 @@ fn confidential_unbalanced_inputs_rejected() {
         program,
         dummy_header(),
         1_000_000,
-        0,
     );
     match prove_attempt {
         Err(_) => { /* prover refused — good */ }
@@ -609,7 +606,6 @@ fn confidential_unbalanced_inputs_rejected() {
                 &proof,
                 dummy_header(),
                 1_000_000,
-                0,
                 None,
             )
             .expect_err("verifier must reject imbalance");
@@ -644,7 +640,6 @@ fn confidential_flavor_mismatch_rejected() {
         program,
         dummy_header(),
         1_000_000,
-        0,
     );
     match prove_attempt {
         Err(_) => { /* prover refused — good */ }
@@ -658,7 +653,6 @@ fn confidential_flavor_mismatch_rejected() {
                 &proof,
                 dummy_header(),
                 1_000_000,
-                0,
                 None,
             )
             .expect_err("verifier must reject flavor mismatch");
@@ -707,7 +701,6 @@ fn confidential_with_fee_undersupply_rejected() {
     program = push_taproot_proof_to_program(program, &cp);
     program = program
         .push_int(1024u64)
-        .push_int(1024u64)
         .push_int(0u64)
         .open()
         .verify()
@@ -727,7 +720,6 @@ fn confidential_with_fee_undersupply_rejected() {
         program,
         dummy_header(),
         1_000_000,
-        0,
     );
     match prove_attempt {
         Err(_) => { /* prover refused the bad witness — good */ }
@@ -741,7 +733,6 @@ fn confidential_with_fee_undersupply_rejected() {
                 &proof,
                 dummy_header(),
                 1_000_000,
-                0,
                 None,
             )
             .expect_err("verifier must reject fee undersupply");

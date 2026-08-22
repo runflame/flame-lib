@@ -184,7 +184,6 @@ fn open_with_valid_taproot_proof_runs_program() {
     program = push_taproot_proof_to_program(program, &cp);
     let script = program
         .push_int(1024u64)                             // gas
-        .push_int(1024u64)                             // bytes
         .push_int(0u64)                                // k = 0 args
         .open()
         .to_bytecode();
@@ -218,7 +217,6 @@ fn open_with_wrong_program_hard_fails() {
         .cell();
     program = push_taproot_proof_to_program(program, &cp);
     let script = program
-        .push_int(1024u64)
         .push_int(1024u64)
         .push_int(0u64)
         .open()
@@ -302,7 +300,6 @@ fn open_preserves_alloc_witnesses_via_script_string() {
         .push_str(String::from(cp.position.clone()))
         .push_script(inner) // ← Script(instrs), witnesses intact
         .push_int(1024u64) // gas
-        .push_int(1024u64) // bytes
         .push_int(0u64)    // k args
         .open()
         .verify()  // pops success marker (1); errors if 0
@@ -310,7 +307,7 @@ fn open_preserves_alloc_witnesses_via_script_string() {
 
     // Prover round-trip.
     let pc_gens = bulletproofs::PedersenGens::default();
-    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000, 0)
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000)
         .expect("prove with witness-bearing open");
     let txid_p = result.txid;
     let TxResult { bytecode, proof, .. } = result;
@@ -326,7 +323,6 @@ fn open_preserves_alloc_witnesses_via_script_string() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify ok");
@@ -354,7 +350,6 @@ fn open_passes_args_after_payload() {
     program = push_taproot_proof_to_program(program, &cp);
     let script = program
         .push_int(1024u64)                             // gas
-        .push_int(1024u64)                             // bytes
         .push_int(20u64)                               // arg[0]
         .push_int(30u64)                               // arg[1]
         .push_int(2u64)                                // k=2
@@ -421,7 +416,6 @@ fn scripts_only_predicate_opens_via_program_path() {
     p = push_taproot_proof_to_program(p, &cp);
     let script = p
         .push_int(1024u64)                             // gas
-        .push_int(1024u64)                             // bytes
         .push_int(0u64)                                // 0 args
         .open()
         .to_bytecode();
@@ -462,7 +456,6 @@ fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
             .cell();
         p = push_taproot_proof_to_program(p, &cp);
         let script = p
-            .push_int(1024u64)
             .push_int(1024u64)
             .push_int(0u64)
             .open()
@@ -512,7 +505,6 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
         .cell();
     p = push_taproot_proof_to_program(p, &forged);
     let script = p
-        .push_int(1024u64)
         .push_int(1024u64)
         .push_int(0u64)
         .open()
@@ -1056,13 +1048,13 @@ fn external_tx_two_inputs_two_outputs_via_open() {
         .push_str(String::from(cell1_bytes))
         .input();
     p = push_taproot_proof_to_program(p, &cp1);
-    p = p.push_int(1024u64).push_int(1024u64).push_int(0u64).open()
+    p = p.push_int(1024u64).push_int(0u64).open()
         .verify().drop_();   // verify pops success marker; drop discards count
 
     // Consume cell 2
     p = p.push_str(String::from(cell2_bytes)).input();
     p = push_taproot_proof_to_program(p, &cp2);
-    p = p.push_int(1024u64).push_int(1024u64).push_int(0u64).open()
+    p = p.push_int(1024u64).push_int(0u64).open()
         .verify().drop_();
 
     // Emit output 1
@@ -1142,8 +1134,8 @@ fn external_tx_two_inputs_two_outputs_via_open() {
 
 /// `op_open` creates an isolated CallFrame with no actor identity;
 /// `op_selfid` inside the leaf errors `OpcodeRequiresActorContext`,
-/// which the step wrapper catches as a `0` failure marker on the
-/// parent's stack (the call simply "failed").
+/// which the step wrapper catches. The parent recovers the locked Cell
+/// followed by `count=1, success=0`.
 #[test]
 fn op_open_selfid_errors_no_actor_context() {
     // `selfid` errors before reaching a return — that's fine, the
@@ -1158,19 +1150,20 @@ fn op_open_selfid_errors_no_actor_context() {
         .cell();
     p = push_taproot_proof_to_program(p, &cp);
     let script = p
-        .push_int(1024u64).push_int(1024u64).push_int(0u64)
+        .push_int(1024u64).push_int(0u64)
         .open()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
-    // Child errored → unwind + marker `0` on parent.
-    assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+    assert_eq!(vm.current_call.stack.len(), 3);
+    assert!(matches!(vm.current_call.stack[0], Value::Cell(_)));
+    assert_int(&vm.current_call.stack[1], Int253::ONE);
+    assert_int(&vm.current_call.stack[2], Int253::ZERO);
 }
 
 /// `op_open` leaf returning the wrong arity errors `BadReturnArity`;
-/// caught by step as a `0` failure marker on the parent.
+/// caught by step while restoring the locked Cell to the parent.
 #[test]
 fn op_open_return_arity_mismatch_errors() {
     // push:1, return — pops k=1 from stack, then stack.len()(0) < 1.
@@ -1183,14 +1176,48 @@ fn op_open_return_arity_mismatch_errors() {
         .cell();
     p = push_taproot_proof_to_program(p, &cp);
     let script = p
-        .push_int(1024u64).push_int(1024u64).push_int(0u64)
+        .push_int(1024u64).push_int(0u64)
         .open()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
-    assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+    assert_eq!(vm.current_call.stack.len(), 3);
+    assert!(matches!(vm.current_call.stack[0], Value::Cell(_)));
+    assert_int(&vm.current_call.stack[1], Int253::ONE);
+    assert_int(&vm.current_call.stack[2], Int253::ZERO);
+}
+
+#[test]
+fn failed_open_restores_cell_and_negative_token_argument() {
+    let inner = ScriptBuilder::new().push_int(0u64).verify().to_bytecode();
+    let (tree, cp) = build_predicate_with_program(&inner, 0);
+    let mut p = ScriptBuilder::new()
+        .push_int(0u64)
+        .push_point(*tree.point.as_bytes())
+        .cell();
+    p = push_taproot_proof_to_program(p, &cp);
+    let script = p
+        .push_int(1024u64)
+        .push_int(7u64)
+        .push_int(FLAME_FLAVOR)
+        .borrow()
+        .retire()
+        .push_int(1u64)
+        .open()
+        .to_bytecode();
+    let mut vm = vm_with_script(script);
+    vm.last_anchor = Some(Anchor([0x42; 32]));
+    run_to_end(&mut vm).unwrap();
+
+    assert_eq!(vm.current_call.stack.len(), 4);
+    assert!(matches!(&vm.current_call.stack[0], Value::Cell(_)));
+    assert!(matches!(
+        &vm.current_call.stack[1],
+        Value::ClearToken(t) if t.qty() == Int253::from(-7i64) && t.flv() == FLAME_FLAVOR
+    ));
+    assert_int(&vm.current_call.stack[2], Int253::from(2u64));
+    assert_int(&vm.current_call.stack[3], Int253::ZERO);
 }
 
 /// CS context propagates: a CellOpen frame with `external_context:
@@ -1201,7 +1228,7 @@ fn op_open_return_arity_mismatch_errors() {
 #[test]
 fn op_open_cs_blocked_when_external_context_false() {
     use crate::vm::{Anchor, CallFrame, CallKind, VM};
-    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0);
+    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500);
     // alloc is 0x62 — external-only CS op. push:0 + alloc + return.
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
@@ -1211,15 +1238,15 @@ fn op_open_cs_blocked_when_external_context_false() {
         vec![Instruction::Alloc(None)],
         child_kind,
         500,
-        0,
     );
     let mut vm = VM::new(dummy_header(), parent);
     let parent_saved = std::mem::replace(&mut vm.current_call, child);
     vm.call_stack.push(parent_saved);
     // alloc errors ExternalOnly inside the child; step catches and
-    // unwinds, leaving a `0` failure marker on the parent's stack.
+    // unwinds, leaving `[count=0, success=0]` on the parent's stack.
     vm.step_internal().expect("step ok — error swallowed into marker");
     assert!(vm.call_stack.is_empty());
-    assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+    assert_eq!(vm.current_call.stack.len(), 2);
+    assert_int(&vm.current_call.stack[0], Int253::ZERO);
+    assert_int(&vm.current_call.stack[1], Int253::ZERO);
 }

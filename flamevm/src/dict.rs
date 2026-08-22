@@ -127,6 +127,14 @@ impl Dict {
         self.droppable
     }
 
+    /// Logical heap work needed for a Rust-level rollback clone. Used only
+    /// for gas charging; VM copyability remains governed by `try_clone`.
+    pub(crate) fn clone_gas(&self) -> u64 {
+        self.entries.values().fold(self.entries.len() as u64, |gas, value| {
+            gas.saturating_add(value.clone_gas())
+        })
+    }
+
     /// VM-level clone — always fails: dicts are non-copyable (todo #5).
     /// The `dup`/`getdup` family routes here, so a dict value can never
     /// be duplicated on the stack. The Rust-level `Clone` impl is the

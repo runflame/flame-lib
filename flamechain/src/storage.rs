@@ -22,7 +22,6 @@ pub struct StorageParams {
     pub minimum_lease_units: u64,
     pub minimum_remaining_units: u64,
     pub lease_record_bytes: u64,
-    pub transient_memory_multiplier: u64,
     pub initial_price_sparks_per_unit: u64,
 }
 
@@ -36,7 +35,6 @@ impl Default for StorageParams {
             minimum_lease_units: 1,
             minimum_remaining_units: 1,
             lease_record_bytes: 16,
-            transient_memory_multiplier: 4,
             initial_price_sparks_per_unit: 10 * SPARKS_PER_FLAME,
         }
     }
@@ -49,7 +47,6 @@ impl StorageParams {
             || self.lease_duration_blocks == 0
             || self.minimum_lease_units == 0
             || self.minimum_remaining_units == 0
-            || self.transient_memory_multiplier == 0
             || self.initial_price_sparks_per_unit == 0
         {
             return Err(StorageError::InvalidParameters);
@@ -530,6 +527,22 @@ impl ActorRegistry for ActorStore {
         Ok(live.code.clone())
     }
 
+    fn actor_code_bytes(&self, actor: &ActorID) -> Result<u64, VMError> {
+        let live = self.require_live(actor.to_hash())?.live.as_ref().unwrap();
+        if live.state.is_none() {
+            return Err(VMError::ActorEmpty);
+        }
+        Ok(live.code.len() as u64)
+    }
+
+    fn actor_state_bytes(&self, actor: &ActorID) -> Result<u64, VMError> {
+        let live = self.require_live(actor.to_hash())?.live.as_ref().unwrap();
+        if live.state.is_none() {
+            return Err(VMError::ActorEmpty);
+        }
+        Ok(live.state_bytes)
+    }
+
     fn set_code(&mut self, actor: &ActorID, code: Vec<u8>) -> Result<(), VMError> {
         let key = actor.to_hash();
         self.require_live(key)?;
@@ -546,10 +559,6 @@ impl ActorRegistry for ActorStore {
 
     fn actor_capacity(&self, actor: &ActorID, height: u64) -> Result<u64, VMError> {
         self.capacity_slot(self.require_live(actor.to_hash())?, height)
-    }
-
-    fn transient_memory_multiplier(&self) -> u64 {
-        self.params.transient_memory_multiplier
     }
 
     fn quote_storage(

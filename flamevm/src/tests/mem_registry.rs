@@ -198,6 +198,25 @@ impl ActorRegistry for MemRegistry {
         MemRegistry::load_code(self, id)
     }
 
+    fn actor_code_bytes(&self, id: &ActorID) -> Result<u64, VMError> {
+        let actor = self.actor(id).ok_or(VMError::ActorNotFound)?;
+        if actor.is_checked_out() {
+            return Err(VMError::ActorEmpty);
+        }
+        Ok(actor.code.len() as u64)
+    }
+
+    fn actor_state_bytes(&self, id: &ActorID) -> Result<u64, VMError> {
+        let actor = self.actor(id).ok_or(VMError::ActorNotFound)?;
+        if actor.is_checked_out() {
+            return Err(VMError::ActorEmpty);
+        }
+        actor
+            .committed_usage
+            .checked_sub(actor.code.len() as u64)
+            .ok_or(VMError::StorageArithmeticOverflow)
+    }
+
     fn set_code(&mut self, id: &ActorID, code: Vec<u8>) -> Result<(), VMError> {
         MemRegistry::set_code(self, id, code)
     }

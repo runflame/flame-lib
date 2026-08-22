@@ -20,7 +20,6 @@ pub struct BlockLimits {
     pub max_transactions: usize,
     pub max_witness_bytes: usize,
     pub max_external_gas: u64,
-    pub max_external_memory: u64,
     pub max_internal_gas: u64,
     pub max_messages: usize,
     pub max_proofs_per_transaction: usize,
@@ -33,7 +32,6 @@ impl Default for BlockLimits {
             max_transactions: 10_000,
             max_witness_bytes: 16 * 1024 * 1024,
             max_external_gas: 100_000_000,
-            max_external_memory: 512 * 1024 * 1024,
             max_internal_gas: 25_000_000,
             max_messages: 100_000,
             max_proofs_per_transaction: 100_000,
@@ -77,7 +75,6 @@ impl BlockTx {
         t.append_message(b"tx.signature", &self.tx.signature_bytes());
         t.append_message(b"tx.proof", &self.tx.proof_bytes());
         t.append_message(b"tx.gas", &self.limits.gas.to_le_bytes());
-        t.append_message(b"tx.mem", &self.limits.mem.to_le_bytes());
         t.append_message(
             b"utreexo.proof_count",
             &(self.proofs.len() as u64).to_le_bytes(),
@@ -110,7 +107,7 @@ impl BlockTx {
             .checked_add(self.tx.script().len())?
             .checked_add(self.tx.signature_bytes().len())?
             .checked_add(self.tx.proof_bytes().len())?
-            .checked_add(16)?
+            .checked_add(8)?
             .checked_add(8)?;
         self.proofs.iter().try_fold(fixed, |sum, proof| {
             let proof_size = match proof {
@@ -617,7 +614,6 @@ impl Blockchain {
 
         let mut witness_bytes = 0usize;
         let mut gas = 0u64;
-        let mut memory = 0u64;
         for tx in &block.transactions {
             if tx.tx.header().version != self.params.version
                 || tx.proofs.len() > self.params.limits.max_proofs_per_transaction
@@ -635,13 +631,9 @@ impl Blockchain {
             gas = gas
                 .checked_add(tx.limits.gas)
                 .ok_or(ChainError::LimitExceeded)?;
-            memory = memory
-                .checked_add(tx.limits.mem)
-                .ok_or(ChainError::LimitExceeded)?;
         }
         if witness_bytes > self.params.limits.max_witness_bytes
             || gas > self.params.limits.max_external_gas
-            || memory > self.params.limits.max_external_memory
         {
             return Err(ChainError::LimitExceeded);
         }

@@ -75,7 +75,6 @@ impl Verifier {
         proof: &R1CSProof,
         header: TxHeader,
         gas_limit: u64,
-        mem_limit: u64,
         txbound_signature: Option<musig::Signature>,
     ) -> Result<TxResult, VMError> {
         let mut verifier = Verifier::new();
@@ -85,7 +84,6 @@ impl Verifier {
             header,
             bytecode,
             gas_limit,
-            mem_limit,
             &mut verifier,
         )?;
         // Append each Explicit deferred sig to the batch.

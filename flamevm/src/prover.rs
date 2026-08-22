@@ -74,7 +74,6 @@ impl<'g> Prover<'g> {
         program: ScriptBuilder,
         header: TxHeader,
         gas_limit: u64,
-        mem_limit: u64,
     ) -> Result<TxResult, VMError> {
         let mut prover = Prover::new(pc_gens);
         // Run the VM but receive the result without the proof set —
@@ -85,7 +84,6 @@ impl<'g> Prover<'g> {
             header,
             program,
             gas_limit,
-            mem_limit,
             &mut prover,
         )?;
         // Bind the canonical TxID into the R1CS transcript so the

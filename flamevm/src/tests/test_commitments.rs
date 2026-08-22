@@ -66,7 +66,7 @@ fn prove_then_verify_with_commit_expr_eq() {
         .alloc(Some(witness_int))
         .eq()
         .verify();
-    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
             .expect("prove succeeds");
     let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
@@ -77,7 +77,6 @@ fn prove_then_verify_with_commit_expr_eq() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify succeeds");

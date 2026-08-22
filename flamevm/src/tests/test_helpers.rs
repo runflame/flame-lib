@@ -33,6 +33,14 @@ impl ActorRegistry for StubRegistry {
         Ok(self.script.clone())
     }
 
+    fn actor_code_bytes(&self, _actor: &ActorID) -> Result<u64, VMError> {
+        Ok(self.script.len() as u64)
+    }
+
+    fn actor_state_bytes(&self, _actor: &ActorID) -> Result<u64, VMError> {
+        Ok(0)
+    }
+
     fn set_code(&mut self, _actor: &ActorID, _code: Vec<u8>) -> Result<(), VMError> {
         unimplemented!("StubRegistry::set_code — use MemRegistry")
     }
@@ -131,7 +139,6 @@ pub(crate) fn vm_with_script(script: Vec<u8>) -> VM {
                 .into_instructions(),
             kind,
             1_000_000,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     )
@@ -349,7 +356,7 @@ pub(crate) fn dispatch_code(arms: &[(u64, Vec<u8>)]) -> Vec<u8> {
 /// exercise the inner checks (root frame would short-circuit with
 /// `ReturnAtRoot`).
 pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
-    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0);
+    let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500);
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
@@ -360,7 +367,6 @@ pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
             .into_instructions(),
         child_kind,
         500,
-        0,
     );
     let mut vm = VM::new(dummy_header(), parent);
     let p = mem::replace(&mut vm.current_call, child);
@@ -468,7 +474,6 @@ pub(crate) fn vm_internal_with_actor(script: Vec<u8>, actor: ActorID) -> VM {
                 .into_instructions(),
             kind,
             1_000_000,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     )
@@ -500,7 +505,6 @@ pub(crate) fn vm_external_with_script(script: Vec<u8>) -> VM {
                 .into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
         ),
     )
 }
@@ -555,7 +559,6 @@ pub(crate) fn run_external_workflow(script: Vec<u8>) -> VM {
                 .into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
         ),
     );
     let mut delegate = StubDelegate::new();
@@ -616,7 +619,6 @@ pub(crate) fn run_external_steps<'g>(
             program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
         ),
     );
     let mut prover = Prover::new(pc_gens);
@@ -787,12 +789,11 @@ pub(crate) fn build_confidential_nm_program(
         program = program.input();
         // taproot_proof pieces.
         program = push_taproot_proof_to_program(program, &cp);
-        // gas/bytes operands (generous), then push:0 args, open.
+        // A generous gas operand, then push:0 args, open.
         // After open, the parent stack has [Token, k=1, success=1]:
         // verify pops the success marker (hard-fail if 0), drop
         // discards the count, leaving just the Token for mix.
         program = program
-            .push_int(1024u64)
             .push_int(1024u64)
             .push_int(0u64)
             .open()
@@ -1055,7 +1056,7 @@ pub(crate) fn run_confidential_nm(inputs: &[NMInputSpec], outputs: &[NMOutputSpe
     let pc_gens = PedersenGens::default();
     let program = build_confidential_nm_program(inputs, outputs);
     let prover_result =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0).expect("prove ok");
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove ok");
     let txid_p = prover_result.txid;
     // The prover-side TxResult already exposes the full txlog —
     // assert against it so any divergence between prover and
@@ -1072,7 +1073,6 @@ pub(crate) fn run_confidential_nm(inputs: &[NMInputSpec], outputs: &[NMOutputSpe
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify ok");

@@ -4,7 +4,7 @@ use crate::constraints::Commitment;
 use crate::crypto::Point;
 use crate::errors::VMError;
 use crate::int253::Int253;
-use readerwriter::Encodable;
+use readerwriter::{Encodable, SizeWriter};
 
 use crate::ops::Instruction;
 use crate::cell::{Cell, Predicate};
@@ -59,8 +59,18 @@ impl StringWitness {
     fn len(&self) -> usize {
         match self {
             Self::Point(_) | Self::Scalar(_) => 32,
-            Self::Script(instrs) => compile_instructions(instrs).len(),
-            Self::Cell(c) => c.to_bytes().len(),
+            Self::Script(instrs) => {
+                let mut size = SizeWriter::new();
+                for instr in instrs {
+                    instr.encode(&mut size).expect("size writer has capacity");
+                }
+                size.len()
+            }
+            Self::Cell(c) => {
+                let mut size = SizeWriter::new();
+                c.encode(&mut size).expect("admitted cell is encodable");
+                size.len()
+            }
         }
     }
 
@@ -286,6 +296,14 @@ impl String {
     pub fn append_bytes(self, bytes: &[u8]) -> String {
         let mut out = self.to_bytes();
         out.extend_from_slice(bytes);
+        String::Opaque(out)
+    }
+
+    /// Returns `self` followed by `n` zero bytes without allocating a
+    /// temporary zero buffer.
+    pub fn append_zeros(self, n: usize) -> String {
+        let mut out = self.to_bytes();
+        out.resize(out.len().saturating_add(n), 0);
         String::Opaque(out)
     }
 

@@ -4,7 +4,7 @@ mod writer;
 
 pub use codable::{Codable, Decodable, Encodable, ExactSizeEncodable};
 pub use reader::{ReadError, Reader};
-pub use writer::{WriteError, Writer};
+pub use writer::{SizeWriter, WriteError, Writer};
 
 // `merlin_support` only provides `impl Writer for Transcript` — no
 // items to re-export. Declaring the module is enough to bring the

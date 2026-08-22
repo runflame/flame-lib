@@ -4,14 +4,13 @@ use super::test_helpers::*;
 use crate::vm::LOCKTIME_TIMESTAMP_THRESHOLD;
 use crate::{empty_state, ActorID, ActorRegistry, Int253, StoragePurchase};
 
-fn external_vm(header: TxHeader, script: Vec<u8>, gas: u64, memory: u64) -> VM {
+fn external_vm(header: TxHeader, script: Vec<u8>, gas: u64) -> VM {
     VM::new(
         header,
         CallFrame::new(
             ScriptBuilder::parse(&script).unwrap().into_instructions(),
             CallKind::ExternalRoot,
             gas,
-            memory,
         ),
     )
 }
@@ -26,7 +25,6 @@ fn timelock_reports_bip65_kind() {
             },
             ScriptBuilder::new().timelock().to_bytecode(),
             1_000_000,
-            0,
         );
         run_to_end(&mut vm).unwrap();
         assert_int(&vm.current_call.stack[0], Int253::from(locktime as u64));
@@ -35,11 +33,10 @@ fn timelock_reports_bip65_kind() {
 }
 
 #[test]
-fn version_and_resource_limits_report_frame_values() {
+fn version_and_gas_limit_report_frame_values() {
     let script = ScriptBuilder::new()
         .version()
         .gaslimit()
-        .memlimit()
         .to_bytecode();
     let mut vm = external_vm(
         TxHeader {
@@ -48,12 +45,10 @@ fn version_and_resource_limits_report_frame_values() {
         },
         script,
         99_999,
-        4_096,
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(42u64));
     assert_int(&vm.current_call.stack[1], Int253::from(99_999u64));
-    assert_int(&vm.current_call.stack[2], Int253::from(4_096u64));
 }
 
 #[test]
@@ -62,7 +57,6 @@ fn gas_reports_remaining_budget_after_its_own_cost() {
         dummy_header(),
         ScriptBuilder::new().gas().to_bytecode(),
         12_345,
-        0,
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[0], Int253::from(12_344u64));
@@ -94,7 +88,6 @@ fn usage_and_capacity_read_actor_storage() {
             ],
             kind,
             1_000_000,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     );
@@ -113,7 +106,7 @@ fn storage_introspection_requires_registry() {
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(vec![Instruction::Usage], kind, 1_000_000, 0)
+        CallFrame::new(vec![Instruction::Usage], kind, 1_000_000)
             .with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
@@ -161,7 +154,6 @@ fn storage_quote_and_purchase_use_host_result() {
                 caller: None,
             },
             1_000_000,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     );
@@ -179,7 +171,6 @@ fn storage_quote_and_purchase_use_host_result() {
                 .into_instructions(),
             kind,
             1_000_000,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     );

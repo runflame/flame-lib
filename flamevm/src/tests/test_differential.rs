@@ -25,7 +25,6 @@ fn assert_backends_agree(bytecode: &[u8]) {
             ScriptBuilder::parse(bytecode).expect("parse").into_instructions(),
             internal_kind(),
             100_000,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     );
@@ -33,7 +32,7 @@ fn assert_backends_agree(bytecode: &[u8]) {
 
     let mut vm_bytes = VM::new(
         dummy_header(),
-        CallFrame::from_bytecode(bytecode.to_vec(), internal_kind(), 100_000, 0)
+        CallFrame::from_bytecode(bytecode.to_vec(), internal_kind(), 100_000)
             .with_anchor(Anchor([0u8; 32])),
     );
     let r_bytes = run_until_tx_done(&mut vm_bytes);
@@ -75,7 +74,7 @@ fn backends_agree_across_sample_programs() {
             .drop_(),
         // Forward jump skip-scan over dead code.
         ScriptBuilder::new().jump(0).push_int(7u64).push_int(8u64).label(0),
-        // String growth (charges mem identically) + type probe.
+        // String growth (charges allocation gas identically) + type probe.
         ScriptBuilder::new()
             .push_str(String::from(b"ab".to_vec()))
             .push_str(String::from(b"cd".to_vec()))

@@ -41,11 +41,6 @@ pub enum VMError {
     #[error("Index out of range")]
     IndexOutOfRange,
 
-    /// A stack-controlled allocation (`writezeros`, `tread`) exceeds the
-    /// frame's transient-memory cap.
-    #[error("transient allocation exceeds memory limit")]
-    MemLimitExceeded,
-
     /// The frame's gas budget is exhausted (per-instruction metering,
     /// including instructions scanned while skipping to a label), or a
     /// call grants more gas than the caller has remaining.

@@ -190,6 +190,11 @@ smaller enclosing value, including:
 - cryptographic multiplication/MSM work; and
 - issued and purchased storage.
 
+Execution RAM has no independent storage-derived allowance. FlameVM charges
+logical byte/item allocation work against external or internal gas, so these
+gas ceilings also bound hostile active-memory growth. Persistent actor capacity
+continues to bound stored state only.
+
 Storage parameters are listed in [storage.md](storage.md). Every active parameter
 set must be selected by a committed protocol version; node-local configuration
 must not silently alter consensus validity. Separate limits are easier to audit

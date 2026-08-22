@@ -8,7 +8,7 @@ use crate::{empty_state, ActorID, Dict, Int253, StoragePurchase};
 
 /// Builds an empty state with a single `recv` method that runs the
 /// caller-supplied bytes. Returns (state, id).
-fn deploy_with_recv(reg: &mut MemRegistry, recv: Vec<u8>, capacity: u64, _height: u64) -> ActorID {
+fn deploy_with_recv(reg: &mut MemRegistry, recv: Vec<u8>, capacity: u64) -> ActorID {
     // The recv bytes ARE the actor's code; state starts empty. Id is
     // derived from the code (stand-in for the real constructor).
     let id = ActorID::Hash(ActorID::Constructor(recv.clone()).to_hash());
@@ -33,7 +33,6 @@ fn vm_for(actor: ActorID, script: Vec<u8>) -> VM {
                 .into_instructions(),
             kind,
             1_000_000,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     )
@@ -44,7 +43,7 @@ fn vm_for(actor: ActorID, script: Vec<u8>) -> VM {
 #[test]
 fn facade_internal_execute_tx_roundtrip() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000);
     let mut reg = reg;
     let msg = Message::new(
         id,
@@ -118,7 +117,7 @@ fn constructor_buys_storage_and_is_reused() {
 #[test]
 fn load_checks_out_state() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000);
 
     // Script: just `load`. Step once and inspect; don't run to
     // end (end-of-frame is checked clean-stack, which a bare
@@ -141,7 +140,7 @@ fn load_checks_out_state() {
 #[test]
 fn load_then_save_round_trips() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000);
 
     // Script: `load; save`.
     let script = ScriptBuilder::new().load().save().to_bytecode();
@@ -165,7 +164,6 @@ fn load_in_external_root_errors_actor_context() {
             ScriptBuilder::new().load().into_instructions(),
             kind,
             1000,
-            0,
         ),
     );
     let err = vm
@@ -177,7 +175,7 @@ fn load_in_external_root_errors_actor_context() {
 #[test]
 fn load_without_registry_errors_registry_unavailable() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000);
     let mut vm = vm_for(id, ScriptBuilder::new().load().to_bytecode());
     // step_internal (no registry) hits the RegistryUnavailable
     // guard inside op_load.
@@ -188,7 +186,7 @@ fn load_without_registry_errors_registry_unavailable() {
 #[test]
 fn second_load_errors_actor_empty() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000);
 
     // Script: `load; load`. The second load finds the actor empty
     // (state already checked out) → ActorEmpty.
@@ -204,7 +202,7 @@ fn second_load_errors_actor_empty() {
 #[test]
 fn load_against_checked_out_actor_errors() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000);
     // Simulate a sibling frame having checked out the state.
     reg.actor_mut(&id).expect("present").state = None;
 
@@ -218,7 +216,7 @@ fn load_against_checked_out_actor_errors() {
 #[test]
 fn save_without_load_errors() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000);
 
     // Script: push:0, dict, save. Save runs without a prior
     // load → SaveWithoutLoad error.
@@ -248,7 +246,7 @@ fn save_accepts_arbitrary_portable_dict_shape() {
     // 0x00 — scripts that ignore the convention just won't be
     // dispatchable, but that's their choice.)
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000);
     // Check the state out (as a prior op_load would) so save can move
     // a fresh Dict back in.
     reg.actor_mut(&id).expect("present").state = None;
@@ -275,7 +273,7 @@ fn save_accepts_arbitrary_portable_dict_shape() {
 #[test]
 fn save_rejects_nested_nonportable_state() {
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000, 0);
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 1_000);
     reg.actor_mut(&id).expect("present").state = None;
 
     let mut inner = Dict::new();
@@ -302,7 +300,6 @@ fn load_then_dismantle_emits_actor_destroy() {
         &mut reg,
         ScriptBuilder::new().load().drop_().to_bytecode(),
         10_000,
-        0,
     );
     assert!(reg.exists(&id));
 
@@ -427,7 +424,6 @@ fn load_without_discharge_errors_stack_not_clean() {
         &mut reg,
         ScriptBuilder::new().load().to_bytecode(),
         10_000,
-        0,
     );
     let block = BlockContext { height: 100 };
     let msg = Message::new(
@@ -455,7 +451,6 @@ fn load_followed_by_save_preserves_actor() {
         &mut reg,
         ScriptBuilder::new().load().save().to_bytecode(),
         10_000,
-        0,
     );
 
     let block = BlockContext { height: 100 };
@@ -496,7 +491,6 @@ fn receive_committed_as_first_effect_after_header() {
         &mut reg,
         ScriptBuilder::new().nop().to_bytecode(),
         10_000,
-        0,
     );
     let block = BlockContext { height: 100 };
     let known_anchor = [0xab; 32];
@@ -545,7 +539,6 @@ fn receive_makes_internal_txid_bind_to_send_anchor() {
             &mut reg,
             ScriptBuilder::new().nop().to_bytecode(),
             10_000,
-            0,
         );
         let block = BlockContext { height: 100 };
         let msg = Message::new(

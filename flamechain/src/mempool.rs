@@ -13,7 +13,6 @@ pub struct MempoolPolicy {
     pub max_transactions: usize,
     pub max_witness_bytes: usize,
     pub max_transaction_gas: u64,
-    pub max_transaction_memory: u64,
     pub max_proofs_per_transaction: usize,
     pub max_proof_depth: usize,
     pub minimum_fee: u64,
@@ -25,7 +24,6 @@ impl Default for MempoolPolicy {
             max_transactions: 10_000,
             max_witness_bytes: 64 * 1024 * 1024,
             max_transaction_gas: 10_000_000,
-            max_transaction_memory: 64 * 1024 * 1024,
             max_proofs_per_transaction: 100_000,
             max_proof_depth: 63,
             minimum_fee: 0,
@@ -184,7 +182,6 @@ impl Mempool {
     fn check_envelope(&self, block_tx: &BlockTx) -> Result<usize, MempoolError> {
         if block_tx.tx.header().version != self.version
             || block_tx.limits.gas > self.policy.max_transaction_gas
-            || block_tx.limits.mem > self.policy.max_transaction_memory
             || block_tx.proofs.len() > self.policy.max_proofs_per_transaction
             || block_tx.proofs.iter().any(|proof| {
                 proof

@@ -48,7 +48,6 @@ fn signcall_records_explicit_sig_and_runs_program() {
         .push_str(String::from(prog))                    // inner script
         .push_str(String::from(sig_bytes.to_vec()))      // 64-byte sig
         .push_int(1024u64)                               // gas
-        .push_int(1024u64)                               // bytes
         .push_int(0u64)                                  // m = 0 args
         .signcall()
         .to_bytecode();
@@ -91,7 +90,6 @@ fn signcall_message_binds_only_to_program_not_to_cell() {
             .push_str(String::from(prog))
             .push_str(String::from(sig.to_vec()))
             .push_int(1024u64)
-            .push_int(1024u64)
             .push_int(0u64)
             .signcall()
             .to_bytecode();
@@ -114,7 +112,7 @@ fn signcall_message_binds_only_to_program_not_to_cell() {
 
 #[test]
 fn signcall_rejects_wrong_signature_length() {
-    // payload(5), count(1), predicate, cell, prog, bad-sig, gas/bytes,
+    // payload(5), count(1), predicate, cell, prog, bad-sig, gas,
     // m=0, signcall. signcall pops bad sig and errors before frame.
     let prog = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
     let script = ScriptBuilder::new()
@@ -124,7 +122,6 @@ fn signcall_rejects_wrong_signature_length() {
         .cell()
         .push_str(String::from(prog))
         .push_str(String::from(vec![0u8; 63]))           // bad: 63-byte sig
-        .push_int(1024u64)
         .push_int(1024u64)
         .push_int(0u64)
         .signcall()
@@ -219,7 +216,7 @@ fn phase20_single_txbound_verifies_with_multisig() {
     let (script, cell_id) = make_signtx_script_with_cell(vk);
     let program = ScriptBuilder::parse(&script).expect("decode");
     let prover_result =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
             .expect("prove ok");
     let txid = prover_result.txid;
     // Sanity: deferred_sigs has one TxBound with the expected cell_id.
@@ -248,7 +245,6 @@ fn phase20_single_txbound_verifies_with_multisig() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         Some(sig),
     )
     .expect("verify ok");
@@ -264,7 +260,7 @@ fn facade_build_sign_verify_roundtrip() {
     let (vk, sk) = signing_keypair(101);
     let (script, _cid) = make_signtx_script_with_cell(vk);
     let program = ScriptBuilder::parse(&script).expect("decode");
-    let limits = Limits { gas: 1_000_000, mem: 0 };
+    let limits = Limits { gas: 1_000_000 };
 
     let unsigned = program.build_tx(dummy_header(), limits).expect("build_tx");
     let si = unsigned.signing_instructions();
@@ -333,7 +329,7 @@ fn phase20_two_txbound_verifies_with_multisig() {
         .drop_()
         .drop_();
     let prover_result =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
             .expect("prove ok");
     assert_eq!(prover_result.deferred_sigs.len(), 2);
     let txid = prover_result.txid;
@@ -358,7 +354,6 @@ fn phase20_two_txbound_verifies_with_multisig() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         Some(sig),
     )
     .expect("verify ok");
@@ -372,7 +367,7 @@ fn phase20_missing_signature_when_txbound_present() {
     let (vk, _sk) = signing_keypair(7);
     let (script, _cell_id) = make_signtx_script_with_cell(vk);
     let program = ScriptBuilder::parse(&script).expect("decode");
-    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
             .expect("prove ok");
     let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
@@ -383,7 +378,6 @@ fn phase20_missing_signature_when_txbound_present() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .unwrap_err();
@@ -405,7 +399,7 @@ fn phase20_spurious_signature_when_no_txbound() {
         .alloc(Some(Int253::from(10u64)))
         .eq()
         .verify();
-    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
             .expect("prove ok");
     let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
@@ -423,7 +417,6 @@ fn phase20_spurious_signature_when_no_txbound() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         Some(sig),
     )
     .unwrap_err();
@@ -444,7 +437,7 @@ fn phase20_tampered_signature_rejected() {
     let (script, cell_id) = make_signtx_script_with_cell(vk);
     let program = ScriptBuilder::parse(&script).expect("decode");
     let prover_result =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
             .expect("prove ok");
     let txid = prover_result.txid;
     let TxResult { bytecode, proof, .. } = prover_result;
@@ -463,7 +456,6 @@ fn phase20_tampered_signature_rejected() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         Some(sig),
     )
     .unwrap_err();
@@ -484,7 +476,7 @@ fn phase20_no_txbound_no_signature_roundtrip() {
         .alloc(Some(Int253::from(10u64)))
         .eq()
         .verify();
-    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
             .expect("prove ok");
     let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
@@ -495,7 +487,6 @@ fn phase20_no_txbound_no_signature_roundtrip() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify ok with None signature");
@@ -513,7 +504,7 @@ fn phase20_signature_over_wrong_txid_rejected() {
     let program = ScriptBuilder::parse(&script).expect("decode");
     let header_prove = TxHeader { version: 1, locktime: 0 };
     let prover_result =
-        Prover::prove(&pc_gens, program, header_prove, 1_000_000, 0)
+        Prover::prove(&pc_gens, program, header_prove, 1_000_000)
             .expect("prove ok");
     let TxResult { bytecode, proof, .. } = prover_result;
     let proof = proof.expect("proof set");
@@ -532,7 +523,6 @@ fn phase20_signature_over_wrong_txid_rejected() {
         &proof,
         header_prove,
         1_000_000,
-        0,
         Some(sig),
     )
     .unwrap_err();
@@ -541,8 +531,8 @@ fn phase20_signature_over_wrong_txid_rejected() {
 
 /// `op_signcall` creates an isolated CallFrame with no actor identity,
 /// same as `op_open` (ADR 0013). Inside the signed leaf, `op_selfid`
-/// errors `OpcodeRequiresActorContext` — caught by step as a `0`
-/// failure marker on the parent's stack.
+/// errors `OpcodeRequiresActorContext`; the parent recovers the locked
+/// Cell followed by `count=1, success=0`.
 #[test]
 fn signcall_selfid_errors_no_actor_context() {
     let prog = ScriptBuilder::new().selfid().to_bytecode();
@@ -555,14 +545,14 @@ fn signcall_selfid_errors_no_actor_context() {
         .push_str(String::from(prog))
         .push_str(String::from(sig_bytes.to_vec()))
         .push_int(1024u64)
-        .push_int(1024u64)
         .push_int(0u64)
         .signcall()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
-    // Child errored → unwind + marker `0` on parent.
-    assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+    assert_eq!(vm.current_call.stack.len(), 3);
+    assert!(matches!(vm.current_call.stack[0], Value::Cell(_)));
+    assert_int(&vm.current_call.stack[1], Int253::ONE);
+    assert_int(&vm.current_call.stack[2], Int253::ZERO);
 }

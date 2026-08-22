@@ -31,7 +31,6 @@ fn vm_for_actor(actor: ActorID, script: Vec<u8>) -> VM {
                 .into_instructions(),
             kind,
             1_000_000,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     )
@@ -155,7 +154,7 @@ fn call_does_not_emit_txlog_entry_by_itself() {
 fn call_to_checked_out_actor_blocked() {
     // The re-entrancy lock (ADR 0017): calling an actor whose state is
     // checked out — a live frame holds it mid-update — fails with the
-    // `0` marker (the call "did not happen"). The state's absence *is*
+    // `[count=0, success=0]`. The state's absence *is*
     // the lock; `resolve_method` returns `ActorEmpty`.
     let mut reg = MemRegistry::new();
     let id = ActorID::Hash([0xa1; 32]);
@@ -171,23 +170,13 @@ fn call_to_checked_out_actor_blocked() {
 
     let script = call_script(&id, 10_000);
     let mut vm = vm_for_actor(id.clone(), script);
-    while vm.step_internal_with_registry(&mut reg).is_ok() {
-        if vm.current_call.stack.len() == 1 {
-            match &vm.current_call.stack[0] {
-                Value::Int253(i) => {
-                    assert_eq!(*i, Int253::from(0u64), "block marker");
-                    assert_eq!(
-                        vm.txlog.len(),
-                        1,
-                        "blocked re-entry must not emit side effects"
-                    );
-                    return;
-                }
-                _ => panic!("expected Int253 marker"),
-            }
-        }
+    for _ in 0..4 {
+        vm.step_internal_with_registry(&mut reg).expect("step ok");
     }
-    panic!("call did not push a marker");
+    assert_eq!(vm.current_call.stack.len(), 2);
+    assert_int(&vm.current_call.stack[0], Int253::ZERO);
+    assert_int(&vm.current_call.stack[1], Int253::ZERO);
+    assert_eq!(vm.txlog.len(), 1, "blocked re-entry must emit no effects");
 }
 
 #[test]
@@ -291,7 +280,6 @@ fn call_grant_exceeding_caller_budget_is_out_of_gas() {
             ScriptBuilder::parse(&a_script).unwrap().into_instructions(),
             kind,
             100,
-            0,
         )
         .with_anchor(Anchor([0u8; 32])),
     );
@@ -361,10 +349,12 @@ fn reentrant_view_of_mid_update_state_is_blocked() {
     reg.deploy(a_id.clone(), a_code, empty_state(), 1_000_000)
         .expect("deploy A");
 
-    // B.recv: call A.method1 — blocked (A checked out) → single `0`
-    // marker, drop it once; B exits cleanly.
+    // B.recv: call A.method1 — blocked (A checked out). The selector
+    // is restored ahead of `count=1, success=0`; consume all three.
     let b_recv = {
         let mut p = ScriptBuilder::parse(&call_with_selector(&a_id, 1, 100_000)).expect("parse");
+        p.push_instr(Instruction::Drop);
+        p.push_instr(Instruction::Drop);
         p.push_instr(Instruction::Drop);
         p.to_bytecode()
     };
@@ -520,9 +510,10 @@ fn failed_call_burns_full_grant() {
         .verify()
         .to_bytecode();
     let b = deploy_recv(&mut reg, b_code, 1_000);
-    // A: call B with a 5_000 grant, drop the single failure marker.
+    // A: call B with a 5_000 grant, consume `count=0, success=0`.
     let a_script = {
         let mut p = ScriptBuilder::parse(&call_script(&b, 5_000)).expect("parse");
+        p.push_instr(Instruction::Drop);
         p.push_instr(Instruction::Drop);
         p.to_bytecode()
     };
@@ -553,7 +544,7 @@ fn failed_call_burns_full_grant() {
 fn call_depth_caps_at_exactly_max() {
     let mut reg = MemRegistry::new();
     let id = ActorID::Hash([0xce; 32]);
-    // recv: args…k=0, gas−200, bytes=0, method=0, addr → call; drop marker.
+    // recv: args…k=0, gas−200, addr → call; consume its result.
     let recv = ScriptBuilder::new()
         .push_int(0u64) // k = 0 args
         .gas()
@@ -561,6 +552,7 @@ fn call_depth_caps_at_exactly_max() {
         .add() // grant = remaining − 200
         .push_str(String::from(id.to_hash().to_vec()))
         .call()
+        .drop_()
         .drop_()
         .to_bytecode();
     reg.deploy(id.clone(), recv.clone(), empty_state(), 1_000_000)
@@ -620,14 +612,15 @@ fn f1_failed_subcall_load_does_not_destroy_actor() {
         .to_bytecode();
     let x_id = deploy_recv(&mut reg, evil_recv, 10_000);
 
-    // A.recv: call X (k=0, gas=5_000), drop the failure marker so
+    // A.recv: call X (k=0, gas=5_000), consume its failure result so
     // A's frame exits clean (stack empty → no StackNotClean).
     let a_recv = ScriptBuilder::new()
         .push_int(0u64) // k = 0 args
         .push_int(5_000u64) // gas
         .push_str(String::from(x_id.to_hash().to_vec())) // addr
         .call()
-        .drop_() // drop failure marker (0)
+        .drop_() // drop status = 0
+        .drop_() // drop restored-value count = 0
         .to_bytecode();
     let a_id = deploy_recv(&mut reg, a_recv, 10_000);
 
@@ -699,6 +692,7 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
         .push_int(5_000u64)
         .push_str(String::from(x_id.to_hash().to_vec()))
         .call()
+        .drop_()
         .drop_()
         .to_bytecode();
     let a_id = deploy_recv(&mut reg, a_recv, 10_000);
@@ -783,6 +777,7 @@ fn f3_save_failure_rolls_back_and_preserves_actor() {
         .push_str(String::from(x_id.to_hash().to_vec()))
         .call()
         .drop_()
+        .drop_()
         .to_bytecode();
     let a_id = deploy_recv(&mut reg, a_recv, 10_000);
 
@@ -851,22 +846,62 @@ fn save_emits_actorsave_with_full_state() {
 fn call_to_unknown_actor_rejected_with_marker() {
     let mut reg = MemRegistry::new();
     // Caller exists; target does not — pre-frame registry lookup
-    // fails → marker `0` on caller's stack. No side effects emitted.
+    // fails. The original Token argument must be restored before
+    // `count=1, success=0`; no side effects are emitted.
     let ghost = ActorID::Hash([0xab; 32]);
-    let a_script = call_script(&ghost, 10_000);
+    let a_script = ScriptBuilder::new()
+        .push_int(1u64)
+        .push_int(10_000u64)
+        .push_str(String::from(ghost.to_hash().to_vec()))
+        .call()
+        .to_bytecode();
     let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
     let mut vm = vm_for_actor(a, a_script);
-    while vm.step_internal_with_registry(&mut reg).is_ok() {
-        if !vm.current_call.stack.is_empty() {
-            assert_eq!(vm.current_call.stack.len(), 1);
-            match &vm.current_call.stack[0] {
-                Value::Int253(i) => assert_eq!(*i, Int253::from(0u64)),
-                _ => panic!("expected Int253 marker"),
-            }
-            // Header only — no side effects from a rejected call.
-            assert_eq!(vm.txlog.len(), 1);
-            return;
+    let token = Token::cleartext(Int253::from(7u64), Int253::from(9u64)).unwrap();
+    vm.push_value(Value::Token(token.clone()));
+    for _ in 0..4 {
+        vm.step_internal_with_registry(&mut reg).expect("step ok");
+    }
+    assert_eq!(vm.current_call.stack.len(), 3);
+    assert!(matches!(
+        &vm.current_call.stack[0],
+        Value::Token(t) if t.qty() == token.qty() && t.flv() == token.flv()
+    ));
+    assert_int(&vm.current_call.stack[1], Int253::ONE);
+    assert_int(&vm.current_call.stack[2], Int253::ZERO);
+    assert_eq!(vm.txlog.len(), 1);
+}
+
+#[test]
+fn entered_call_failure_restores_token_argument() {
+    let mut reg = MemRegistry::new();
+    let failing = ScriptBuilder::new().push_int(0u64).verify().to_bytecode();
+    let callee = deploy_recv(&mut reg, failing, 10_000);
+    let caller_script = ScriptBuilder::new()
+        .push_int(1u64)
+        .push_int(5_000u64)
+        .push_str(String::from(callee.to_hash().to_vec()))
+        .call()
+        .to_bytecode();
+    let caller = deploy_recv(&mut reg, caller_script.clone(), 10_000);
+    let mut vm = vm_for_actor(caller, caller_script);
+    let token = Token::cleartext(Int253::from(11u64), Int253::from(13u64)).unwrap();
+    vm.push_value(Value::Token(token.clone()));
+
+    let mut entered = false;
+    loop {
+        vm.step_internal_with_registry(&mut reg).expect("step ok");
+        entered |= !vm.call_stack.is_empty();
+        if entered && vm.call_stack.is_empty() {
+            break;
         }
     }
-    panic!("call did not push a marker");
+
+    assert_eq!(vm.current_call.stack.len(), 3);
+    assert!(matches!(
+        &vm.current_call.stack[0],
+        Value::Token(t) if t.qty() == token.qty() && t.flv() == token.flv()
+    ));
+    assert_int(&vm.current_call.stack[1], Int253::ONE);
+    assert_int(&vm.current_call.stack[2], Int253::ZERO);
 }

@@ -34,10 +34,11 @@ verification are execution machinery and do not appear in the log. TxID commits
 to the ordered effects.
 
 Every `open`, `signcall`, and actor `call` runs in an isolated frame with its own
-stack, control flow, gas, and transient-memory budget. Successful calls return
-only explicitly selected values. Failed calls restore state effects,
-constraints, deferred signatures, fees, and batch-verification work to their
-entry checkpoints.
+stack, control flow, and gas budget. Successful calls return only explicitly
+selected values. Failed calls restore state effects, constraints, deferred
+signatures, fees, and batch-verification work to their entry checkpoints. They
+also return entry-owned values: actor calls return their arguments, while cell
+calls return the original locked Cell followed by their explicit arguments.
 
 Actor state is its re-entrancy lock. `load` moves state out of the registry;
 while checked out, another frame cannot enter or observe that actor. Calling
@@ -49,14 +50,13 @@ Persistent actor storage is purchased in one-year leases by the actor itself.
 Purchases burn Flame at a deterministic reserve price; storage is neither a
 token nor transferable between actors. See [Actor storage](storage.md).
 
-At actor-frame entry, the transient-memory cap is
-`TRANSIENT_MEMORY_CAPACITY_MULTIPLIER` times the larger of current storage
-capacity and charged usage. The usage term bootstraps a provisional constructor
-before its first lease; a successful `addstorage` raises the current frame's cap
-to reflect the new capacity. Memory uses monotonic high-water accounting. Calls
-are bounded to 64 nested frames. Instruction fetch and forward label scans
-consume gas; a failed entered call burns its grant, while a call rejected before
-entry refunds it.
+Execution memory is independent of persistent actor storage. There is no
+separate memory-limit operand or storage-derived RAM allowance. Variable-size
+allocation work is charged to the active frame's gas before allocation; these
+charges are monotonic, so the gas cap bounds hostile allocation even after
+values are dropped. Calls are bounded to 64 nested frames. Instruction fetch,
+EOF checks, and forward label scans consume gas; a failed entered call burns its
+grant, while an availability failure before entry refunds it.
 
 External transaction effects are atomic and independently verifiable. Internal
 transactions execute serially because they share actor state. Expired leases
@@ -466,14 +466,12 @@ Address = enum {
 Persistent-storage allocation, pricing, leases, expiry, destruction, and
 introspection are specified in [Actor storage](storage.md).
 
-**Transient memory.** In addition to persistent storage, an actor may use
-transient memory during a call. At frame entry the cap is
-`TRANSIENT_MEMORY_CAPACITY_MULTIPLIER × max(current capacity, charged usage)`;
-the usage term lets a zero-capacity provisional constructor reach
-`addstorage`. A successful storage purchase raises the current frame's cap to
-reflect its new capacity. `memlimit` returns the actual current cap. Allocations
-that would push monotonic memory accounting past it fail the call. The
-multiplier is defined in [Actor storage](storage.md).
+**Execution memory.** Persistent storage capacity does not grant execution RAM.
+The frame's gas cap is the only execution-resource budget: byte-sized and
+collection-sized growth is charged before allocation, and freeing a value does
+not refund allocation gas. This deliberately accounts logical work rather than
+Rust allocator layout, while still proving a gas-derived upper bound on hostile
+growth.
 
 
 ## Anchors
@@ -486,7 +484,7 @@ Every new cell and message is **anchored** by a unique 32-byte value embedded in
 - `None` at the start of an external tx — [`input`](#input) is the only way to seed it.
 - `Some(M)` at the start of an internal tx, where `M` is the delivering Message's anchor (a split-child from the originating external tx's `op_send`).
 
-Calls split the anchor at entry. `op_call`, `op_open`, and `op_signcall` each split `last_anchor` into `(left, right)` at frame entry. The child's frame starts with `last_anchor = left`; the parent frame stashes `right` in its `post_call_anchor` slot, and `last_anchor` is restored to `right` when control returns (success or failure). This keeps the caller's anchor chain independent of whatever the callee does with its own half, which is what makes the `0` failure marker semantics safe — a failed call cannot corrupt the caller's anchor state.
+Calls split the anchor at entry. `op_call`, `op_open`, and `op_signcall` each split `last_anchor` into `(left, right)` at frame entry. The child's frame starts with `last_anchor = left`; the parent frame stashes `right` in its `post_call_anchor` slot, and `last_anchor` is restored to `right` when control returns (success or failure). This keeps the caller's anchor chain independent of whatever the callee does with its own half.
 
 **Splitting.** Each opcode that produces a new unique-anchored *cross-tx* entity (cell-on-wire, message-to-actor) consumes `last_anchor` and replaces it with a fresh derived value. The split is a single Merlin transcript:
 
@@ -503,7 +501,7 @@ The `left` half is embedded in the new entity (cell anchor / MessageID); the `ri
 
 **Site that seeds without consuming**: [`input`](#input) sets `last_anchor = Anchor(cell.id())` directly (the spent UTXO's id is already unique on the wire — no split needed). Replacing any prior value is intentional: it lets a partial transaction depend only on its own input claim, not on what other parts of the tx contributed before it.
 
-**Sites that split at call entry**: [`call`](#call), [`open`](#open), [`signcall`](#signcall). All three create new call frames and each splits `last_anchor` at entry. The `left` half seeds the child frame's `last_anchor`; the `right` half is held in the parent frame's `post_call_anchor` slot and replaces `last_anchor` when control returns (whether the call succeeded or returned the `0` failure marker). This makes anchor flow deterministic across call success/failure boundaries — the caller's anchor chain is independent of whatever the callee did with its left half.
+**Sites that split at call entry**: [`call`](#call), [`open`](#open), [`signcall`](#signcall). All three create new call frames and each splits `last_anchor` at entry. The `left` half seeds the child frame's `last_anchor`; the `right` half is held in the parent frame's `post_call_anchor` slot and replaces `last_anchor` when control returns. This makes anchor flow deterministic across call success/failure boundaries — the caller's anchor chain is independent of whatever the callee did with its left half.
 
 **Locality across parties.** Each `op_input` *replaces* the anchor unconditionally rather than mixing into a chain. So a multi-party tx where party A claims input A_in and produces outputs, then party B claims input B_in and produces outputs, has each party's output anchors rooted only in their own input id. B's claim wipes A's residue; that's fine because B's outputs derive from B_in's split-children, not from anything A did. A party signing their portion can predict their own output anchors locally from their own input cell ids.
 
@@ -608,12 +606,12 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | c0 | [input](#input) | ext. | s → cell | Materialize a cell from a Utreexo-validated input encoding. |
 | c1 | [cell](#cell) | | items… k pred → cell | Build a new cell from `k` portable items under predicate `pred`. |
 | c2 | [output](#output) | | items… k pred → ø | Like `cell`, but emits the cell directly as a tx Output. |
-| c3 | [open](#open) | | cell ik nbrs pos script gas memlimit args… k → results… k' | Reveal a taproot leaf and run it in an isolated call frame. |
+| c3 | [open](#open) | | cell ik nbrs pos script gas args… k → {results… k' 1 \| cell args… (k+1) 0} | Reveal a taproot leaf and run it in an isolated call frame. |
 | c4 | [signtx](#signtx) | | cell → items… k | Authorize the tx with the cell predicate's signature; pour payload. |
-| c5 | [signcall](#signcall) | | cell script sig gas memlimit args… m → results… k' | Run a script signed by the cell predicate in an isolated frame. |
+| c5 | [signcall](#signcall) | | cell script sig gas args… m → {results… k' 1 \| cell args… (m+1) 0} | Run a script signed by the cell predicate in an isolated frame. |
 |    | **Actors** | | | |
 | d0 | [send](#send) | | args… k refund gas addr → ø | Queue an asynchronous actor message. |
-| d1 | [call](#call) | int. | args… k gas addr → results… k' | Synchronously call an actor. |
+| d1 | [call](#call) | int. | args… k gas addr → {results… k' 1 \| args… k 0} | Synchronously call an actor. |
 | d2 | [load](#load) | int. | ø → value | Check out the actor's state (any portable Value; moves it out, locks re-entry). |
 | d3 | [save](#save) | int. | value → ø | Move the state value back in (requires checkout; unlocks). |
 | d4 | [setcode](#setcode) | int. | code → ø | Replace the actor's code blob (author-gated upgrade). |
@@ -626,7 +624,6 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | e4 | [gas](#gas) | | ø → n | Push remaining gas budget for the current call. |
 | e5 | [gaslimit](#gaslimit) | | ø → n | Push the call's total gas budget cap. |
 | e6 | [usage](#usage) | int. | ø → n | Push the actor's currently occupied storage bytes. |
-| e7 | [memlimit](#memlimit) | | ø → n | Push the frame's current transient-memory cap. |
 | e8 | [capacity](#capacity) | int. | h → n | Push actor storage capacity available at current or future core-block height `h`. |
 |    | **Tx & chain info** | | | |
 | f0 | [timelock](#timelock) | | ø → n {0\|1} | Push tx locktime and a flag for height (`0`) vs. timestamp (`1`). |
@@ -646,6 +643,11 @@ implemented; bytes `f3` through `f7` remain reserved and currently fail
 ### Failure modes
 
 A **hard fail** aborts the current call.
+
+If that call has a parent, the VM rolls the child back and converts the failure
+to the call opcode's documented in-band failure shape. At the outermost frame,
+the error aborts the transaction. Synchronous failure never exposes the failed
+child's mutated stack: it exposes only the entry escrow after rollback.
 
 A **soft fail** is an in-band signal: the opcode pushes an optional shape
 `{value 1 | 0}` so the script can branch. Its stack diagram is authoritative
@@ -1212,7 +1214,7 @@ Atomic cross-frame return:
 3. Asserts the callee stack has exactly `k` items left (otherwise `BadReturnArity` or `StackNotClean`).
 4. Pops the call frame.
 5. Refunds leftover gas to the parent.
-6. Pushes the `k` items onto the parent's stack, then the count `k`, then a **success marker `1`** — the parent observes `results… k 1`. (A clean run-off-the-end exit pushes `0 1`.) A **failed** call instead pushes a single `0` — the call "did not happen". Callers branch on this trailing `1`/`0` flag; the same convention applies to [`call`](#call), [`open`](#open), and [`signcall`](#signcall).
+6. Pushes the `k` items onto the parent's stack, then the count `k`, then a **success marker `1`** — the parent observes `results… k 1`. A clean run-off-the-end exit pushes `0 1`. A failed child instead restores its entry escrow followed by the escrow count and `0`; callers branch on this trailing status. Actor calls escrow their arguments. `open` and `signcall` escrow the original locked Cell plus their explicit arguments, never the Cell payload separately.
 
 At the outermost call frame, `return` always errors regardless of `k`; a script terminates cleanly by running off the end of its instructions with an empty stack (jump to a trailing label to short-circuit).
 
@@ -1268,19 +1270,27 @@ Same construction as [`cell`](#cell) but emits an `Output` effect into the txlog
 
 ### open
 
-_cell internal_key neighbors position script gas memlimit args… k_ → _results… k'_
+_cell internal_key neighbors position script gas args… k_ →
+_{results… k' 1 | cell args… (k+1) 0}_
 
 Verifies the Taproot proof against the cell's predicate:
 
-1. Pops `k` (Int253) and `args` (k portable values).
-2. Pops `memlimit` and `gas` as `Int253` (transient-memory cap and gas allotment).
+1. Pops `k` (Int253) and `args` (k values).
+2. Pops `gas` as a non-negative `Int253` gas allotment.
 3. Pops `script` (String) — the revealed leaf bytes (or witness-bearing `StringWitness::Script` on the prover).
 4. Pops `position` (String, bit-packed path), `neighbors` (list-Dict of 32-byte Strings, leaf-to-root), `internal_key` (Point).
 5. Pops `cell`.
 6. Constructs a `TaprootProof` and verifies `predicate.verify_taproot_proof` — checks the Merkle root and the tweaked-key relation `P = X + h(X, M)·B`.
-7. On success, creates a new isolated `CallKind::CellOpen { predicate: cell.predicate, external_context }` frame with the popped `gas` allotment and transient `memlimit`, pours the cell's payload then the `args` onto the new frame's stack, and enters the unlocked `script`. The frame's starting anchor (the `CallFrame.anchor` field — todo #4, formerly carried in the variant) is the child-anchor split from the parent. The tx's `last_anchor` is set to that child-anchor on entry; `op_open` is intra-tx and doesn't mint anything cross-tx.
+7. On success, creates a new isolated `CallKind::CellOpen { predicate: cell.predicate, external_context }` frame with the popped `gas` allotment, pours the cell's payload then the `args` onto the new frame's stack, and enters the unlocked `script`. The frame's starting anchor (the `CallFrame.anchor` field — todo #4, formerly carried in the variant) is the child-anchor split from the parent. The tx's `last_anchor` is set to that child-anchor on entry; `op_open` is intra-tx and doesn't mint anything cross-tx.
 
-The new frame has **no actor identity** by default — `op_load`/`op_save`/`op_call`/`op_send` all error from inside. The frame inherits CS access from the caller's context (external root → CS available; internal → not). Results return via `return k'`; leftover gas refunds to the parent.
+The new frame has **no actor identity** by default — `op_load`/`op_save`/`op_call`/`op_send` all error from inside. The frame inherits CS access from the caller's context (external root → CS available; internal → not). Results return as `results… k' 1` via `return k'`; clean fall-through returns `0 1`; leftover gas refunds to the parent.
+
+Once the child is entered, any hard failure, out-of-gas condition, dirty EOF, or
+bad return arity rolls back its effects and returns the original locked `cell`
+followed by the explicit `args`, count `k+1`, and status `0`. The payload is not
+returned separately: it remains sealed in the restored Cell. Invalid operands,
+invalid proofs, insufficient caller gas, and call-depth rejection occur before
+child entry and hard-fail the current frame.
 
 Position bits are read LSB-first within byte, zero-extended past the end; bit `0` = current hash on left, neighbor on right; bit `1` = swap.
 
@@ -1328,7 +1338,7 @@ On internal-tx failure during delivery, consensus seals the message payload into
 
 ### call
 
-_args… k gas addr_ → _results… k'_
+_args… k gas addr_ → _{results… k' 1 | args… k 0}_
 
 Synchronous actor-to-actor call. Same operand shape as [`send`](#send) minus
 `refund` and, likewise, no method selector. A caller that wants the callee to
@@ -1341,13 +1351,20 @@ Before entering the callee, `call` rejects every non-portable argument with
 `NonPortableInCall`. This is a top-level scan; a nested Dict is checked in O(1)
 through its sticky flag.
 
-**Re-entrancy:** the state-checkout lock closes issues with re-entracy: state is reachable **only** via `load`, which acquires the lock, and there is no peek-state opcode, so a half-applied update is never observable — a re-entrant `call`/`load` into an actor that has already `load`ed its state fails `ActorEmpty` (→ `0` marker for `call`). The lock does **not** enforce checks-effects-interactions ordering *within* a load/save window: holding a loaded state across a `call`/`send`/`open` is legal, but anything `save`d afterward is a pre-call snapshot — authors must `save` (or fully discharge) before calling out. Nested call depth is capped at `MAX_CALL_DEPTH` (64); deeper entry fails `CallDepthExceeded` (→ `0` marker for `call`, hard-fail for `open`/`signcall`).
+**Re-entrancy:** the state-checkout lock closes issues with re-entracy: state is reachable **only** via `load`, which acquires the lock, and there is no peek-state opcode, so a half-applied update is never observable — a re-entrant `call`/`load` into an actor that has already `load`ed its state cannot enter. The lock does **not** enforce checks-effects-interactions ordering *within* a load/save window: holding a loaded state across a `call`/`send`/`open` is legal, but anything `save`d afterward is a pre-call snapshot — authors must `save` (or fully discharge) before calling out. Nested call depth is capped at `MAX_CALL_DEPTH` (64).
 
 **Emits no txlog entry.** Calls are intra-tx control flow; the structural effects produced inside the callee (`Output`, `Send`, `ActorSave`, `Issue`, `Retire`, `Fee`, `Data`) are what the state machine reads. The `(External TxID, Internal TxID)` of a tx is a merkle root over effects only — see the effect model above.
 
-Creates an isolated `CallKind::ActorCall { actor, caller }` frame (the frame's starting anchor lives in `CallFrame.anchor` — todo #4) with the popped gas allotment. Its transient-memory cap is derived from the callee's own storage usage and capacity; callers supply neither storage capacity nor a memory-limit operand. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
+Creates an isolated `CallKind::ActorCall { actor, caller }` frame (the frame's starting anchor lives in `CallFrame.anchor` — todo #4) with the popped gas allotment. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
 
-Returns via `return k'`. Hard-fails `RegistryUnavailable` outside an internal-tx execution.
+Successful return is `results… k' 1`; clean fall-through is `0 1`. Before
+entry, missing/empty actors, depth rejection, and a grant too small to activate
+the callee return the original `args… k 0`. Availability rejection refunds the
+grant; an undersized child grant is burned. After entry, every runtime failure
+rolls back the child and returns the same escrowed arguments and failure suffix;
+the failed child's current stack is discarded. `RegistryUnavailable`, malformed
+operands, non-portable arguments, or inability of the caller to fund the grant
+hard-fail the current frame before this soft boundary.
 
 ### load
 
@@ -1422,9 +1439,7 @@ On success, atomically:
 3. adds or coalesces a lease for the current actor at
    `current_height + LEASE_DURATION_CORE_BLOCKS`;
 4. emits `TxEntry::StoragePurchase { actor, bytes, expiry_height, fee_sparks }`;
-5. pushes `ClearToken(-fee_sparks, FLAME_FLAVOR)` followed by `1`; and
-6. raises the current frame's transient-memory cap, if needed, to
-   `TRANSIENT_MEMORY_CAPACITY_MULTIPLIER × capacity(current_height)`.
+5. pushes `ClearToken(-fee_sparks, FLAME_FLAVOR)` followed by `1`.
 
 The negative token must be balanced with actual Flame before transaction
 finalization. The storage-purchase effect burns that amount rather than paying a
@@ -1460,17 +1475,20 @@ The deferred signature is verified at finalize: the prover aggregates all `TxBou
 
 ### signcall
 
-_cell script sig gas memlimit args… m_ → _results… k'_
+_cell script sig gas args… m_ →
+_{results… k' 1 | cell args… (m+1) 0}_
 
 Same call-frame mechanics as [`open`](#open) — taproot reveal is replaced by signature verification:
 
-1. Pops `m` (Int253), `args` (m portable values), `memlimit`, `gas`.
+1. Pops `m` (Int253), `args` (m values), and `gas`.
 2. Pops `sig` (String, exactly 64 bytes — Schnorr signature).
 3. Pops `script` (String) and `cell`.
 4. Records `DeferredSig::Explicit { verification_key: cell.predicate.point, message: signcall_message(script_bytes), signature }`. The message is built via a Merlin transcript labelled `flamevm.signcall` over the script bytes only — scripts bind themselves to further context (anchor, actor identity, tx data) via explicit checks inside the script body.
-5. Creates a new isolated `CallKind::CellOpen` frame matching [`open`](#open), pours payload + args, enters the signed script.
+5. Snapshots rollback state before recording the deferred signature, then creates a new isolated `CallKind::CellOpen` frame matching [`open`](#open), pours payload + args, and enters the signed script.
 
-The deferred signatures are batch-verified at finalize alongside any `signtx` items.
+The deferred signatures are batch-verified at finalize alongside any `signtx`
+items. Entered-child failure removes this signature and returns the original
+Cell plus explicit arguments using the same failure shape as `open`.
 
 ### timelock
 
@@ -1502,7 +1520,30 @@ Pushes the frame's *current* `last_anchor` as a 32-byte String — the value the
 
 Pushes the current call's remaining gas budget — i.e. `gaslimit − gas_used` (saturating). Available in either context.
 
-**Gas metering.** Every fetched instruction costs a flat 1 gas — *fetched* meaning executed **or** scanned while skipping forward to a label, so dead branches and loop bodies are charged identically on the prover (in-memory instructions) and a streaming verifier (decode-as-you-go); both walk the same instruction sequence. Label tables are collected afresh per frame — **no caching** — so gas is a pure function of the code and its inputs, never of prior execution state . Exhaustion hard-fails `OutOfGas`. Per-opcode cost calibration replaces the flat unit later ; the *mechanism* — charge at fetch, charge the skip-scan — is normative now. Call entry (`call` / `open` / `signcall`) **debits the full gas grant from the caller**: a caller that cannot afford the grant hard-fails `OutOfGas`; leftover gas is refunded on clean return; a **failed** call burns the entire grant (its partial execution is unobservable, so the burn is the only deterministic choice); a call blocked *before* the frame is created (re-entrancy lock, missing actor → `0` marker) refunds the grant in full. `send` does not debit the sender's frame; the message's gas grant is funded at delivery by the consensus layer.
+**Gas metering.** Every execution attempt costs 1 gas before checking for EOF;
+executed instructions and instructions scanned while seeking a forward label
+cost the same. Thus a clean program with `N` instructions consumes at least
+`N + 1` gas. Prover-side decoded instructions and verifier/internal byte streams
+walk the same sequence. Label tables are collected afresh per frame, so gas is
+a pure function of code and inputs rather than cache history.
+
+Variable-size allocation work is additional gas: canonical code and decoded
+payload activation, String byte growth, Dict/collection growth, rollback
+escrows, actor-state activation and cloning, constraint terms, range-proof
+terms, MSM/batch vectors, and `mix`'s quadratic work are charged before the
+corresponding allocation. Fixed-size stack pushes are bounded by the base
+instruction charge. Allocation charges are monotonic and are not refunded when
+memory is freed; this is a deterministic logical-work bound, not a dependency
+on Rust object sizes or allocator behavior. Prover-only witness presence never
+changes gas. Exhaustion hard-fails `OutOfGas`.
+
+Call entry (`call` / `open` / `signcall`) debits the full gas grant from the
+caller. A caller that cannot afford the grant hard-fails; leftover gas is
+refunded on clean return and `gaslimit` remains the immutable creation cap. A
+failed entered call burns the grant. An actor call rejected for availability
+before entry refunds it, while a child grant too small to activate its code is
+burned. `send` does not debit the sender's frame; the message's gas grant is
+funded at delivery by the consensus layer.
 
 ### usage
 
@@ -1525,19 +1566,6 @@ Pushes the caller actor id as a 32-byte String. For `InternalRoot` triggered by 
 ø → _n_
 
 Pushes the current call's total gas budget cap (the value set at frame creation, not the remaining amount). Available in either context.
-
-### memlimit
-
-ø → _n_
-
-Pushes the current call's transient-memory cap —
-`TRANSIENT_MEMORY_CAPACITY_MULTIPLIER × max(current capacity, charged usage)` at
-actor-frame entry, the caller-specified `bytes` operand for `CellOpen` frames,
-or the explicit limit passed at the outermost frame. A successful `addstorage`
-can raise an actor frame's cap during execution; it never lowers the cap.
-Available in either context.
-
-**Memory accounting.** Each frame meters its transient growth against the cap with a monotonic high-water counter: `pushstr` literals, `append`, `writezeros`, and `tread` charge the bytes they add; drops do **not** release budget (the cap bounds total growth, keeping accounting O(1) and rollback-free — the counter dies with the frame). Exceeding the cap hard-fails `MemLimitExceeded`. Further growth ops (Dict inserts, stack depth) join the same charging seam as they are calibrated.
 
 ### capacity
 
@@ -1606,6 +1634,6 @@ Pushes a Dict of block stats at height `n`.
 
 ## Isolation & binding notes
 
-**Cell-open trust model.** `open`, `signcall`, and `call` all create isolated call frames: the unlocked / signed / called script runs in its own stack, gas budget, memory cap, and identity scope, with no implicit access to the host's actor state, gas pool, or identity. This eliminates the confused-deputy class of bugs — an actor accepting an untrusted-source cell need not audit the predicate as a global authorization filter, because the script cannot reach the actor's state regardless of what the predicate authorizes .
+**Cell-open trust model.** `open`, `signcall`, and `call` all create isolated call frames: the unlocked / signed / called script runs in its own stack, gas budget, and identity scope, with no implicit access to the host's actor state, gas pool, or identity. This eliminates the confused-deputy class of bugs — an actor accepting an untrusted-source cell need not audit the predicate as a global authorization filter, because the script cannot reach the actor's state regardless of what the predicate authorizes .
 
 **`signcall` binding policy.** The deferred `signcall` signature commits to the script bytes only; the script binds itself to further context (anchor, actor identity, tx-level data) via explicit checks such as `anchor <expected> eq verify`. Binding policy lives in the author's hands — flexibility at the price of footgun.

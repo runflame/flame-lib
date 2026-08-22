@@ -43,6 +43,40 @@ pub trait Writer {
     }
 }
 
+/// Allocation-free writer that only counts encoded bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SizeWriter {
+    len: usize,
+}
+
+impl SizeWriter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Writer for SizeWriter {
+    fn write(&mut self, _label: &'static [u8], src: &[u8]) -> Result<(), WriteError> {
+        self.len = self
+            .len
+            .checked_add(src.len())
+            .ok_or(WriteError::InsufficientCapacity)?;
+        Ok(())
+    }
+
+    fn remaining_capacity(&self) -> usize {
+        usize::MAX.saturating_sub(self.len)
+    }
+}
+
 impl Writer for Vec<u8> {
     #[inline]
     fn write(&mut self, _label: &'static [u8], src: &[u8]) -> Result<(), WriteError> {

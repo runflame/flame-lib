@@ -210,7 +210,7 @@ fn infinite_loop_exhausts_gas() {
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(ScriptBuilder::parse(&script).unwrap().into_instructions(), kind, 1_000, 0).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(ScriptBuilder::parse(&script).unwrap().into_instructions(), kind, 1_000).with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
@@ -234,7 +234,7 @@ fn skip_scan_charges_gas() {
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(ScriptBuilder::parse(&script).unwrap().into_instructions(), kind, 10, 0).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(ScriptBuilder::parse(&script).unwrap().into_instructions(), kind, 10).with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
@@ -242,14 +242,19 @@ fn skip_scan_charges_gas() {
     ));
 }
 
-// ── transient-memory accounting (ADR 0002 cap) ──────────────
+// ── allocation gas accounting ─────────────────────────────────────────
 
-/// `writezeros` growth is charged against the frame's mem cap; the cap
-/// is cumulative (high-water), not per-allocation.
 #[test]
-fn mem_cap_bounds_cumulative_string_growth() {
-    // Two writezeros of 60 bytes each against a 100-byte cap: first
-    // passes, second exceeds the cumulative budget.
+fn gas_counter_overflow_is_out_of_gas() {
+    let mut frame = CallFrame::new(Vec::new(), CallKind::ExternalRoot, u64::MAX);
+    frame.gas_used = u64::MAX;
+    assert!(matches!(frame.charge_gas(1), Err(VMError::OutOfGas)));
+}
+
+/// `writezeros` growth spends gas cumulatively; freeing the previous buffer
+/// does not refund it.
+#[test]
+fn gas_bounds_cumulative_string_growth() {
     let script = ScriptBuilder::new()
         .push_str(String::from(Vec::new()))
         .push_int(60u64)
@@ -266,21 +271,19 @@ fn mem_cap_bounds_cumulative_string_growth() {
         CallFrame::new(
             ScriptBuilder::parse(&script).unwrap().into_instructions(),
             kind,
-            1_000,
-            /*mem_limit=*/ 100,
+            100,
         ).with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
-        VMError::MemLimitExceeded
+        VMError::OutOfGas
     ));
 }
 
-/// Each mem-charging op independently trips the cap: `pushstr` literal,
-/// `append`, and `tread` (writezeros is covered above).
+/// Each variable-sized allocation independently spends gas.
 #[test]
-fn mem_cap_trips_on_pushstr_append_and_tread() {
-    let run_capped = |script: Vec<u8>, cap: u64| {
+fn allocation_gas_trips_on_pushstr_append_and_tread() {
+    let run_metered = |script: Vec<u8>, gas: u64| {
         let kind = CallKind::InternalRoot {
             actor: ActorID::Hash([0u8; 32]),
             caller: None,
@@ -290,23 +293,22 @@ fn mem_cap_trips_on_pushstr_append_and_tread() {
             CallFrame::new(
                 ScriptBuilder::parse(&script).unwrap().into_instructions(),
                 kind,
-                10_000,
-                cap,
+                gas,
             ).with_anchor(Anchor([0u8; 32])),
         );
         run_until_tx_done(&mut vm)
     };
 
     // pushstr: a 60-byte literal against a 50-byte cap.
-    let s = run_capped(
+    let s = run_metered(
         ScriptBuilder::new().push_str(String::from(vec![7u8; 60])).to_bytecode(),
         50,
     );
-    assert!(matches!(s.unwrap_err(), VMError::MemLimitExceeded), "pushstr charges");
+    assert!(matches!(s.unwrap_err(), VMError::OutOfGas), "pushstr charges");
 
     // append: 40 + 40 literals fit a 100 cap (80), the 40-byte append
     // pushes the high-water to 120.
-    let s = run_capped(
+    let s = run_metered(
         ScriptBuilder::new()
             .push_str(String::from(vec![1u8; 40]))
             .push_str(String::from(vec![2u8; 40]))
@@ -314,10 +316,10 @@ fn mem_cap_trips_on_pushstr_append_and_tread() {
             .to_bytecode(),
         100,
     );
-    assert!(matches!(s.unwrap_err(), VMError::MemLimitExceeded), "append charges");
+    assert!(matches!(s.unwrap_err(), VMError::OutOfGas), "append charges");
 
     // tread: a 200-byte challenge squeeze against a 100 cap.
-    let s = run_capped(
+    let s = run_metered(
         ScriptBuilder::new()
             .push_str(String::from(b"L".to_vec()))
             .transcript()
@@ -327,7 +329,7 @@ fn mem_cap_trips_on_pushstr_append_and_tread() {
             .to_bytecode(),
         100,
     );
-    assert!(matches!(s.unwrap_err(), VMError::MemLimitExceeded), "tread charges");
+    assert!(matches!(s.unwrap_err(), VMError::OutOfGas), "tread charges");
 }
 
 // ── return ──────────────────────────────────────────────────
@@ -359,7 +361,7 @@ fn return_nonzero_at_root_errors() {
 fn return_with_dirty_leftover_errors() {
     // Inside a child frame: push:9, push:7, push:1, return — k=1, two
     // items below count → StackNotClean. Error is caught and translated
-    // to a `0` failure marker on the parent.
+    // to `[count=0, success=0]` on the parent.
     let mut vm = vm_with_nested_child_script(
         ScriptBuilder::new()
             .push_int(9u64).push_int(7u64).push_int(1u64).return_()
@@ -368,24 +370,25 @@ fn return_with_dirty_leftover_errors() {
     while !vm.call_stack.is_empty() {
         vm.step_internal().expect("step ok — error swallowed into marker");
     }
-    assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+    assert_eq!(vm.current_call.stack.len(), 2);
+    assert_int(&vm.current_call.stack[0], Int253::ZERO);
+    assert_int(&vm.current_call.stack[1], Int253::ZERO);
 }
 
 #[test]
 fn return_too_few_items_errors() {
     // Inside a child frame: push:5, return — k=5 popped, zero items
     // remain → BadReturnArity. The `step` wrapper catches the error,
-    // unwinds the child, and pushes `0` (failure marker) onto the parent.
+    // unwinds the child, and pushes `[count=0, success=0]` onto the parent.
     let mut vm = vm_with_nested_child_script(
         ScriptBuilder::new().push_int(5u64).return_().to_bytecode(),
     );
     while !vm.call_stack.is_empty() {
         vm.step_internal().expect("step ok — error swallowed into marker");
     }
-    // Parent stack: just the failure marker.
-    assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
+    assert_eq!(vm.current_call.stack.len(), 2);
+    assert_int(&vm.current_call.stack[0], Int253::ZERO);
+    assert_int(&vm.current_call.stack[1], Int253::ZERO);
 }
 
 #[test]
@@ -393,14 +396,14 @@ fn return_transfers_values_to_parent() {
     // Child script: push:7, push:1, return (k=1).
     let child_script = ScriptBuilder::new().push_int(7u64).push_int(1u64).return_().to_bytecode();
     let parent_frame =
-        CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500, 0);
+        CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500);
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
     };
     let child_frame = CallFrame::new(
         ScriptBuilder::parse(&child_script).expect("parse").into_instructions(),
-        child_kind, 500, 0,
+        child_kind, 500,
     );
     let mut vm = VM::new(dummy_header(), parent_frame);
     let initial_parent = mem::replace(&mut vm.current_call, child_frame);

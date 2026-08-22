@@ -101,6 +101,14 @@ impl Message {
         self.payload
     }
 
+    /// Canonical message length without allocating an encoded buffer.
+    pub fn encoded_size(&self) -> usize {
+        let mut size = readerwriter::SizeWriter::new();
+        self.encode(&mut size)
+            .expect("admitted message is encodable");
+        size.len()
+    }
+
     /// Unique ID identifying the message that spawns the internal transaction.
     /// Note: MessageID is not the same as TxID, which can only be determined after
     /// processing the message.

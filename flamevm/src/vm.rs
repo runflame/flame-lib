@@ -158,6 +158,24 @@ impl Delegate for InternalDelegate {
 /// executed or skip-scanned.
 const GAS_PER_INSTRUCTION: u64 = 1;
 
+/// Variable-size heap work is charged monotonically in the current frame.
+/// Drops do not refund it, so cumulative charged growth is a deterministic
+/// upper bound on peak live allocation.
+const GAS_PER_ALLOC_BYTE: u64 = 1;
+const GAS_PER_ALLOC_ITEM: u64 = 1;
+
+fn alloc_byte_gas(n: usize) -> Result<u64, VMError> {
+    u64::try_from(n)
+        .map(|n| n.saturating_mul(GAS_PER_ALLOC_BYTE))
+        .map_err(|_| VMError::OutOfGas)
+}
+
+fn alloc_item_gas(n: usize) -> Result<u64, VMError> {
+    u64::try_from(n)
+        .map(|n| n.saturating_mul(GAS_PER_ALLOC_ITEM))
+        .map_err(|_| VMError::OutOfGas)
+}
+
 /// Maximum nested call/open/signcall depth. Re-entrancy is permitted
 /// (ADR 0017), so without this a load-free A↔B cycle would be bounded
 /// only by gas; the cap restores a structural bound (docs/flamevm.md §Design).
@@ -180,19 +198,31 @@ impl CallFrame {
         &mut self,
     ) -> Result<Option<Instruction>, VMError> {
         let cursor = self.cursor;
-        match &self.code {
+        let allocation_bytes = match &self.code {
             Script::Transparent(instrs) => {
-                if cursor >= instrs.len() {
+                let Some(instr) = instrs.get(cursor) else {
                     return Ok(None);
+                };
+                match instr {
+                    Instruction::PushStr(s) => s.len(),
+                    _ => 0,
                 }
-                let instr = instrs[cursor].clone();
-                self.cursor = cursor + 1;
-                Ok(Some(instr))
             }
             Script::Opaque(bytes) => {
                 if cursor >= bytes.len() {
                     return Ok(None);
                 }
+                Instruction::decoded_allocation_bytes(&bytes[cursor..])?
+            }
+        };
+        self.charge_gas(alloc_byte_gas(allocation_bytes)?)?;
+        match &self.code {
+            Script::Transparent(instrs) => {
+                let instr = instrs[cursor].clone();
+                self.cursor = cursor + 1;
+                Ok(Some(instr))
+            }
+            Script::Opaque(bytes) => {
                 let mut reader: &[u8] = &bytes[cursor..];
                 let before = reader.len();
                 let instr = Instruction::parse(&mut reader)?;
@@ -218,7 +248,7 @@ impl CallFrame {
     /// or skip-scanned), so prover (`Instrs`) and verifier (`Bytes`)
     /// meter identically — they walk the same instruction sequence.
     fn charge_gas(&mut self, n: u64) -> Result<(), VMError> {
-        self.gas_used = self.gas_used.saturating_add(n);
+        self.gas_used = self.gas_used.checked_add(n).ok_or(VMError::OutOfGas)?;
         if self.gas_used > self.gas_limit {
             return Err(VMError::OutOfGas);
         }
@@ -324,9 +354,8 @@ impl CallKind {
 
 }
 
-/// An isolated execution scope. Holds its own stack, run, gas budget, and
-/// transient-memory cap. Created by `call`, `open`, or the outermost frame
-/// of a tx.
+/// An isolated execution scope with its own stack, code, and gas budget.
+/// Created by `call`, `open`, or the outermost frame of a transaction.
 pub struct CallFrame {
     /// Isolated stack visible to scripts in this scope.
     pub(crate) stack: Vec<Value>,
@@ -354,10 +383,6 @@ pub struct CallFrame {
     pub(crate) gas_limit: u64,
     pub(crate) gas_used: u64,
 
-    /// Transient-memory cap for this call.
-    pub(crate) mem_limit: u64,
-    pub(crate) mem_used: u64,
-
     /// Anchor that should replace `VM.last_anchor` when control
     /// returns to this frame from a child call. Populated at call
     /// entry as the `right` half of the parent's anchor split (the
@@ -372,6 +397,11 @@ pub struct CallFrame {
     pub(crate) snap_txlog_len: usize,
     pub(crate) snap_deferred_sigs_len: usize,
     pub(crate) snap_total_fee: CheckedFee,
+
+    /// Entry-owned values returned to the caller when the child fails.
+    /// Actor calls escrow their arguments; cell calls escrow the original
+    /// locked Cell followed by their explicit arguments.
+    pub(crate) snap_failure_values: Vec<Value>,
 
     /// Snapshot of the delegate's MSM/signature batch state taken
     /// when this frame's child was pushed. Restored on child
@@ -400,9 +430,8 @@ impl CallFrame {
         instructions: Vec<Instruction>,
         kind: CallKind,
         gas_limit: u64,
-        mem_limit: u64,
     ) -> Self {
-        Self::from_code(Script::Transparent(instructions), kind, gas_limit, mem_limit)
+        Self::from_code(Script::Transparent(instructions), kind, gas_limit)
     }
 
     /// Builds a CallFrame that decodes raw `bytecode` on demand — no
@@ -411,9 +440,8 @@ impl CallFrame {
         bytecode: Vec<u8>,
         kind: CallKind,
         gas_limit: u64,
-        mem_limit: u64,
     ) -> Self {
-        Self::from_code(Script::Opaque(bytecode), kind, gas_limit, mem_limit)
+        Self::from_code(Script::Opaque(bytecode), kind, gas_limit)
     }
 
     /// Sets this frame's starting anchor (todo #4). Chained at the
@@ -427,7 +455,6 @@ impl CallFrame {
         code: Script,
         kind: CallKind,
         gas_limit: u64,
-        mem_limit: u64,
     ) -> Self {
         Self {
             stack: Vec::new(),
@@ -438,12 +465,11 @@ impl CallFrame {
             anchor: None,
             gas_limit,
             gas_used: 0,
-            mem_limit,
-            mem_used: 0,
             post_call_anchor: None,
             snap_txlog_len: 0,
             snap_deferred_sigs_len: 0,
             snap_total_fee: CheckedFee::zero(),
+            snap_failure_values: Vec::new(),
             snap_batch: None,
             snap_cs: None,
         }
@@ -535,18 +561,15 @@ impl VM {
         header: TxHeader,
         script: Vec<u8>,
         gas_limit: u64,
-        mem_limit: u64,
         mut delegate: D,
     ) -> Result<TxResult, VMError> {
-        let mut vm = Self::new(
-            header,
-            CallFrame::from_bytecode(
-                script.clone(),
-                CallKind::ExternalRoot,
-                gas_limit,
-                mem_limit,
-            ),
+        let mut frame = CallFrame::from_bytecode(
+            script.clone(),
+            CallKind::ExternalRoot,
+            gas_limit,
         );
+        frame.charge_gas(alloc_byte_gas(script.len())?)?;
+        let mut vm = Self::new(header, frame);
         while vm.step_external(&mut delegate)? {}
         Ok(vm.into_result(script, None))
     }
@@ -558,19 +581,16 @@ impl VM {
         header: TxHeader,
         program: ScriptBuilder,
         gas_limit: u64,
-        mem_limit: u64,
         delegate: &mut D,
     ) -> Result<TxResult, VMError> {
         let bytecode = program.to_bytecode();
-        let mut vm = Self::new(
-            header,
-            CallFrame::new(
-                program.into_instructions(),
-                CallKind::ExternalRoot,
-                gas_limit,
-                mem_limit,
-            ),
+        let mut frame = CallFrame::new(
+            program.into_instructions(),
+            CallKind::ExternalRoot,
+            gas_limit,
         );
+        frame.charge_gas(alloc_byte_gas(bytecode.len())?)?;
+        let mut vm = Self::new(header, frame);
         while vm.step_external(delegate)? {}
         Ok(vm.into_result(bytecode, None))
     }
@@ -582,18 +602,15 @@ impl VM {
         header: TxHeader,
         bytecode: Vec<u8>,
         gas_limit: u64,
-        mem_limit: u64,
         delegate: &mut D,
     ) -> Result<TxResult, VMError> {
-        let mut vm = Self::new(
-            header,
-            CallFrame::from_bytecode(
-                bytecode.clone(),
-                CallKind::ExternalRoot,
-                gas_limit,
-                mem_limit,
-            ),
+        let mut frame = CallFrame::from_bytecode(
+            bytecode.clone(),
+            CallKind::ExternalRoot,
+            gas_limit,
         );
+        frame.charge_gas(alloc_byte_gas(bytecode.len())?)?;
+        let mut vm = Self::new(header, frame);
         while vm.step_external(delegate)? {}
         Ok(vm.into_result(bytecode, None))
     }
@@ -608,6 +625,14 @@ impl VM {
     ) -> Result<TxResult, VMError> {
         registry.push_checkpoint();
         let target = message.target.clone();
+        let message_bytes = message.encoded_size();
+
+        if let ActorID::Constructor(bytes) = &message.target {
+            if alloc_byte_gas(bytes.len())? > message.gas {
+                registry.pop_checkpoint_rollback();
+                return Err(VMError::OutOfGas);
+            }
+        }
 
         // Deploy-on-first-delivery (spec §Actors): a Constructor-form
         // target carries the actor's code on the wire and the id
@@ -627,6 +652,20 @@ impl VM {
                 }
             }
         }
+        let code_bytes = match registry.actor_code_bytes(&message.target) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                registry.pop_checkpoint_rollback();
+                return Err(e);
+            }
+        };
+        let initial_gas = alloc_byte_gas(message_bytes)?
+            .saturating_add(code_bytes.saturating_mul(GAS_PER_ALLOC_BYTE))
+            .saturating_add(alloc_item_gas(message.payload().len())?);
+        if initial_gas > message.gas {
+            registry.pop_checkpoint_rollback();
+            return Err(VMError::OutOfGas);
+        }
         let script = match registry.load_code(&message.target) {
             Ok(script) => script,
             Err(e) => {
@@ -634,23 +673,6 @@ impl VM {
                 return Err(e);
             }
         };
-        let usage = match registry.actor_usage(&message.target) {
-            Ok(v) => v,
-            Err(e) => {
-                registry.pop_checkpoint_rollback();
-                return Err(e);
-            }
-        };
-        let capacity = match registry.actor_capacity(&message.target, block.height) {
-            Ok(v) => v,
-            Err(e) => {
-                registry.pop_checkpoint_rollback();
-                return Err(e);
-            }
-        };
-        let mem_limit = usage
-            .max(capacity)
-            .saturating_mul(registry.transient_memory_multiplier());
         // MessageID is the canonical hash of the whole send (anchor,
         // target, caller, payload, gas, refund
         // predicate) — analogous to CellID for Output. Capture
@@ -668,9 +690,12 @@ impl VM {
             script,
             kind,
             gas,
-            mem_limit,
         )
         .with_anchor(anchor);
+        if let Err(e) = frame.charge_gas(initial_gas) {
+            registry.pop_checkpoint_rollback();
+            return Err(e);
+        }
         // Deliver the message payload onto the recv's stack (in payload
         // order) before dispatch runs — symmetric with `op_call`, which
         // pushes its args. The dispatch selector (ADR 0020) rides as the
@@ -777,7 +802,7 @@ impl VM {
             txid,
             txlog,
             total_fee: self.total_fee.total(),
-            // Root frame's metered gas (per-instruction; spec §gas).
+            // Root frame's instruction and allocation gas (spec §gas).
             gas_used: self.current_call.gas_used,
             bytecode,
             proof,
@@ -832,8 +857,8 @@ impl VM {
     /// Executes one instruction. Returns `Ok(true)` to continue,
     /// `Ok(false)` to stop. Errors that occur inside a nested
     /// call frame are caught — the frame is unwound via
-    /// `fail_current_call` and a `0` failure marker is pushed
-    /// onto the parent's stack. Errors at the outermost frame
+    /// `fail_current_call` and its entry escrow plus `count, 0` is
+    /// pushed onto the parent's stack. Errors at the outermost frame
     /// propagate to the caller (kill the tx).
     fn step<D: Delegate>(
         &mut self,
@@ -934,7 +959,6 @@ impl VM {
                 Ok(())
             }
             I::PushStr(s) => {
-                self.charge_mem(s.len())?;
                 self.push_value(Value::String(s));
                 Ok(())
             }
@@ -1046,9 +1070,8 @@ impl VM {
             I::Gas => self.op_gas(),
             I::Usage => self.op_usage(registry),
             I::Callerid => self.op_callerid(),
-            // gaslimit / memlimit → frame budget fields.
+            // gaslimit → immutable frame budget.
             I::Gaslimit => { self.push_value(Value::Int253(Int253::from(self.current_call.gas_limit))); Ok(()) }
-            I::Memlimit => { self.push_value(Value::Int253(Int253::from(self.current_call.mem_limit))); Ok(()) }
             I::Capacity => self.op_capacity(registry),
             I::Height => { self.push_value(Value::Int253(Int253::from(self.block_height))); Ok(()) }
 
@@ -1067,15 +1090,16 @@ impl VM {
     /// (failure-path only). Order is load-bearing — identical in
     /// `finish_call` and `op_return`.
     fn clean_exit_to_parent(&mut self, leftover_gas: u64) {
-        self.current_call.gas_limit = self
+        self.current_call.gas_used = self
             .current_call
-            .gas_limit
-            .saturating_add(leftover_gas);
+            .gas_used
+            .saturating_sub(leftover_gas);
         if let Some(post) = self.current_call.post_call_anchor.take() {
             self.last_anchor = Some(post);
         }
         self.current_call.snap_batch = None;
         self.current_call.snap_cs = None;
+        self.current_call.snap_failure_values.clear();
     }
 
     fn finish_call(&mut self) -> Result<bool, VMError> {
@@ -1103,8 +1127,8 @@ impl VM {
     /// preserving its effects, rolls back side-effects from the
     /// parent's snapshot (txlog tail, deferred-sigs tail, total_fee,
     /// delegate batch state, R1CS constraint system), applies the
-    /// parent's `post_call_anchor`, and pushes `0` onto the parent's
-    /// stack as the failure marker. Caller's effects up to the
+    /// parent's `post_call_anchor`, and restores entry-owned values
+    /// followed by their count and a zero status. Caller's effects up to the
     /// failed call are preserved; the parent script continues at
     /// the instruction after the call.
     ///
@@ -1125,6 +1149,7 @@ impl VM {
             .pop()
             .expect("fail_current_call: outermost frame errors must propagate");
         self.current_call = parent;
+        let failure_values = mem::take(&mut self.current_call.snap_failure_values);
         // Roll back side effects via the snapshots taken at call
         // entry.
         self.txlog.truncate(self.current_call.snap_txlog_len);
@@ -1155,13 +1180,43 @@ impl VM {
         if let Some(post) = self.current_call.post_call_anchor.take() {
             self.last_anchor = Some(post);
         }
-        // Push failure marker.
-        self.current_call.stack.push(Value::Int253(Int253::from(0u64)));
+        self.push_failed_values(failure_values);
     }
 
     /// Pushes a value onto the current call's stack.
     fn push_value(&mut self, v: Value) {
         self.current_call.stack.push(v);
+    }
+
+    /// Failure shape shared by synchronous calls: restored entry values,
+    /// their count, then the zero status marker.
+    fn push_failed_values(&mut self, values: Vec<Value>) {
+        let count = values.len();
+        self.current_call.stack.extend(values);
+        self.current_call
+            .stack
+            .push(Value::Int253(Int253::from(count as u64)));
+        self.current_call
+            .stack
+            .push(Value::Int253(Int253::ZERO));
+    }
+
+    fn charge_clone_values(&mut self, values: &[Value]) -> Result<(), VMError> {
+        let gas = values
+            .iter()
+            .fold(0u64, |gas, value| gas.saturating_add(value.clone_gas()));
+        self.current_call.charge_gas(gas)
+    }
+
+    fn charge_top_value_growth(&mut self, n: usize) -> Result<(), VMError> {
+        let len = self.current_call.stack.len();
+        if len < n {
+            return Err(VMError::StackUnderflow);
+        }
+        let gas = self.current_call.stack[len - n..]
+            .iter()
+            .fold(0u64, |gas, value| gas.saturating_add(value.clone_gas()));
+        self.current_call.charge_gas(gas)
     }
 
     /// Pops the top value from the current call's stack.
@@ -1211,12 +1266,17 @@ impl VM {
     /// `dup:k` — copies `stack[top - k]` onto the top.
     /// Requires the source value to be copyable.
     fn op_dup_k(&mut self, k: usize) -> Result<(), VMError> {
-        let stack = &self.current_call.stack;
-        if k >= stack.len() {
+        let len = self.current_call.stack.len();
+        if k >= len {
             return Err(VMError::IndexOutOfRange);
         }
-        let idx = stack.len() - 1 - k;
-        let copy = stack[idx].try_clone()?;
+        let idx = len - 1 - k;
+        let bytes = match &self.current_call.stack[idx] {
+            Value::String(s) => s.len(),
+            _ => 0,
+        };
+        self.charge_alloc_bytes(bytes)?;
+        let copy = self.current_call.stack[idx].try_clone()?;
         self.push_value(copy);
         Ok(())
     }
@@ -1245,6 +1305,7 @@ impl VM {
     /// creates a fresh Merlin transcript bound to it.
     fn op_transcript(&mut self) -> Result<(), VMError> {
         let label = self.pop_value()?.to_string()?;
+        self.charge_alloc_bytes(label.len())?;
         self.push_value(Value::Merlin(Merlin::new(&label.to_bytes())));
         Ok(())
     }
@@ -1255,6 +1316,9 @@ impl VM {
     fn op_twrite(&mut self) -> Result<(), VMError> {
         let data = self.pop_value()?.to_string()?;
         let label = self.pop_value()?.to_string()?;
+        self.charge_alloc_bytes(
+            label.len().checked_add(data.len()).ok_or(VMError::OutOfGas)?,
+        )?;
         let mut m = self.pop_value()?.to_merlin()?;
         m.write_bytes(&label.to_bytes(), &data.to_bytes());
         self.push_value(Value::Merlin(m));
@@ -1266,8 +1330,9 @@ impl VM {
     /// merlin back, then the new String.
     fn op_tread(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
-        self.charge_mem(n)?;
+        self.charge_alloc_bytes(n)?;
         let label = self.pop_value()?.to_string()?;
+        self.charge_alloc_bytes(label.len())?;
         let mut m = self.pop_value()?.to_merlin()?;
         let out = m.read_bytes(&label.to_bytes(), n);
         self.push_value(Value::Merlin(m));
@@ -1280,6 +1345,7 @@ impl VM {
     /// (pre-FIPS Keccak, Ethereum-compatible).
     fn op_hash<H: sha2::Digest>(&mut self) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
+        self.charge_alloc_bytes(s.len())?;
         let digest = H::digest(s.to_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
@@ -1291,6 +1357,7 @@ impl VM {
     /// the same canonical bytes.
     fn op_log(&mut self) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
+        self.charge_alloc_bytes(s.len())?;
         self.txlog.push(TxEntry::Data(s.to_bytes()));
         Ok(())
     }
@@ -1302,6 +1369,7 @@ impl VM {
     /// boundary is crossed.
     fn op_dict(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
+        self.charge_alloc_items(n)?;
         let mut dict = Dict::new();
         for _ in 0..n {
             let key = self.pop_value()?.to_int253()?;
@@ -1320,6 +1388,7 @@ impl VM {
         let v = self.pop_value()?;
         let k = self.pop_value()?.to_int253()?;
         let mut dict = self.pop_value()?.to_dict()?;
+        self.charge_alloc_items(1)?;
         if dict.insert_strict(k, v).is_err() {
             return Err(VMError::DictKeyOccupied);
         }
@@ -1334,6 +1403,7 @@ impl VM {
         let v = self.pop_value()?;
         let k = self.pop_value()?.to_int253()?;
         let mut dict = self.pop_value()?.to_dict()?;
+        self.charge_alloc_items(1)?;
         let prev = dict.insert(k, v);
         self.push_value(Value::Dict(dict));
         match prev {
@@ -1378,7 +1448,14 @@ impl VM {
         let k = self.pop_value()?.to_int253()?;
         let dict = self.pop_value()?.to_dict()?;
         let copied = match dict.get(&k) {
-            Some(v) => Some(v.try_clone()?),
+            Some(v) => {
+                let bytes = match v {
+                    Value::String(s) => s.len(),
+                    _ => 0,
+                };
+                self.charge_alloc_bytes(bytes)?;
+                Some(v.try_clone()?)
+            }
             None => None,
         };
         self.push_value(Value::Dict(dict));
@@ -1460,6 +1537,7 @@ impl VM {
             self.push_read_failure(s); // restore original (witness-preserving)
             return Ok(());
         }
+        self.charge_alloc_bytes(s.len())?;
         let bytes = s.to_bytes(); // canonical, owned
         let mut int_bytes = [0u8; 32];
         if n_bytes > 0 {
@@ -1496,6 +1574,7 @@ impl VM {
             self.push_read_failure(s);
             return Ok(());
         }
+        self.charge_alloc_bytes(s.len())?;
         let bytes = s.to_bytes();
         let mut int_bytes = [0u8; 32];
         int_bytes.copy_from_slice(&bytes[..32]);
@@ -1521,6 +1600,7 @@ impl VM {
             self.push_read_failure(s);
             return Ok(());
         }
+        self.charge_alloc_bytes(s.len())?;
         let (remainder, consumed) = s.split_at(n).expect("length checked");
         self.push_value(Value::String(remainder));
         self.push_value(Value::String(consumed));
@@ -1537,6 +1617,7 @@ impl VM {
             self.push_read_failure(s);
             return Ok(());
         }
+        self.charge_alloc_bytes(s.len())?;
         let bytes = s.to_bytes();
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes[..32]);
@@ -1560,6 +1641,9 @@ impl VM {
         let n_bytes = n / 8;
         let x = self.pop_value()?.to_int253()?;
         let s = self.pop_value()?.to_string()?;
+        self.charge_alloc_bytes(
+            s.len().checked_add(n_bytes).ok_or(VMError::OutOfGas)?,
+        )?;
         // Raw 32-byte sign-magnitude form; low `n` bits = first `n_bytes`.
         let raw = x.to_bytes();
         let appended = s.append_bytes(&raw[..n_bytes]);
@@ -1574,6 +1658,7 @@ impl VM {
     fn op_write_int(&mut self) -> Result<(), VMError> {
         let x = self.pop_value()?.to_int253()?;
         let s = self.pop_value()?.to_string()?;
+        self.charge_alloc_bytes(s.len().checked_add(32).ok_or(VMError::OutOfGas)?)?;
         let appended = s.append_bytes(&x.to_bytes());
         self.push_value(Value::String(appended));
         Ok(())
@@ -1583,33 +1668,31 @@ impl VM {
     fn op_append(&mut self) -> Result<(), VMError> {
         let s2 = self.pop_value()?.to_string()?;
         let s1 = self.pop_value()?.to_string()?;
-        self.charge_mem(s2.len())?;
+        self.charge_alloc_bytes(
+            s1.len().checked_add(s2.len()).ok_or(VMError::OutOfGas)?,
+        )?;
         self.push_value(Value::String(s1.append_bytes(&s2.to_bytes())));
         Ok(())
     }
 
-    /// Debits `n` bytes of transient memory from the current frame
-    /// (ADR 0002 arena cap). Monotonic high-water accounting — drops
-    /// don't release; the cap bounds the frame's total growth, and the
-    /// counter dies with the frame (failure rollback is automatic).
-    /// `mem_limit == 0` means unmetered (test frames); production
-    /// frames always carry a cap (derived from actor storage,
-    /// the CellOpen `mem_limit` operand, or the root `Limits`).
-    fn charge_mem(&mut self, n: usize) -> Result<(), VMError> {
-        let f = &mut self.current_call;
-        f.mem_used = f.mem_used.saturating_add(n as u64);
-        if f.mem_limit > 0 && f.mem_used > f.mem_limit {
-            return Err(VMError::MemLimitExceeded);
-        }
-        Ok(())
+    /// Charges variable byte allocation before it occurs. Allocation gas is
+    /// monotonic: freeing memory never refunds gas, so total charged growth
+    /// bounds the frame's peak live heap without allocator-specific tracking.
+    fn charge_alloc_bytes(&mut self, n: usize) -> Result<(), VMError> {
+        self.current_call.charge_gas(alloc_byte_gas(n)?)
+    }
+
+    /// Charges variable-sized collection growth before reserving its items.
+    fn charge_alloc_items(&mut self, n: usize) -> Result<(), VMError> {
+        self.current_call.charge_gas(alloc_item_gas(n)?)
     }
 
     /// `writezeros` — `s n → s'`. Appends `n` zero bytes.
     fn op_write_zeros(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
-        self.charge_mem(n)?;
         let s = self.pop_value()?.to_string()?;
-        let appended = s.append_bytes(&vec![0u8; n]);
+        self.charge_alloc_bytes(s.len().checked_add(n).ok_or(VMError::OutOfGas)?)?;
+        let appended = s.append_zeros(n);
         self.push_value(Value::String(appended));
         Ok(())
     }
@@ -1617,6 +1700,7 @@ impl VM {
     /// `bitnot` — `s → s'`. Inverts every bit.
     fn op_bit_not(&mut self) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
+        self.charge_alloc_bytes(s.len())?;
         self.push_value(Value::String(s.bit_not()));
         Ok(())
     }
@@ -1625,6 +1709,10 @@ impl VM {
     fn op_bit_or(&mut self) -> Result<(), VMError> {
         let b = self.pop_value()?.to_string()?;
         let a = self.pop_value()?.to_string()?;
+        if a.len() != b.len() {
+            return Err(VMError::BitwiseSizeMismatch);
+        }
+        self.charge_alloc_bytes(a.len())?;
         let c = a.bit_or(&b).ok_or(VMError::BitwiseSizeMismatch)?;
         self.push_value(Value::String(c));
         Ok(())
@@ -1634,6 +1722,10 @@ impl VM {
     fn op_bit_and(&mut self) -> Result<(), VMError> {
         let b = self.pop_value()?.to_string()?;
         let a = self.pop_value()?.to_string()?;
+        if a.len() != b.len() {
+            return Err(VMError::BitwiseSizeMismatch);
+        }
+        self.charge_alloc_bytes(a.len())?;
         let c = a.bit_and(&b).ok_or(VMError::BitwiseSizeMismatch)?;
         self.push_value(Value::String(c));
         Ok(())
@@ -1643,6 +1735,10 @@ impl VM {
     fn op_bit_xor(&mut self) -> Result<(), VMError> {
         let b = self.pop_value()?.to_string()?;
         let a = self.pop_value()?.to_string()?;
+        if a.len() != b.len() {
+            return Err(VMError::BitwiseSizeMismatch);
+        }
+        self.charge_alloc_bytes(a.len())?;
         let c = a.bit_xor(&b).ok_or(VMError::BitwiseSizeMismatch)?;
         self.push_value(Value::String(c));
         Ok(())
@@ -1654,6 +1750,11 @@ impl VM {
     fn op_shift_left(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(256)?;
         let a = self.pop_value()?.to_string()?;
+        self.charge_alloc_bytes(
+            a.len()
+                .checked_add(n.div_ceil(8))
+                .ok_or(VMError::OutOfGas)?,
+        )?;
         let (shifted, removed) = a.shift_left(n);
         self.push_value(Value::String(shifted));
         self.push_value(Value::String(removed));
@@ -1665,6 +1766,11 @@ impl VM {
     fn op_shift_right(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(256)?;
         let a = self.pop_value()?.to_string()?;
+        self.charge_alloc_bytes(
+            a.len()
+                .checked_add(n.div_ceil(8))
+                .ok_or(VMError::OutOfGas)?,
+        )?;
         let (shifted, removed) = a.shift_right(n);
         self.push_value(Value::String(shifted));
         self.push_value(Value::String(removed));
@@ -1696,6 +1802,7 @@ impl VM {
         let cs_involved = matches!(self.current_call.stack[n - 1], Value::Variable(_) | Value::Expression(_))
             || matches!(self.current_call.stack[n - 2], Value::Variable(_) | Value::Expression(_));
         if self.is_external() && cs_involved {
+            self.charge_top_value_growth(2)?;
             let b = self.pop_value()?.to_expression()?;
             let a = self.pop_value()?.to_expression()?;
             self.push_value(Value::Constraint(Constraint::eq(a, b)));
@@ -1710,6 +1817,7 @@ impl VM {
 
     /// _x_ **neg** → _-x_  (Int253 cleartext or Expression LC negate)
     fn op_neg<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
+        self.charge_top_value_growth(1)?;
         let v = self.pop_value()?.neg()?;
         self.push_value(v);
         Ok(())
@@ -1717,6 +1825,7 @@ impl VM {
 
     /// _x y_ **add** → _z_  (cleartext modulo ℓ, or LC sum)
     fn op_add<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
+        self.charge_top_value_growth(2)?;
         let b = self.pop_value()?;
         let a = self.pop_value()?;
         let r = a.add(b, self.is_external())?;
@@ -1728,6 +1837,7 @@ impl VM {
     /// or CS multiplier)
     fn op_mul<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         use crate::msm::{int_to_scalar, MultiscalarMul};
+        self.charge_top_value_growth(2)?;
         let b = self.pop_value()?;
         let a = self.pop_value()?;
         match (a, b) {
@@ -1796,6 +1906,7 @@ impl VM {
 
     /// _x_ **not** → _y_  (Int253 logical, or Constraint negation)
     fn op_not<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
+        self.charge_top_value_growth(1)?;
         let v = self.pop_value()?.not()?;
         self.push_value(v);
         Ok(())
@@ -1803,6 +1914,7 @@ impl VM {
 
     /// _a b_ **and** → _c_  (Int253 logical, or Constraint conjunction)
     fn op_and<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
+        self.charge_top_value_growth(2)?;
         let b = self.pop_value()?;
         let a = self.pop_value()?;
         let r = a.and(b, self.is_external())?;
@@ -1812,6 +1924,7 @@ impl VM {
 
     /// _a b_ **or** → _c_  (Int253 logical, or Constraint disjunction)
     fn op_or<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
+        self.charge_top_value_growth(2)?;
         let b = self.pop_value()?;
         let a = self.pop_value()?;
         let r = a.or(b, self.is_external())?;
@@ -1846,6 +1959,7 @@ impl VM {
     ///   the delegate's `BatchVerifier` (alongside Schnorr/Musig
     ///   sigs). Requires external context.
     fn op_verify<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
+        self.charge_top_value_growth(1)?;
         match self.pop_value()? {
             Value::Int253(v) => {
                 if v.is_zero() {
@@ -1861,6 +1975,7 @@ impl VM {
             Value::MultiscalarMul(m) => {
                 self.require_external()?;
                 let terms = m.into_terms();
+                self.charge_alloc_items(terms.len().saturating_mul(2))?;
                 let scalars: Vec<curve25519_dalek::scalar::Scalar> =
                     terms.iter().map(|(s, _)| *s).collect();
                 let points: Vec<Option<curve25519_dalek::ristretto::RistrettoPoint>> =
@@ -2231,6 +2346,7 @@ impl VM {
         if self.current_call.stack.len() < n {
             return Err(VMError::StackUnderflow);
         }
+        self.charge_alloc_items(n)?;
         let start = self.current_call.stack.len() - n;
         Ok(self.current_call.stack.drain(start..).collect())
     }
@@ -2258,7 +2374,9 @@ impl VM {
     /// stack with the value.
     fn op_input(&mut self) -> Result<(), VMError> {
         self.require_external()?;
-        let cell = self.pop_value()?.to_string()?.to_cell()?;
+        let encoded = self.pop_value()?.to_string()?;
+        self.charge_alloc_bytes(encoded.len())?;
+        let cell = encoded.to_cell()?;
         // Seed the per-tx anchor from the input cell's id — the cell
         // is a spend-once source on the wire, so its id is unique. Any
         // prior `last_anchor` (e.g. unused residue from a previous
@@ -2291,14 +2409,14 @@ impl VM {
         Ok(())
     }
 
-    /// _cell ik nbrs pos script gas memlimit args… k_ **open** → _results… k'_
+    /// _cell ik nbrs pos script gas args… k_ **open** → _results… k'_
     ///
     /// Verifies the taproot-proofs, then enters the unlocked script in an
     /// isolated `CellOpen` frame via [`enter_cell_open_frame`].
     fn op_open(&mut self) -> Result<(), VMError> {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
-        let (gas, mem_limit) = self.pop_gas_mem_limit()?;
+        let gas = self.pop_gas_limit()?;
         // The callee's budget comes out of the caller's: debit the full
         // grant now; leftover is refunded on clean return, burned on
         // failure.
@@ -2309,6 +2427,15 @@ impl VM {
         let internal_key = self.pop_value()?.to_point()?;
         let cell = self.pop_value()?.to_cell()?;
 
+        let proof_bytes = neighbors
+            .len()
+            .checked_mul(32)
+            .and_then(|n| n.checked_add(position.len()))
+            .and_then(|n| n.checked_add(prog.len()))
+            .ok_or(VMError::OutOfGas)?;
+        self.charge_alloc_items(neighbors.len())?;
+        self.charge_alloc_bytes(proof_bytes)?;
+
         let cp = Self::taproot_proof_from_stack_pieces(
             internal_key,
             &neighbors,
@@ -2318,21 +2445,22 @@ impl VM {
         let _ = cell.predicate.verify_taproot_proof(&cp)?;
         // `Script` keeps prover witnesses inline; `Opaque` streams bytes
         // (no parse) on the verifier. See ADR 0015.
+        let code_bytes = prog.len();
         let code = prog.into_script()?;
         // Split parent's anchor for the callee + stash post-call.
         let child_anchor = self.split_anchor_for_call()?;
-        self.enter_cell_open_frame(cell, code, gas, mem_limit, args, child_anchor)?;
+        self.enter_cell_open_frame(cell, code, code_bytes, gas, args, child_anchor)?;
         Ok(())
     }
 
-    /// _cell script sig gas memlimit args… m_ **signcall** → _results… k'_
+    /// _cell script sig gas args… m_ **signcall** → _results… k'_
     ///
     /// Defers an Explicit signature over `script` and enters it in an
     /// isolated `CellOpen` frame via [`enter_cell_open_frame`].
     fn op_signcall(&mut self) -> Result<(), VMError> {
         let m = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(m)?;
-        let (gas, mem_limit) = self.pop_gas_mem_limit()?;
+        let gas = self.pop_gas_limit()?;
         // Debit the grant from the caller (see op_open).
         self.current_call.charge_gas(gas)?;
         let sig_bytes = self.pop_value()?.to_string()?.to_bytes();
@@ -2345,16 +2473,19 @@ impl VM {
         sig.copy_from_slice(&sig_bytes);
         // Canonical bytecode for the signed message; `prog_str` is kept
         // for `to_instructions()` (witness-preserving) just below.
+        self.charge_alloc_bytes(prog_str.len())?;
         let msg = Self::signcall_message(&prog_str.to_bytes_vec());
+        let code_bytes = prog_str.len();
+        let code = prog_str.into_script()?;
+        // Snapshot cursors before recording this call's deferred signature,
+        // so a failed child removes it with the rest of the child effects.
+        let child_anchor = self.split_anchor_for_call()?;
         self.deferred_sigs.push(DeferredSig::Explicit {
             verification_key: cell.predicate.verification_key(),
             message: msg,
             signature: sig,
         });
-
-        let code = prog_str.into_script()?;
-        let child_anchor = self.split_anchor_for_call()?;
-        self.enter_cell_open_frame(cell, code, gas, mem_limit, args, child_anchor)?;
+        self.enter_cell_open_frame(cell, code, code_bytes, gas, args, child_anchor)?;
         Ok(())
     }
 
@@ -2362,21 +2493,32 @@ impl VM {
     /// `CellOpen` frame snapshotting the caller's CS context, pour
     /// `cell.payload` then `args` onto the new stack, swap the
     /// parent out, and switch the active anchor to `child_anchor`
-    /// (the `left` half of the parent's call-entry split). Memory
-    /// cap equals `mem_limit` because a CellOpen frame has no actor storage.
+    /// (the `left` half of the parent's call-entry split).
     fn enter_cell_open_frame(
         &mut self,
         cell: Cell,
         code: Script,
+        code_bytes: usize,
         gas: u64,
-        mem_limit: u64,
         args: Vec<Value>,
         child_anchor: Anchor,
     ) -> Result<(), VMError> {
         if self.call_stack.len() >= MAX_CALL_DEPTH {
             return Err(VMError::CallDepthExceeded);
         }
+        let failure_count = args.len().saturating_add(1);
+        self.charge_alloc_items(failure_count)?;
+        let clone_gas = args.iter().fold(
+            1u64.saturating_add(cell.clone_gas()),
+            |gas, value| gas.saturating_add(value.clone_gas()),
+        );
+        self.current_call.charge_gas(clone_gas)?;
+        let mut failure_values = Vec::with_capacity(failure_count);
+        failure_values.push(Value::Cell(Box::new(cell.clone())));
+        failure_values.extend(args.iter().cloned());
+        self.current_call.snap_failure_values = failure_values;
         let external_context = self.is_external();
+        let payload_len = cell.payload().len();
         let mut frame = CallFrame::from_code(
             code,
             CallKind::CellOpen {
@@ -2384,9 +2526,10 @@ impl VM {
                 external_context,
             },
             gas,
-            mem_limit,
         )
         .with_anchor(child_anchor);
+        frame.gas_used = alloc_byte_gas(code_bytes)?
+            .saturating_add(alloc_item_gas(payload_len.saturating_add(args.len()))?);
         for v in cell.into_payload() {
             frame.stack.push(v);
         }
@@ -2399,20 +2542,13 @@ impl VM {
         Ok(())
     }
 
-    /// Pops `mem_limit` then `gas` (in that order — `gas` is deeper) as
-    /// non-negative `u64`. Shared by `op_open` and `op_signcall`.
-    fn pop_gas_mem_limit(&mut self) -> Result<(u64, u64), VMError> {
-        let mem_limit = self
+    /// Pops the child gas grant as a non-negative `u64`.
+    fn pop_gas_limit(&mut self) -> Result<u64, VMError> {
+        self
             .pop_value()?
             .to_int253()?
             .to_u64()
-            .ok_or(VMError::InvalidBitrange)?;
-        let gas = self
-            .pop_value()?
-            .to_int253()?
-            .to_u64()
-            .ok_or(VMError::InvalidBitrange)?;
-        Ok((gas, mem_limit))
+            .ok_or(VMError::InvalidBitrange)
     }
 
     /// Builds a `TaprootProof` from the four stack-popped pieces. `neighbors`
@@ -2487,10 +2623,10 @@ impl VM {
         Ok(())
     }
 
-    /// _args… k gas addr_ **call** → _results… k' 1 | 0_
+    /// _args… k gas addr_ **call** → _results… k' 1 | args… k 0_
     ///
     /// Synchronous actor-to-actor call. Re-entry is gated by actor-state
-    /// presence: a checked-out callee soft-fails with `0`; otherwise
+    /// presence: a checked-out callee returns its arguments and `k 0`; otherwise
     /// re-entry is permitted. There is no VM-level method operand
     /// (ADR 0020). Calls emit no txlog entry; a callee state mutation is
     /// recorded later by `op_save`.
@@ -2516,41 +2652,49 @@ impl VM {
         }
 
         // Pre-frame setup. Any failure here ("cannot enter callee")
-        // converts to a `0` failure marker on the caller's stack —
+        // converts to the restored arguments plus `k 0` —
         // the call simply "did not happen" from the caller's POV. A
         // re-entrant call into an actor that's mid-update lands here
         // too: its state is checked out, so `resolve_method` returns
         // `ActorEmpty` (ADR 0017 — the state is the re-entrancy lock).
-        let pre_frame: Result<(Vec<u8>, u64, ActorID), VMError> = (|| {
+        let pre_frame: Result<(Vec<u8>, ActorID, u64), VMError> = (|| {
             if self.call_stack.len() >= MAX_CALL_DEPTH {
                 return Err(VMError::CallDepthExceeded);
             }
+            let code_bytes = registry.actor_code_bytes(&callee)?;
+            let initial_gas = code_bytes
+                .saturating_mul(GAS_PER_ALLOC_BYTE)
+                .saturating_add(alloc_item_gas(args.len())?);
+            if initial_gas > gas {
+                return Err(VMError::OutOfGas);
+            }
             let script = registry.load_code(&callee)?;
-            let usage = registry.actor_usage(&callee)?;
-            let capacity = registry.actor_capacity(&callee, self.block_height)?;
-            let mem_limit = usage
-                .max(capacity)
-                .saturating_mul(registry.transient_memory_multiplier());
             let caller = self
                 .current_call
                 .kind
                 .actor()
                 .cloned()
                 .unwrap_or(ActorID::Hash([0u8; 32]));
-            Ok((script, mem_limit, caller))
+            Ok((script, caller, initial_gas))
         })();
-        let (script, mem_limit, caller) = match pre_frame {
+        let (script, caller, initial_gas) = match pre_frame {
             Ok(v) => v,
-            Err(_) => {
+            Err(error) => {
                 // Pre-frame failure (reentrancy, missing actor, etc.):
-                // push marker `0`, no frame created, no rollback needed.
-                // The call "did not happen" — refund the debited grant.
-                self.current_call.gas_used =
-                    self.current_call.gas_used.saturating_sub(gas);
-                self.push_value(Value::Int253(Int253::from(0u64)));
+                // restore the moved arguments. Availability failures refund
+                // the grant; an insufficient child budget burns it.
+                if !matches!(error, VMError::OutOfGas) {
+                    self.current_call.gas_used =
+                        self.current_call.gas_used.saturating_sub(gas);
+                }
+                self.push_failed_values(args);
                 return Ok(());
             }
         };
+
+        self.charge_alloc_items(args.len())?;
+        self.charge_clone_values(&args)?;
+        self.current_call.snap_failure_values = args.clone();
 
         // Split the parent's anchor: `left` (callee_anchor) seeds
         // the callee's `last_anchor`; `right` is stashed on the
@@ -2566,9 +2710,9 @@ impl VM {
                 caller,
             },
             gas,
-            mem_limit,
         )
         .with_anchor(callee_anchor);
+        frame.gas_used = initial_gas;
         for v in args {
             frame.stack.push(v);
         }
@@ -2597,6 +2741,9 @@ impl VM {
     ) -> Result<(), VMError> {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let actor = self.require_actor()?.clone();
+        let state_bytes = registry.actor_state_bytes(&actor)?;
+        self.current_call
+            .charge_gas(state_bytes.saturating_mul(GAS_PER_ALLOC_BYTE))?;
         let state = registry.load_state(&actor)?;
         self.push_value(state);
         Ok(())
@@ -2628,6 +2775,7 @@ impl VM {
         if !state.is_portable() {
             return Err(VMError::NonPortableInState);
         }
+        self.current_call.charge_gas(state.clone_gas())?;
         // Rust-level deep clone for the txlog entry. The registry
         // takes ownership of one copy; the txlog gets another.
         // `clone` ignores VM stack-copyability rules so portable
@@ -2662,7 +2810,10 @@ impl VM {
     ) -> Result<(), VMError> {
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
-        let code = self.pop_value()?.to_string()?.to_bytes_vec();
+        let code_string = self.pop_value()?.to_string()?;
+        self.charge_alloc_bytes(code_string.len())?;
+        let code = code_string.to_bytes();
+        self.charge_alloc_bytes(code.len())?;
         registry.set_code(&actor, code.clone())?;
         registry.validate_actor_storage(&actor, self.block_height)?;
         self.txlog.push(TxEntry::SetCode { actor, code });
@@ -2701,13 +2852,6 @@ impl VM {
         )));
         self.push_value(Value::Int253(Int253::ONE));
 
-        // A provisional constructor starts with no capacity. Once its first
-        // lease is bought, let subsequent instructions use the corresponding
-        // transient-memory allowance.
-        let capacity = registry.actor_capacity(&actor, self.block_height)?;
-        self.current_call.mem_limit = self.current_call.mem_limit.max(
-            capacity.saturating_mul(registry.transient_memory_multiplier()),
-        );
         Ok(())
     }
 
@@ -2850,6 +2994,7 @@ impl VM {
         delegate: &mut D,
     ) -> Result<(), VMError> {
         self.require_external()?;
+        self.charge_alloc_items(1)?;
         use bulletproofs::r1cs::ConstraintSystem;
         let witness_scalar = witness.map(|i| i.to_scalar_mod_order());
         let r1cs_var = delegate
@@ -2869,6 +3014,7 @@ impl VM {
     /// the commitment, pushes a one-term Expression.
     fn op_expr<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         self.require_external()?;
+        self.charge_alloc_items(1)?;
         use curve25519_dalek::scalar::Scalar;
         let var = self.pop_value()?.to_variable()?;
         let (_point, r1cs_var) = delegate.commit_variable(&var.commitment)?;
@@ -2898,6 +3044,8 @@ impl VM {
             return Err(VMError::BitCountOutOfRange);
         }
         let bit_range = BitRange::new(n_usize).ok_or(VMError::BitCountOutOfRange)?;
+
+        self.charge_alloc_items(n_usize)?;
 
         let expr = self.pop_value()?.to_expression()?;
 
@@ -3092,6 +3240,9 @@ impl VM {
         if m == 0 || n == 0 {
             return Err(VMError::MixDegenerate);
         }
+        let mix_items = m.checked_add(n).ok_or(VMError::OutOfGas)?;
+        let quadratic_work = mix_items.checked_mul(mix_items).ok_or(VMError::OutOfGas)?;
+        self.charge_alloc_items(quadratic_work)?;
         // Stack depth check: we'll pop 2n commitment Strings + m token values.
         let needed = m.saturating_add(n.saturating_mul(2));
         if needed > self.current_call.stack.len() {

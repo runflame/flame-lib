@@ -42,7 +42,7 @@ fn callframe_advances_through_instructions() {
     let instrs = ScriptBuilder::parse(&[0x05, 0x1c, 0x1d])
         .unwrap()
         .into_instructions();
-    let mut frame = CallFrame::new(instrs, CallKind::ExternalRoot, 0, 0);
+    let mut frame = CallFrame::new(instrs, CallKind::ExternalRoot, 0);
     use crate::ops::Instruction;
     assert!(matches!(
         frame.next_instruction().unwrap(),
@@ -59,11 +59,10 @@ fn callframe_advances_through_instructions() {
     assert!(frame.next_instruction().unwrap().is_none());
 }
 
-/// Chain-info bytes after `height` (0xf3–0xf7) remain reserved and fail
-/// deterministically.
+/// Removed/reserved bytes remain unavailable and fail deterministically.
 #[test]
-fn reserved_chain_info_opcodes_reject_at_dispatch() {
-    for byte in 0xf3u8..=0xf7 {
+fn reserved_opcodes_reject_at_dispatch() {
+    for byte in core::iter::once(0xe7u8).chain(0xf3u8..=0xf7) {
         let mut reg = StubRegistry { script: vec![byte] };
         let block = BlockContext { height: 0 };
         let err = VM::execute_internal(dummy_header(), dummy_message(1000), &mut reg, &block)
@@ -92,7 +91,7 @@ fn dirty_stack_at_call_exit_is_an_error() {
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(Vec::new(), kind, 1000, 0).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(Vec::new(), kind, 1000).with_anchor(Anchor([0u8; 32])),
     );
     vm.current_call
         .stack

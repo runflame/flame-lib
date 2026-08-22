@@ -6,11 +6,56 @@ use crate::Merlin;
 use crate::Point;
 use crate::String;
 use crate::{ClearToken, Token, WideToken};
-use crate::{Constraint, Expression, Variable};
+use crate::{Constraint, Expression, SecretConstraint, Variable};
 use crate::MultiscalarMul;
 
 #[rustfmt::skip]
 impl Value {
+    /// Logical heap work needed for a Rust-level clone. The unit is gas, not
+    /// allocator bytes: every variable byte, container member, expression
+    /// term, and constraint node contributes at least one unit. This keeps
+    /// rollback snapshots bounded without making consensus depend on a Rust
+    /// allocator's layout.
+    pub(crate) fn clone_gas(&self) -> u64 {
+        fn expression_gas(expr: &Expression) -> u64 {
+            match expr {
+                Expression::Constant(_) => 0,
+                Expression::LinearCombination(terms, _) => terms.len() as u64,
+            }
+        }
+
+        fn secret_constraint_gas(constraint: &SecretConstraint) -> u64 {
+            match constraint {
+                SecretConstraint::Eq(a, b) => 2u64
+                    .saturating_add(expression_gas(a))
+                    .saturating_add(expression_gas(b)),
+                SecretConstraint::And(a, b) | SecretConstraint::Or(a, b) => 2u64
+                    .saturating_add(secret_constraint_gas(a))
+                    .saturating_add(secret_constraint_gas(b)),
+                SecretConstraint::Not(value) => {
+                    1u64.saturating_add(secret_constraint_gas(value))
+                }
+            }
+        }
+
+        match self {
+            Value::Int253(_) | Value::ClearToken(_) | Value::Variable(_) => 0,
+            Value::String(s) => s.len() as u64,
+            Value::Dict(d) => d.clone_gas(),
+            Value::Point(_) | Value::Token(_) | Value::Merlin(_) => 1,
+            // Charge the same logical item on prover (assigned) and verifier
+            // (unassigned); gas must never depend on secret witness presence.
+            Value::WideToken(_) => 1,
+            Value::Cell(cell) => 1u64.saturating_add(cell.clone_gas()),
+            Value::Expression(expr) => expression_gas(expr),
+            Value::Constraint(Constraint::Cleartext(_)) => 0,
+            Value::Constraint(Constraint::Secret(constraint)) => {
+                secret_constraint_gas(constraint)
+            }
+            Value::MultiscalarMul(msm) => msm.len() as u64,
+        }
+    }
+
     /// Downcast to Int253.
     pub fn to_int253(self)      -> Result<Int253, VMError>     { match self { Value::Int253(x) => Ok(x),     _ => Err(VMError::TypeNotInt253) } }
     /// Downcast to String.

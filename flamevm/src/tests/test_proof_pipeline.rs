@@ -60,7 +60,6 @@ fn prove_then_verify_alloc_arithmetic_equality() {
         program,
         dummy_header(),
         1_000_000,
-        0,
     )
     .expect("prove succeeds");
 let TxResult { bytecode, proof, .. } = _pp;
@@ -74,7 +73,6 @@ let proof = proof.expect("proof set");
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify succeeds");
@@ -95,7 +93,6 @@ fn prove_succeeds_but_verify_fails_on_tampered_proof() {
         program,
         dummy_header(),
         1_000_000,
-        0,
     )
     .expect("prove succeeds");
 let TxResult { bytecode, proof, .. } = _pp;
@@ -115,7 +112,6 @@ let proof = proof.expect("proof set");
         &tampered,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .unwrap_err();
@@ -141,7 +137,6 @@ fn prove_fails_for_unsatisfiable_equality() {
         program,
         dummy_header(),
         1_000_000,
-        0,
     )
     .expect("prover doesn't refuse construction");
 let TxResult { bytecode, proof, .. } = _pp;
@@ -154,7 +149,6 @@ let proof = proof.expect("proof set");
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .unwrap_err();
@@ -178,7 +172,6 @@ fn alloc_pushes_expression_with_witness() {
             program.into_instructions(),
             kind,
             1_000_000,
-            0,
         ),
     );
     // One step → executes the alloc.
@@ -210,7 +203,6 @@ fn prove_then_verify_alloc_multiplication() {
         program,
         dummy_header(),
         1_000_000,
-        0,
     )
     .expect("prove succeeds");
 let TxResult { bytecode, proof, .. } = _pp;
@@ -223,7 +215,6 @@ let proof = proof.expect("proof set");
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify succeeds");
@@ -244,7 +235,6 @@ fn prove_then_verify_alloc_with_negation() {
         program,
         dummy_header(),
         1_000_000,
-        0,
     )
     .expect("prove succeeds");
 let TxResult { bytecode, proof, .. } = _pp;
@@ -257,7 +247,6 @@ let proof = proof.expect("proof set");
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify succeeds");
@@ -285,7 +274,6 @@ fn alloc_without_witness_works_in_verifier_path() {
         program,
         dummy_header(),
         1_000_000,
-        0,
     )
     .expect("prove succeeds");
 let TxResult { bytecode, proof, .. } = _pp;
@@ -298,7 +286,6 @@ let proof = proof.expect("proof set");
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         None,
     )
     .expect("verify succeeds");
@@ -321,9 +308,9 @@ fn shared_bp_gens_is_singleton() {
         .alloc(Some(Int253::from(2u64)))
         .eq()
         .verify();
-    Prover::prove(&pc_gens, program1, dummy_header(), 1_000_000, 0)
+    Prover::prove(&pc_gens, program1, dummy_header(), 1_000_000)
         .expect("prove #1 succeeds with shared gens");
-    Prover::prove(&pc_gens, program2, dummy_header(), 1_000_000, 0)
+    Prover::prove(&pc_gens, program2, dummy_header(), 1_000_000)
         .expect("prove #2 succeeds with shared gens");
 }
 
@@ -343,9 +330,9 @@ fn phase18_txid_deterministic_for_equal_inputs() {
             .eq()
             .verify()
     };
-    let txid1 = Prover::prove(&pc_gens, mk_program(), header, 1_000_000, 0)
+    let txid1 = Prover::prove(&pc_gens, mk_program(), header, 1_000_000)
         .expect("prove #1").txid;
-    let txid2 = Prover::prove(&pc_gens, mk_program(), header, 1_000_000, 0)
+    let txid2 = Prover::prove(&pc_gens, mk_program(), header, 1_000_000)
         .expect("prove #2").txid;
     assert_eq!(txid1, txid2);
 }
@@ -379,11 +366,11 @@ fn phase18_txid_changes_when_header_changes() {
         version: 2,
         locktime: 0,
     };
-    let id1 = Prover::prove(&pc_gens, mk_program(), h1, 1_000_000, 0)
+    let id1 = Prover::prove(&pc_gens, mk_program(), h1, 1_000_000)
         .expect("prove h1").txid;
-    let id2 = Prover::prove(&pc_gens, mk_program(), h2, 1_000_000, 0)
+    let id2 = Prover::prove(&pc_gens, mk_program(), h2, 1_000_000)
         .expect("prove h2").txid;
-    let id3 = Prover::prove(&pc_gens, mk_program(), h3, 1_000_000, 0)
+    let id3 = Prover::prove(&pc_gens, mk_program(), h3, 1_000_000)
         .expect("prove h3").txid;
     assert_ne!(id1, id2, "locktime change must alter TxID");
     assert_ne!(id1, id3, "version change must alter TxID");
@@ -405,7 +392,7 @@ fn phase18_prove_verify_roundtrip_binds_txid() {
         .alloc(Some(Int253::from(10u64)))
         .eq()
         .verify();
-    let prover_result = Prover::prove(&pc_gens, program, header, 1_000_000, 0)
+    let prover_result = Prover::prove(&pc_gens, program, header, 1_000_000)
         .expect("prove ok");
     let txid_p = prover_result.txid;
     let TxResult { bytecode, proof, .. } = prover_result;
@@ -417,7 +404,6 @@ fn phase18_prove_verify_roundtrip_binds_txid() {
         &proof,
         header,
         1_000_000,
-        0,
         None,
     )
     .expect("verify ok");
@@ -449,7 +435,7 @@ fn phase18_verifier_rejects_proof_under_different_header() {
         .alloc(Some(Int253::from(10u64)))
         .eq()
         .verify();
-    let _pp = Prover::prove(&pc_gens, program, prove_header, 1_000_000, 0)
+    let _pp = Prover::prove(&pc_gens, program, prove_header, 1_000_000)
             .expect("prove ok");
     let TxResult { bytecode, proof, .. } = _pp;
     let proof = proof.expect("proof set");
@@ -460,7 +446,6 @@ fn phase18_verifier_rejects_proof_under_different_header() {
         &proof,
         verify_header, // mismatch — TxID bound differs
         1_000_000,
-        0,
         None,
     )
     .expect_err("must reject under different header");
@@ -481,7 +466,7 @@ fn phase21_txresult_populated_for_trivial_program() {
         .eq()
         .verify();
     let prover_result =
-        Prover::prove(&pc_gens, program, header, 1_000_000, 0)
+        Prover::prove(&pc_gens, program, header, 1_000_000)
             .expect("prove ok");
     // Txlog has Header at [0].
     assert!(matches!(
@@ -507,7 +492,6 @@ fn phase21_txresult_populated_for_trivial_program() {
         &proof,
         header,
         1_000_000,
-        0,
         None,
     )
     .expect("verify ok");
@@ -538,7 +522,6 @@ fn phase21_total_fee_flows_through_to_txresult() {
             program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
         ),
     );
     let mut prover = Prover::new(&pc_gens);
@@ -568,7 +551,6 @@ fn phase21_txlog_ordering_in_txresult() {
         dummy_header(),
         script,
         1_000_000,
-        0,
         delegate,
     )
     .expect("execute ok");
@@ -599,7 +581,7 @@ fn phase21_deferred_sigs_in_txresult() {
     let (script, cell_id) = make_signtx_script_with_cell(vk);
     let program = ScriptBuilder::parse(&script).expect("decode");
     let prover_result =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000, 0)
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
             .expect("prove ok");
     assert_eq!(prover_result.deferred_sigs.len(), 1);
     let prover_txid = prover_result.txid;
@@ -621,7 +603,6 @@ fn phase21_deferred_sigs_in_txresult() {
         &proof,
         dummy_header(),
         1_000_000,
-        0,
         Some(sig),
     )
     .expect("verify ok");

@@ -164,10 +164,10 @@ pub fn code_root(code: &[u8]) -> [u8; 32] {
 /// authoritative storage gate; this reports the rare case of a portable
 /// value that lacks an encoder.
 pub fn code_state_bytes(code: &[u8], state: &Value) -> Result<u64, VMError> {
-    let mut buf = Vec::new();
-    write_value(&mut buf, state).map_err(|_| VMError::MalformedActorState)?;
+    let mut size = readerwriter::SizeWriter::new();
+    write_value(&mut size, state).map_err(|_| VMError::MalformedActorState)?;
     (code.len() as u64)
-        .checked_add(buf.len() as u64)
+        .checked_add(size.len() as u64)
         .ok_or(VMError::StorageArithmeticOverflow)
 }
 
@@ -179,11 +179,6 @@ pub struct StoragePurchase {
     pub fee_sparks: crate::Int253,
     pub expiry_height: u64,
 }
-
-/// Transient actor-frame memory is bounded by four times the larger of
-/// current capacity and charged usage. The usage side is the constructor's
-/// bootstrap allowance before its first lease is purchased.
-pub const TRANSIENT_MEMORY_CAPACITY_MULTIPLIER: u64 = 4;
 
 // ── ActorRegistry trait ──────────────────────────────────────────
 
@@ -213,6 +208,14 @@ pub trait ActorRegistry {
     /// `ActorEmpty` (checked out → re-entrancy block).
     fn load_code(&self, actor: &ActorID) -> Result<Vec<u8>, VMError>;
 
+    /// Code bytes that [`Self::load_code`] would activate. Used to debit gas
+    /// before the host clones or decodes the code.
+    fn actor_code_bytes(&self, actor: &ActorID) -> Result<u64, VMError>;
+
+    /// Canonical state bytes that [`Self::load_state`] would activate. Used to
+    /// debit gas before checkout or deserialization.
+    fn actor_state_bytes(&self, actor: &ActorID) -> Result<u64, VMError>;
+
     /// Replaces the actor's code blob (`setcode`). Errors `ActorNotFound`.
     fn set_code(&mut self, actor: &ActorID, code: Vec<u8>) -> Result<(), VMError>;
 
@@ -223,13 +226,6 @@ pub trait ActorRegistry {
     /// Leased bytes available at `height`. A past height and an actor pending
     /// block-boundary destruction are hard errors.
     fn actor_capacity(&self, actor: &ActorID, height: u64) -> Result<u64, VMError>;
-
-    /// Multiplier converting persistent actor bytes into a transient frame
-    /// memory allowance. Chain implementations override the default when the
-    /// activated consensus parameter differs.
-    fn transient_memory_multiplier(&self) -> u64 {
-        TRANSIENT_MEMORY_CAPACITY_MULTIPLIER
-    }
 
     /// Quotes `bytes` without changing state. `None` is the storage opcodes'
     /// in-band unavailable result; arithmetic or invariant failures are hard

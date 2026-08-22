@@ -77,7 +77,6 @@ fn phase19_op_fee_rejects_negative_qty() {
             program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
         ),
     );
     let mut prover = Prover::new(&pc_gens);
@@ -99,7 +98,6 @@ fn phase19_op_fee_rejects_qty_over_cap() {
             program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
         ),
     );
     let mut prover = Prover::new(&pc_gens);
@@ -129,7 +127,6 @@ fn phase19_op_fee_rejects_aggregate_over_cap() {
             program.into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
-            0,
         ),
     );
     let mut prover = Prover::new(&pc_gens);
