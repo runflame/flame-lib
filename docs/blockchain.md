@@ -161,6 +161,21 @@ long send chain serial and lets early transactions influence all later actor and
 storage outcomes. Gas, message-count, call-depth, and block limits must bound
 that work.
 
+No duplicate-message table is part of consensus. Every accepted `Send` gets its
+anchor by splitting the VM's current ratchet: the left child enters the Message
+and the right child continues execution. Ratchet roots come from a spent input
+CellID or the unique anchor of the delivering Message, and synchronous calls
+split disjoint child and caller-continuation subtrees. The queue is derived once
+from each executed `Send` effect and fully drained before commit. A
+reorganization may execute a message again only after rolling back its former
+delivery or refund.
+
+Delivery and recovery share the block's outer atomic checkpoint. Actor changes
+from a failed delivery are rolled back before the original payload is sealed in
+one refund Cell under `refund_predicate`. If constructing or applying that Cell
+fails, the whole candidate is rejected, including the Send that originated the
+message; a failed candidate never commits consumption without recovery.
+
 ## Derived internal transactions
 
 An internal transaction is a receipt of deterministic execution, not another
@@ -169,8 +184,9 @@ actor and synchronous calls, and records the resulting ordered effects. A
 lease-expiry destruction is a system internal transaction with
 `ActorDestroy(actor)` instead of `Receive`; it recursively records token
 retirements and binds the expiry height. A failed delivery records `Receive` and
-the refund `Output`, and its execution-record kind distinguishes failure from
-success.
+exactly one refund `Output`; the Cell uses the left split of the message anchor,
+the same unique slot the delivery's first successful output would have used.
+Its execution-record kind distinguishes failure from success.
 
 Re-derivation prevents a proposer from forging actor changes and avoids a second
 admission path. Its cost is that every validator must repeat serial actor

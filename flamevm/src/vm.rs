@@ -548,8 +548,8 @@ pub(crate) struct VM {
     /// internal tx (where `M` is the delivering Message's anchor —
     /// itself a split-child from the originating tx's `op_send`).
     /// Consumed-and-replaced via split by `cell` / `output` / `send`;
-    /// `call` / `open` / `signcall` don't touch it (intra-tx calls
-    /// don't mint new cross-tx entities).
+    /// `call` / `open` / `signcall` split it into disjoint callee and
+    /// caller-continuation subtrees.
     pub(crate) last_anchor: Option<Anchor>,
 
     current_call: CallFrame,

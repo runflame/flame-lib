@@ -47,17 +47,19 @@ fn send_commits_message_fields() {
 }
 
 #[test]
-fn sequential_sends_get_distinct_anchors() {
+fn sequential_sends_get_distinct_anchors_and_ids() {
     let target = ActorID::Hash([0xcc; 32]);
     let mut code = send_script(&target, [0; 32], 0, 1);
     code.extend(send_script(&target, [0; 32], 0, 1));
     let mut reg = MemRegistry::new();
     let actor = deploy_actor(&mut reg, code);
     let log = deliver(&mut reg, msg_to(actor));
-    let anchors: Vec<_> = sends(&log).iter().map(|message| message.anchor).collect();
+    let messages = sends(&log);
+    let anchors: Vec<_> = messages.iter().map(|message| message.anchor).collect();
     let (first, remainder) = Anchor([0u8; 32]).split();
     let (second, _) = remainder.split();
     assert_eq!(anchors, vec![first, second]);
+    assert_ne!(messages[0].id(), messages[1].id());
 }
 
 #[test]

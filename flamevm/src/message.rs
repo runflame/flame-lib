@@ -25,28 +25,23 @@ impl MessageID {
 
 /// One queued outbound message. Built by `op_send`, embedded directly
 /// in `TxEntry::Send(Message)`, drained by the consensus layer after
-/// external-tx commit. Mirrors `spec.md` §Messages with one addition:
-/// `refund_predicate`, the sender-chosen unlock predicate for the
-/// bounce cell produced when the delivered internal tx fails (Q3 —
-/// failure path emits an Output directly via consensus, not a fresh
-/// sub-VM).
+/// external-tx execution. `refund_predicate` is the sender-chosen unlock
+/// predicate for the Cell emitted directly by consensus when delivery fails.
 #[derive(Clone, Debug)]
 pub struct Message {
     /// Destination actor (either `Hash` for an already-deployed actor,
-    /// or `Constructor` for transparent on-the-fly deployment per Q4).
-    /// `id()` canonicalizes both forms via `to_canonical()` so a send
-    /// targeted by hash and a send targeted by constructor bytes that
-    /// hash to the same id produce the same MessageID.
+    /// or `Constructor` for transparent on-the-fly deployment). Encoding
+    /// preserves the variant because constructor code must reach first
+    /// delivery, so Hash and Constructor forms have different MessageIDs.
     pub target: ActorID,
-
 
     /// Originating actor's id if this send was emitted by an internal
     /// tx; `None` if it was emitted by an external tx (the external
-    /// sender has no actor identity). Canonicalized in `id()` the same
-    /// way as `target`.
+    /// sender has no actor identity). Canonicalized during encoding so
+    /// equivalent constructor-form caller ids commit identically.
     pub caller: Option<ActorID>,
 
-    /// Anchor ratcheted from the external tx's chain right before the
+    /// Anchor ratcheted from the current tx's chain right before the
     /// `TxEntry::Send` was appended. Provides uniqueness for the
     /// MessageID hash. Also seeds the resulting internal tx's
     /// `last_anchor`.
@@ -57,13 +52,13 @@ pub struct Message {
     payload: Vec<Value>,
 
     /// Gas allotment committed by the originator. Fully consumed
-    /// regardless of internal-tx outcome (no refunds for sends per
-    /// spec.md).
+    /// regardless of internal-tx outcome; asynchronous sends have no
+    /// caller frame to refund.
     pub gas: u64,
 
     /// Sender-chosen bounce predicate. If the delivered internal tx
-    /// fails, consensus seals `payload` into a fresh cell under this
-    /// predicate and emits the cell as an Output effect (Q3).
+    /// fails, consensus seals `payload` into a fresh Cell under this
+    /// predicate and emits it as an Output effect.
     pub refund_predicate: Predicate,
 }
 
@@ -125,9 +120,7 @@ impl Message {
 /// Canonical wire form. Field order:
 ///
 /// 1. `anchor` — 32 raw bytes (via `Anchor: Encodable`).
-/// 2. `target` — canonical `ActorID::encode` of `to_canonical()` so
-///    Hash and Constructor forms of the same actor produce identical
-///    bytes.
+/// 2. `target` — `ActorID::encode`, preserving Hash or Constructor form.
 /// 3. `caller` — `0x00` for None, `0x01 ‖ ActorID::encode(canonical)`
 ///    for Some.
 /// 4. `refund_predicate` — 32-byte compressed Ristretto (via

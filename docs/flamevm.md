@@ -442,6 +442,14 @@ it.
 
 Messages execute “method calls” asynchronously. Each message contains a predicate for bouncing its arguments in case of actor failure. If the method called through a message returns any values, the call fails and the original arguments are bounced.
 
+Messages are unique by construction, not by a duplicate-message table. Each
+accepted `send` embeds the left child of the current anchor ratchet and leaves
+the right child for subsequent execution. Calls split disjoint callee and
+caller-continuation subtrees. A failed delivery rolls back its actor effects and
+produces one Cell containing the original payload under `refund_predicate`; it
+does not enqueue another Message. Failure to apply that refund rejects the
+whole candidate, so the originating Send does not commit.
+
 A Message's payload is immutable and is created through a checked constructor.
 Construction scans its top-level values and rejects any non-portable item;
 checking a nested Dict is O(1) through its sticky `portable` flag. Message

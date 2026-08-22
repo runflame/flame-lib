@@ -33,18 +33,17 @@ when the specification, implementation, and focused regression tests agree.
      retain explicit upward-return tests for non-portable liabilities, and add
      a storage-pool conservation test across nested and outer rollback.
 
-2. [ ] Make asynchronous message failure conserve payload assets.
+2. [x] Make asynchronous message failure conserve payload assets.
 
-   - [ ] Implement the documented bounce: on failed delivery, seal the original
-     payload into exactly one cell under `refund_predicate`, or replace the spec
-     with another exactly-once recovery rule before implementing it.
-   - [ ] Ensure a failed constructor delivery rolls back the provisional actor,
+   - [x] Implement the documented bounce: on failed delivery, seal the original
+     payload into exactly one cell under `refund_predicate`.
+   - [x] Ensure a failed constructor delivery rolls back the provisional actor,
      storage purchases, burns, message consumption, and bounce creation in one
      atomic boundary.
-   - [ ] Cover missing, pending-destruction, and checked-out actors; malformed
-     or failing code; dirty return stacks; repeated delivery; and failure while
-     producing the bounce.
-   - [ ] Prove with tests that a message carrying each portable bearer type can
+   - [x] Cover missing, pending-destruction, and checked-out actors; malformed
+     or failing code; dirty return stacks; anchor-ratcheted message uniqueness;
+     and failure while producing the bounce.
+   - [x] Prove with tests that a message carrying each portable bearer type can
      be delivered or recovered, but never lost or recovered twice.
 
 3. [x] Close internal signature authorization gaps.

@@ -457,7 +457,14 @@ impl Blockchain {
                     Self::bounce_log(failed_message)?,
                 ),
             };
-            self.apply_log(&mut work, &hasher, &log, &[], &mut sends, &mut seen_outputs)?;
+            self.apply_log(
+                &mut work,
+                &hasher,
+                &log,
+                &[],
+                &mut sends,
+                &mut seen_outputs,
+            )?;
             records.push(ExecutionRecord {
                 kind,
                 txid: log.txid(),
@@ -761,7 +768,309 @@ pub enum ChainError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flamevm::{ClearToken, FLAME_FLAVOR, Int253};
+    use flamevm::{
+        Anchor, ClearToken, Dict, FLAME_FLAVOR, Int253, Predicate, ScriptBuilder, Token,
+        empty_state, state_root,
+    };
+
+    fn refund_predicate() -> Predicate {
+        Predicate::opaque(Predicate::unspendable_key())
+    }
+
+    fn message(target: ActorID, payload: Vec<Value>, gas: u64, anchor: u8) -> Message {
+        Message::new(
+            target,
+            None,
+            Anchor([anchor; 32]),
+            payload,
+            gas,
+            refund_predicate(),
+        )
+        .expect("test payload is portable")
+    }
+
+    fn assert_bounce_matches(log: &TxLog, original: &Message) {
+        assert_eq!(log.entries().len(), 3);
+        assert!(matches!(
+            log.entries()[0],
+            TxEntry::Header(TxHeader {
+                version: 1,
+                locktime: 0
+            })
+        ));
+        assert!(matches!(
+            log.entries()[1],
+            TxEntry::Receive(id) if id == *original.id().as_bytes()
+        ));
+        let TxEntry::Output(cell) = &log.entries()[2] else {
+            panic!("bounce must contain exactly one output");
+        };
+        assert_eq!(cell.anchor, original.anchor.split().0);
+        assert_eq!(
+            cell.predicate.verification_key(),
+            original.refund_predicate.verification_key()
+        );
+        assert_eq!(cell.payload().len(), original.payload().len());
+        for (actual, expected) in cell.payload().iter().zip(original.payload()) {
+            assert_eq!(state_root(actual), state_root(expected));
+        }
+    }
+
+    fn fail_and_bounce(
+        store: &mut ActorStore,
+        original: Message,
+        height: u64,
+    ) -> (VMError, TxLog) {
+        let escrow = original.clone();
+        let error = match original.execute_tx(store, &BlockContext { height }) {
+            Ok(_) => panic!("delivery must fail"),
+            Err(error) => error,
+        };
+        let log = Blockchain::bounce_log(escrow.clone()).expect("admitted payload must bounce");
+        assert_bounce_matches(&log, &escrow);
+        (error, log)
+    }
+
+    fn deploy_actor(store: &mut ActorStore, id: u8, code: Vec<u8>) -> ActorID {
+        let actor = ActorID::Hash([id; 32]);
+        store
+            .deploy(actor.clone(), code, empty_state())
+            .expect("deploy test actor");
+        store
+            .purchase_storage(&actor, 1_024, 0)
+            .expect("quote storage")
+            .expect("storage available");
+        actor
+    }
+
+    #[test]
+    fn failed_delivery_matrix_returns_one_exact_bounce() {
+        let payload = || {
+            vec![Value::ClearToken(ClearToken::new(
+                Int253::from(7u64),
+                FLAME_FLAVOR,
+            ))]
+        };
+
+        let mut missing = ActorStore::new(StorageParams::default()).unwrap();
+        let (error, _) = fail_and_bounce(
+            &mut missing,
+            message(ActorID::Hash([1; 32]), payload(), 1_000_000, 1),
+            0,
+        );
+        assert!(matches!(error, VMError::ActorNotFound));
+
+        let mut malformed = ActorStore::new(StorageParams::default()).unwrap();
+        let actor = deploy_actor(&mut malformed, 2, vec![0xff]);
+        let (error, _) = fail_and_bounce(
+            &mut malformed,
+            message(actor, payload(), 1_000_000, 2),
+            0,
+        );
+        assert!(matches!(error, VMError::UnknownOpcode(0xff)));
+
+        let mut failing = ActorStore::new(StorageParams::default()).unwrap();
+        let actor = deploy_actor(
+            &mut failing,
+            3,
+            ScriptBuilder::new().push_int(0u64).verify().to_bytecode(),
+        );
+        let (error, _) = fail_and_bounce(
+            &mut failing,
+            message(actor, payload(), 1_000_000, 3),
+            0,
+        );
+        assert!(matches!(error, VMError::VerifyFailed));
+
+        let mut dirty = ActorStore::new(StorageParams::default()).unwrap();
+        let actor = deploy_actor(
+            &mut dirty,
+            4,
+            ScriptBuilder::new().push_int(1u64).to_bytecode(),
+        );
+        let (error, _) = fail_and_bounce(
+            &mut dirty,
+            message(actor, payload(), 1_000_000, 4),
+            0,
+        );
+        assert!(matches!(error, VMError::StackNotClean));
+
+        let mut out_of_gas = ActorStore::new(StorageParams::default()).unwrap();
+        let actor = deploy_actor(&mut out_of_gas, 5, ScriptBuilder::new().nop().to_bytecode());
+        let (error, _) = fail_and_bounce(
+            &mut out_of_gas,
+            message(actor, payload(), 0, 5),
+            0,
+        );
+        assert!(matches!(error, VMError::OutOfGas));
+
+        let mut checked_out = ActorStore::new(StorageParams::default()).unwrap();
+        let actor = deploy_actor(&mut checked_out, 6, ScriptBuilder::new().nop().to_bytecode());
+        checked_out.load_state(&actor).unwrap();
+        let (error, _) = fail_and_bounce(
+            &mut checked_out,
+            message(actor, payload(), 1_000_000, 6),
+            0,
+        );
+        assert!(matches!(error, VMError::ActorEmpty));
+
+        let mut pending = ActorStore::new(StorageParams::default()).unwrap();
+        let actor = deploy_actor(&mut pending, 7, ScriptBuilder::new().nop().to_bytecode());
+        let expiry = StorageParams::default().lease_duration_blocks;
+        pending.begin_block(expiry).unwrap();
+        let (error, _) = fail_and_bounce(
+            &mut pending,
+            message(actor, payload(), 1_000_000, 7),
+            expiry,
+        );
+        assert!(matches!(error, VMError::ActorPendingDestruction));
+    }
+
+    #[test]
+    fn failed_constructor_rolls_back_actor_storage_and_effects() {
+        let code = ScriptBuilder::new()
+            .push_int(5u64)
+            .push_str(b"mint".to_vec())
+            .issuepub()
+            .retire()
+            .push_int(1_024u64)
+            .addstorage()
+            .drop_()
+            .merge()
+            .drop_()
+            .drop_()
+            .push_int(0u64)
+            .verify()
+            .to_bytecode();
+        let target = ActorID::Constructor(code.clone());
+        let mut store = ActorStore::new(StorageParams::default()).unwrap();
+        let mut quote_store = store.clone();
+        quote_store
+            .deploy(target.clone(), code.clone(), empty_state())
+            .unwrap();
+        let fee = quote_store
+            .quote_storage(&target, 1_024, 0)
+            .unwrap()
+            .unwrap()
+            .fee_sparks;
+        let original = message(
+            target.clone(),
+            vec![Value::ClearToken(ClearToken::new(fee, FLAME_FLAVOR))],
+            10_000_000,
+            8,
+        );
+        let pool = store.available_units();
+        let actors = store.actor_root();
+
+        let (error, bounce) = fail_and_bounce(&mut store, original, 0);
+
+        assert!(matches!(error, VMError::VerifyFailed));
+        assert!(!store.exists(&target));
+        assert_eq!(store.available_units(), pool);
+        assert_eq!(store.actor_root(), actors);
+        store.assert_supply(0).unwrap();
+        assert!(!bounce.iter().any(|entry| matches!(
+            entry,
+            TxEntry::IssuePub(..)
+                | TxEntry::Retire(..)
+                | TxEntry::StoragePurchase { .. }
+                | TxEntry::ActorSave { .. }
+        )));
+    }
+
+    #[test]
+    fn portable_bearers_are_delivered_or_recovered_without_duplication() {
+        let mut dict = Dict::new();
+        dict.insert(
+            Int253::ZERO,
+            Value::Token(
+                Token::cleartext(Int253::from(11u64), FLAME_FLAVOR)
+                    .expect("quantity is in range"),
+            ),
+        );
+        let values = vec![
+            Value::ClearToken(ClearToken::new(Int253::from(7u64), FLAME_FLAVOR)),
+            Value::Token(
+                Token::cleartext(Int253::from(9u64), FLAME_FLAVOR)
+                    .expect("quantity is in range"),
+            ),
+            Value::Dict(dict),
+        ];
+
+        for (index, value) in values.into_iter().enumerate() {
+            let mut delivered = ActorStore::new(StorageParams::default()).unwrap();
+            let actor = deploy_actor(
+                &mut delivered,
+                20 + index as u8,
+                ScriptBuilder::new().load().drop_().save().to_bytecode(),
+            );
+            let result = message(
+                actor.clone(),
+                vec![value.clone()],
+                1_000_000,
+                20 + index as u8,
+            )
+            .execute_tx(&mut delivered, &BlockContext { height: 0 })
+            .expect("delivery succeeds");
+            assert!(result
+                .log()
+                .iter()
+                .any(|entry| matches!(entry, TxEntry::ActorSave { .. })));
+            assert!(!result
+                .log()
+                .iter()
+                .any(|entry| matches!(entry, TxEntry::Output(_))));
+            let stored = delivered.load_state(&actor).unwrap();
+            assert_eq!(state_root(&stored), state_root(&value));
+
+            let mut recovered = ActorStore::new(StorageParams::default()).unwrap();
+            let original = message(
+                ActorID::Hash([40 + index as u8; 32]),
+                vec![value],
+                1_000_000,
+                40 + index as u8,
+            );
+            let (_, bounce) = fail_and_bounce(&mut recovered, original, 0);
+            assert_eq!(
+                bounce
+                    .iter()
+                    .filter(|entry| matches!(entry, TxEntry::Output(_)))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn bounce_collisions_reject_atomically() {
+        let chain = Blockchain::new(ChainParams::default()).unwrap();
+        let hasher = utreexo::utreexo_hasher::<CellLeaf>();
+        let mut work = chain.cells.work_forest();
+        let mut sends = VecDeque::new();
+        let mut seen_outputs = BTreeSet::new();
+        let original = message(ActorID::Hash([50; 32]), Vec::new(), 1_000, 50);
+        let bounce = Blockchain::bounce_log(original).unwrap();
+        let bounce_id = bounce
+            .iter()
+            .find_map(|entry| match entry {
+                TxEntry::Output(cell) => Some(cell.id()),
+                _ => None,
+            })
+            .unwrap();
+        seen_outputs.insert(bounce_id);
+        assert!(matches!(
+            chain.apply_log(
+                &mut work,
+                &hasher,
+                &bounce,
+                &[],
+                &mut sends,
+                &mut seen_outputs,
+            ),
+            Err(ChainError::DuplicateCell)
+        ));
+        assert_eq!(work.normalize(&hasher).0.count(), 0);
+    }
 
     #[test]
     fn expiry_destruction_retires_tokens_and_binds_height() {
