@@ -439,6 +439,7 @@ pub struct CallFrame {
     /// discarded.
     pub(crate) snap_txlog_len: usize,
     pub(crate) snap_deferred_sigs_len: usize,
+    pub(crate) snap_deferred_multiplications: usize,
     pub(crate) snap_total_fee: CheckedFee,
 
     /// Entry-owned values returned to the caller when the child fails.
@@ -514,6 +515,7 @@ impl CallFrame {
             post_call_anchor: None,
             snap_txlog_len: 0,
             snap_deferred_sigs_len: 0,
+            snap_deferred_multiplications: 0,
             snap_total_fee: CheckedFee::zero(),
             snap_failure_values: Vec::new(),
             snap_failure_arg_count: 0,
@@ -538,6 +540,9 @@ pub struct TxResult {
     /// Gas spent by instructions, logical allocation, scheduled finalization,
     /// and asynchronous message grants.
     pub gas_used: u64,
+
+    /// Exact number of multiplication gates in the final constraint system.
+    pub multiplications: usize,
 
     /// Canonical bytecode of the executed script. The prover supplies
     /// this from the `ScriptBuilder`; the verifier echoes back the bytecode
@@ -565,6 +570,7 @@ impl core::fmt::Debug for TxResult {
             .field("txlog.len", &self.txlog.len())
             .field("total_fee", &self.total_fee)
             .field("gas_used", &self.gas_used)
+            .field("multiplications", &self.multiplications)
             .field("bytecode.len", &self.bytecode.len())
             .field("proof_present", &self.proof.is_some())
             .field("deferred_sigs.len", &self.deferred_sigs.len())
@@ -596,6 +602,10 @@ pub(crate) struct VM {
 
     /// Signature checks deferred to `Delegate::finalize`.
     deferred_sigs: Vec<DeferredSig>,
+
+    /// Multiplications added by deferred randomized constraints. Ordinary
+    /// gates are read from the finalized constraint system by the delegate.
+    deferred_multiplications: usize,
 
 }
 
@@ -813,6 +823,7 @@ impl VM {
             txlog,
             total_fee: CheckedFee::zero(),
             deferred_sigs: Vec::new(),
+            deferred_multiplications: 0,
         }
     }
 
@@ -843,6 +854,7 @@ impl VM {
         // Snapshot effect counters for failure rollback.
         self.current_call.snap_txlog_len = self.txlog.len();
         self.current_call.snap_deferred_sigs_len = self.deferred_sigs.len();
+        self.current_call.snap_deferred_multiplications = self.deferred_multiplications;
         self.current_call.snap_total_fee = self.total_fee;
         Ok(left)
     }
@@ -862,6 +874,7 @@ impl VM {
             total_fee: self.total_fee.total(),
             // Root frame's instruction and allocation gas (spec §gas).
             gas_used: self.current_call.gas_used,
+            multiplications: self.deferred_multiplications,
             bytecode,
             proof,
             deferred_sigs,
@@ -1215,6 +1228,7 @@ impl VM {
         // entry.
         self.txlog.truncate(self.current_call.snap_txlog_len);
         self.deferred_sigs.truncate(self.current_call.snap_deferred_sigs_len);
+        self.deferred_multiplications = self.current_call.snap_deferred_multiplications;
         self.total_fee = self.current_call.snap_total_fee;
         // Restore actor registry state (F1).
         if let Some(r) = registry.as_mut() {
@@ -2036,9 +2050,12 @@ impl VM {
             }
             Value::Constraint(c) => {
                 self.require_external()?;
-                self.current_call
-                    .charge_gas(r1cs_gas(c.multiplier_count())?)?;
+                let multiplications = c.multiplier_count();
+                self.current_call.charge_gas(r1cs_gas(multiplications)?)?;
                 c.verify(delegate.cs())?;
+                self.deferred_multiplications = self
+                    .deferred_multiplications
+                    .saturating_add(multiplications);
                 Ok(())
             }
             Value::MultiscalarMul(m) => {

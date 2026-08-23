@@ -80,12 +80,15 @@ impl Verifier {
         let mut verifier = Verifier::new();
         // Verifier-side: stream the wire bytecode directly — decode one
         // instruction at a time, no `Vec<Instruction>`. See ADR 0015.
-        let result = VM::run_bytecode(
+        let mut result = VM::run_bytecode(
             header,
             bytecode,
             gas_limit,
             &mut verifier,
         )?;
+        result.multiplications = result
+            .multiplications
+            .saturating_add(verifier.cs.metrics().multipliers);
         // Append each Explicit deferred sig to the batch.
         for sig in &result.deferred_sigs {
             if let DeferredSig::Explicit {

@@ -500,6 +500,10 @@ fn failed_call_rolls_back_every_state_lane() {
 
     let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000).expect("prove ok");
     let txid_p = result.txid;
+    assert_eq!(
+        result.multiplications, 2,
+        "failed child's multiplication gates must be rolled back"
+    );
 
     // ── TxLog assertion: rollback truncated all child entries ──
     // After the failure, the only entries left are Header (always)
@@ -546,6 +550,7 @@ fn failed_call_rolls_back_every_state_lane() {
         None, // no txbound sig — if a TxBound leaked, verify rejects with MissingTxBoundSignature
     )
     .expect("verify must accept — every rollback lane fired");
+    assert_eq!(verifier_result.multiplications, 2);
 
     // TxID must match between prover and verifier (both ran the
     // same script through the same rollback sites).

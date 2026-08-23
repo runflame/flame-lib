@@ -86,6 +86,9 @@ impl<'g> Prover<'g> {
             gas_limit,
             &mut prover,
         )?;
+        result.multiplications = result
+            .multiplications
+            .saturating_add(prover.cs.metrics().multipliers);
         // Bind the canonical TxID into the R1CS transcript so the
         // proof commits to the full transaction effects (header +
         // log), not just the constraint system shape. Verifier

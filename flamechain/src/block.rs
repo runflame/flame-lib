@@ -8,7 +8,9 @@ use flamevm::{
 };
 use merkle::{Hash, MerkleItem, MerkleTree};
 use merlin::Transcript;
-use readerwriter::{Encodable, ExactSizeEncodable};
+use readerwriter::{
+    Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer,
+};
 
 use crate::BlockHash;
 use crate::storage::{ActorStore, DestroyedActor, RegistryUndo, StorageError, StorageParams};
@@ -20,8 +22,14 @@ use crate::utreexo::{self, Catchup, Forest, Proof, UtreexoError};
 pub struct BlockLimits {
     pub max_transactions: usize,
     pub max_witness_bytes: usize,
+    pub max_transaction_script_bytes: usize,
+    pub max_script_bytes: usize,
+    pub max_transaction_gas: u64,
+    pub max_gas_credit: u64,
     pub max_external_gas: u64,
     pub max_internal_gas: u64,
+    pub max_multiplications_per_transaction: usize,
+    pub max_multiplications: usize,
     pub max_messages: usize,
     pub max_proofs_per_transaction: usize,
     pub max_proof_depth: usize,
@@ -32,8 +40,14 @@ impl Default for BlockLimits {
         Self {
             max_transactions: 10_000,
             max_witness_bytes: 16 * 1024 * 1024,
+            max_transaction_script_bytes: 1024 * 1024,
+            max_script_bytes: 4 * 1024 * 1024,
+            max_transaction_gas: 35_000_000,
+            max_gas_credit: 10_000_000,
             max_external_gas: 100_000_000,
             max_internal_gas: 25_000_000,
+            max_multiplications_per_transaction: 1_024,
+            max_multiplications: 100_000,
             max_messages: 100_000,
             max_proofs_per_transaction: 100_000,
             max_proof_depth: 63,
@@ -69,37 +83,84 @@ pub struct BlockTx {
 impl BlockTx {
     pub fn witness_hash(&self) -> Hash {
         let mut t = Transcript::new(b"flamechain.block.tx.witness");
-        let header = self.tx.header();
-        t.append_message(b"tx.version", &header.version.to_le_bytes());
-        t.append_message(b"tx.locktime", &header.locktime.to_le_bytes());
-        t.append_message(b"tx.script", self.tx.script());
-        t.append_message(b"tx.signature", &self.tx.signature_bytes());
-        t.append_message(b"tx.proof", &self.tx.proof_bytes());
-        t.append_message(b"tx.gas", &self.limits.gas.to_le_bytes());
-        t.append_message(
-            b"utreexo.proof_count",
-            &(self.proofs.len() as u64).to_le_bytes(),
-        );
-        for proof in &self.proofs {
-            t.append_message(b"utreexo.proof", &proof.encode_to_vec());
-        }
+        t.append_message(b"block_tx", &self.encode_to_vec());
         let mut hash = [0; 32];
         t.challenge_bytes(b"witness_hash", &mut hash);
         Hash(hash)
     }
 
-    /// Explicit in-memory witness weight. Canonical block transport is still
-    /// intentionally TBD; this accounts for every field committed above.
+    /// Exact number of bytes in the canonical `BlockTx` encoding.
     pub fn witness_size(&self) -> Option<usize> {
-        let fixed = 8usize
-            .checked_add(self.tx.script().len())?
-            .checked_add(self.tx.signature_bytes().len())?
-            .checked_add(self.tx.proof_bytes().len())?
-            .checked_add(8)?
-            .checked_add(8)?;
-        self.proofs
-            .iter()
-            .try_fold(fixed, |sum, proof| sum.checked_add(proof.encoded_size()))
+        self.tx.encoded_size().checked_add(16)?.checked_add(
+            self.proofs
+                .iter()
+                .try_fold(0usize, |sum, proof| sum.checked_add(proof.encoded_size()))?,
+        )
+    }
+
+    fn decode_bounded(
+        reader: &mut impl Reader,
+        version: u32,
+        limits: BlockLimits,
+    ) -> Result<Self, ReadError> {
+        let tx = ExternalTx::decode_bounded(
+            reader,
+            version,
+            limits.max_transaction_script_bytes,
+            limits.max_witness_bytes,
+        )?;
+        let gas = reader.read_u64()?;
+        if gas > limits.max_transaction_gas {
+            return Err(ReadError::InvalidFormat);
+        }
+        let proof_count =
+            usize::try_from(reader.read_u64()?).map_err(|_| ReadError::InvalidFormat)?;
+        if proof_count > limits.max_proofs_per_transaction {
+            return Err(ReadError::InvalidFormat);
+        }
+        let proofs = reader.read_vec(proof_count, Proof::decode)?;
+        if proofs.iter().any(|proof| {
+            proof
+                .as_path()
+                .is_some_and(|path| path.neighbors.len() > limits.max_proof_depth)
+        }) {
+            return Err(ReadError::InvalidFormat);
+        }
+        Ok(Self {
+            tx,
+            limits: Limits { gas },
+            proofs,
+        })
+    }
+
+    pub fn from_bytes_bounded(
+        bytes: &[u8],
+        version: u32,
+        limits: BlockLimits,
+    ) -> Result<Self, ReadError> {
+        if bytes.len() > limits.max_witness_bytes {
+            return Err(ReadError::InvalidFormat);
+        }
+        let mut reader = bytes;
+        reader.read_all(|reader| Self::decode_bounded(reader, version, limits))
+    }
+}
+
+impl Encodable for BlockTx {
+    fn encode(&self, writer: &mut impl Writer) -> Result<(), WriteError> {
+        self.tx.encode(writer)?;
+        writer.write_u64(b"block_tx.gas", self.limits.gas)?;
+        writer.write_u64(b"block_tx.proof_count", self.proofs.len() as u64)?;
+        for proof in &self.proofs {
+            proof.encode(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl ExactSizeEncodable for BlockTx {
+    fn encoded_size(&self) -> usize {
+        self.witness_size().unwrap_or(usize::MAX)
     }
 }
 
@@ -134,21 +195,65 @@ pub struct BlockHeader {
 impl BlockHeader {
     pub fn id(&self) -> BlockHash {
         let mut t = Transcript::new(b"flamechain.block.header");
-        t.append_message(b"version", &self.version.to_le_bytes());
-        t.append_message(b"height", &self.height.to_le_bytes());
-        t.append_message(b"core_block_hash", &self.core_block_hash);
-        t.append_message(b"parent", self.parent.as_bytes());
-        t.append_message(b"witness_root", &self.witness_root.0);
-        t.append_message(b"effects_root", &self.effects_root.0);
-        t.append_message(b"cell_root", &self.state.cells.0);
-        t.append_message(b"actor_root", &self.state.actors.0);
-        t.append_message(
-            b"available_storage_units",
-            &self.state.available_storage_units.to_le_bytes(),
-        );
+        t.append_message(b"header", &self.encode_to_vec());
         let mut id = [0; 32];
         t.challenge_bytes(b"id", &mut id);
         BlockHash::new(id)
+    }
+
+    pub fn from_bytes_bounded(bytes: &[u8], expected_version: u32) -> Result<Self, ReadError> {
+        if expected_version != 1 {
+            return Err(ReadError::InvalidFormat);
+        }
+        let mut reader = bytes;
+        reader.read_all(|reader| {
+            let header = Self::decode(reader)?;
+            if header.version != expected_version {
+                return Err(ReadError::InvalidFormat);
+            }
+            Ok(header)
+        })
+    }
+}
+
+impl Encodable for BlockHeader {
+    fn encode(&self, writer: &mut impl Writer) -> Result<(), WriteError> {
+        writer.write_u32(b"block.version", self.version)?;
+        writer.write_u64(b"block.height", self.height)?;
+        writer.write(b"block.core_block_hash", &self.core_block_hash)?;
+        writer.write(b"block.parent", self.parent.as_bytes())?;
+        writer.write(b"block.witness_root", &self.witness_root.0)?;
+        writer.write(b"block.effects_root", &self.effects_root.0)?;
+        writer.write(b"block.cell_root", &self.state.cells.0)?;
+        writer.write(b"block.actor_root", &self.state.actors.0)?;
+        writer.write_u64(
+            b"block.available_storage_units",
+            self.state.available_storage_units,
+        )
+    }
+}
+
+impl ExactSizeEncodable for BlockHeader {
+    fn encoded_size(&self) -> usize {
+        212
+    }
+}
+
+impl Decodable for BlockHeader {
+    fn decode(reader: &mut impl Reader) -> Result<Self, ReadError> {
+        Ok(Self {
+            version: reader.read_u32()?,
+            height: reader.read_u64()?,
+            core_block_hash: reader.read_u8x32()?,
+            parent: BlockHash::new(reader.read_u8x32()?),
+            witness_root: Hash(reader.read_u8x32()?),
+            effects_root: Hash(reader.read_u8x32()?),
+            state: StateCommitment {
+                cells: Hash(reader.read_u8x32()?),
+                actors: Hash(reader.read_u8x32()?),
+                available_storage_units: reader.read_u64()?,
+            },
+        })
     }
 }
 
@@ -165,6 +270,62 @@ impl Block {
                 .iter()
                 .map(|tx| WitnessHash(tx.witness_hash())),
         )
+    }
+
+    /// Decodes a complete network block under the active consensus bounds.
+    pub fn from_bytes_bounded(bytes: &[u8], params: ChainParams) -> Result<Self, ReadError> {
+        if params.version != 1 {
+            return Err(ReadError::InvalidFormat);
+        }
+        let mut reader = bytes;
+        reader.read_all(|reader| {
+            let header = BlockHeader::decode(reader)?;
+            if header.version != params.version {
+                return Err(ReadError::InvalidFormat);
+            }
+            let count =
+                usize::try_from(reader.read_u64()?).map_err(|_| ReadError::InvalidFormat)?;
+            if count > params.limits.max_transactions {
+                return Err(ReadError::InvalidFormat);
+            }
+            let mut witness_bytes = 0usize;
+            let mut transactions = Vec::with_capacity(count);
+            for _ in 0..count {
+                let before = reader.remaining_bytes();
+                let tx = BlockTx::decode_bounded(reader, params.version, params.limits)?;
+                let consumed = before - reader.remaining_bytes();
+                witness_bytes = witness_bytes
+                    .checked_add(consumed)
+                    .ok_or(ReadError::InvalidFormat)?;
+                if witness_bytes > params.limits.max_witness_bytes {
+                    return Err(ReadError::InvalidFormat);
+                }
+                transactions.push(tx);
+            }
+            Ok(Self {
+                header,
+                transactions,
+            })
+        })
+    }
+}
+
+impl Encodable for Block {
+    fn encode(&self, writer: &mut impl Writer) -> Result<(), WriteError> {
+        self.header.encode(writer)?;
+        writer.write_u64(b"block.transaction_count", self.transactions.len() as u64)?;
+        for tx in &self.transactions {
+            tx.encode(writer)?;
+        }
+        Ok(())
+    }
+}
+
+impl ExactSizeEncodable for Block {
+    fn encoded_size(&self) -> usize {
+        self.transactions
+            .iter()
+            .fold(220usize, |size, tx| size.saturating_add(tx.encoded_size()))
     }
 }
 
@@ -283,6 +444,10 @@ impl Blockchain {
         self.header.version
     }
 
+    pub fn limits(&self) -> BlockLimits {
+        self.params.limits
+    }
+
     pub fn state_commitment(&self) -> StateCommitment {
         self.header.state
     }
@@ -309,9 +474,8 @@ impl Blockchain {
         &self.cells
     }
 
-    /// Builds an in-memory candidate by running the same transition as
-    /// validation, then rolling it back. Canonical wire encoding remains a
-    /// launch requirement rather than a second, premature implementation.
+    /// Builds a candidate by running the same transition as validation, then
+    /// rolling it back.
     pub fn build_block(
         &mut self,
         core_block_hash: [u8; 32],
@@ -396,9 +560,37 @@ impl Blockchain {
         let mut records = Vec::new();
         let mut sends = VecDeque::new();
         let mut seen_outputs = BTreeSet::new();
+        let mut external_gas = 0u64;
+        let mut internal_gas = 0u64;
+        let mut multiplications = 0usize;
 
         for block_tx in &block.transactions {
-            let log = block_tx.tx.verify(block_tx.limits)?;
+            let (log, metrics) = block_tx.tx.verify_with_metrics(block_tx.limits)?;
+            let direct_send_gas = log.direct_send_gas().ok_or(ChainError::LimitExceeded)?;
+            let gas_credit = metrics
+                .gas_used
+                .checked_sub(direct_send_gas)
+                .ok_or(ChainError::LimitExceeded)?;
+            if gas_credit > self.params.limits.max_gas_credit
+                || metrics.multiplications > self.params.limits.max_multiplications_per_transaction
+            {
+                return Err(ChainError::LimitExceeded);
+            }
+            external_gas = external_gas
+                .checked_add(gas_credit)
+                .ok_or(ChainError::LimitExceeded)?;
+            internal_gas = internal_gas
+                .checked_add(direct_send_gas)
+                .ok_or(ChainError::LimitExceeded)?;
+            multiplications = multiplications
+                .checked_add(metrics.multiplications)
+                .ok_or(ChainError::LimitExceeded)?;
+            if external_gas > self.params.limits.max_external_gas
+                || internal_gas > self.params.limits.max_internal_gas
+                || multiplications > self.params.limits.max_multiplications
+            {
+                return Err(ChainError::LimitExceeded);
+            }
             let txid = log.txid();
             self.apply_log(
                 &mut work,
@@ -416,20 +608,12 @@ impl Blockchain {
             });
         }
 
-        let mut internal_gas = 0u64;
         let mut message_count = 0usize;
         while let Some(message) = sends.pop_front() {
             if message_count >= self.params.limits.max_messages {
                 return Err(ChainError::LimitExceeded);
             }
             message_count += 1;
-            internal_gas = internal_gas
-                .checked_add(message.gas)
-                .ok_or(ChainError::LimitExceeded)?;
-            if internal_gas > self.params.limits.max_internal_gas {
-                return Err(ChainError::LimitExceeded);
-            }
-
             let context = BlockContext {
                 height: block.header.height,
             };
@@ -791,9 +975,11 @@ impl Blockchain {
         }
 
         let mut witness_bytes = 0usize;
-        let mut gas = 0u64;
+        let mut script_bytes = 0usize;
         for tx in &block.transactions {
             if tx.tx.header().version != self.params.version
+                || tx.tx.script().len() > self.params.limits.max_transaction_script_bytes
+                || tx.limits.gas > self.params.limits.max_transaction_gas
                 || tx.proofs.len() > self.params.limits.max_proofs_per_transaction
                 || tx.proofs.iter().any(|proof| {
                     proof.as_path().is_some_and(|path| {
@@ -806,12 +992,12 @@ impl Blockchain {
             witness_bytes = witness_bytes
                 .checked_add(tx.witness_size().ok_or(ChainError::LimitExceeded)?)
                 .ok_or(ChainError::LimitExceeded)?;
-            gas = gas
-                .checked_add(tx.limits.gas)
+            script_bytes = script_bytes
+                .checked_add(tx.tx.script().len())
                 .ok_or(ChainError::LimitExceeded)?;
         }
         if witness_bytes > self.params.limits.max_witness_bytes
-            || gas > self.params.limits.max_external_gas
+            || script_bytes > self.params.limits.max_script_bytes
         {
             return Err(ChainError::LimitExceeded);
         }
@@ -962,6 +1148,31 @@ mod tests {
         .expect("test payload is portable")
     }
 
+    fn external_tx(program: ScriptBuilder, locktime: u32) -> BlockTx {
+        let limits = Limits { gas: 100_000 };
+        BlockTx {
+            tx: program
+                .build_tx(
+                    TxHeader {
+                        version: 1,
+                        locktime,
+                    },
+                    limits,
+                )
+                .expect("build external transaction")
+                .without_signature()
+                .expect("program has no signtx authorization"),
+            limits,
+            proofs: Vec::new(),
+        }
+    }
+
+    fn external_txs(count: u32, program: impl Fn() -> ScriptBuilder) -> Vec<BlockTx> {
+        (0..count)
+            .map(|locktime| external_tx(program(), locktime))
+            .collect()
+    }
+
     fn assert_bounce_matches(log: &TxLog, original: &Message) {
         assert_eq!(log.entries().len(), 3);
         assert!(matches!(
@@ -987,6 +1198,173 @@ mod tests {
         for (actual, expected) in cell.payload().iter().zip(original.payload()) {
             assert_eq!(state_root(actual), state_root(expected));
         }
+    }
+
+    #[test]
+    fn aggregate_limits_reject_many_individually_valid_transactions() {
+        let single = external_tx(ScriptBuilder::new().nop(), 0);
+        let (_, metrics) = single
+            .tx
+            .verify_with_metrics(single.limits)
+            .expect("single transaction is valid");
+        let witness_bytes = single.witness_size().unwrap();
+
+        let mut gas_params = ChainParams::default();
+        gas_params.limits.max_gas_credit = metrics.gas_used;
+        gas_params.limits.max_external_gas = metrics.gas_used * 2;
+        let mut chain = Blockchain::new(gas_params).unwrap();
+        assert!(matches!(
+            chain.build_block([1; 32], external_txs(3, || ScriptBuilder::new().nop())),
+            Err(ChainError::LimitExceeded)
+        ));
+
+        let mut script_params = ChainParams::default();
+        script_params.limits.max_transaction_script_bytes = 1;
+        script_params.limits.max_script_bytes = 2;
+        let mut chain = Blockchain::new(script_params).unwrap();
+        assert!(matches!(
+            chain.build_block([2; 32], external_txs(3, || ScriptBuilder::new().nop())),
+            Err(ChainError::LimitExceeded)
+        ));
+        let mut lenient = Blockchain::new(ChainParams::default()).unwrap();
+        let oversized = lenient
+            .build_block([2; 32], external_txs(3, || ScriptBuilder::new().nop()))
+            .unwrap();
+        assert!(matches!(
+            chain.connect(&oversized),
+            Err(ChainError::LimitExceeded)
+        ));
+
+        let mut witness_params = ChainParams::default();
+        witness_params.limits.max_witness_bytes = witness_bytes * 2;
+        let mut chain = Blockchain::new(witness_params).unwrap();
+        assert!(matches!(
+            chain.build_block([3; 32], external_txs(3, || ScriptBuilder::new().nop())),
+            Err(ChainError::LimitExceeded)
+        ));
+
+        let constrained = || {
+            ScriptBuilder::new()
+                .alloc(Some(Int253::ONE))
+                .drop_()
+                .alloc(Some(Int253::ONE))
+                .drop_()
+        };
+        let single = external_tx(constrained(), 0);
+        assert_eq!(
+            single
+                .tx
+                .verify_with_metrics(single.limits)
+                .unwrap()
+                .1
+                .multiplications,
+            1
+        );
+        let mut multiplication_params = ChainParams::default();
+        multiplication_params
+            .limits
+            .max_multiplications_per_transaction = 1;
+        multiplication_params.limits.max_multiplications = 2;
+        let mut chain = Blockchain::new(multiplication_params).unwrap();
+        assert!(matches!(
+            chain.build_block([4; 32], external_txs(3, constrained)),
+            Err(ChainError::LimitExceeded)
+        ));
+    }
+
+    #[test]
+    fn canonical_block_vector_and_bounded_decoders() {
+        const BLOCK: &str = "0100000001000000000000001111111111111111111111111111111111111111111111111111111111111111ee1bf13f076445794dc6c1c21e25165a06d8a7c903555da84f94f40d4eefaac5d8788aa3a86b569c9461c3e95b005f14a18399b4a53001fde47f3b89f3d15ed526561ed94f8fb233d630a2613228b0d4f78fed918f02fdc1df974cf563af64d94ef24bb0e331b2a6fb5de8c786cd2f1ee3853690086b1b7cccefd750ea22a538da7314d0adce1ce597bfdfc4cf300246bbbeb7a199fe967858cf93526f4438cd08000200000000000000000000000000";
+        let mut chain = Blockchain::new(ChainParams::default()).unwrap();
+        let block = chain.build_block([0x11; 32], Vec::new()).unwrap();
+        let bytes = block.encode_to_vec();
+        assert_eq!(hex::encode(&bytes), BLOCK);
+        assert_eq!(block.encoded_size(), bytes.len());
+        assert_eq!(
+            hex::encode(block.header.id().as_bytes()),
+            "92c6bedeabedffdc8ff8fd12afa05cd6d78eb38234499e7a19a6eb02c2c209a1"
+        );
+        assert_eq!(
+            hex::encode(block.header.witness_root.0),
+            "d8788aa3a86b569c9461c3e95b005f14a18399b4a53001fde47f3b89f3d15ed5"
+        );
+        assert_eq!(
+            hex::encode(block.header.effects_root.0),
+            "26561ed94f8fb233d630a2613228b0d4f78fed918f02fdc1df974cf563af64d9"
+        );
+        assert_eq!(
+            hex::encode(block.header.state.cells.0),
+            "4ef24bb0e331b2a6fb5de8c786cd2f1ee3853690086b1b7cccefd750ea22a538"
+        );
+        assert_eq!(
+            hex::encode(block.header.state.actors.0),
+            "da7314d0adce1ce597bfdfc4cf300246bbbeb7a199fe967858cf93526f4438cd"
+        );
+
+        let decoded = Block::from_bytes_bounded(&bytes, ChainParams::default()).unwrap();
+        assert_eq!(decoded.encode_to_vec(), bytes);
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(matches!(
+            Block::from_bytes_bounded(&trailing, ChainParams::default()),
+            Err(ReadError::TrailingBytes)
+        ));
+        let mut wrong_version = bytes.clone();
+        wrong_version[0] = 2;
+        assert!(matches!(
+            Block::from_bytes_bounded(&wrong_version, ChainParams::default()),
+            Err(ReadError::InvalidFormat)
+        ));
+        let mut unknown_params = ChainParams::default();
+        unknown_params.version = 2;
+        assert!(matches!(
+            Block::from_bytes_bounded(&wrong_version, unknown_params),
+            Err(ReadError::InvalidFormat)
+        ));
+
+        let tx = external_tx(ScriptBuilder::new().nop(), 0);
+        let tx_bytes = tx.encode_to_vec();
+        let decoded = BlockTx::from_bytes_bounded(&tx_bytes, 1, BlockLimits::default()).unwrap();
+        assert_eq!(decoded.encode_to_vec(), tx_bytes);
+        let mut limits = BlockLimits::default();
+        limits.max_transaction_gas = 99_999;
+        assert!(matches!(
+            BlockTx::from_bytes_bounded(&tx_bytes, 1, limits),
+            Err(ReadError::InvalidFormat)
+        ));
+    }
+
+    #[test]
+    fn canonical_block_tx_witness_vector() {
+        const BLOCK_TX: &str = "010000000200000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a101000000000000007e5de4349c5b87f2e1003095aff2e310801e2504b706bc6c062076eee49f90366625b75748908fb2492dd909a6d1428001dfdd201a0a7fae70911cf29112c8319e9d0eba4ca7fe137d5f8026614ab8736204ea46c213d9a20d0d663aa3e8ff1676fcd93dc1cba92d2f820b5b8ae5c99bacce0610dc799f050d1dec5effd5cb6c96950b0ad392e7414252008e6ff97d385437f30c74f106ae586522db4a9d73241ca0ed4f24798b31981e98e96bc121852a567728380ca00d12ee8556c220c13c3ed16d35fca58a3a3773120657b5b49cac1830a472bd083c51f4012ab7de25450a4544cdee6b7577d97a9c3e5a3267da4e13e2ef36a65ce83697cc498f00d005000000000000000000000000000000000000000000000000000000000000000027e4219ec9efc32f50b4b1c8766037a812d135363cbaa38be71527de967eb20839057e9d2324d2932cba8c6a646bb2b9f09661cd1ef8977bbd1df4813803e4040000000000000000000000000000000000000000000000000000000000000000ecd3f55c1a631258d69cf7a2def9de140000000000000000000000000000001010270000000000000000000000000000";
+        let bytes = hex::decode(BLOCK_TX).unwrap();
+        let tx = BlockTx::from_bytes_bounded(&bytes, 1, BlockLimits::default()).unwrap();
+        assert_eq!(tx.encode_to_vec(), bytes);
+        assert_eq!(
+            hex::encode(tx.witness_hash().0),
+            "864aa6bc2b94f9a03bbfd2e6fbbe0f3ed44776b8e12ac95000cbaef25f6b2abd"
+        );
+
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                height: 1,
+                core_block_hash: [0; 32],
+                parent: BlockHash::new([0; 32]),
+                witness_root: Hash([0; 32]),
+                effects_root: Hash([0; 32]),
+                state: StateCommitment {
+                    cells: Hash([0; 32]),
+                    actors: Hash([0; 32]),
+                    available_storage_units: 0,
+                },
+            },
+            transactions: vec![tx],
+        };
+        assert_eq!(
+            hex::encode(block.witness_root().0),
+            "c3ef21733d5a9abdcec4aa0b31078f48c42ce2692df20db0f09ba058599f9bd3"
+        );
     }
 
     fn fail_and_bounce(

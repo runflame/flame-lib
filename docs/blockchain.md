@@ -120,26 +120,45 @@ A block has a header and an ordered body of external transactions. Internal
 transactions are execution records derived by the state machine; they are not
 independently submitted or selected by a proposer.
 
-The in-memory header commits, with domain-separated hashes, to:
+The header commits, with domain-separated hashes, to:
 
 - protocol/network version, parent, and height;
 - the authenticated core-block context;
 - the exact ordered external-transaction witness;
 - the resulting cell-accumulator commitment;
-- the resulting actor/storage-state commitment; and
-- consensus resource totals needed to validate the transition.
+- the resulting actor/storage-state commitment.
 
-The exact wire encoding of the header and external transaction is **TBD**. The
-current hash preimages and actor-state commitment must be frozen with additional
-conformance vectors before consensus launch. In particular, committing only to
-effect logs is insufficient when signatures or proofs bind to an external
-transaction witness.
+All integers in the canonical network envelope are little-endian. Its grammar
+is:
 
-The first implementation may use an in-memory `BlockBody` and locally verified
-effects while canonical `ExternalTx` transport is being finalized. Such values
-are an internal API, not a consensus wire block: effects received across a trust
-boundary must never be accepted instead of re-executing the transaction, and an
-exact witness hash is required before launch.
+```text
+ExternalTx = version:u32 || locktime:u32
+           || script_len:u64 || script
+           || txbound_signature_present:u8 || [signature:64]
+           || r1cs_proof_len:u64 || r1cs_proof
+
+BlockTx    = ExternalTx || gas_limit:u64
+           || utreexo_proof_count:u64 || UtreexoProof...
+
+BlockHeader = version:u32 || height:u64 || core_block_hash:32 || parent:32
+            || witness_root:32 || effects_root:32
+            || cell_root:32 || actor_root:32
+            || available_storage_units:u64
+
+Block      = BlockHeader || transaction_count:u64 || BlockTx...
+```
+
+The signature presence byte is exactly `0` or `1`; it is absent only when the
+script records no `signtx` authorization. Lengths and counts are checked against
+the active `ChainParams` before allocation. Decoders reject unknown versions or
+proof tags, malformed signatures and R1CS/Utreexo proofs, excessive proof depth,
+oversized scripts/counts, and trailing bytes. Network code admits blocks through
+the bounded decoders; it never accepts a supplied TxLog in place of execution.
+
+`BlockTx::witness_hash` hashes the canonical `BlockTx` bytes, and the ordered
+witness hashes form `witness_root`. `BlockHeader::id` hashes the canonical
+212-byte header. Hard-coded vectors pin the external envelope, empty block,
+witness/effect roots, state commitments, and block ID.
 
 ## Staged block application
 
@@ -166,8 +185,8 @@ reorganization attachment:
 7. Derive expiry destructions under a checkpoint, roll them back, replay the
    ordered destruction logs, and require the resulting actor commitment and
    pool to match.
-8. Normalize Utreexo, recompute all state commitments and resource totals, and
-   compare them with the header.
+8. Normalize Utreexo, recompute all state commitments, compare them with the
+   header, and reject any actual resource total above the active limits.
 9. Commit the staged state and retain complete undo data.
 
 The message discipline is FIFO: external transactions seed the queue in block
@@ -217,22 +236,38 @@ Trust-boundary ownership is deliberately narrow:
 
 | Value | Source and decoder rule |
 | --- | --- |
-| `Block`, `BlockTx`, `ExternalTx` | Network consensus input; bounded canonical decoders are required when their still-TBD wire formats are frozen. |
+| `Block`, `BlockTx`, `ExternalTx` | Network consensus input; use their bounded canonical decoders and reject trailing bytes before application. |
 | Utreexo `Forest` and `Proof` | Consensus state/witness; use the exact bounded encodings above. |
 | FlameVM `TxLog`, `TxEntry`, `Message` | Derived by verified execution; canonical encode-only formats support commitments and archives, but consensus never admits decoded copies. |
 | `WorkForest`, `Catchup`, actor undo/checkpoints | Local transient or persistence data; Serde representation is non-consensus and cannot enter block application. |
 
 ## Consensus limits
 
-Consensus parameters independently bound work that is not already bounded by a
-smaller enclosing value, including:
+The current v1 defaults are:
+
+| Limit | Default | Accounting rule |
+| --- | ---: | --- |
+| Transactions | 10,000/block | External `BlockTx` count. |
+| Canonical witness bytes | 16 MiB/block | Sum of canonical `BlockTx` encodings. |
+| External script | 1 MiB/tx, 4 MiB/block | `ExternalTx.script` bytes. |
+| Declared gas | 35,000,000/tx | Envelope cap for `Limits.gas`. |
+| Gas credit | 10,000,000/tx, 100,000,000/block | Actual `gas_used - direct_send_gas`. |
+| Internal gas | 25,000,000/block | Direct external `Send` grants; descendants are not counted twice. |
+| R1CS multiplications | 1,024/tx, 100,000/block | Exact final constraint-system multipliers. |
+| Delivered messages | 100,000/block | Every dequeued message, including descendants. |
+| Utreexo proofs | 100,000/tx, depth 63 | One proof per derived `Input`. |
+
+Active values are consensus parameters selected by protocol version; the table
+records the implementation defaults rather than granting nodes local freedom to
+change validity. Together they independently bound work that is not already
+bounded by a smaller enclosing value, including:
 
 - encoded block and external-transaction bytes;
 - external and internal gas;
 - cell inputs, outputs, and proof work;
 - messages, actor executions, and call depth;
 - cryptographic multiplication/MSM work; and
-- issued and purchased storage.
+- fixed storage issuance and pool-bounded purchases.
 
 Execution RAM has no independent storage-derived allowance. FlameVM charges
 logical byte/item allocation work against external or internal gas, so these
@@ -241,10 +276,11 @@ continues to bound stored state only.
 
 Message gas is not created by the delivery loop. Every `send` permanently
 debits its grant from the sending frame before the effect is committed. An
-internal transaction and all of its descendant sends therefore partition the
-grant originating in an external transaction. The independent block-wide
-internal-gas and message-count limits remain conservative admission bounds for
-the serial delivery work.
+internal transaction and all descendants therefore partition a grant that was
+already counted when the external transaction seeded the queue. Consensus sums
+only those direct grants for the internal-gas bound; summing nested message
+grants again would double-count the same budget. The message-count limit
+independently bounds queue fan-out.
 
 Storage parameters are listed in [storage.md](storage.md). Every active parameter
 set must be selected by a committed protocol version; node-local configuration
@@ -310,7 +346,7 @@ must obtain an older trusted snapshot/state sync instead.
 | Stage a whole block atomically. | Invalid tails cannot leave partial state. | Requires transient working state; naive cloning may be expensive. |
 | Retain complete undo. | Simple, exact detach and safe failed-branch handling. | Disk/memory grows with state size and reorg window. |
 | Keep mempool policy local and bounded. | Limits RAM/CPU DoS and avoids making relay policy consensus. | Nodes may hold different candidates; basic eviction is gameable. |
-| Start with in-memory block bodies. | Allows the state model to settle before freezing transport. | Not interoperable or launch-safe until canonical witness encoding and hashes exist. |
+| Hash canonical block-envelope bytes. | One wire grammar is also the witness and block-ID preimage. | Any grammar change requires version activation. |
 | Destroy actors exactly at expiry. | Capacity semantics are simple and deterministic. | Coordinated expiries can concentrate state traversal and retirement work into one block. |
 
 ## Launch-critical TBDs
@@ -318,11 +354,10 @@ must obtain an older trusted snapshot/state sync instead.
 Before this state machine can define production consensus, the project must
 freeze and test:
 
-1. canonical block, external-transaction, proof, receipt, and undo encodings;
-2. every domain-separated hash preimage, especially the external witness root;
-3. the actor/storage-state commitment and state-sync verification rules;
-4. authenticated core-block context and its behavior across Bitcoin reorgs;
-5. exact resource limits and protocol-version activation;
-6. the failure-receipt/error taxonomy, concentrated-expiry work bounds, and all
+1. archival receipt and persistent undo encodings;
+2. state-sync verification rules;
+3. authenticated core-block context and its behavior across Bitcoin reorgs;
+4. protocol-version activation;
+5. the failure-receipt/error taxonomy, concentrated-expiry work bounds, and all
    queue edge cases; and
-7. persistence/crash recovery and the retained undo/state-sync policy.
+6. persistence/crash recovery and the retained undo/state-sync policy.

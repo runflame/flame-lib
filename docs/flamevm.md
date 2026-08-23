@@ -130,15 +130,38 @@ with a Utreexo proof and, most of the time, a transaction signature.
 
 ## Limits
 
-**Gas limit:** maximum amount of gas used per block. Each tx and sum of all txs in a block cannot exceed that amount of gas.
+**Transaction gas limit:** the declared `Limits.gas` is the execution budget for
+one external transaction. It includes gas permanently reserved by direct
+`send` effects. The VM hard-fails before actual use can exceed the declaration,
+and the network envelope caps the declaration itself.
 
-**Script size limit:** maximum total size of scripts in each tx and all txs in a block.
+**Gas credit:** for one verified external transaction:
 
-**Multiplications limit:** maximum Bulletproofs multiplications per block and per tx.
+```text
+direct_send_gas = sum(gas grant of each Send in the derived TxLog)
+gas_credit      = gas_used - direct_send_gas
+```
 
-**Gas credit:** maximum amount of gas used by external transaction without additional gas allocated for message sends.
+`gas_credit` is the actual external execution work. It has a per-transaction
+limit and contributes to the block's external-gas total. Direct send grants
+contribute instead to the block's internal-gas total. Nested sends are not
+counted again: they partition gas already granted to their ancestor message.
 
-**Issued storage:** amount added to the available storage pool by each core block.
+**Script size limit:** counts canonical external-transaction script bytes, both
+per transaction and across a block. Dynamically loaded actor code is persistent
+state and its execution/allocation work is charged in gas; it is not counted a
+second time as external witness script.
+
+**Multiplications limit:** `TxMetrics.multiplications` is the exact number of
+Bulletproofs multiplication gates in the final constraint system, including
+randomized constraints and excluding failed-child work rolled back at a call
+boundary. It is limited per transaction and in aggregate per block.
+
+**Issued storage:** `StorageParams.issued_units_per_block` adds exactly that
+many units to the global pool at each core block. Storage purchases do not
+issue bytes; they move already-issued units from the pool into actor leases.
+The storage supply invariant checks initial plus per-block issuance against the
+pool and all live leases.
 
 ## Fees
 

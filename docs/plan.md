@@ -240,20 +240,23 @@ when the specification, implementation, and focused regression tests agree.
       still account for a callee's success status and effects when deciding what
       state to save, but the VM cannot infer or enforce that application policy.
 
-12. [ ] Enforce complete transaction and block resource limits.
+12. [x] Enforce complete transaction and block resource limits.
 
-    - [ ] Resolve and implement the documented block gas, script-size,
-      multiplication, gas-credit, and added-storage limits; current `Limits`
-      covers only per-execution gas and memory.
-    - [ ] Once those fields are settled, define bounded canonical encoders and
+    - [x] Resolve and implement gas, script-size, multiplication, gas-credit,
+      and storage issuance accounting. External gas uses actual gas excluding
+      direct message grants; internal gas counts those grants once at the
+      external boundary; storage issuance remains the fixed per-block market
+      parameter and purchases consume the existing pool.
+    - [x] Define bounded canonical encoders and
       decoders for `ExternalTx`, `BlockTx`, `BlockHeader`, and `Block`; reject
       unknown versions and tags, oversized lengths, malformed proofs, and
       trailing bytes before application.
-    - [ ] Pin external-transaction and block encodings, witness/effect roots,
+    - [x] Pin external-transaction and block encodings, witness/effect roots,
       state commitments, and block IDs with independently generated vectors.
-    - [ ] Apply the same limits during mempool admission, block construction, and
+    - [x] Apply the same limits during mempool admission, block construction, and
       block verification.
-    - [ ] Test aggregate limits across many individually valid transactions.
+    - [x] Test aggregate witness, script, actual gas, and R1CS limits across
+      many individually valid transactions.
 
 13. [ ] Define extension and version activation rules.
 

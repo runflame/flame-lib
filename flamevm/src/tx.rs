@@ -1,10 +1,11 @@
 use bulletproofs::r1cs::R1CSProof;
 use bulletproofs::PedersenGens;
+use core::convert::TryFrom;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use merkle::{Hash, MerkleItem, MerkleTree};
 use merlin::Transcript;
 use musig::Signature;
-use readerwriter::{Encodable, WriteError, Writer};
+use readerwriter::{Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::{code_root, state_root, ActorID, ActorRegistry};
@@ -35,8 +36,9 @@ pub struct ExternalTx {
     /// Script representing the transaction
     pub script: Vec<u8>,
 
-    /// Aggregated signature of the txid
-    pub signature: Signature,
+    /// Aggregate TxID-bound signature, absent when the script records no
+    /// `signtx` authorizations. Explicit `signcall` signatures live in script.
+    pub signature: Option<Signature>,
 
     /// Constraint system proof for all the constraints
     pub proof: R1CSProof,
@@ -53,9 +55,9 @@ impl ExternalTx {
         &self.script
     }
 
-    /// Aggregate signature bytes used by block witness commitments.
-    pub fn signature_bytes(&self) -> [u8; 64] {
-        self.signature.to_bytes()
+    /// Optional aggregate signature bytes used by the network envelope.
+    pub fn signature_bytes(&self) -> Option<[u8; 64]> {
+        self.signature.map(|signature| signature.to_bytes())
     }
 
     /// R1CS proof bytes used by block witness commitments.
@@ -63,10 +65,73 @@ impl ExternalTx {
         self.proof.to_bytes()
     }
 
+    /// Decodes one canonical transaction envelope under caller-provided
+    /// network bounds. Execution policy remains in [`Self::verify`].
+    pub fn decode_bounded(
+        reader: &mut impl Reader,
+        expected_version: u32,
+        max_script_bytes: usize,
+        max_proof_bytes: usize,
+    ) -> Result<Self, ReadError> {
+        let header = TxHeader {
+            version: reader.read_u32()?,
+            locktime: reader.read_u32()?,
+        };
+        if expected_version != 1 || header.version != expected_version {
+            return Err(ReadError::InvalidFormat);
+        }
+        let script_len =
+            usize::try_from(reader.read_u64()?).map_err(|_| ReadError::InvalidFormat)?;
+        if script_len > max_script_bytes {
+            return Err(ReadError::InvalidFormat);
+        }
+        let script = reader.read_bytes(script_len)?;
+        let signature = match reader.read_u8()? {
+            0 => None,
+            1 => Some(
+                Signature::from_bytes(reader.read_u8x64()?)
+                    .map_err(|_| ReadError::InvalidFormat)?,
+            ),
+            _ => return Err(ReadError::InvalidFormat),
+        };
+        let proof_len =
+            usize::try_from(reader.read_u64()?).map_err(|_| ReadError::InvalidFormat)?;
+        if proof_len > max_proof_bytes {
+            return Err(ReadError::InvalidFormat);
+        }
+        let proof = R1CSProof::from_bytes(&reader.read_bytes(proof_len)?)
+            .map_err(|_| ReadError::InvalidFormat)?;
+        Ok(Self {
+            header,
+            script,
+            signature,
+            proof,
+        })
+    }
+
+    /// Decodes one complete transaction and rejects trailing bytes.
+    pub fn from_bytes_bounded(
+        bytes: &[u8],
+        expected_version: u32,
+        max_script_bytes: usize,
+        max_proof_bytes: usize,
+    ) -> Result<Self, ReadError> {
+        let mut reader = bytes;
+        reader.read_all(|reader| {
+            Self::decode_bounded(reader, expected_version, max_script_bytes, max_proof_bytes)
+        })
+    }
+
     /// Lifecycle step 3: verify the signed transaction — run the opaque
     /// program, check the proof and the aggregate signature — and return
     /// its effects. Bulletproof generators are managed inside the crate.
     pub fn verify(&self, limits: Limits) -> Result<TxLog, VMError> {
+        self.verify_with_metrics(limits).map(|(log, _)| log)
+    }
+
+    /// Verifies the transaction and returns both its effects and actual
+    /// execution counters for consensus admission.
+    pub fn verify_with_metrics(&self, limits: Limits) -> Result<(TxLog, TxMetrics), VMError> {
         let pc_gens = PedersenGens::default();
         let result = Verifier::verify(
             &pc_gens,
@@ -74,9 +139,44 @@ impl ExternalTx {
             &self.proof,
             self.header,
             limits.gas,
-            Some(self.signature),
+            self.signature,
         )?;
-        Ok(TxLog(result.txlog))
+        Ok((
+            TxLog(result.txlog),
+            TxMetrics {
+                gas_used: result.gas_used,
+                total_fee: result.total_fee,
+                multiplications: result.multiplications,
+            },
+        ))
+    }
+}
+
+impl Encodable for ExternalTx {
+    fn encode(&self, writer: &mut impl Writer) -> Result<(), WriteError> {
+        writer.write_u32(b"external_tx.version", self.header.version)?;
+        writer.write_u32(b"external_tx.locktime", self.header.locktime)?;
+        writer.write_u64(b"external_tx.script_len", self.script.len() as u64)?;
+        writer.write(b"external_tx.script", &self.script)?;
+        match self.signature {
+            Some(signature) => {
+                writer.write_u8(b"external_tx.signature_present", 1)?;
+                writer.write(b"external_tx.signature", &signature.to_bytes())?;
+            }
+            None => writer.write_u8(b"external_tx.signature_present", 0)?,
+        }
+        let proof = self.proof.to_bytes();
+        writer.write_u64(b"external_tx.proof_len", proof.len() as u64)?;
+        writer.write(b"external_tx.proof", &proof)
+    }
+}
+
+impl ExactSizeEncodable for ExternalTx {
+    fn encoded_size(&self) -> usize {
+        25usize
+            .saturating_add(usize::from(self.signature.is_some()) * 64)
+            .saturating_add(self.script.len())
+            .saturating_add(self.proof.to_bytes().len())
     }
 }
 
@@ -113,6 +213,15 @@ impl TxLog {
         self.0.iter()
     }
 
+    /// Sum of gas grants on messages emitted directly by this execution.
+    /// Descendant messages are charged to their own derived logs.
+    pub fn direct_send_gas(&self) -> Option<u64> {
+        self.0.iter().try_fold(0u64, |sum, entry| match entry {
+            TxEntry::Send(message) => sum.checked_add(message.gas),
+            _ => Some(sum),
+        })
+    }
+
     /// Consumes the log and returns its ordered effects. Consensus code uses
     /// this to move linear cells and messages into the block transition
     /// without cloning bearer values.
@@ -121,12 +230,13 @@ impl TxLog {
     }
 }
 
-/// Resource counters surfaced for measurement/debugging. Not part of
-/// the [`TxID`].
-#[derive(Clone, Copy, Debug)]
+/// Actual resource counters surfaced for consensus admission and diagnostics.
+/// They are re-derived by execution and are not part of the [`TxID`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TxMetrics {
     pub gas_used: u64,
     pub total_fee: u64,
+    pub multiplications: usize,
 }
 
 /// What the sender must aggregate-sign before broadcast. Build the
@@ -171,9 +281,22 @@ impl UnsignedTx {
         ExternalTx {
             header: self.header,
             script: self.script,
-            signature,
+            signature: Some(signature),
             proof: self.proof,
         }
+    }
+
+    /// Finalizes a transaction that recorded no `signtx` authorizations.
+    pub fn without_signature(self) -> Result<ExternalTx, VMError> {
+        if !self.txbound_items.is_empty() {
+            return Err(VMError::MissingTxBoundSignature);
+        }
+        Ok(ExternalTx {
+            header: self.header,
+            script: self.script,
+            signature: None,
+            proof: self.proof,
+        })
     }
 }
 
@@ -201,6 +324,7 @@ impl ScriptBuilder {
             metrics: TxMetrics {
                 gas_used: result.gas_used,
                 total_fee: result.total_fee,
+                multiplications: result.multiplications,
             },
             txbound_items,
             log: TxLog(result.txlog),
@@ -249,6 +373,7 @@ impl Message {
             metrics: TxMetrics {
                 gas_used: result.gas_used,
                 total_fee: result.total_fee,
+                multiplications: result.multiplications,
             },
         })
     }
@@ -382,6 +507,97 @@ pub enum TxEntry {
     /// Deterministic removal of an actor, either by explicit state
     /// dismantling or by the blockchain's block-boundary expiry process.
     ActorDestroy { actor: ActorID },
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digit = |byte: u8| match byte {
+                    b'0'..=b'9' => byte - b'0',
+                    b'a'..=b'f' => byte - b'a' + 10,
+                    _ => panic!("invalid test vector"),
+                };
+                digit(pair[0]) << 4 | digit(pair[1])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn canonical_external_tx_vector_and_bounds() {
+        const VECTOR: &str = "010000000200000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a101000000000000007e5de4349c5b87f2e1003095aff2e310801e2504b706bc6c062076eee49f90366625b75748908fb2492dd909a6d1428001dfdd201a0a7fae70911cf29112c8319e9d0eba4ca7fe137d5f8026614ab8736204ea46c213d9a20d0d663aa3e8ff1676fcd93dc1cba92d2f820b5b8ae5c99bacce0610dc799f050d1dec5effd5cb6c96950b0ad392e7414252008e6ff97d385437f30c74f106ae586522db4a9d73241ca0ed4f24798b31981e98e96bc121852a567728380ca00d12ee8556c220c13c3ed16d35fca58a3a3773120657b5b49cac1830a472bd083c51f4012ab7de25450a4544cdee6b7577d97a9c3e5a3267da4e13e2ef36a65ce83697cc498f00d005000000000000000000000000000000000000000000000000000000000000000027e4219ec9efc32f50b4b1c8766037a812d135363cbaa38be71527de967eb20839057e9d2324d2932cba8c6a646bb2b9f09661cd1ef8977bbd1df4813803e4040000000000000000000000000000000000000000000000000000000000000000ecd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010";
+        let bytes = hex_bytes(VECTOR);
+        let tx = ExternalTx::from_bytes_bounded(&bytes, 1, 0, 417).unwrap();
+        assert_eq!(tx.encode_to_vec(), bytes);
+        assert_eq!(tx.encoded_size(), bytes.len());
+
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(matches!(
+            ExternalTx::from_bytes_bounded(&trailing, 1, 0, 417),
+            Err(ReadError::TrailingBytes)
+        ));
+        assert!(matches!(
+            ExternalTx::from_bytes_bounded(&bytes, 2, 0, 417),
+            Err(ReadError::InvalidFormat)
+        ));
+        let mut unknown_version = bytes.clone();
+        unknown_version[0] = 2;
+        assert!(matches!(
+            ExternalTx::from_bytes_bounded(&unknown_version, 2, 0, 417),
+            Err(ReadError::InvalidFormat)
+        ));
+        assert!(matches!(
+            ExternalTx::from_bytes_bounded(&bytes, 1, 0, 416),
+            Err(ReadError::InvalidFormat)
+        ));
+    }
+
+    #[test]
+    fn transaction_without_txbound_authorization_omits_signature() {
+        let limits = Limits { gas: 10_000 };
+        let tx = ScriptBuilder::new()
+            .build_tx(
+                TxHeader {
+                    version: 1,
+                    locktime: 0,
+                },
+                limits,
+            )
+            .unwrap()
+            .without_signature()
+            .unwrap();
+        assert!(tx.signature_bytes().is_none());
+        let (_, metrics) = tx.verify_with_metrics(limits).unwrap();
+        assert!(metrics.gas_used > 0);
+        assert_eq!(metrics.multiplications, 0);
+    }
+
+    #[test]
+    fn multiplication_metrics_include_randomized_constraints() {
+        let limits = Limits { gas: 100_000 };
+        let unsigned = ScriptBuilder::new()
+            .alloc(Some(Int253::ONE))
+            .alloc(Some(Int253::from(2u64)))
+            .eq()
+            .not()
+            .verify()
+            .build_tx(
+                TxHeader {
+                    version: 1,
+                    locktime: 0,
+                },
+                limits,
+            )
+            .unwrap();
+        assert_eq!(unsigned.metrics().multiplications, 3);
+        let tx = unsigned.without_signature().unwrap();
+        assert_eq!(tx.verify_with_metrics(limits).unwrap().1.multiplications, 3);
+    }
 }
 
 impl TxID {
