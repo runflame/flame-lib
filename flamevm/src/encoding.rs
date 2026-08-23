@@ -15,9 +15,9 @@
 //! 128..=187  List (immediate count; 187 = VAR sub-varint)
 //! 188..=247  Dict  (immediate count; 247 = VAR sub-varint)
 //! 248        Point          (32-byte compressed Ristretto)
-//! 249..=253  Token / ClearToken / WideToken / Object / Merlin
-//! 254        reserved
-//! 255        extension      (sub-tag follows)
+//! 249..=250  Token / ClearToken
+//! 251..=254  reserved
+//! 255        reserved extension prefix
 //! ```
 //!
 //! Sub-varint (used inside `STR_VAR` / `LIST_VAR` / `DICT_VAR`)
@@ -95,11 +95,9 @@ const DICT_VAR: u8 = 247;
 const POINT_TAG: u8 = 248;
 const TOKEN_TAG: u8 = 249;
 const CLEAR_TOKEN_TAG: u8 = 250;
-const WIDE_TOKEN_TAG: u8 = 251;
-const OBJECT_TAG: u8 = 252;
-const MERLIN_TAG: u8 = 253;
-// Reserved: 254
-// Extension: 255
+const RESERVED_VALUE_TAG_MIN: u8 = 251;
+const RESERVED_VALUE_TAG_MAX: u8 = 254;
+// Reserved extension prefix: 255
 
 // Number of IMM slots (values 0..=58) shared across int/str/list/dict.
 const IMM_COUNT: u8 = INT_IMM_MAX + 1; // 59
@@ -430,8 +428,7 @@ fn keys_are_sequential<'a>(keys: impl Iterator<Item = &'a Int253>) -> bool {
 const MAX_DEPTH: u32 = 64;
 
 /// Reads a `Value`.
-/// Returns `Ok(None)` for the recognized but unimplemented Object and Merlin
-/// tags. WideToken and unknown tags are invalid; Token and ClearToken decode.
+/// Token and ClearToken decode; all unassigned and extension tags are invalid.
 /// Returns `Err` for malformed data, non-canonical encodings, or
 /// resource-exhausting input (excessive nesting, oversized counts).
 pub fn read_value(r: &mut impl Reader) -> Result<Option<Value>, ReadError> {
@@ -532,11 +529,9 @@ fn read_value_with_depth(
             let flv = read_int253(r)?;
             Ok(Some(Value::ClearToken(ClearToken::new(qty, flv))))
         }
-        // WideToken has no implemented representation.
-        WIDE_TOKEN_TAG => Err(ReadError::InvalidFormat),
-        // Allocated but unimplemented tags — payload size unknown.
-        OBJECT_TAG | MERLIN_TAG => Ok(None),
-        // Reserved and extension tags are not yet defined.
+        // Unassigned tags have no payload shape and cannot be skipped.
+        RESERVED_VALUE_TAG_MIN..=RESERVED_VALUE_TAG_MAX => Err(ReadError::InvalidFormat),
+        // Extension tags are not yet defined.
         _ => Err(ReadError::InvalidFormat),
     }
 }
@@ -887,23 +882,15 @@ mod tests {
     }
 
     #[test]
-    fn read_value_unimplemented_returns_none() {
-        // OBJECT_TAG / MERLIN_TAG still soft-fail decoding with `Ok(None)`
-        // (their wire formats are pending). The token tags now have
-        // definite semantics — see `token_decode_*` below.
-        for tag in [OBJECT_TAG, MERLIN_TAG] {
-            let buf = vec![tag];
-            let mut r = buf.as_slice();
-            assert!(read_value(&mut r).unwrap().is_none());
+    fn read_value_unimplemented_tags_reject() {
+        for tag in RESERVED_VALUE_TAG_MIN..=255 {
+            let bytes = [tag];
+            let mut input = bytes.as_slice();
+            assert!(matches!(
+                read_value(&mut input),
+                Err(ReadError::InvalidFormat)
+            ));
         }
-    }
-
-    #[test]
-    fn read_value_widetoken_tag_rejects() {
-        // WideToken has no implemented value encoding: tag 0xfb is invalid.
-        let buf = vec![WIDE_TOKEN_TAG];
-        let mut r = buf.as_slice();
-        assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
     }
 
     #[test]
@@ -1028,16 +1015,6 @@ mod tests {
         let mut buf2 = Vec::new();
         write_value(&mut buf2, &decoded).expect("re-encodes");
         assert_eq!(buf, buf2);
-    }
-
-    #[test]
-    fn read_value_reserved_tags_reject() {
-        // 254 (reserved) and 255 (extension) currently reject.
-        for tag in [254u8, 255] {
-            let buf = vec![tag];
-            let mut r: &[u8] = &buf;
-            assert!(read_value(&mut r).is_err());
-        }
     }
 
     #[test]

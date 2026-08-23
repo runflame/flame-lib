@@ -11,8 +11,8 @@ use crate::Value;
 /// per call. Iteration yields entries in ascending key order, which the
 /// wire encoder relies on for canonical output.
 ///
-/// Dicts are **never VM-copyable** (todo #5 / ADR-style: avoids
-/// variable gas for `dup`/`getdup` and the linear-leak hazard). They
+/// Dicts are **never VM-copyable** (avoids variable gas for
+/// `dup`/`getdup` and the linear-leak hazard). They
 /// carry two independent sticky capability flags:
 ///
 /// - `droppable` — true iff every value ever inserted was droppable.
@@ -107,7 +107,7 @@ impl Dict {
     }
 
     /// Dicts are never VM-copyable (avoids variable `dup`/`getdup` gas
-    /// and the linear-leak hazard — todo #5).
+    /// and the linear-leak hazard).
     pub fn is_copyable(&self) -> bool {
         false
     }
@@ -135,7 +135,7 @@ impl Dict {
         })
     }
 
-    /// VM-level clone — always fails: dicts are non-copyable (todo #5).
+    /// VM-level clone — always fails: dicts are non-copyable.
     /// The `dup`/`getdup` family routes here, so a dict value can never
     /// be duplicated on the stack. The Rust-level `Clone` impl is the
     /// separate data-duplication path (registry snapshot / txlog entry).

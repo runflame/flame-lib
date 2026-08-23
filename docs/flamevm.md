@@ -170,17 +170,32 @@ Plain data types: integers, byte strings, Ristretto points. These can be copied 
 
 Structured data types: dicts that are used as lists, dictionaries and enum variants. Dicts are **never copyable** and cache sticky portability and droppability capabilities (see §Dict).
 
-Token types: WideToken, Token, ClearToken.
+Bearer types: Cell, WideToken, Token and ClearToken.
 
-Constraint types: Object, Variable, Expression and Constraint.
+Constraint-system types: Variable, Expression and Constraint.
 
 Cryptography types: Merlin transcript. (Batched scalar-point
 checks are not user-visible — see the note on `MultiscalarMul`
 below.)
 
-Portable types: can be stored in a UTXO or permanent storage.
+Portable types can cross a Cell, Message, actor-call, or actor-state boundary.
 
-Copyable types: can be copied or dropped.
+Copyable types can be duplicated by the VM. Every copyable value is also
+droppable, but non-copyable pure-computation values may be droppable too.
+
+| Type | Copyable | Droppable | Portable |
+| --- | --- | --- | --- |
+| Int253, String, Point | yes | yes | yes |
+| Dict | no | sticky flag | sticky flag |
+| Token | no | no | yes |
+| ClearToken | no | quantity is zero | quantity is non-negative |
+| WideToken, Cell | no | no | no |
+| Merlin, Variable, Expression, Constraint, MultiscalarMul | no | yes | no |
+
+Droppability tracks asset ownership, not whether a value is mutable or useful.
+Dropping a transcript, expression, constraint, variable, or unscheduled MSM
+abandons computation but cannot destroy bearer value. A Dict starts droppable;
+inserting any non-droppable value clears its sticky flag permanently.
 
 Portability is a business-logic capability, not a serialization property.
 Generic value codecs describe representation only. For example, a negative
@@ -204,7 +219,7 @@ inline variant (`Token`), while `WideToken` is 40 bytes. Rust layout and byte
 counts are implementation details; the canonical wire representation is
 unchanged.
 
-Value tag allocation. A reserved tag does not imply that an encoder exists:
+Implemented generic `Value` encodings:
 
 | Type | Tag(s) | Description |
 | --- | --- | --- |
@@ -214,16 +229,15 @@ Value tag allocation. A reserved tag does not imply that an encoder exists:
 | Point | 248 | Element of the Ristretto255 group. |
 | Token | 249 | Linear type (qty, flavor) representing an asset value, possibly encrypted. |
 | ClearToken | 250 | Linear type (qty, flavor) with cleartext values. Portable when non-negative. Both signs have the same representation; a negative `ClearToken` is a non-portable intermediate rejected at domain admission. |
-| WideToken | 251 | Allocated tag; no current value encoding. The type is a CS-bound, possibly-negative token. |
-| Object | 252 | Allocated for a future object value; no current `Value` variant or encoding. |
-| Merlin | 253 | Allocated tag; no current value encoding for transcript state. |
-| (reserved) | 254 | Reserved tag. |
-| (extension) | 255 | Extension prefix; sub-tag follows. |
+
+Tags `251..=254` are unassigned and rejected. Tag `255` is reserved as an
+extension prefix but is also rejected until an extension format is activated.
 
 Stack-only types (non-portable and without an implemented `Value` encoding):
 
 | Type | Description |
 | --- | --- |
+| Cell | Linear cell handle. `Cell` has its own top-level encoding, but `Value::Cell` has no generic value tag. |
 | WideToken | Possibly-negative encrypted token tied to the current constraint system. |
 | Merlin | Mutable transcript state tied to the current execution. |
 | Variable | Secret value in the constraint system, tied to a Pedersen commitment. |
@@ -271,11 +285,8 @@ Tag namespace (one byte, 256 values total):
 248        Point      (32-byte compressed Ristretto)
 249        Token      (32-byte qty commitment point + 32-byte flv commitment point)
 250        ClearToken (cleartext qty Int253 + flv Int253)
-251        WideToken  (assigned tag; Value encoding not implemented)
-252        Object     (assigned tag; Value encoding not implemented)
-253        Merlin     (assigned tag; Value encoding not implemented)
-254        reserved
-255        extension (sub-tag follows)
+251..=254  unassigned (rejected)
+255        reserved extension prefix (rejected until defined)
 ```
 
 A list-style Dict (tags 128..=187) is used when keys are exactly `0..n-1`; the keys are omitted from the wire and reconstructed at decode. An explicit-keys Dict payload whose keys turn out to be `0..n-1` is rejected at decode time, since it has a shorter list-style encoding.
@@ -424,11 +435,11 @@ A Point on the value stack downcasts via `to_commitment` / `to_predicate` to ext
 
 ### MultiscalarMul
 
-Lazy multi-scalar-multiplication: a vector of `(scalar_i, point_i)` pairs that the VM defers as the assertion `sum(s_i · P_i) == identity`. Linear (non-copyable, non-droppable), stack-only, **not** wire-encodable — exactly like [Expression](#types) and [Constraint](#types).
+Lazy multi-scalar-multiplication: a vector of `(scalar_i, point_i)` pairs that the VM defers as the assertion `sum(s_i · P_i) == identity`. Non-copyable but droppable, stack-only, and **not** wire-encodable — exactly like [Expression](#types) and [Constraint](#types). Dropping it abandons an assertion that has not been scheduled; only `verify` commits it to the batch.
 
 **Purpose: custom Sigma-protocols.** Together with [Merlin](#cryptography-instructions) transcripts (Fiat–Shamir challenges), `MultiscalarMul` lets contract authors express any Schnorr-style relation over Pedersen-committed data — proof of knowledge of discrete log, equality of two encryptions, proof of correct re-encryption, etc. The verification equation always reduces to "this weighted sum of group elements is the identity point".
 
-**Batched verification.** `verify` on an MSM does **not** decompress or check anything immediately — it appends the term vector to the same `BatchVerifier` that holds the transaction's Schnorr / Musig signatures (with `basepoint_scalar = 0` so the MSM contributes only its dynamic terms). At finalize the entire batch is verified with a single Dalek `vartime_multiscalar_mul` (Strauss algorithm), amortising the ~4× speedup of batched MSM across every Sigma-protocol assertion and every signature in the transaction.
+**Batched verification.** `verify` on an MSM attempts to decompress every point while scheduling the statement and appends each result as `Some(point)` or `None` to the same `BatchVerifier` that holds the transaction's Schnorr / Musig signatures (with `basepoint_scalar = 0` so the MSM contributes only its dynamic terms). Scheduling does not accept or reject the assertion. At finalize, `optional_multiscalar_mul` rejects the entire batch if any point failed decompression or if the weighted sum is not the identity, while still amortising batch work across every Sigma-protocol assertion and signature in the transaction.
 
 **Witness-gated failures are fail-closed.** A few opcodes can fail on the *prover* over data the verifier lacks (e.g. an out-of-`u64` range-proof assignment, a `commit`-then-`expr` over an opaque commitment with no witness). Because the proof binds the **entire** constraint system through Fiat–Shamir, any prover/verifier control-flow or CS divergence — including one caused by such a prover-only failure being caught as a sub-call `0` marker — makes the proof **fail to verify**: the verifier rejects, it can never *accept* an invalid transaction. The effect is a self-inflicted liveness edge (a prover that commits to a malformed witness produces an unverifiable tx), not a soundness break. Making such failures tx-level (uncatchable) so they never reach a marker is a deliberate liveness-hardening item, tracked for ZK review.
 
@@ -454,9 +465,11 @@ Quadratic group-element products (`Point * Point`, `MSM * Point`, `MSM * MSM`) h
 
 Dict is a versatile data structure for representing lists, dictionaries and even sum-type (aka “enum”) values. One-key struct is used to encode a single variant of a sum-type.
 
-Keys are non-negative Ints to keep ordering non-ambiguous.
+Keys are signed `Int253` values. Canonical iteration and explicit-key encoding
+use their total numeric order: negative keys first, then zero and positive
+keys. List-style encoding remains limited to the exact keys `0..n-1`.
 
-**Dicts are never copyable** (todo #5): `dup`/`getdup` of a Dict value always fails `TypeNotCopyable`. Each Dict carries independent sticky `portable` and `droppable` flags. A newly constructed empty Dict starts with both flags true. Every successful insertion applies `dict.portable &= value.is_portable()` and `dict.droppable &= value.is_droppable()`. Removal and replacement never restore a cleared flag; a rejected strict insertion does not change either flag.
+**Dicts are never copyable**: `dup`/`getdup` of a Dict value always fails `TypeNotCopyable`. Each Dict carries independent sticky `portable` and `droppable` flags. A newly constructed empty Dict starts with both flags true. Every successful insertion applies `dict.portable &= value.is_portable()` and `dict.droppable &= value.is_droppable()`. Removal and replacement never restore a cleared flag; a rejected strict insertion does not change either flag.
 
 The `dict` / `put` / `replace` opcodes may insert any Value. A non-portable Dict remains usable on the stack, but `cell`, `output`, `send`, `call`, `open`, `signcall`, and actor-state storage reject it at their portability boundary. Checking a Dict is O(1), including when it is nested: inserting a nested Dict reads that Dict's already-cached flag. Dict values are owned and cannot be mutated through an alias, so the cached parent flag cannot become stale.
 
@@ -482,7 +495,9 @@ Drilling down the nested dict preserving ownership with `get` and `put` instruct
 
 ### Tokens
 
-All token types are linear types: non-copyable and non-droppable.
+All token types are non-copyable. `Token`, `WideToken`, and a nonzero
+`ClearToken` are non-droppable; a zero-quantity `ClearToken` is droppable
+because it carries only a flavor nameplate and no balance.
 
 The native Flame flavor is `FLAME_FLAVOR = 0`. One Flame is exactly
 `100_000_000` sparks; all native-token quantities on the stack and wire are
@@ -832,7 +847,9 @@ Pops an `Int253` flavor; pushes a zero-quantity `ClearToken { qty: 0, flv }`. Co
 
 _x_ → ø
 
-Drops a [droppable](#types) value. Hard-fails `TypeNotDroppable` for linear types and non-empty containers.
+Drops a [droppable](#types) value. Hard-fails `TypeNotDroppable` for
+asset-bearing values and Dicts whose sticky droppable flag is false. A
+non-empty Dict of droppable members and pure-computation values may be dropped.
 
 ### nop
 
@@ -1136,7 +1153,9 @@ Iteration helpers. Push the first/last key of the dict, or the key after `k`, or
 
 _label_ → _merlin_
 
-Creates a fresh [Merlin transcript](#types) seeded with `label`. The transcript is a linear value (never copyable, never droppable) consumed by `twrite` / `tread` to build custom ZKP statements.
+Creates a fresh [Merlin transcript](#types) seeded with `label`. The transcript
+is never copyable but is droppable; `twrite` / `tread` consume and return it
+while building custom ZKP statements.
 
 ### twrite
 

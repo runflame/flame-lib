@@ -171,21 +171,21 @@ when the specification, implementation, and focused regression tests agree.
    - [x] Add remaining golden vectors for quote rounding, pool boundaries, lease
      coalescing, expiry, destruction, wire effects, and nested rollback.
 
-9. [ ] Reconcile value capabilities and public data models.
+9. [x] Reconcile value capabilities and public data models.
 
-   - [ ] Decide and document droppability for MSM, Merlin, Variables,
+   - [x] Define droppability by asset ownership: MSM, Merlin, Variables,
      Expressions, Constraints, zero-quantity `ClearToken`, and non-empty Dicts;
-     align `drop` and its tests.
-   - [ ] Decide whether Dict keys are signed or nonnegative. Code and tests
-     currently support negative keys.
-   - [ ] Remove unsupported `WideToken`, `Object`, and `Merlin` entries from the
-     “encodable types” table, or implement their encodings. Use `Cell`, not the
-     removed `Object` name.
-   - [ ] Clarify that MSM point decompression happens during `verify` even though
+     the pure-computation values and zero token are droppable, while Dict
+     droppability is sticky. Align `drop` and its tests.
+   - [x] Define Dict keys as signed `Int253` values in total numeric order;
+     list-style encoding still requires the exact nonnegative range `0..n-1`.
+   - [x] Remove unsupported `WideToken`, `Object`, and `Merlin` entries from the
+     encodable-types table. Generic value tags `251..=254` are unassigned;
+     `Cell` has a separate top-level encoding rather than a generic Value tag.
+   - [x] Clarify that MSM point decompression happens during `verify` even though
      batch acceptance is deferred.
-   - [ ] Remove the obsolete `method` field from exported
-     `Address::MessageTarget`, or restore a method field consistently across
-     Message, `send`, and the specification.
+   - [x] Remove the obsolete `method` field from exported
+     `Address::MessageTarget`; a selector, when used, is an ordinary argument.
 
 10. [ ] Make the effect model and chain formats complete.
 

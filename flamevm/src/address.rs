@@ -23,12 +23,10 @@ pub enum Address {
     /// predicate via signature or reveal to unlock the cell later.
     Predicate(Predicate),
 
-    /// Message routing target: deliver `args` to `dst.method` with
-    /// the given gas allotment. The byte-token deposit lives outside
-    /// the Address since it concerns the send, not the destination.
+    /// Message routing target: deliver `args` to `dst` with the given gas
+    /// allotment. A selector, when used, is an ordinary argument.
     MessageTarget {
         dst: ActorID,
-        method: Int253,
         args: Dict,
         gas: u64,
     },
@@ -55,7 +53,7 @@ impl Address {
 ///
 /// Layout:
 /// - `Predicate`: `[tag, point]`.
-/// - `MessageTarget`: `[tag, dst_string, method_int, args_dict, gas_int]`.
+/// - `MessageTarget`: `[tag, dst_string, args_dict, gas_int]`.
 ///
 /// `dst` is wrapped as a `String` carrying the bytes of
 /// [`ActorID::encode`] so the outer list-Dict reader sees a uniform
@@ -73,11 +71,10 @@ impl Encodable for Address {
             }
             Address::MessageTarget {
                 dst,
-                method,
                 args,
                 gas,
             } => {
-                write_list_prefix(w, 5)?;
+                write_list_prefix(w, 4)?;
                 write_admitted_value(
                     w,
                     &Value::Int253(Int253::from(Self::TAG_MESSAGE_TARGET as u64)),
@@ -85,10 +82,9 @@ impl Encodable for Address {
                 let mut dst_bytes = Vec::new();
                 dst.encode(&mut dst_bytes)?;
                 write_admitted_value(w, &Value::String(String::from(dst_bytes)))?;
-                write_admitted_value(w, &Value::Int253(*method))?;
                 // Serialization is the Rust-level data path, so use
                 // `Clone`, not the VM-level `try_clone` (dicts are
-                // non-copyable on the stack — todo #5).
+                // non-copyable on the stack).
                 write_admitted_value(w, &Value::Dict(args.clone()))?;
                 write_admitted_value(w, &Value::Int253(Int253::from(*gas)))
             }
@@ -124,17 +120,13 @@ impl Decodable for Address {
                 };
                 Ok(Address::Predicate(p))
             }
-            (Self::TAG_MESSAGE_TARGET, 5) => {
+            (Self::TAG_MESSAGE_TARGET, 4) => {
                 let dst_bytes = read_string(r)?;
                 let mut dst_r = dst_bytes.as_slice();
                 let dst = ActorID::decode(&mut dst_r)?;
                 if !dst_r.is_empty() {
                     return Err(ReadError::InvalidFormat);
                 }
-                let method = match read_value(r) {
-                    Ok(Some(Value::Int253(i))) => i,
-                    _ => return Err(ReadError::InvalidFormat),
-                };
                 let args = match read_value(r) {
                     Ok(Some(Value::Dict(d))) => d,
                     _ => return Err(ReadError::InvalidFormat),
@@ -150,7 +142,6 @@ impl Decodable for Address {
                 };
                 Ok(Address::MessageTarget {
                     dst,
-                    method,
                     args,
                     gas,
                 })
@@ -185,7 +176,7 @@ mod tests {
 
     #[test]
     fn address_decode_rejects_wrong_arity_for_message() {
-        // tag = MessageTarget but only 3 entries instead of 5.
+        // tag = MessageTarget but only 3 entries instead of 4.
         let mut bytes = Vec::new();
         write_list_prefix(&mut bytes, 3).unwrap();
         write_value(
@@ -208,7 +199,6 @@ mod tests {
     fn address_decode_rejects_negative_gas() {
         let addr = Address::MessageTarget {
             dst: ActorID::Hash([0u8; 32]),
-            method: Int253::from(0u64),
             args: Dict::new(),
             gas: 0,
         };
@@ -217,7 +207,7 @@ mod tests {
         // it with a fresh -1 Int253. To keep the surgery simple, just
         // append a fresh list-Dict instead with the negative tail:
         bytes.clear();
-        write_list_prefix(&mut bytes, 5).unwrap();
+        write_list_prefix(&mut bytes, 4).unwrap();
         write_value(
             &mut bytes,
             &Value::Int253(Int253::from(Address::TAG_MESSAGE_TARGET as u64)),
@@ -228,7 +218,6 @@ mod tests {
             &Value::String(String::from(ActorID::Hash([0u8; 32]).encode_to_vec())),
         )
         .unwrap();
-        write_value(&mut bytes, &Value::Int253(Int253::from(0u64))).unwrap();
         write_value(&mut bytes, &Value::Dict(Dict::new())).unwrap();
         write_value(&mut bytes, &Value::Int253(Int253::from(-1i64))).unwrap();
         let mut r = bytes.as_slice();
@@ -241,7 +230,7 @@ mod tests {
         // Encode the message target; tamper with the dst-string
         // bytes to add a trailing byte after the ActorID.
         let mut bytes = Vec::new();
-        write_list_prefix(&mut bytes, 5).unwrap();
+        write_list_prefix(&mut bytes, 4).unwrap();
         write_value(
             &mut bytes,
             &Value::Int253(Int253::from(Address::TAG_MESSAGE_TARGET as u64)),
@@ -251,11 +240,30 @@ mod tests {
         let mut dst_payload = ActorID::Hash([1u8; 32]).encode_to_vec();
         dst_payload.push(0xff);
         write_value(&mut bytes, &Value::String(String::from(dst_payload))).unwrap();
-        write_value(&mut bytes, &Value::Int253(Int253::from(0u64))).unwrap();
         write_value(&mut bytes, &Value::Dict(Dict::new())).unwrap();
         write_value(&mut bytes, &Value::Int253(Int253::from(0u64))).unwrap();
         let mut r = bytes.as_slice();
         let err = Address::decode(&mut r).expect_err("must error");
         assert!(matches!(err, ReadError::InvalidFormat));
+    }
+
+    #[test]
+    fn message_target_roundtrips_without_a_method_field() {
+        let expected_dst = ActorID::Hash([3u8; 32]);
+        let encoded = Address::MessageTarget {
+            dst: expected_dst.clone(),
+            args: Dict::new(),
+            gas: 42,
+        }
+        .to_bytes()
+        .unwrap();
+        let mut input = encoded.as_slice();
+        let decoded = Address::decode(&mut input).unwrap();
+        assert!(input.is_empty());
+        assert!(matches!(
+            decoded,
+            Address::MessageTarget { dst, args, gas }
+                if dst == expected_dst && args.is_empty() && gas == 42
+        ));
     }
 }

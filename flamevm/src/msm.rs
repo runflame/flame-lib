@@ -29,11 +29,12 @@ use crate::int253::Int253;
 /// `sum(scalar_i · point_i) == identity` that the VM appends to the
 /// delegate's `BatchVerifier` when `verify` consumes it.
 ///
-/// Linear (non-copyable, non-droppable) and stack-only — like
+/// Non-copyable, droppable, and stack-only — like
 /// [`Expression`](crate::Expression) and [`Constraint`](crate::Constraint).
-/// Points are stored compressed; decompression is deferred to batch-
-/// verify time (Dalek's `optional_multiscalar_mul` handles
-/// undecompressable points by failing the batch).
+/// Dropping abandons the proposed assertion; only `verify` schedules it.
+/// Points are stored compressed. `verify` attempts decompression while
+/// appending the statement and retains failures as `None`; acceptance remains
+/// deferred until final batch verification, where any `None` rejects the batch.
 ///
 /// Internal storage is a flat `Vec<(Scalar, CompressedRistretto)>`.
 /// Once an MSM is on the stack, the originating `Point` enum variant

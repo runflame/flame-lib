@@ -238,7 +238,7 @@ fn roll_out_of_range_errors() {
 
 #[test]
 fn dup_of_dict_errors_noncopyable() {
-    // {5: 50}, dup:0 — dicts are never VM-copyable (todo #5), so even an
+    // {5: 50}, dup:0 — dicts are never VM-copyable, so even an
     // all-Int dict can't be duplicated on the stack.
     let mut vm = vm_with_script(
         ScriptBuilder::new()
@@ -267,4 +267,3 @@ fn dup_of_noncopyable_dict_errors() {
         VMError::TypeNotCopyable
     ));
 }
-

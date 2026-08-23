@@ -2,7 +2,7 @@
 //!
 //! Covers the arithmetic lift (Point/Point/Int253/MSM dispatch in
 //! `op_add` / `op_neg` / `op_mul`), the linear-type invariants
-//! (non-copyable, non-droppable, non-portable, non-wire-encodable),
+//! (non-copyable, droppable, non-portable, non-wire-encodable),
 //! and the deferred-batch semantics of `verify` on an MSM —
 //! including the end-to-end Prover→Verifier path where a non-identity
 //! MSM is detected only at finalize via `BatchSignatureVerificationFailed`.
@@ -277,8 +277,8 @@ fn verify_msm_nonidentity_rejected_at_batch() {
     assert!(matches!(err, VMError::BatchSignatureVerificationFailed));
 }
 
-/// MSM with non-decompressable point fails at batch verify
-/// (`optional_multiscalar_mul` returns None → `InvalidBatch`).
+/// `verify` attempts point decompression when scheduling the MSM but preserves
+/// failure as `None`; final batch verification rejects that deferred failure.
 #[test]
 fn verify_msm_invalid_point_rejected_at_batch() {
     use bulletproofs::PedersenGens;
@@ -286,8 +286,8 @@ fn verify_msm_invalid_point_rejected_at_batch() {
     // 0xff-filled bytes do not decompress as a valid Ristretto point.
     let bad = [0xff; 32];
     // push:0  pushpoint(bad)  mul  verify — even with coefficient 0,
-    // the batched MSM decompresses each point before scaling, so a
-    // bad point fails the whole batch.
+    // `verify` records failed decompression as `None`, so scheduling succeeds
+    // but final batch acceptance fails.
     let prog = ScriptBuilder::new()
         .push_int(0u64)
         .push_point(bad)

@@ -202,6 +202,49 @@ mod layout_tests {
     }
 }
 
+#[cfg(test)]
+mod capability_tests {
+    use curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED;
+    use curve25519_dalek::scalar::Scalar;
+
+    use super::Value;
+    use crate::{
+        ClearToken, Commitment, Constraint, Dict, Expression, Int253, Merlin, MultiscalarMul,
+        Variable,
+    };
+
+    #[test]
+    fn droppability_matrix_matches_asset_ownership() {
+        for value in [
+            Value::Merlin(Merlin::new(b"drop-test")),
+            Value::Variable(Variable {
+                commitment: Commitment::unblinded(Int253::ONE),
+            }),
+            Value::Expression(Expression::Constant(Int253::ONE)),
+            Value::Constraint(Constraint::Cleartext(true)),
+            Value::MultiscalarMul(MultiscalarMul::term(
+                Scalar::ONE,
+                RISTRETTO_BASEPOINT_COMPRESSED,
+            )),
+            Value::ClearToken(ClearToken::new(Int253::ZERO, Int253::from(7u64))),
+        ] {
+            assert!(value.is_droppable());
+            assert!(!value.is_copyable());
+        }
+
+        let mut dict = Dict::new();
+        dict.insert(Int253::ZERO, Value::Int253(Int253::ONE));
+        assert!(dict.is_droppable());
+        dict.insert(
+            Int253::ONE,
+            Value::ClearToken(ClearToken::new(Int253::ONE, Int253::from(7u64))),
+        );
+        assert!(!dict.is_droppable());
+        dict.remove(&Int253::ONE);
+        assert!(!dict.is_droppable(), "droppability is sticky");
+    }
+}
+
 /// Possible values on the stack machine.
 ///
 /// `Clone` is the Rust-level deep copy (used for snapshots, storage,
