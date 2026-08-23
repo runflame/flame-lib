@@ -166,9 +166,9 @@ when the specification, implementation, and focused regression tests agree.
    - [x] Build one context matrix test covering ExternalRoot, InternalRoot,
      ActorCall, and external/internal CellOpen for every restricted opcode.
 
-8. [ ] Finish actor-storage lease coverage.
+8. [x] Finish actor-storage lease coverage.
 
-   - [ ] Add remaining golden vectors for quote rounding, pool boundaries, lease
+   - [x] Add remaining golden vectors for quote rounding, pool boundaries, lease
      coalescing, expiry, destruction, wire effects, and nested rollback.
 
 9. [ ] Reconcile value capabilities and public data models.

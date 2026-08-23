@@ -710,6 +710,19 @@ mod tests {
         ActorID::Hash([7; 32])
     }
 
+    fn small_params() -> StorageParams {
+        StorageParams {
+            unit_bytes: 64,
+            initial_pool_units: 10,
+            lease_duration_blocks: 2,
+            issued_units_per_block: 1,
+            minimum_lease_units: 1,
+            minimum_remaining_units: 1,
+            lease_record_bytes: 2,
+            initial_price_sparks_per_unit: 3,
+        }
+    }
+
     fn nested_nonportable_state() -> Value {
         let mut inner = Dict::new();
         inner.insert(
@@ -739,20 +752,139 @@ mod tests {
     }
 
     #[test]
-    fn purchase_rounds_up_and_rollback_restores_supply() {
+    fn quote_rounding_and_pool_boundaries_are_exact() {
         let mut store = ActorStore::new(StorageParams::default()).unwrap();
         store.deploy(actor(), vec![0], empty_state()).unwrap();
-        store.push_checkpoint();
-        let before = store.available_units();
         let quote = store
-            .purchase_storage(&actor(), 1_024, 10)
+            .quote_storage(&actor(), 1_024, 10)
             .unwrap()
             .unwrap();
-        assert!(quote.fee_sparks.to_u128().unwrap() > 0);
-        assert_eq!(store.available_units(), before - 1);
-        store.pop_checkpoint_rollback();
-        assert_eq!(store.available_units(), before);
-        assert_eq!(store.actor_capacity(&actor(), 10).unwrap(), 0);
+        assert_eq!(quote.fee_sparks, Int253::from(1_000_007_630u64));
+        assert_eq!(quote.expiry_height, 52_510);
+        let params = StorageParams::default();
+        let largest = (params.initial_pool_units - params.minimum_remaining_units)
+            * params.unit_bytes;
+        assert_eq!(largest, 134_216_704);
+        assert_eq!(
+            store
+                .quote_storage(&actor(), largest, 0)
+                .unwrap()
+                .unwrap()
+                .fee_sparks,
+            Int253::from(17_179_738_112_000_000_000u64)
+        );
+        assert_eq!(
+            store
+                .quote_storage(
+                    &actor(),
+                    params.initial_pool_units * params.unit_bytes,
+                    0,
+                )
+                .unwrap(),
+            None
+        );
+
+        let params = small_params();
+        let mut store = ActorStore::new(params).unwrap();
+        store.deploy(actor(), vec![0], empty_state()).unwrap();
+        assert_eq!(store.quote_storage(&actor(), 0, 0).unwrap(), None);
+        assert_eq!(store.quote_storage(&actor(), 63, 0).unwrap(), None);
+        assert_eq!(
+            store
+                .quote_storage(&actor(), 9 * params.unit_bytes, 0)
+                .unwrap()
+                .unwrap()
+                .fee_sparks,
+            Int253::from(270u64)
+        );
+        assert_eq!(
+            store.quote_storage(&actor(), 10 * params.unit_bytes, 0).unwrap(),
+            None
+        );
+        store
+            .purchase_storage(&actor(), 9 * params.unit_bytes, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.available_units(), 1);
+        assert_eq!(
+            store
+                .quote_storage(&actor(), params.unit_bytes, 0)
+                .unwrap(),
+            None
+        );
+        store.assert_supply(0).unwrap();
+    }
+
+    #[test]
+    fn leases_coalesce_expire_and_destroy_at_exact_heights() {
+        let params = small_params();
+        let state = Value::ClearToken(ClearToken::new(Int253::from(7u64), FLAME_FLAVOR));
+        let state_hash = state_root(&state);
+        let mut store = ActorStore::new(params).unwrap();
+        store.deploy(actor(), vec![0], state).unwrap();
+        let base_usage = store.actor_usage(&actor()).unwrap();
+
+        let first = store
+            .purchase_storage(&actor(), params.unit_bytes, 0)
+            .unwrap()
+            .unwrap();
+        let second = store
+            .purchase_storage(&actor(), 2 * params.unit_bytes, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (first.fee_sparks, first.expiry_height),
+            (Int253::from(4u64), 2)
+        );
+        assert_eq!(
+            (second.fee_sparks, second.expiry_height),
+            (Int253::from(9u64), 2)
+        );
+        assert_eq!(
+            store.actors[&actor().to_hash()].leases,
+            BTreeMap::from([(2, 3)])
+        );
+        assert_eq!(store.actor_usage(&actor()).unwrap(), base_usage + 2);
+        assert_eq!(store.actor_capacity(&actor(), 1).unwrap(), 192);
+        assert_eq!(store.actor_capacity(&actor(), 2).unwrap(), 0);
+
+        let third = store
+            .purchase_storage(&actor(), params.unit_bytes, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (third.fee_sparks, third.expiry_height),
+            (Int253::from(5u64), 3)
+        );
+        assert_eq!(
+            store.actors[&actor().to_hash()].leases,
+            BTreeMap::from([(2, 3), (3, 1)])
+        );
+        assert_eq!(store.actor_usage(&actor()).unwrap(), base_usage + 4);
+        assert_eq!(store.actor_capacity(&actor(), 2).unwrap(), 64);
+
+        store.begin_block(1).unwrap();
+        store.begin_block(2).unwrap();
+        assert_eq!(store.available_units(), 11);
+        assert_eq!(
+            store.actors[&actor().to_hash()].leases,
+            BTreeMap::from([(3, 1)])
+        );
+        assert_eq!(store.actor_capacity(&actor(), 2).unwrap(), 64);
+        store.assert_supply(2).unwrap();
+
+        store.begin_block(3).unwrap();
+        assert!(matches!(
+            store.actor_capacity(&actor(), 3),
+            Err(VMError::ActorPendingDestruction)
+        ));
+        let destroyed = store.destroy_expired_actors().unwrap();
+        assert_eq!(destroyed.len(), 1);
+        assert_eq!(destroyed[0].actor, actor());
+        assert_eq!(state_root(&destroyed[0].state), state_hash);
+        assert!(!store.exists(&actor()));
+        assert_eq!(store.available_units(), 13);
+        store.assert_supply(3).unwrap();
     }
 
     #[test]
@@ -776,6 +908,39 @@ mod tests {
         assert_eq!(store.actor_root(), before_root);
         assert_eq!(store.actor_capacity(&actor(), 0).unwrap(), 0);
         assert_eq!(store.actor_capacity(&other, 0).unwrap(), 0);
+        store.assert_supply(0).unwrap();
+    }
+
+    #[test]
+    fn nested_expiry_and_destruction_commit_is_undone_by_outer_rollback() {
+        let params = small_params();
+        let mut store = ActorStore::new(params).unwrap();
+        store.deploy(actor(), vec![0], empty_state()).unwrap();
+        store
+            .purchase_storage(&actor(), params.unit_bytes, 0)
+            .unwrap()
+            .unwrap();
+        let before_pool = store.available_units();
+        let before_root = store.actor_root();
+        let before_expiries = store.expiries.clone();
+
+        store.push_checkpoint();
+        store.begin_block(1).unwrap();
+        store.begin_block(2).unwrap();
+        store.push_checkpoint();
+        assert_eq!(store.destroy_expired_actors().unwrap().len(), 1);
+        store.pop_checkpoint_commit();
+        assert!(!store.exists(&actor()));
+
+        store.pop_checkpoint_rollback();
+        assert!(store.exists(&actor()));
+        assert_eq!(store.available_units(), before_pool);
+        assert_eq!(store.actor_root(), before_root);
+        assert_eq!(store.expiries, before_expiries);
+        assert_eq!(
+            store.actor_capacity(&actor(), 0).unwrap(),
+            params.unit_bytes
+        );
         store.assert_supply(0).unwrap();
     }
 

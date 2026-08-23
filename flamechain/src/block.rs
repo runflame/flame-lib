@@ -1074,22 +1074,25 @@ mod tests {
 
     #[test]
     fn expiry_destruction_retires_tokens_and_binds_height() {
+        let actor = ActorID::Hash([9; 32]);
+        let qty = Int253::from(7u64);
+        let qty_point = Commitment::unblinded(qty).to_point();
+        let flavor_point = Commitment::unblinded(FLAME_FLAVOR).to_point();
         let destroyed = || DestroyedActor {
-            actor: ActorID::Hash([9; 32]),
-            state: Value::ClearToken(ClearToken::new(Int253::from(7u64), FLAME_FLAVOR)),
+            actor: actor.clone(),
+            state: Value::ClearToken(ClearToken::new(qty, FLAME_FLAVOR)),
         };
         let first = Blockchain::destruction_log(10, destroyed()).unwrap();
         let second = Blockchain::destruction_log(11, destroyed()).unwrap();
-        assert!(
-            first
-                .iter()
-                .any(|entry| matches!(entry, TxEntry::Retire(_, _)))
-        );
-        assert!(
-            first
-                .iter()
-                .any(|entry| matches!(entry, TxEntry::ActorDestroy { .. }))
-        );
+        assert!(matches!(first.entries(), [
+            TxEntry::Header(TxHeader { version: 1, locktime: 0 }),
+            TxEntry::Data(height),
+            TxEntry::Retire(q, f),
+            TxEntry::ActorDestroy { actor: destroyed_actor },
+        ] if height == &10u64.to_le_bytes()
+            && q == &qty_point
+            && f == &flavor_point
+            && destroyed_actor == &actor));
         assert_ne!(first.txid(), second.txid());
     }
 

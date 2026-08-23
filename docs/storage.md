@@ -164,6 +164,22 @@ A request is unavailable when:
 The final unit is therefore never purchasable: its quoted price is
 mathematically unbounded.
 
+### Default quote vectors
+
+These exact values pin rounding and the reserve boundary for the initial
+parameters:
+
+| Request from the initial pool | Reserve after | Fee (sparks) | Result |
+| ---: | ---: | ---: | --- |
+| `1_024` bytes at height `10` | `131_071` units | `1_000_007_630` | lease expires at height `52_510` |
+| `134_216_704` bytes | `1` unit | `17_179_738_112_000_000_000` | available |
+| `134_217_728` bytes | `0` units | — | unavailable |
+
+The canonical storage-effect wire vector is pinned alongside the other TxLog
+vectors in FlameVM's golden tests. It covers the `StoragePurchase` and
+`ActorDestroy` tags, canonical actor id, little-endian byte and expiry fields,
+and compact `Int253` fee encoding.
+
 This endpoint-price formula is deliberately **not path independent**. Splitting
 one large request into many minimum-size purchases pays the successive marginal
 prices and is cheaper than pricing the whole batch at its final, highest price.
