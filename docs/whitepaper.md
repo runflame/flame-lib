@@ -43,3 +43,19 @@ In order to agree on which block to vote on, minters run the BFT consensus proto
 
 Flames are incentives for keeping network secure. Flames are issued at a similar schedule as bitcoins: 50 flames per block, halving every 4 years, with maximum supply below 21 million units. Each flame is divisible by 100 million atomic units called *sparks*. Flames are distributed at an open auction to all participants in proportion to destroyed bitcoins. The total cap of both coins (bitcoins + flames) remains below 21+21=42M units. Permanent destruction of bitcoins and a continuous stream of mining fees from Flame consensus directly and indirectly increase the value of Bitcoin mining rewards and therefore improve the security budget of Bitcoin.
 
+## Network operation
+
+Flame is a peer-to-peer network of nodes that implement the rules of the Flame protocol. 
+Nodes may vary in the degree of their participation: some may observe the blocks of transactions in order to validate payments, other participate in the process of minting. For the purposes of this section, we will use term *minters* to describe subset of nodes that burn bitcoins, timestamp transactions and collect *flames* as a reward.
+
+Minters operate on both networks simultaneously — Flame and Bitcoin. The steps to run the network are as follows:
+
+1. New transactions are broadcast to all minters.
+2. Minters publish their *stakes* on the Bitcoin network. Stake is a transaction that declares minter’s cryptographic identity and destroys some amount of bitcoins. Each stake has a limited duration of two weeks.
+3. At each Bitcoin block at height H-1, the minters compute the membership set based on the currently active stakes to perform the BFT protocol.
+4. During the BFT protocol, minters agree on a chain of ordinary Flame blocks, forming a *candidate chain*.
+5. When Bitcoin block appears at height H, minters finalize the Flame candidate chain with a *core block* and broadcast Bitcoin transactions where they vote for that core block. Each vote is securely linked to the active stake of each minter.
+6. Nodes accept the Flame block only if all transactions in it are valid and not already spent. 
+7. If multiple valid *core blocks* are present at the given height, nodes choose the one with the larger weight calculated based on amount of burned coins.
+8. The set of minters continuously changes each Bitcoin block. New set of minters express their acceptance of the block by creating the next block in the chain, using the hash of the accepted block as the previous hash.
+
