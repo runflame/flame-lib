@@ -188,16 +188,44 @@ when the specification, implementation, and focused regression tests agree.
    - [x] Remove the obsolete `method` field from exported
      `Address::MessageTarget`; a selector, when used, is an ordinary argument.
 
-10. [ ] Make the effect model and chain formats complete.
+10. [ ] Make committed effects complete, replayable, and canonically committed.
 
-    - [ ] Add `SetCode` to every supposedly exhaustive effect list.
-    - [ ] Pin TxLog, block, state-root, accumulator, proof, and certificate
-      formats with hard-coded vectors generated independently of the production
-      encoders.
-    - [ ] Define canonical decode and validation responsibility for formats that
-      FlameVM intentionally exposes as encode-only.
-    - [ ] Test that replaying the committed effect log produces exactly the same
-      state transition as execution.
+    - [ ] Complete the context-specific effect inventory. Add `SetCode` to the
+      exhaustive internal-effect list, and add an `ActorDeploy { actor, code }`
+      effect for successful first delivery to a constructor-form actor. Initial
+      state is the canonical empty state; append its wire tag without
+      renumbering existing effects.
+    - [ ] Define and enforce canonical log shapes: external logs start with
+      `Header`; successful internal logs start with `Header, Receive` and an
+      optional immediate `ActorDeploy`; failed delivery is `Header, Receive,
+      Output(refund)`; system destruction is `Header, Data(height), Retire...,
+      ActorDestroy`.
+    - [ ] Implement one ordered effect applier for inputs, outputs, sends, actor
+      deployment, state and code replacement, storage purchases, and actor
+      destruction. Utreexo membership proofs remain an application sidecar;
+      every actual state mutation must be represented by an effect.
+    - [ ] Make replay the production application path. Execute actor code under
+      an existing registry checkpoint, capture the resulting commitment and
+      log, roll the direct mutations back, then consume and apply the log. The
+      replayed actor root, storage pool, cell root, and queued messages must
+      equal the execution result.
+    - [ ] Cover constructor deployment; token-bearing state; ordered
+      `ActorSave` and `SetCode`; storage pool, lease, and expiry-index changes;
+      explicit and expiry-driven destruction; output/send combinations; nested
+      actor calls; and atomic rollback when execution or replay fails.
+    - [ ] Specify decoder and trust-boundary ownership. `Block`, external
+      transactions, and Utreexo proofs require bounded network decoders;
+      FlameVM `TxLog`, `TxEntry`, and `Message` remain encode-only because
+      consensus re-derives them. An archival decoder must never create an
+      application bypass.
+    - [ ] Freeze the formats whose fields are already settled: `TxEntry` and
+      `TxLog`, state and code roots, actor leaves/root, Utreexo `Forest`, and
+      transient/committed Utreexo proofs. Serde encodings of accumulator working
+      state are explicitly non-consensus.
+    - [ ] Pin those encodings and commitments with versioned hard-coded vectors
+      generated independently of the production encoders. Remove the production
+      `REGEN` path and cover every effect, ordered aggregate logs, actor roots,
+      accumulator shapes, proof shapes, and malformed/non-canonical inputs.
 
 11. [ ] Decide how actor authors handle stale loaded snapshots.
 
@@ -212,6 +240,12 @@ when the specification, implementation, and focused regression tests agree.
     - [ ] Resolve and implement the documented block gas, script-size,
       multiplication, gas-credit, and added-storage limits; current `Limits`
       covers only per-execution gas and memory.
+    - [ ] Once those fields are settled, define bounded canonical encoders and
+      decoders for `ExternalTx`, `BlockTx`, `BlockHeader`, and `Block`; reject
+      unknown versions and tags, oversized lengths, malformed proofs, and
+      trailing bytes before application.
+    - [ ] Pin external-transaction and block encodings, witness/effect roots,
+      state commitments, and block IDs with independently generated vectors.
     - [ ] Apply the same limits during mempool admission, block construction, and
       block verification.
     - [ ] Test aggregate limits across many individually valid transactions.
@@ -229,6 +263,11 @@ when the specification, implementation, and focused regression tests agree.
     - [ ] Resolve every consensus, block-format, storage, accumulator, and
       mempool `TBD` in [consensus.md](consensus.md) and
       [blockchain.md](blockchain.md).
+    - [ ] After selecting the BFT protocol, define its canonical proposal, vote,
+      and certificate formats, bounded decoders, domain separation, and
+      independently generated conformance vectors. Do not invent a placeholder
+      certificate before the signer set, quorum rule, and signature scheme are
+      known.
     - [ ] Rebuild the threat model around the selected design: equivocation,
       long-range attacks, proposer withholding and censorship, MEV, bribery,
       vote stalling, partitions, eclipse and Sybil attacks, Bitcoin reorgs, key
@@ -240,6 +279,6 @@ when the specification, implementation, and focused regression tests agree.
     - [ ] Fuzz every network decoder and state transition with explicit memory,
       recursion, and work bounds.
     - [ ] Run differential tests against an independent implementation using the
-      vectors from tasks 5 and 10.
+      vectors from tasks 5, 10, 12, and 14.
     - [ ] Commission fresh cryptographic, VM, chain, and consensus audits only
       after the preceding semantics and formats are frozen.
