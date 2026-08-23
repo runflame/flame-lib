@@ -12,9 +12,10 @@ data against the commitment and materializing it for execution. This is not an
 ordinary byte-compression codec and does not, by itself, guarantee that the
 witness data remains available.
 
-The immediate scope is actor state, Dict branches, and Cells. Utreexo and
-Taproot program trees may share the same primitives, but need not be part of the
-first implementation.
+The immediate scope is actor state, Dict branches, and Cells. A common ordered
+Merkle collection may also cover Cell payloads, Taproot program trees, and
+Utreexo items. Sharing the primitive does not require every use to share the
+same update or ownership policy.
 
 ## Core insights
 
@@ -37,6 +38,209 @@ first implementation.
   the transaction execution context, or through both interfaces.
 - These cases may use one content-addressed witness format, one verifier, and
   one set of availability and charging rules.
+
+## One ordered Merkle collection
+
+Dict entries, Cell payload items, Taproot leaves, and Utreexo items have the
+same structural core:
+
+- every item has a canonical position in a total order;
+- some positions are successive ordinals;
+- some positions are arbitrary keys; and
+- a root commits to both the items and their order.
+
+The distinction is therefore a **key policy**, not necessarily a different
+tree. A candidate common primitive is a canonical binary Merkle-Patricia tree
+over fixed-width, order-preserving keys. Patricia compression removes unary
+paths, so a 256-bit key space does not imply 256 sibling hashes in every proof.
+The binary form should be the first design; wider nodes are justified only if
+measurements show a material proof-size or verification advantage.
+
+```text
+Key = [u8; 32]
+
+MerkleCollection {
+    domain: Domain,
+    mode: CollectionMode,
+    root: RootRef,
+}
+
+CollectionMode {
+    Sequence { len: u64 },  // exactly 0 .. len-1
+    OrderedMap,             // arbitrary unique keys
+}
+
+Node {
+    Leaf {
+        key,
+        value_commitment,
+    },
+    Branch {
+        shared_prefix: BitPrefix { len, bits },
+        left: NodeRef,      // next key bit is 0
+        right: NodeRef,     // next key bit is 1
+    },
+}
+
+NodeRef {
+    node_hash,
+    summary,
+    body: Resident(Box<Node>) | Pruned,
+}
+
+RootRef {
+    Empty,
+    Node(NodeRef),
+}
+
+Summary {
+    item_count,
+    logical_bytes,
+    key_bounds: Option<(first_key, last_key)>,
+    domain_summary,
+}
+```
+
+For collections of VM `Value`s, `domain_summary` includes the AND of the
+currently present values' `portable` and `droppable` capabilities. Other
+domains use an empty summary. A Dict's history-sticky runtime flags remain
+conservative transient metadata: they are not part of the logical value or its
+content root. Reconstruction derives capabilities from the present leaves, and
+an empty Dict is droppable even if its former contents were not.
+
+Summaries fold bottom-up: counts and logical byte sizes add, key bounds take
+the minimum and maximum, and Value capability bits use AND. The empty summary
+has count and logical size zero, no bounds, and neutral `true` capability bits.
+`logical_bytes` measures the fully materialized logical value; pruning changes
+resident bytes and rent, not this number.
+
+`Resident` and `Pruned` hold the same authenticated `NodeRef`; they differ only
+in whether its body is present. An opened witness must reproduce both the node
+hash and the summary from the actual node and values. If residency affects
+execution, a separate consensus residency commitment records it; a node's
+private cache cannot silently turn a pruned branch into a resident one.
+
+Every hash input uses a canonical, length-framed encoding; in particular, a
+Patricia prefix commits both its bit length and its masked bytes. The hash rules
+are domain-separated and include summaries:
+
+```text
+leaf_node   = H(domain, "leaf", key, value_commitment)
+branch_node = H(domain, "branch", shared_prefix, left.ref_hash, right.ref_hash)
+ref_hash    = H(domain, "ref", node_hash, summary)
+empty_root  = H(domain, "empty")
+root        = H(domain, "collection", mode, empty_root | top_ref.ref_hash)
+```
+
+The canonical shape has no one-child branches, stores the maximal shared
+prefix once, and always orders child `0` before child `1`. Its root is therefore
+independent of insertion order and of which nodes are resident. The empty
+collection has a domain-separated empty commitment and `key_bounds = None`.
+The inherited depth fixes where each prefix starts; unused prefix bits are
+zero, depth strictly advances, both children exist, child bounds match their
+prefix and branch bit, and all summary arithmetic is checked against consensus
+bounds.
+
+```mermaid
+flowchart TD
+    C["MerkleCollection<br/>domain + mode + root + summary"]
+    C --> B["Branch: common prefix"]
+    B -->|"bit 0"| R["Resident branch"]
+    B -->|"bit 1"| P["Pruned commitment + summary"]
+    R --> L0["Leaf: key 0 / value commitment"]
+    R --> L1["Leaf: key 1 / value commitment"]
+    P -. "execution-scoped witness" .-> N["Verified branch bytes"]
+    N -. "hydrate; authenticated ref unchanged" .-> H["Resident branch"]
+```
+
+### Canonical keys
+
+One fixed-width key representation can preserve the native ordering of each
+view:
+
+- sequential positions use a big-endian unsigned ordinal;
+- signed `Int253` Dict keys use an order-preserving rank encoding;
+- current Taproot leaves use successive ordinals; a future sparse design could
+  instead use derived blinded keys; and
+- Utreexo has a dense logical order, while its current proof `position` stores
+  tree-relative direction bits rather than a stable global item index.
+
+The collection domain and mode are committed at the root, so identical key and
+value bytes cannot be reinterpreted between a Dict, Cell payload, predicate
+tree, or accumulator.
+
+For an `Int253` with magnitude `m` and maximum canonical scalar magnitude
+`M = ℓ - 1`, encode rank `M - m` when negative and `M + m` otherwise, then
+write the rank as 32-byte big-endian. This orders `-M .. -1, 0, 1 .. M`
+lexicographically without relying on the native sign-magnitude bytes.
+
+`Sequence { len }` requires unique keys exactly covering `0..len`, and `len`
+must fit both the key space and the consensus collection size bound. For a
+non-empty sequence, the root summary proves this compactly when
+`item_count == len` and `key_bounds == Some((0, len - 1))`; the unique-key tree
+then has no room for a gap. For `len == 0`, the count is zero and the bounds are
+`None`. `OrderedMap` permits arbitrary keys, including ordinal keys with holes.
+Big-endian ordinals are zero-extended to 32 bytes.
+
+Each domain fixes one canonical mode; mode is not a caller choice. Cells and
+the current Taproot tree use `Sequence`. Dict always uses `OrderedMap`, while
+its existing wire codec may omit exact keys `0..len` as a list-size
+optimization without changing the committed mode. A future sparse Taproot tree
+with derived blinded labels would instead define an `OrderedMap` domain.
+
+### Specialized views
+
+| Use | Collection view | Leaf value | Additional rule |
+| --- | --- | --- | --- |
+| Cell payload | `Sequence { len }` | portable `Value` | Cell identity commits the payload root and length. |
+| Dict, including list-style encoding | `OrderedMap` | `Value` | Keys use signed `Int253` numeric order; exact `0..len` may omit keys on the wire. |
+| Taproot predicate | `Sequence { len }` | program or opaque blinding leaf | Current blinding randomizes each program/blinding pair's orientation; the root feeds the internal-key tweak. |
+| Utreexo | dense `Sequence`, if redesigned; otherwise its existing forest | `CellID` | Positions move during normalization; update/catchup remains domain-specific. |
+
+A hidden subtree needs no separate item number: its authenticated key prefix
+locates its pruned commitment. The current Taproot construction instead uses a
+successive leaf sequence and randomizes the left/right orientation within each
+program/blinding pair; pseudorandom keyed leaves would be a future redesign.
+
+Utreexo may keep its forest-of-perfect-trees root wrapper for batched deletion
+and proof catchup. In that case it can still reuse domain hashing conventions
+and the resident/pruned witness envelope; exact Patricia nodes and proofs are
+shared only if Utreexo is deliberately reimplemented on the common tree. The
+goal is not to erase useful domain-specific algorithms.
+
+This is consensus-format redesign, not transparent implementation reuse.
+Today Cell IDs hash payload items directly, and Taproot and Utreexo use their
+own leaf and branch hashes without Patricia prefixes or summaries. Moving any
+of them to this collection changes its roots, IDs, proofs, and test vectors.
+
+### Proofs and operations
+
+One opening proof contains the expected domain, collection root and mode, the
+requested key, the leaf or first divergent prefix, and the sibling commitments
+from leaf to root. The same proof form supports:
+
+- membership and value materialization;
+- authenticated absence;
+- point insertion, removal, and replacement; and
+- pruning or hydrating a whole subtree.
+
+Ranges and consecutive-index claims use a canonical multiproof that opens the
+range boundaries and all covered subtree commitments; one point proof is not
+enough.
+
+Missing witness data is different from proven absence. An empty collection or
+a proof ending at the first divergent leaf/prefix proves that a key is absent.
+A path that reaches a pruned reference without its execution-scoped witness
+fails `MissingWitness`.
+
+Linearity is a policy above the proof format. A witness proves bytes; it never
+mints a stack `Value`. Hydration replaces a pruned reference inside the same
+uniquely owned collection. Extracting a token-bearing leaf atomically consumes
+the old collection state and returns a new root plus the value; on failure,
+both the root and returned call arguments roll back together. Read-only access
+may expose only copyable values. A partially opened Cell likewise needs either
+to consume the whole Cell or to return a residual committed payload containing
+every unopened linear value.
 
 ## Actor lifecycle
 
@@ -70,17 +274,10 @@ accumulate those records rather than assuming that a 32-byte root is free.
 
 ## Partially materialized Dicts
 
-A Dict should have one canonical **content root** independent of which branches
-are currently resident. A branch reference is either:
-
-```text
-Resident(node)
-Pruned(commitment, entry_count, logical_size, portable, droppable)
-```
-
-The exact tree shape is open. Binary, quaternary, and higher-fanout trees trade
-proof size against update and lookup costs. The first design should choose the
-simplest canonical representation that gives bounded proofs.
+A Dict always uses the common `OrderedMap`; exact keys `0..len` merely enable
+the existing shorter list-style wire encoding. There is therefore no runtime
+mode bit or conversion rule for Dict. Its canonical **content root** is
+independent of which branches are currently resident.
 
 Each pruned branch needs enough authenticated summary data to preserve the
 rules that would apply if it were resident:
@@ -152,6 +349,11 @@ WitnessTable:       WitnessID -> bytes
 ExecutionManifest: transaction/message -> ordered WitnessIDs
 ```
 
+The ordered manifest has its own root. An external transaction's TxID and
+signature commit that root, and each asynchronous `MessageID` commits the root
+of the witness IDs visible at delivery. A block may deduplicate identical bytes
+in `WitnessTable`, but that physical optimization never expands a manifest.
+
 Consensus rules should include:
 
 - an execution sees only its own manifest;
@@ -166,6 +368,18 @@ Consensus rules should include:
 - asynchronous messages commit to the witness scope they will receive, so a
   message ID also commits to any witness-dependent behavior.
 
+A referenced witness missing from the table or failing its hash makes the block
+invalid. A witness needed by execution but absent from that execution's
+manifest produces `MissingWitness`: an external transaction is rejected, while
+a failed asynchronous delivery follows the normal bounce path. Synchronous
+calls inherit the enclosing manifest and their existing call-failure behavior.
+
+For delayed asynchronous delivery, the message commits ordered witness hashes,
+not necessarily the bytes. The later delivery block supplies those bytes in
+its table and scopes them to that message; if nobody retains them, delivery
+deterministically fails. This keeps each validating block self-contained and
+does not charge the message queue for duplicate witness blobs.
+
 Synchronous calls can share the enclosing execution's witness scope. The actor
 and state root against which a proof is checked must still be explicit in the
 lookup key.
@@ -174,16 +388,16 @@ lookup key.
 
 | Application | Common pattern | Important difference |
 | --- | --- | --- |
-| Actor state | Root plus selectively restored state | Mutable identity and linear values |
-| Dict | Root plus key-path proofs | Fine-grained reads and updates |
-| Cell | ID plus payload/program witness | Immutable and single-use |
-| Utreexo | Compact accumulator plus membership proof | Set membership and batch updates |
-| Taproot program tree | Root plus revealed script path | Usually reveals one immutable branch |
+| Actor state | Root plus selectively restored collection | Mutable identity and linear values |
+| Dict | Ordered collection plus key-path proofs | Fine-grained reads and updates |
+| Cell | ID plus committed payload collection | Immutable and single-use |
+| Utreexo | Dense forest plus membership proof | Batch updates and proof catchup |
+| Taproot program tree | Sequential program/blinding collection | Usually reveals one immutable branch |
 
 Utreexo already demonstrates the compact-state-plus-witness model. Taproot
-demonstrates selective program revelation. They are useful reference cases,
-but sharing code with them should wait until the actor/Dict/Cell primitives are
-stable and an actual common interface is evident.
+demonstrates selective program revelation. Use both as conformance cases for
+the common commitment and witness conventions, while keeping Utreexo's
+forest/catchup rules and Taproot's internal-key tweak outside the generic layer.
 
 ## Safety requirements
 
@@ -212,29 +426,35 @@ Privacy, encryption, and zero-knowledge access are separate concerns.
 
 ## Open decisions
 
-- Canonical Dict tree shape, node encoding, proof format, and size bounds.
+- Canonical key width and encoding, node encoding, proof format, and size bounds.
+- Whether Utreexo uses the common tree or only its commitment/witness
+  conventions while retaining the current forest wrapper.
+- Whether Taproot leaves use successive positions or blinded derived keys.
 - Whether actors freeze automatically on lease expiry, explicitly, or both.
 - Which actor metadata remains resident and how its permanent cost is bounded.
 - Whether actor code can be pruned separately from state.
 - Exact explicit and implicit witness APIs.
-- How witness manifests propagate into asynchronous messages and bounces.
+- Canonical encoding and data-retention obligations for witness manifests
+  committed by asynchronous messages and bounces.
 - Whether partial Dict pruning is actor-controlled or only a storage-layer
   representation choice.
 - Maximum String and program sizes, so large portable data has one canonical
   chunking path through Dicts.
 - Which witness bytes are retained across reorganization and archival pruning.
-- Whether Utreexo and Taproot merely inform the design or eventually share its
-  implementation.
+- How much implementation Utreexo and Taproot can share without replacing
+  their useful domain-specific wrappers.
 
 ## Proposed work order
 
-1. Specify commitments, capability summaries, witness scoping, and failure
-   semantics independently of a tree implementation.
-2. Prototype a canonical pruned Dict node and test lookup, absence, update,
-   rollback, and hidden-token droppability.
+1. Specify the common collection's key encodings, commitments, capability
+   summaries, authorization-bound witness scoping, and failure semantics.
+2. Prototype the binary Patricia node once, then test both `Sequence` and
+   `OrderedMap` views for lookup, absence, update, rollback, pruning, and
+   hidden-token droppability.
 3. Add a transaction-scoped witness provider and block manifest.
 4. Freeze and restore actor state using the Dict mechanism, while treating a
    bounded non-Dict state as one witness blob.
 5. Reuse the provider for Cell restoration and nested Dict payloads.
-6. Only then evaluate whether Utreexo or Taproot reuse enough of the mechanism
-   to justify a shared abstraction.
+6. Validate the commitment and witness conventions against Utreexo proof
+   catchup and Taproot openings; keep their forest and tweak wrappers
+   domain-specific, sharing exact node/proof code only if that is simpler.
