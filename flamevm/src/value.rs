@@ -241,7 +241,9 @@ mod capability_tests {
         );
         assert!(!dict.is_droppable());
         dict.remove(&Int253::ONE);
-        assert!(!dict.is_droppable(), "droppability is sticky");
+        assert!(!dict.is_droppable(), "a non-empty tainted dict stays non-droppable");
+        dict.remove(&Int253::ZERO);
+        assert!(dict.is_droppable(), "a fully drained dict is droppable");
     }
 }
 

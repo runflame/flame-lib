@@ -356,3 +356,35 @@ fn nonempty_dict_of_droppable_values_is_droppable() {
     run_to_end(&mut vm).expect("non-empty dict of droppable values is droppable");
     assert!(vm.current_call.stack.is_empty());
 }
+
+#[test]
+fn token_bearing_dict_can_be_drained_and_empty_shell_dropped() {
+    let key = Int253::from(5u64);
+    let token = ClearToken::new(Int253::from(7u64), Int253::from(9u64));
+    let mut dict = Dict::new();
+    dict.insert(key, Value::ClearToken(token));
+    assert!(!dict.is_droppable());
+
+    // get returns `dict' key value`; move the now-empty dict to the top and
+    // drop it. The extracted bearer remains owned by the caller.
+    let mut vm = vm_with_script(
+        ScriptBuilder::new()
+            .push_int(key)
+            .get()
+            .roll_k(2)
+            .drop_()
+            .to_bytecode(),
+    );
+    vm.push_value(Value::Dict(dict));
+    run_to_end(&mut vm).expect("a drained dict shell is droppable");
+
+    assert_eq!(vm.current_call.stack.len(), 2);
+    assert_int(&vm.current_call.stack[0], key);
+    match &vm.current_call.stack[1] {
+        Value::ClearToken(returned) => {
+            assert_eq!(returned.qty(), token.qty());
+            assert_eq!(returned.flv(), token.flv());
+        }
+        other => panic!("expected returned ClearToken, got {}", value_kind(other)),
+    }
+}

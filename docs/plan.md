@@ -176,7 +176,8 @@ when the specification, implementation, and focused regression tests agree.
    - [x] Define droppability by asset ownership: MSM, Merlin, Variables,
      Expressions, Constraints, zero-quantity `ClearToken`, and non-empty Dicts;
      the pure-computation values and zero token are droppable, while Dict
-     droppability is sticky. Align `drop` and its tests.
+     droppability is sticky until the Dict is fully drained; an empty Dict is
+     always droppable. Align `drop` and its tests.
    - [x] Define Dict keys as signed `Int253` values in total numeric order;
      list-style encoding still requires the exact nonnegative range `0..n-1`.
    - [x] Remove unsupported `WideToken`, `Object`, and `Merlin` entries from the

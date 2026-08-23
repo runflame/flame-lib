@@ -18,7 +18,8 @@ use crate::Value;
 /// - `droppable` — true iff every value ever inserted was droppable.
 ///   Once a non-droppable value enters (a `Token` — portable but
 ///   linear), the flag stays false even if later removed, so a
-///   token-bearing dict can't be silently `drop`ped.
+///   non-empty token-bearing dict can't be silently `drop`ped. An empty
+///   dict is always droppable so a fully drained container can be discarded.
 /// - `portable` — true iff every value ever inserted was portable.
 ///   Once a non-portable value enters, the flag stays false even if
 ///   that value is later removed.
@@ -119,12 +120,12 @@ impl Dict {
         self.portable
     }
 
-    /// Returns true iff this dict can be silently discarded by `drop`
-    /// (every member ever inserted was droppable). A dict containing
-    /// only `Variable` / `Constraint` / pure-computation values is
-    /// droppable but not copyable.
+    /// Returns true iff this dict can be silently discarded by `drop`:
+    /// it is empty, or every member ever inserted was droppable. A dict
+    /// containing only `Variable` / `Constraint` / pure-computation
+    /// values is droppable but not copyable.
     pub fn is_droppable(&self) -> bool {
-        self.droppable
+        self.entries.is_empty() || self.droppable
     }
 
     /// Logical heap work needed for a Rust-level rollback clone. Used only

@@ -186,7 +186,7 @@ droppable, but non-copyable pure-computation values may be droppable too.
 | Type | Copyable | Droppable | Portable |
 | --- | --- | --- | --- |
 | Int253, String, Point | yes | yes | yes |
-| Dict | no | sticky flag | sticky flag |
+| Dict | no | empty or sticky flag | sticky flag |
 | Token | no | no | yes |
 | ClearToken | no | quantity is zero | quantity is non-negative |
 | WideToken, Cell | no | no | no |
@@ -195,7 +195,8 @@ droppable, but non-copyable pure-computation values may be droppable too.
 Droppability tracks asset ownership, not whether a value is mutable or useful.
 Dropping a transcript, expression, constraint, variable, or unscheduled MSM
 abandons computation but cannot destroy bearer value. A Dict starts droppable;
-inserting any non-droppable value clears its sticky flag permanently.
+inserting any non-droppable value clears its sticky flag. A fully drained Dict
+is nevertheless droppable, allowing the empty container shell to be discarded.
 
 Portability is a business-logic capability, not a serialization property.
 Generic value codecs describe representation only. For example, a negative
@@ -469,7 +470,7 @@ Keys are signed `Int253` values. Canonical iteration and explicit-key encoding
 use their total numeric order: negative keys first, then zero and positive
 keys. List-style encoding remains limited to the exact keys `0..n-1`.
 
-**Dicts are never copyable**: `dup`/`getdup` of a Dict value always fails `TypeNotCopyable`. Each Dict carries independent sticky `portable` and `droppable` flags. A newly constructed empty Dict starts with both flags true. Every successful insertion applies `dict.portable &= value.is_portable()` and `dict.droppable &= value.is_droppable()`. Removal and replacement never restore a cleared flag; a rejected strict insertion does not change either flag.
+**Dicts are never copyable**: `dup`/`getdup` of a Dict value always fails `TypeNotCopyable`. Each Dict carries independent sticky `portable` and `droppable` flags. A newly constructed empty Dict starts with both flags true. Every successful insertion applies `dict.portable &= value.is_portable()` and `dict.droppable &= value.is_droppable()`. Removal and replacement never restore a cleared flag; a rejected strict insertion does not change either flag. Emptiness overrides only droppability: after every member is extracted, the empty Dict can be dropped while the extracted bearer values remain owned by the script. Portability remains sticky because it governs domain admission rather than disposal.
 
 The `dict` / `put` / `replace` opcodes may insert any Value. A non-portable Dict remains usable on the stack, but `cell`, `output`, `send`, `call`, `open`, `signcall`, and actor-state storage reject it at their portability boundary. Checking a Dict is O(1), including when it is nested: inserting a nested Dict reads that Dict's already-cached flag. Dict values are owned and cannot be mutated through an alias, so the cached parent flag cannot become stale.
 
