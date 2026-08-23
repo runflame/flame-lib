@@ -290,6 +290,15 @@ pub enum TxEntry {
     /// "what triggered me" effects emitted before the body runs.
     Receive([u8; 32]),
 
+    /// Successful first delivery to a constructor-form actor. Carries the
+    /// canonical actor id and full constructor code so state-machine replay
+    /// does not need the original Message. The initial state is the canonical
+    /// empty state.
+    ActorDeploy {
+        actor: ActorID,
+        code: Vec<u8>,
+    },
+
     /// Output: a newly sealed cell, emitted by the `output` opcode.
     Output(Cell),
 
@@ -322,7 +331,7 @@ pub enum TxEntry {
     Fee(u64),
 
     /// Actor-state mutation recorded by `op_save`. Carries the
-    /// actor's identity and the **full** post-save state Dict —
+    /// actor's identity and the **full** post-save state Value —
     /// symmetric with `Output(Cell)` which carries the full Cell.
     /// The state machine consumes this entry by replacing the
     /// actor's stored state with `state`; no re-execution of the
@@ -360,9 +369,9 @@ pub enum TxEntry {
     /// an addressable artifact embeds the artifact itself.
     Send(Message),
 
-    /// Persistent storage purchased by an actor. Execution already mutated
-    /// the host atomically; this exact record commits the allocation and burn
-    /// to the transaction id without requiring consumers to re-quote it.
+    /// Persistent storage purchased by an actor. Replay recomputes the quote
+    /// from the ordered storage-pool state and requires this allocation and
+    /// fee to match exactly.
     StoragePurchase {
         actor: ActorID,
         bytes: u64,
@@ -400,6 +409,10 @@ impl MerkleItem for TxEntry {
             }
             TxEntry::Receive(send_id) => {
                 t.append_message(b"receive.send_id", send_id);
+            }
+            TxEntry::ActorDeploy { actor, code } => {
+                t.append_message(b"deploy.actor", &actor.to_hash());
+                t.append_message(b"deploy.code_root", &code_root(code));
             }
             TxEntry::Output(cell) => {
                 // Bind to the cell's canonical 32-byte identity hash.
@@ -464,9 +477,9 @@ impl MerkleItem for TxEntry {
 }
 
 impl TxEntry {
-    /// Wire tag bytes, sequential in declaration order (spec §TxLog
-    /// transport). Encode-only: the TxLog is re-derived by execution,
-    /// never decoded from the wire by this crate.
+    /// Stable wire tags (spec §TxLog transport). New effects append tags
+    /// without renumbering existing entries. Encode-only: the TxLog is
+    /// re-derived by execution, never decoded from the wire by this crate.
     pub const TAG_HEADER: u8 = 0;
     pub const TAG_DATA: u8 = 1;
     pub const TAG_INPUT: u8 = 2;
@@ -481,6 +494,7 @@ impl TxEntry {
     pub const TAG_SEND: u8 = 11;
     pub const TAG_STORAGE_PURCHASE: u8 = 12;
     pub const TAG_ACTOR_DESTROY: u8 = 13;
+    pub const TAG_ACTOR_DEPLOY: u8 = 14;
 }
 
 /// Canonical wire serialization of one effect: a tag byte followed by
@@ -509,6 +523,12 @@ impl Encodable for TxEntry {
             TxEntry::Receive(send_id) => {
                 w.write_u8(b"txentry.tag", Self::TAG_RECEIVE)?;
                 w.write(b"receive.send_id", send_id)
+            }
+            TxEntry::ActorDeploy { actor, code } => {
+                w.write_u8(b"txentry.tag", Self::TAG_ACTOR_DEPLOY)?;
+                actor.to_canonical().encode(w)?;
+                w.write_u64(b"deploy.len", code.len() as u64)?;
+                w.write(b"deploy.bytes", code)
             }
             TxEntry::Output(cell) => {
                 w.write_u8(b"txentry.tag", Self::TAG_OUTPUT)?;

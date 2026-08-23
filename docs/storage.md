@@ -180,6 +180,18 @@ vectors in FlameVM's golden tests. It covers the `StoragePurchase` and
 `ActorDestroy` tags, canonical actor id, little-endian byte and expiry fields,
 and compact `Int253` fee encoding.
 
+Actor commitments are canonical independently of persistence encoding.
+`code_root` is a Merlin transcript under `flamevm.actor.code.root` containing
+the code bytes. `state_root` is a transcript under
+`flamevm.actor.state.root` containing the canonical encoded state Value. An
+actor leaf commits, in order, to actor id; live marker; code and state roots;
+u64-LE code and state byte counts; u64-LE lease count; then each lease's
+u64-LE expiry and unit count in expiry order. The actor registry root is the
+Merkle root under `flamechain.actors` over actor-id order, including lease-only
+tombstones. The golden fixture `(actor=07×32, code=1d, state=Int253(42), one
+1024-byte lease at height 0)` has root
+`2694dc0a474475efe48096f89f41ad71bbadd7694021fc6ede5b3397d967f572`.
+
 This endpoint-price formula is deliberately **not path independent**. Splitting
 one large request into many minimum-size purchases pays the successive marginal
 prices and is cheaper than pricing the whole batch at its final, highest price.

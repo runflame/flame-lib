@@ -188,41 +188,41 @@ when the specification, implementation, and focused regression tests agree.
    - [x] Remove the obsolete `method` field from exported
      `Address::MessageTarget`; a selector, when used, is an ordinary argument.
 
-10. [ ] Make committed effects complete, replayable, and canonically committed.
+10. [x] Make committed effects complete, replayable, and canonically committed.
 
-    - [ ] Complete the context-specific effect inventory. Add `SetCode` to the
+    - [x] Complete the context-specific effect inventory. Add `SetCode` to the
       exhaustive internal-effect list, and add an `ActorDeploy { actor, code }`
       effect for successful first delivery to a constructor-form actor. Initial
       state is the canonical empty state; append its wire tag without
       renumbering existing effects.
-    - [ ] Define and enforce canonical log shapes: external logs start with
+    - [x] Define and enforce canonical log shapes: external logs start with
       `Header`; successful internal logs start with `Header, Receive` and an
       optional immediate `ActorDeploy`; failed delivery is `Header, Receive,
       Output(refund)`; system destruction is `Header, Data(height), Retire...,
       ActorDestroy`.
-    - [ ] Implement one ordered effect applier for inputs, outputs, sends, actor
+    - [x] Implement one ordered effect applier for inputs, outputs, sends, actor
       deployment, state and code replacement, storage purchases, and actor
       destruction. Utreexo membership proofs remain an application sidecar;
       every actual state mutation must be represented by an effect.
-    - [ ] Make replay the production application path. Execute actor code under
+    - [x] Make replay the production application path. Execute actor code under
       an existing registry checkpoint, capture the resulting commitment and
       log, roll the direct mutations back, then consume and apply the log. The
       replayed actor root, storage pool, cell root, and queued messages must
       equal the execution result.
-    - [ ] Cover constructor deployment; token-bearing state; ordered
+    - [x] Cover constructor deployment; token-bearing state; ordered
       `ActorSave` and `SetCode`; storage pool, lease, and expiry-index changes;
       explicit and expiry-driven destruction; output/send combinations; nested
       actor calls; and atomic rollback when execution or replay fails.
-    - [ ] Specify decoder and trust-boundary ownership. `Block`, external
+    - [x] Specify decoder and trust-boundary ownership. `Block`, external
       transactions, and Utreexo proofs require bounded network decoders;
       FlameVM `TxLog`, `TxEntry`, and `Message` remain encode-only because
       consensus re-derives them. An archival decoder must never create an
       application bypass.
-    - [ ] Freeze the formats whose fields are already settled: `TxEntry` and
+    - [x] Freeze the formats whose fields are already settled: `TxEntry` and
       `TxLog`, state and code roots, actor leaves/root, Utreexo `Forest`, and
       transient/committed Utreexo proofs. Serde encodings of accumulator working
       state are explicitly non-consensus.
-    - [ ] Pin those encodings and commitments with versioned hard-coded vectors
+    - [x] Pin those encodings and commitments with versioned hard-coded vectors
       generated independently of the production encoders. Remove the production
       `REGEN` path and cover every effect, ordered aggregate logs, actor roots,
       accumulator shapes, proof shapes, and malformed/non-canonical inputs.

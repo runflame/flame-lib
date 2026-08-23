@@ -100,12 +100,13 @@ Internal transactions do not have a pre-determined effect and therefore do not s
 Like external, internal transactions produce effects:
 
 1. `Receive(MessageID)` (txlog variant `TxEntry::Receive`) — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating `MessageID` (canonical 32-byte hash of the whole Send: anchor, target, caller, payload, gas, refund predicate — analogous to `CellID` for cells) into the Internal TxID merkle root. Symmetric with `Input` for external transactions. The message **payload is delivered onto the recv frame's stack** in payload order before code runs — symmetric with `op_call` pushing its args; a conventional dispatch selector rides as the topmost payload arg.
-2. Outputs — creation of new entries in the Utreexo.
-3. Sends — messages sent to actors that produce other internal transactions.
-4. Issuance and retirement — creation and removal of tokens to/from circulation.
-5. Actor-state mutations — `op_save` records the actor's post-save state hash, allowing a state machine to mutate the registry without re-running the script.
-6. Data entry — for data logging that does not occupy permanent storage.
-7. Storage purchases — `addstorage` records the actor, purchased bytes, expiry
+2. Actor deployment — successful first delivery to a constructor-form target emits an immediate `ActorDeploy { actor, code }`; replay starts it with the canonical empty state.
+3. Outputs — creation of new entries in the Utreexo.
+4. Sends — messages sent to actors that produce other internal transactions.
+5. Issuance and retirement — creation and removal of tokens to/from circulation.
+6. Actor mutations — `ActorSave` carries the full replacement state and `SetCode` carries the full replacement code.
+7. Data entry — for data logging that does not occupy permanent storage.
+8. Storage purchases — `addstorage` records the actor, purchased bytes, expiry
    height, and burned sparks.
 
 Actor destruction caused by lease expiry is represented by a system internal
@@ -117,7 +118,9 @@ transactions are ordered lexicographically by actor ID. See
 
 Calls themselves are intra-transaction control flow, not effects. Anything a callee does that the outer world cares about appears through one of the effects above.
 
-**TxLog transport.** The TxLog (`Vec<TxEntry>`) is **re-derived by re-executing** the bytecode under the proof + signature binding — it is never trusted from the wire. `ExternalTx::verify` re-runs the script and rebuilds the log from scratch, so full-node consensus needs no TxLog decoding and a forged TxLog cannot be injected. For storage and light-client transport the crate provides a canonical **encode-only** serialization (`Encodable` for `TxEntry`/`TxLog`): a u64-LE entry count, then per entry a tag byte (sequential in declaration order: `0 Header, 1 Data, 2 Input, 3 Receive, 4 Output, 5 IssuePub, 6 IssuePriv, 7 Retire, 8 Fee, 9 ActorSave, 10 SetCode, 11 Send, 12 StoragePurchase, 13 ActorDestroy`) followed by the variant's fields in their existing canonical forms — `Cell`/`Message`/`ActorID` encoders, `write_value`/`write_int253`, u32/u64 little-endian integers, u64-LE length-prefixed byte blobs. `StoragePurchase` encodes actor, bytes (`u64`), expiry height (`u64`), and fee sparks (`Int253`); `ActorDestroy` encodes its actor.
+Canonical internal log shapes are enforced by the state machine. Success is `Header, Receive, [ActorDeploy], effects...`, where deployment is permitted only immediately after `Receive` and any `ActorDestroy` entries form a suffix. Failed delivery is exactly `Header, Receive, Output(refund)`. Lease-expiry destruction is exactly `Header, Data(height), Retire..., ActorDestroy`. External logs start with one `Header` and cannot contain internal-only actor effects.
+
+**TxLog transport.** The TxLog (`Vec<TxEntry>`) is **re-derived by re-executing** the bytecode under the proof + signature binding — it is never trusted from the wire. `ExternalTx::verify` re-runs the script and rebuilds the log from scratch, so full-node consensus needs no TxLog decoding and a forged TxLog cannot be injected. For archival and light-client transport the crate provides a canonical **encode-only** serialization (`Encodable` for `TxEntry`/`TxLog`): a u64-LE entry count, then each entry's stable tag and fields. Existing tags are never renumbered: `0 Header, 1 Data, 2 Input, 3 Receive, 4 Output, 5 IssuePub, 6 IssuePriv, 7 Retire, 8 Fee, 9 ActorSave, 10 SetCode, 11 Send, 12 StoragePurchase, 13 ActorDestroy, 14 ActorDeploy`. Fields reuse the canonical `Cell`, `Message`, `ActorID`, `Value`, and `Int253` encodings; integers are little-endian and byte blobs are u64-LE length-prefixed. `ActorDeploy` encodes canonical actor id and constructor code; `StoragePurchase` encodes actor, bytes, expiry height, and fee sparks. No consensus decoder accepts a TxLog: a future archival decoder must remain outside the application path.
 
 Internal transactions do not pay transaction-prioritization fees. Actors may
 nevertheless burn Flame for storage through `addstorage`. Internal transactions
@@ -1556,7 +1559,7 @@ through its sticky flag.
 
 **Re-entrancy:** the state-checkout lock closes issues with re-entracy: state is reachable **only** via `load`, which acquires the lock, and there is no peek-state opcode, so a half-applied update is never observable — a re-entrant `call`/`load` into an actor that has already `load`ed its state cannot enter. The lock does **not** enforce checks-effects-interactions ordering *within* a load/save window: holding a loaded state across a `call`/`send`/`open` is legal, but anything `save`d afterward is a pre-call snapshot — authors must `save` (or fully discharge) before calling out. Nested call depth is capped at `MAX_CALL_DEPTH` (64).
 
-**Emits no txlog entry.** Calls are intra-tx control flow; the structural effects produced inside the callee (`Output`, `Send`, `ActorSave`, `Issue`, `Retire`, `Fee`, `Data`) are what the state machine reads. The `(External TxID, Internal TxID)` of a tx is a merkle root over effects only — see the effect model above.
+**Emits no txlog entry.** Calls are intra-tx control flow; the structural effects produced inside the callee (`Output`, `Send`, `ActorSave`, `SetCode`, `StoragePurchase`, `Issue`, `Retire`, `Fee`, `Data`, and actor destruction) are what the state machine reads. The `(External TxID, Internal TxID)` of a tx is a merkle root over effects only — see the effect model above.
 
 Creates an isolated `CallKind::ActorCall { actor, caller }` frame (the frame's starting anchor lives in `CallFrame.anchor` — todo #4) with the popped gas allotment. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
 

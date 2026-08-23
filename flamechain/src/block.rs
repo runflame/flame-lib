@@ -8,6 +8,7 @@ use flamevm::{
 };
 use merkle::{Hash, MerkleItem, MerkleTree};
 use merlin::Transcript;
+use readerwriter::{Encodable, ExactSizeEncodable};
 
 use crate::BlockHash;
 use crate::storage::{ActorStore, DestroyedActor, RegistryUndo, StorageError, StorageParams};
@@ -80,20 +81,7 @@ impl BlockTx {
             &(self.proofs.len() as u64).to_le_bytes(),
         );
         for proof in &self.proofs {
-            match proof {
-                Proof::Transient => t.append_message(b"utreexo.proof.kind", &[0]),
-                Proof::Committed(path) => {
-                    t.append_message(b"utreexo.proof.kind", &[1]);
-                    t.append_message(b"utreexo.proof.position", &path.position.to_le_bytes());
-                    t.append_message(
-                        b"utreexo.proof.depth",
-                        &(path.neighbors.len() as u64).to_le_bytes(),
-                    );
-                    for neighbor in &path.neighbors {
-                        t.append_message(b"utreexo.proof.neighbor", &neighbor.0);
-                    }
-                }
-            }
+            t.append_message(b"utreexo.proof", &proof.encode_to_vec());
         }
         let mut hash = [0; 32];
         t.challenge_bytes(b"witness_hash", &mut hash);
@@ -109,16 +97,9 @@ impl BlockTx {
             .checked_add(self.tx.proof_bytes().len())?
             .checked_add(8)?
             .checked_add(8)?;
-        self.proofs.iter().try_fold(fixed, |sum, proof| {
-            let proof_size = match proof {
-                Proof::Transient => 1,
-                Proof::Committed(path) => 1usize
-                    .checked_add(8)?
-                    .checked_add(8)?
-                    .checked_add(path.neighbors.len().checked_mul(32)?)?,
-            };
-            sum.checked_add(proof_size)
-        })
+        self.proofs
+            .iter()
+            .try_fold(fixed, |sum, proof| sum.checked_add(proof.encoded_size()))
     }
 }
 
@@ -418,17 +399,20 @@ impl Blockchain {
 
         for block_tx in &block.transactions {
             let log = block_tx.tx.verify(block_tx.limits)?;
+            let txid = log.txid();
             self.apply_log(
                 &mut work,
                 &hasher,
-                &log,
+                ExecutionKind::External,
+                log,
                 &block_tx.proofs,
                 &mut sends,
                 &mut seen_outputs,
+                block.header.height,
             )?;
             records.push(ExecutionRecord {
                 kind: ExecutionKind::External,
-                txid: log.txid(),
+                txid,
             });
         }
 
@@ -450,33 +434,75 @@ impl Blockchain {
                 height: block.header.height,
             };
             let failed_message = message.clone();
-            let (kind, log) = match message.execute_tx(&mut self.actors, &context) {
-                Ok(result) => (ExecutionKind::Internal, result.into_log()),
-                Err(_) => (
-                    ExecutionKind::InternalFailed,
-                    Self::bounce_log(failed_message)?,
-                ),
+            self.actors.push_checkpoint();
+            let staged = match message.execute_tx(&mut self.actors, &context) {
+                Ok(result) => Ok((
+                    ExecutionKind::Internal,
+                    result.into_log(),
+                    Some((self.actors.actor_root(), self.actors.available_units())),
+                )),
+                Err(_) => Self::bounce_log(failed_message)
+                    .map(|log| (ExecutionKind::InternalFailed, log, None)),
             };
+            self.actors.pop_checkpoint_rollback();
+            let (kind, log, executed_actor_state) = staged?;
+            let txid = log.txid();
             self.apply_log(
                 &mut work,
                 &hasher,
-                &log,
+                kind,
+                log,
                 &[],
                 &mut sends,
                 &mut seen_outputs,
+                block.header.height,
             )?;
-            records.push(ExecutionRecord {
-                kind,
-                txid: log.txid(),
-            });
+            if let Some(expected) = executed_actor_state {
+                let replayed = (self.actors.actor_root(), self.actors.available_units());
+                if replayed != expected {
+                    return Err(ChainError::CommitmentMismatch);
+                }
+            }
+            records.push(ExecutionRecord { kind, txid });
         }
 
-        for destroyed in self.actors.destroy_expired_actors()? {
-            let log = Self::destruction_log(block.header.height, destroyed)?;
+        self.actors.push_checkpoint();
+        let staged_destructions = (|| {
+            let logs = self
+                .actors
+                .destroy_expired_actors()?
+                .into_iter()
+                .map(|destroyed| Self::destruction_log(block.header.height, destroyed))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, ChainError>((
+                logs,
+                self.actors.actor_root(),
+                self.actors.available_units(),
+            ))
+        })();
+        self.actors.pop_checkpoint_rollback();
+        let (destruction_logs, destroyed_root, destroyed_pool) = staged_destructions?;
+        for log in destruction_logs {
+            let txid = log.txid();
+            self.apply_log(
+                &mut work,
+                &hasher,
+                ExecutionKind::ActorDestroy,
+                log,
+                &[],
+                &mut sends,
+                &mut seen_outputs,
+                block.header.height,
+            )?;
             records.push(ExecutionRecord {
                 kind: ExecutionKind::ActorDestroy,
-                txid: log.txid(),
+                txid,
             });
+        }
+        if (self.actors.actor_root(), self.actors.available_units())
+            != (destroyed_root, destroyed_pool)
+        {
+            return Err(ChainError::CommitmentMismatch);
         }
 
         let (cells, catchup) = work.normalize(&hasher);
@@ -560,14 +586,17 @@ impl Blockchain {
     }
 
     fn apply_log(
-        &self,
+        &mut self,
         work: &mut utreexo::WorkForest,
         hasher: &merkle::Hasher<CellLeaf>,
-        log: &TxLog,
+        kind: ExecutionKind,
+        log: TxLog,
         proofs: &[Proof],
         sends: &mut VecDeque<Message>,
         seen_outputs: &mut BTreeSet<CellID>,
+        height: u64,
     ) -> Result<(), ChainError> {
+        Self::validate_log_shape(kind, &log, height)?;
         let expected = log
             .iter()
             .filter(|entry| matches!(entry, TxEntry::Input(_)))
@@ -579,11 +608,13 @@ impl Blockchain {
         let mut proofs = proofs.iter();
         let mut new_outputs = BTreeSet::new();
         let mut new_sends = Vec::new();
-        work.batch(|work| {
-            for entry in log.iter() {
+        let mut new_actors = Vec::new();
+        self.actors.push_checkpoint();
+        let result = work.batch(|work| {
+            for entry in log.into_entries() {
                 match entry {
                     TxEntry::Input(id) => {
-                        work.delete(&CellLeaf(*id), proofs.next().unwrap(), hasher)?;
+                        work.delete(&CellLeaf(id), proofs.next().unwrap(), hasher)?;
                     }
                     TxEntry::Output(cell) => {
                         let id = cell.id();
@@ -592,14 +623,154 @@ impl Blockchain {
                         }
                         work.insert(&CellLeaf(id), hasher);
                     }
-                    TxEntry::Send(message) => new_sends.push(message.clone()),
+                    TxEntry::Send(message) => new_sends.push(message),
+                    TxEntry::ActorDeploy { actor, code } => {
+                        let actor = Self::canonical_effect_actor(&actor)?;
+                        if ActorID::Constructor(code.clone()).to_hash() != actor.to_hash() {
+                            return Err(ChainError::InvalidEffectLog);
+                        }
+                        self.actors.replay_deploy(actor.clone(), code)?;
+                        new_actors.push(actor);
+                    }
+                    TxEntry::ActorSave { actor, state } => {
+                        let actor = Self::canonical_effect_actor(&actor)?;
+                        self.actors.replay_save(&actor, state, height)?;
+                    }
+                    TxEntry::SetCode { actor, code } => {
+                        let actor = Self::canonical_effect_actor(&actor)?;
+                        self.actors.replay_set_code(&actor, code, height)?;
+                    }
+                    TxEntry::StoragePurchase {
+                        actor,
+                        bytes,
+                        expiry_height,
+                        fee_sparks,
+                    } => {
+                        let actor = Self::canonical_effect_actor(&actor)?;
+                        let actual = self
+                            .actors
+                            .purchase_storage(&actor, bytes, height)?
+                            .ok_or(ChainError::InvalidEffectLog)?;
+                        if actual.expiry_height != expiry_height || actual.fee_sparks != fee_sparks
+                        {
+                            return Err(ChainError::InvalidEffectLog);
+                        }
+                    }
+                    TxEntry::ActorDestroy { actor } => {
+                        let actor = Self::canonical_effect_actor(&actor)?;
+                        self.actors.replay_destroy(&actor)?;
+                    }
                     _ => {}
                 }
             }
+            for actor in &new_actors {
+                if self.actors.exists(actor) {
+                    self.actors.validate_actor_storage(actor, height)?;
+                }
+            }
             Ok::<_, ChainError>(())
-        })?;
-        seen_outputs.extend(new_outputs);
-        sends.extend(new_sends);
+        });
+        match result {
+            Ok(_) => {
+                self.actors.pop_checkpoint_commit();
+                seen_outputs.extend(new_outputs);
+                sends.extend(new_sends);
+                Ok(())
+            }
+            Err(error) => {
+                self.actors.pop_checkpoint_rollback();
+                Err(error)
+            }
+        }
+    }
+
+    fn canonical_effect_actor(actor: &ActorID) -> Result<ActorID, ChainError> {
+        match actor {
+            ActorID::Hash(id) => Ok(ActorID::Hash(*id)),
+            ActorID::Constructor(_) => Err(ChainError::InvalidEffectLog),
+        }
+    }
+
+    fn validate_log_shape(kind: ExecutionKind, log: &TxLog, height: u64) -> Result<(), ChainError> {
+        let entries = log.entries();
+        let Some(TxEntry::Header(header)) = entries.first() else {
+            return Err(ChainError::InvalidEffectLog);
+        };
+        if entries[1..]
+            .iter()
+            .any(|entry| matches!(entry, TxEntry::Header(_)))
+        {
+            return Err(ChainError::InvalidEffectLog);
+        }
+
+        match kind {
+            ExecutionKind::External => {
+                if entries[1..].iter().any(|entry| {
+                    matches!(
+                        entry,
+                        TxEntry::Receive(_)
+                            | TxEntry::ActorDeploy { .. }
+                            | TxEntry::IssuePub(..)
+                            | TxEntry::ActorSave { .. }
+                            | TxEntry::SetCode { .. }
+                            | TxEntry::StoragePurchase { .. }
+                            | TxEntry::ActorDestroy { .. }
+                    )
+                }) {
+                    return Err(ChainError::InvalidEffectLog);
+                }
+            }
+            ExecutionKind::Internal => {
+                if header.version != 1
+                    || header.locktime != 0
+                    || !matches!(entries.get(1), Some(TxEntry::Receive(_)))
+                {
+                    return Err(ChainError::InvalidEffectLog);
+                }
+                let mut destroying = false;
+                for (index, entry) in entries.iter().enumerate().skip(2) {
+                    if destroying && !matches!(entry, TxEntry::ActorDestroy { .. }) {
+                        return Err(ChainError::InvalidEffectLog);
+                    }
+                    match entry {
+                        TxEntry::ActorDeploy { .. } if index == 2 => {}
+                        TxEntry::ActorDeploy { .. }
+                        | TxEntry::Receive(_)
+                        | TxEntry::Input(_)
+                        | TxEntry::IssuePriv(..)
+                        | TxEntry::Fee(_) => return Err(ChainError::InvalidEffectLog),
+                        TxEntry::ActorDestroy { .. } => destroying = true,
+                        _ => {}
+                    }
+                }
+            }
+            ExecutionKind::InternalFailed => {
+                if header.version != 1
+                    || header.locktime != 0
+                    || entries.len() != 3
+                    || !matches!(entries[1], TxEntry::Receive(_))
+                    || !matches!(entries[2], TxEntry::Output(_))
+                {
+                    return Err(ChainError::InvalidEffectLog);
+                }
+            }
+            ExecutionKind::ActorDestroy => {
+                if header.version != 1
+                    || header.locktime != 0
+                    || entries.len() < 3
+                    || !matches!(
+                        entries.get(1),
+                        Some(TxEntry::Data(bytes)) if bytes.as_slice() == height.to_le_bytes()
+                    )
+                    || !matches!(entries.last(), Some(TxEntry::ActorDestroy { .. }))
+                    || entries[2..entries.len() - 1]
+                        .iter()
+                        .any(|entry| !matches!(entry, TxEntry::Retire(..)))
+                {
+                    return Err(ChainError::InvalidEffectLog);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -749,6 +920,8 @@ pub enum ChainError {
     ProofCount,
     #[error("duplicate cell id in one block")]
     DuplicateCell,
+    #[error("invalid transaction effect log")]
+    InvalidEffectLog,
     #[error("block commitment mismatch")]
     CommitmentMismatch,
     #[error("requested block is not the active tip")]
@@ -973,9 +1146,342 @@ mod tests {
             entry,
             TxEntry::IssuePub(..)
                 | TxEntry::Retire(..)
+                | TxEntry::ActorDeploy { .. }
                 | TxEntry::StoragePurchase { .. }
                 | TxEntry::ActorSave { .. }
         )));
+    }
+
+    #[test]
+    fn actor_effect_replay_matches_direct_execution() {
+        let mut state = Dict::new();
+        state.insert(
+            Int253::ZERO,
+            Value::Token(
+                Token::cleartext(Int253::from(11u64), FLAME_FLAVOR)
+                    .expect("quantity is in range"),
+            ),
+        );
+        let expected_state = Value::Dict(state);
+        let replacement_code = ScriptBuilder::new().nop().to_bytecode();
+        let constructor_code = ScriptBuilder::new()
+            .push_int(1_024u64)
+            .addstorage()
+            .drop_()
+            .merge()
+            .drop_()
+            .drop_()
+            .push_str(replacement_code.clone())
+            .setcode()
+            .load()
+            .drop_()
+            .save()
+            .to_bytecode();
+        let target = ActorID::Constructor(constructor_code.clone());
+        let actor = ActorID::Hash(target.to_hash());
+        let baseline = ActorStore::new(StorageParams::default()).unwrap();
+        let mut quote_store = baseline.clone();
+        quote_store
+            .deploy(target.clone(), constructor_code, empty_state())
+            .unwrap();
+        let fee = quote_store
+            .quote_storage(&target, 1_024, 0)
+            .unwrap()
+            .unwrap()
+            .fee_sparks;
+        let delivery = message(
+            target,
+            vec![
+                expected_state.clone(),
+                Value::ClearToken(ClearToken::new(fee, FLAME_FLAVOR)),
+            ],
+            10_000_000,
+            70,
+        );
+
+        let mut executed = baseline.clone();
+        let log = delivery
+            .execute_tx(&mut executed, &BlockContext { height: 0 })
+            .expect("constructor execution succeeds")
+            .into_log();
+        assert!(matches!(
+            log.entries().get(2),
+            Some(TxEntry::ActorDeploy { actor: deployed, code })
+                if deployed == &actor && !code.is_empty()
+        ));
+        assert!(
+            log.iter()
+                .any(|entry| matches!(entry, TxEntry::StoragePurchase { .. }))
+        );
+        assert!(
+            log.iter()
+                .any(|entry| matches!(entry, TxEntry::SetCode { .. }))
+        );
+        assert!(
+            log.iter()
+                .any(|entry| matches!(entry, TxEntry::ActorSave { .. }))
+        );
+        let expected_commitment = (executed.actor_root(), executed.available_units());
+
+        let mut chain = Blockchain::new(ChainParams::default()).unwrap();
+        chain.actors = baseline;
+        let hasher = utreexo::utreexo_hasher::<CellLeaf>();
+        let mut work = chain.cells.work_forest();
+        let mut sends = VecDeque::new();
+        let mut seen_outputs = BTreeSet::new();
+        chain
+            .apply_log(
+                &mut work,
+                &hasher,
+                ExecutionKind::Internal,
+                log,
+                &[],
+                &mut sends,
+                &mut seen_outputs,
+                0,
+            )
+            .expect("committed effects replay");
+
+        assert_eq!(
+            (chain.actors.actor_root(), chain.actors.available_units()),
+            expected_commitment
+        );
+        assert!(sends.is_empty());
+        assert_eq!(work.normalize(&hasher).0.count(), 0);
+        chain.actors.assert_supply(0).unwrap();
+        assert_eq!(chain.actors.load_code(&actor).unwrap(), replacement_code);
+        let replayed_state = chain.actors.load_state(&actor).unwrap();
+        assert_eq!(state_root(&replayed_state), state_root(&expected_state));
+    }
+
+    #[test]
+    fn invalid_effect_shape_rolls_back_every_lane() {
+        let mut chain = Blockchain::new(ChainParams::default()).unwrap();
+        let actor_root = chain.actors.actor_root();
+        let pool = chain.actors.available_units();
+        let hasher = utreexo::utreexo_hasher::<CellLeaf>();
+        let mut work = chain.cells.work_forest();
+        let mut sends = VecDeque::new();
+        let mut seen_outputs = BTreeSet::new();
+        let code = ScriptBuilder::new().nop().to_bytecode();
+        let actor = ActorID::Hash(ActorID::Constructor(code.clone()).to_hash());
+        let invalid = TxLog::from(vec![
+            TxEntry::Header(TxHeader {
+                version: 1,
+                locktime: 0,
+            }),
+            TxEntry::Receive([1; 32]),
+            TxEntry::Data(vec![0]),
+            TxEntry::ActorDeploy { actor, code },
+        ]);
+
+        assert!(matches!(
+            chain.apply_log(
+                &mut work,
+                &hasher,
+                ExecutionKind::Internal,
+                invalid,
+                &[],
+                &mut sends,
+                &mut seen_outputs,
+                0,
+            ),
+            Err(ChainError::InvalidEffectLog)
+        ));
+        assert_eq!(chain.actors.actor_root(), actor_root);
+        assert_eq!(chain.actors.available_units(), pool);
+        assert_eq!(work.normalize(&hasher).0.count(), 0);
+        assert!(sends.is_empty());
+        assert!(seen_outputs.is_empty());
+
+        let code = ScriptBuilder::new().nop().to_bytecode();
+        let actor = ActorID::Hash(ActorID::Constructor(code.clone()).to_hash());
+        let underfunded = TxLog::from(vec![
+            TxEntry::Header(TxHeader {
+                version: 1,
+                locktime: 0,
+            }),
+            TxEntry::Receive([2; 32]),
+            TxEntry::ActorDeploy { actor, code },
+        ]);
+        let mut work = chain.cells.work_forest();
+        assert!(matches!(
+            chain.apply_log(
+                &mut work,
+                &hasher,
+                ExecutionKind::Internal,
+                underfunded,
+                &[],
+                &mut sends,
+                &mut seen_outputs,
+                0,
+            ),
+            Err(ChainError::Vm(VMError::StorageCapacityExceeded))
+        ));
+        assert_eq!(chain.actors.actor_root(), actor_root);
+        assert_eq!(chain.actors.available_units(), pool);
+        assert_eq!(work.normalize(&hasher).0.count(), 0);
+    }
+
+    #[test]
+    fn nested_call_effects_replay_in_order() {
+        let mut baseline = ActorStore::new(StorageParams::default()).unwrap();
+        let child_code = ScriptBuilder::new()
+            .load()
+            .drop_()
+            .push_int(2u64)
+            .save()
+            .to_bytecode();
+        let child = deploy_actor(&mut baseline, 81, child_code);
+        let parent_code = ScriptBuilder::new()
+            .load()
+            .drop_()
+            .push_int(1u64)
+            .save()
+            .push_int(0u64)
+            .push_int(100_000u64)
+            .push_str(child.to_hash().to_vec())
+            .call()
+            .drop_()
+            .drop_()
+            .to_bytecode();
+        let parent = deploy_actor(&mut baseline, 80, parent_code);
+        let delivery = message(parent.clone(), Vec::new(), 1_000_000, 80);
+
+        let mut executed = baseline.clone();
+        let log = delivery
+            .execute_tx(&mut executed, &BlockContext { height: 0 })
+            .expect("nested call succeeds")
+            .into_log();
+        let saves: Vec<_> = log
+            .iter()
+            .filter_map(|entry| match entry {
+                TxEntry::ActorSave { actor, .. } => Some(actor.to_hash()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(saves, vec![parent.to_hash(), child.to_hash()]);
+        let expected = (executed.actor_root(), executed.available_units());
+
+        let mut chain = Blockchain::new(ChainParams::default()).unwrap();
+        chain.actors = baseline;
+        let hasher = utreexo::utreexo_hasher::<CellLeaf>();
+        let mut work = chain.cells.work_forest();
+        chain
+            .apply_log(
+                &mut work,
+                &hasher,
+                ExecutionKind::Internal,
+                log,
+                &[],
+                &mut VecDeque::new(),
+                &mut BTreeSet::new(),
+                0,
+            )
+            .expect("nested effects replay");
+        assert_eq!(
+            (chain.actors.actor_root(), chain.actors.available_units()),
+            expected
+        );
+        assert_eq!(
+            state_root(&chain.actors.load_state(&parent).unwrap()),
+            state_root(&Value::Int253(Int253::ONE))
+        );
+        assert_eq!(
+            state_root(&chain.actors.load_state(&child).unwrap()),
+            state_root(&Value::Int253(Int253::from(2u64)))
+        );
+    }
+
+    #[test]
+    fn explicit_actor_destruction_replays() {
+        let mut baseline = ActorStore::new(StorageParams::default()).unwrap();
+        let actor = deploy_actor(
+            &mut baseline,
+            82,
+            ScriptBuilder::new().load().drop_().to_bytecode(),
+        );
+        let delivery = message(actor.clone(), Vec::new(), 1_000_000, 82);
+
+        let mut executed = baseline.clone();
+        let log = delivery
+            .execute_tx(&mut executed, &BlockContext { height: 0 })
+            .expect("dismantling actor succeeds")
+            .into_log();
+        assert!(matches!(
+            log.entries().last(),
+            Some(TxEntry::ActorDestroy { actor: destroyed }) if destroyed == &actor
+        ));
+        let expected = (executed.actor_root(), executed.available_units());
+
+        let mut chain = Blockchain::new(ChainParams::default()).unwrap();
+        chain.actors = baseline;
+        let hasher = utreexo::utreexo_hasher::<CellLeaf>();
+        let mut work = chain.cells.work_forest();
+        chain
+            .apply_log(
+                &mut work,
+                &hasher,
+                ExecutionKind::Internal,
+                log,
+                &[],
+                &mut VecDeque::new(),
+                &mut BTreeSet::new(),
+                0,
+            )
+            .expect("destruction effects replay");
+
+        assert_eq!(
+            (chain.actors.actor_root(), chain.actors.available_units()),
+            expected
+        );
+        assert!(!chain.actors.exists(&actor));
+        chain.actors.assert_supply(0).unwrap();
+    }
+
+    #[test]
+    fn output_and_send_effects_move_into_chain_lanes() {
+        let mut chain = Blockchain::new(ChainParams::default()).unwrap();
+        let hasher = utreexo::utreexo_hasher::<CellLeaf>();
+        let mut work = chain.cells.work_forest();
+        let output = Cell::new(
+            refund_predicate(),
+            Anchor([91; 32]),
+            vec![Value::Int253(Int253::ONE)],
+        )
+        .unwrap();
+        let output_id = output.id();
+        let outbound = message(ActorID::Hash([92; 32]), Vec::new(), 1_000, 92);
+        let outbound_id = *outbound.id().as_bytes();
+        let log = TxLog::from(vec![
+            TxEntry::Header(TxHeader {
+                version: 1,
+                locktime: 0,
+            }),
+            TxEntry::Receive([90; 32]),
+            TxEntry::Output(output),
+            TxEntry::Send(outbound),
+        ]);
+        let mut sends = VecDeque::new();
+        let mut seen_outputs = BTreeSet::new();
+
+        chain
+            .apply_log(
+                &mut work,
+                &hasher,
+                ExecutionKind::Internal,
+                log,
+                &[],
+                &mut sends,
+                &mut seen_outputs,
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(work.normalize(&hasher).0.count(), 1);
+        assert_eq!(seen_outputs, BTreeSet::from([output_id]));
+        assert_eq!(sends.len(), 1);
+        assert_eq!(*sends.front().unwrap().id().as_bytes(), outbound_id);
     }
 
     #[test]
@@ -984,8 +1490,7 @@ mod tests {
         dict.insert(
             Int253::ZERO,
             Value::Token(
-                Token::cleartext(Int253::from(11u64), FLAME_FLAVOR)
-                    .expect("quantity is in range"),
+                Token::cleartext(Int253::from(11u64), FLAME_FLAVOR).expect("quantity is in range"),
             ),
         );
         let values = vec![
@@ -1043,7 +1548,7 @@ mod tests {
 
     #[test]
     fn bounce_collisions_reject_atomically() {
-        let chain = Blockchain::new(ChainParams::default()).unwrap();
+        let mut chain = Blockchain::new(ChainParams::default()).unwrap();
         let hasher = utreexo::utreexo_hasher::<CellLeaf>();
         let mut work = chain.cells.work_forest();
         let mut sends = VecDeque::new();
@@ -1062,10 +1567,12 @@ mod tests {
             chain.apply_log(
                 &mut work,
                 &hasher,
-                &bounce,
+                ExecutionKind::InternalFailed,
+                bounce,
                 &[],
                 &mut sends,
                 &mut seen_outputs,
+                0,
             ),
             Err(ChainError::DuplicateCell)
         ));
@@ -1094,6 +1601,31 @@ mod tests {
             && f == &flavor_point
             && destroyed_actor == &actor));
         assert_ne!(first.txid(), second.txid());
+
+        let mut params = ChainParams::default();
+        params.storage.lease_duration_blocks = 1;
+        let mut chain = Blockchain::new(params).unwrap();
+        chain
+            .actors
+            .deploy(
+                actor.clone(),
+                ScriptBuilder::new().nop().to_bytecode(),
+                Value::ClearToken(ClearToken::new(qty, FLAME_FLAVOR)),
+            )
+            .unwrap();
+        chain
+            .actors
+            .purchase_storage(&actor, 1_024, 0)
+            .unwrap()
+            .unwrap();
+        let expected_expiry_txid = Blockchain::destruction_log(1, destroyed()).unwrap().txid();
+        let block = chain.build_block([10; 32], Vec::new()).unwrap();
+        let applied = chain.connect(&block).unwrap();
+        assert!(applied.records.iter().any(|record| {
+            record.kind == ExecutionKind::ActorDestroy && record.txid == expected_expiry_txid
+        }));
+        assert!(!chain.actors.exists(&actor));
+        chain.actors.assert_supply(1).unwrap();
     }
 
     #[test]

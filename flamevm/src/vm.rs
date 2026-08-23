@@ -690,6 +690,7 @@ impl VM {
         // not-yet-deployed actor instantiates it — code = constructor
         // bytes and empty state. The actor remains provisional until it buys
         // enough storage during this transaction.
+        let mut deployed_code = None;
         if !registry.exists(&message.target) {
             if let ActorID::Constructor(bytes) = &message.target {
                 if let Err(e) = registry.deploy(
@@ -700,6 +701,7 @@ impl VM {
                     registry.pop_checkpoint_rollback();
                     return Err(e);
                 }
+                deployed_code = Some(bytes.clone());
             }
         }
         let code_bytes = match registry.actor_code_bytes(&message.target) {
@@ -760,6 +762,12 @@ impl VM {
         // post-Header effect identifies *what consumed-once entity*
         // brought this tx into existence.
         vm.txlog.push(TxEntry::Receive(send_id));
+        if let Some(code) = deployed_code {
+            vm.txlog.push(TxEntry::ActorDeploy {
+                actor: ActorID::Hash(target.to_hash()),
+                code,
+            });
+        }
 
         let mut run_err: Option<VMError> = None;
         loop {

@@ -2,6 +2,7 @@ use merlin::Transcript;
 
 use super::*;
 use merkle::*;
+use readerwriter::{Decodable, Encodable, Reader};
 
 struct Item(u64);
 
@@ -460,4 +461,88 @@ fn insert_and_delete_utreexo() {
         forest.delete(&Item(2), &proof2, &hasher).unwrap();
         forest.delete(&Item(7), &proof7, &hasher).unwrap();
     });
+}
+
+#[test]
+fn canonical_forest_and_proof_vectors() {
+    let mut roots = [None; 64];
+    roots[0] = Some(Hash([0x11; 32]));
+    roots[2] = Some(Hash([0x22; 32]));
+    let forest = Forest { roots };
+    let forest_hex = hex::encode(forest.encode_to_vec());
+    assert_eq!(
+        forest_hex,
+        concat!(
+            "0500000000000000",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "2222222222222222222222222222222222222222222222222222222222222222"
+        )
+    );
+    let encoded_forest = forest.encode_to_vec();
+    let mut forest_bytes = encoded_forest.as_slice();
+    let decoded = forest_bytes
+        .read_all(Forest::decode)
+        .expect("canonical forest decodes exactly");
+    assert_eq!(decoded.roots, forest.roots);
+
+    let transient = Proof::Transient;
+    assert_eq!(hex::encode(transient.encode_to_vec()), "00");
+
+    let committed = Proof::Committed(Path {
+        position: 2,
+        neighbors: vec![Hash([0xaa; 32]), Hash([0xbb; 32])],
+    });
+    let committed_hex = hex::encode(committed.encode_to_vec());
+    assert_eq!(
+        committed_hex,
+        concat!(
+            "01",
+            "0200000000000000",
+            "02000000",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        )
+    );
+    let committed_bytes = committed.encode_to_vec();
+    let mut committed_reader = committed_bytes.as_slice();
+    let decoded = committed_reader
+        .read_all(Proof::decode)
+        .expect("canonical proof decodes exactly");
+    assert!(
+        matches!(decoded, Proof::Committed(path) if path.position == 2 && path.neighbors.len() == 2)
+    );
+}
+
+#[test]
+fn proof_decoder_rejects_noncanonical_shapes() {
+    let mut unknown = [2u8].as_slice();
+    assert!(matches!(
+        Proof::decode(&mut unknown),
+        Err(readerwriter::ReadError::InvalidFormat)
+    ));
+
+    let mut high_position = Vec::new();
+    high_position.push(1);
+    high_position.extend_from_slice(&2u64.to_le_bytes());
+    high_position.extend_from_slice(&1u32.to_le_bytes());
+    high_position.extend_from_slice(&[0u8; 32]);
+    assert!(matches!(
+        Proof::decode(&mut high_position.as_slice()),
+        Err(readerwriter::ReadError::InvalidFormat)
+    ));
+
+    let mut excessive_depth = Vec::new();
+    excessive_depth.push(1);
+    excessive_depth.extend_from_slice(&0u64.to_le_bytes());
+    excessive_depth.extend_from_slice(&64u32.to_le_bytes());
+    assert!(matches!(
+        Proof::decode(&mut excessive_depth.as_slice()),
+        Err(readerwriter::ReadError::InvalidFormat)
+    ));
+
+    let mut trailing = [0u8, 1].as_slice();
+    assert!(matches!(
+        trailing.read_all(Proof::decode),
+        Err(readerwriter::ReadError::TrailingBytes)
+    ));
 }

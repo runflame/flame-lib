@@ -8,6 +8,9 @@ use thiserror::Error;
 
 use super::heap::{Heap, HeapIndex};
 use merkle::{Directions, Hash, Hasher, MerkleItem, MerkleTree, Path, Position};
+use readerwriter::{
+    Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer,
+};
 
 /// Forest consists of a number of roots of merkle binary trees.
 #[derive(Clone, Serialize, Deserialize)]
@@ -70,6 +73,84 @@ pub enum Proof {
     Transient,
     /// Proof with a merkle path for an item that was stored in a normalized forest.
     Committed(Path),
+}
+
+impl Encodable for Forest {
+    fn encode(&self, writer: &mut impl Writer) -> Result<(), WriteError> {
+        let occupied = self
+            .roots
+            .iter()
+            .enumerate()
+            .fold(0u64, |bits, (level, root)| {
+                bits | (u64::from(root.is_some()) << level)
+            });
+        writer.write_u64(b"utreexo.forest.occupied", occupied)?;
+        for root in self.roots.iter().flatten() {
+            writer.write(b"utreexo.forest.root", &root.0)?;
+        }
+        Ok(())
+    }
+}
+
+impl ExactSizeEncodable for Forest {
+    fn encoded_size(&self) -> usize {
+        8 + 32 * self.roots.iter().flatten().count()
+    }
+}
+
+impl Decodable for Forest {
+    fn decode(reader: &mut impl Reader) -> Result<Self, ReadError> {
+        let occupied = reader.read_u64()?;
+        let mut roots = [None; 64];
+        for (level, root) in roots.iter_mut().enumerate() {
+            if occupied & (1u64 << level) != 0 {
+                *root = Some(Hash(reader.read_u8x32()?));
+            }
+        }
+        Ok(Self { roots })
+    }
+}
+
+impl Encodable for Proof {
+    fn encode(&self, writer: &mut impl Writer) -> Result<(), WriteError> {
+        match self {
+            Self::Transient => writer.write_u8(b"utreexo.proof.kind", 0),
+            Self::Committed(path) => {
+                writer.write_u8(b"utreexo.proof.kind", 1)?;
+                path.encode(writer)
+            }
+        }
+    }
+}
+
+impl ExactSizeEncodable for Proof {
+    fn encoded_size(&self) -> usize {
+        match self {
+            Self::Transient => 1,
+            Self::Committed(path) => 1 + path.encoded_size(),
+        }
+    }
+}
+
+impl Decodable for Proof {
+    fn decode(reader: &mut impl Reader) -> Result<Self, ReadError> {
+        match reader.read_u8()? {
+            0 => Ok(Self::Transient),
+            1 => {
+                let position = reader.read_u64()?;
+                let depth = reader.read_u32()? as usize;
+                if depth > 63 || position >= (1u64 << depth) {
+                    return Err(ReadError::InvalidFormat);
+                }
+                let neighbors = reader.read_vec(depth, |r| r.read_u8x32().map(Hash))?;
+                Ok(Self::Committed(Path {
+                    position,
+                    neighbors,
+                }))
+            }
+            _ => Err(ReadError::InvalidFormat),
+        }
+    }
 }
 
 impl Proof {

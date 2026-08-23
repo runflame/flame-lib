@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use flamevm::{
     ActorID, ActorRegistry, Int253, StoragePurchase, VMError, Value, code_root,
-    code_state_bytes, state_root,
+    code_state_bytes, empty_state, state_root,
 };
 use merkle::{Hash, MerkleItem, MerkleTree};
 use merlin::Transcript;
@@ -450,6 +450,60 @@ impl ActorStore {
             }),
         )
     }
+
+    pub(crate) fn replay_deploy(&mut self, actor: ActorID, code: Vec<u8>) -> Result<(), VMError> {
+        self.deploy(actor, code, empty_state())
+    }
+
+    pub(crate) fn replay_save(
+        &mut self,
+        actor: &ActorID,
+        state: Value,
+        height: u64,
+    ) -> Result<(), VMError> {
+        if !state.is_portable() {
+            return Err(VMError::NonPortableInState);
+        }
+        let key = actor.to_hash();
+        let code = self.require_live(key)?.live.as_ref().unwrap().code.clone();
+        let state_bytes = Self::state_bytes(&code, &state)?;
+        let root = state_root(&state);
+        self.record_actor(key);
+        let live = self.actors.get_mut(&key).unwrap().live.as_mut().unwrap();
+        live.state = Some(state);
+        live.state_bytes = state_bytes;
+        live.state_root = root;
+        self.validate_actor_storage(actor, height)
+    }
+
+    pub(crate) fn replay_set_code(
+        &mut self,
+        actor: &ActorID,
+        code: Vec<u8>,
+        height: u64,
+    ) -> Result<(), VMError> {
+        self.set_code(actor, code)?;
+        self.validate_actor_storage(actor, height)
+    }
+
+    pub(crate) fn replay_destroy(&mut self, actor: &ActorID) -> Result<(), VMError> {
+        let key = actor.to_hash();
+        self.record_actor(key);
+        let slot = self.actors.get_mut(&key).ok_or(VMError::ActorNotFound)?;
+        let live = slot.live.take().ok_or(VMError::ActorNotFound)?;
+        if live.state.is_none() {
+            return Err(VMError::ActorEmpty);
+        }
+        let remove_slot = slot.leases.is_empty();
+        if remove_slot {
+            self.actors.remove(&key);
+        }
+        if self.pending_destruction.contains(&key) {
+            self.record_pending();
+            self.pending_destruction.remove(&key);
+        }
+        Ok(())
+    }
 }
 
 struct ActorLeaf {
@@ -708,6 +762,19 @@ mod tests {
 
     fn actor() -> ActorID {
         ActorID::Hash([7; 32])
+    }
+
+    #[test]
+    fn canonical_actor_root_vector() {
+        let mut store = ActorStore::new(StorageParams::default()).unwrap();
+        store
+            .deploy(actor(), vec![0x1d], Value::Int253(Int253::from(42u64)))
+            .unwrap();
+        store.purchase_storage(&actor(), 1_024, 0).unwrap().unwrap();
+        assert_eq!(
+            hex::encode(store.actor_root().0),
+            "2694dc0a474475efe48096f89f41ad71bbadd7694021fc6ede5b3397d967f572"
+        );
     }
 
     fn small_params() -> StorageParams {

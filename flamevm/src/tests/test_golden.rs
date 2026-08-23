@@ -5,17 +5,14 @@
 //! identically is caught here (it would silently fork the chain against
 //! any other implementation). Audit p4.
 //!
-//! Regenerate (only on a deliberate consensus change) by flipping
-//! `REGEN` to true, running with `--nocapture`, and pasting the printed
-//! values back into the asserts.
+//! Expected values were produced by a standalone reference that writes the
+//! documented fields directly rather than calling FlameVM encoders.
 
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
 use crate::tx::{TxEntry, TxHeader, TxID, TxLog};
 use crate::{code_root, state_root};
-
-const REGEN: bool = false;
 
 fn h(version: u32, locktime: u32) -> TxHeader {
     TxHeader { version, locktime }
@@ -54,25 +51,19 @@ fn golden_consensus_hashes() {
             },
         ])
     );
+    let deploy = format!(
+        "{:?}",
+        TxID::from_log(&[
+            TxEntry::Header(h(1, 0)),
+            TxEntry::ActorDeploy {
+                actor: actor.clone(),
+                code: vec![0x1d]
+            },
+        ])
+    );
     let state_root = format!("{:?}", state_root(&Value::Int253(Int253::from(42u64))));
     let code_root = format!("{:?}", code_root(&[0x1d]));
     let ctor_id = format!("{:?}", ActorID::Constructor(vec![1, 2, 3]).to_hash());
-
-    if REGEN {
-        for (k, v) in [
-            ("empty", &empty),
-            ("data", &data),
-            ("fee", &fee),
-            ("save", &save),
-            ("setcode", &setcode),
-            ("state_root", &state_root),
-            ("code_root", &code_root),
-            ("ctor_id", &ctor_id),
-        ] {
-            eprintln!("GOLDEN {k} = {v}");
-        }
-        panic!("REGEN — paste values into asserts, set REGEN=false");
-    }
 
     assert_eq!(
         empty,
@@ -93,6 +84,10 @@ fn golden_consensus_hashes() {
     assert_eq!(
         setcode,
         "TxID(Hash(6cc0bb6da93f45f4015000ce5e6f4054a2b341024a0363516508f4531e81346f))"
+    );
+    assert_eq!(
+        deploy,
+        "TxID(Hash(e0f675fdae45f4d7369c0d425cca252421206a164de2f2d16c42b00c546a1a00))"
     );
     assert_eq!(state_root, "[55, 153, 101, 152, 10, 104, 94, 233, 140, 125, 135, 90, 162, 101, 75, 190, 192, 18, 163, 108, 189, 73, 155, 248, 201, 51, 241, 232, 8, 129, 177, 182]");
     assert_eq!(code_root, "[49, 139, 70, 84, 16, 230, 41, 133, 96, 138, 164, 96, 140, 192, 168, 177, 16, 219, 77, 211, 98, 38, 102, 149, 123, 241, 218, 249, 204, 253, 100, 198]");
@@ -132,6 +127,10 @@ fn golden_txlog_wire_encoding() {
         TxEntry::Data(vec![0xab, 0xcd]),
         TxEntry::Input([0x11; 32]),
         TxEntry::Receive([0x22; 32]),
+        TxEntry::ActorDeploy {
+            actor: actor.clone(),
+            code: vec![0x1d],
+        },
         TxEntry::IssuePub(Int253::from(5u64), Int253::from(-3i64)),
         TxEntry::IssuePriv(CR([0x33; 32]), CR([0x44; 32])),
         TxEntry::Retire(CR([0x55; 32]), CR([0x66; 32])),
@@ -160,11 +159,7 @@ fn golden_txlog_wire_encoding() {
     ]);
     let wire = log.encode_to_vec();
     let hex: std::string::String = wire.iter().map(|b| format!("{b:02x}")).collect();
-    if REGEN {
-        eprintln!("GOLDEN wire = {hex}");
-        panic!("REGEN — paste wire hex");
-    }
-    assert_eq!(hex, "0c00000000000000000100000007000000010200000000000000abcd021111111111111111111111111111111111111111111111111111111111111111032222222222222222222222222222222222222222222222222222222222222222050540010633333333333333333333333333333333333333333333333333333333333333334444444444444444444444444444444444444444444444444444444444444444075555555555555555555555555555555555555555555555555555555555555555666666666666666666666666666666666666666666666666666666666666666608e803000000000000090007070707070707070707070707070707070707070707070707070707070707072a0a00070707070707070707070707070707070707070707070707070707070707070701000000000000001d0483f8777777777777777777777777777777777777777777777777777777777777777764888888888888888888888888888888888888888888888888888888888888888881090b999999999999999999999999999999999999999999999999999999999999999900070707070707070707070707070707070707070707070707070707070707070700aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa32000000000000000000000000000000");
+    assert_eq!(hex, "0d00000000000000000100000007000000010200000000000000abcd0211111111111111111111111111111111111111111111111111111111111111110322222222222222222222222222222222222222222222222222222222222222220e00070707070707070707070707070707070707070707070707070707070707070701000000000000001d050540010633333333333333333333333333333333333333333333333333333333333333334444444444444444444444444444444444444444444444444444444444444444075555555555555555555555555555555555555555555555555555555555555555666666666666666666666666666666666666666666666666666666666666666608e803000000000000090007070707070707070707070707070707070707070707070707070707070707072a0a00070707070707070707070707070707070707070707070707070707070707070701000000000000001d0483f8777777777777777777777777777777777777777777777777777777777777777764888888888888888888888888888888888888888888888888888888888888888881090b999999999999999999999999999999999999999999999999999999999999999900070707070707070707070707070707070707070707070707070707070707070700aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa32000000000000000000000000000000");
 }
 
 #[test]

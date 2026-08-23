@@ -71,6 +71,17 @@ same rule lets FIFO mempool children depend on admitted parents. The work forest
 is normalized once after the ordered batch, and its resulting commitment must
 equal the block's committed cell root.
 
+The canonical compact `Forest` encoding is a u64-LE occupied-level bitmap,
+followed by one 32-byte root for each set bit in increasing level order. A
+Utreexo proof starts with kind `0` for `Transient`, or kind `1` for `Committed`;
+a committed proof then contains u64-LE position, u32-LE path depth, and that
+many 32-byte neighbor hashes from lowest to highest. Consensus decoding is
+exact (no trailing bytes), limits depth to 63, and requires
+`position < 2^depth` before allocating the neighbor vector. The Serde forms of
+`Forest`, `WorkForest`, `Catchup`, and `Proof` are local working-state formats,
+not consensus encodings. Block witness hashing and size accounting reuse these
+canonical proof bytes rather than maintaining a parallel proof layout.
+
 This lets a validating node keep a small accumulator instead of every cell
 payload. It does not make cells literally free or solve data availability:
 owners must retain payloads and proofs, proofs need updating, blocks still carry
@@ -140,16 +151,21 @@ reorganization attachment:
 2. Stage lease expiry, recycling, actor marking, and issuance.
 3. Verify external transactions against the declared parent cell state. Reject
    missing or duplicate inputs and accumulate their resource use.
-4. Apply external effects in block order and enqueue their sends in effect
-   order.
-5. Execute the message queue serially. A synchronous `call` remains inside its
-   current internal transaction; `send` effects append new messages to the
-   queue in emission order. Successful effects update the staged state. A failed
-   delivery rolls its actor changes back and deterministically creates one
-   refund cell containing the original portable payload.
-6. Derive storage-purchase records and other internal records from execution;
-   never trust proposer-supplied versions.
-7. Derive the ordered actor-destruction records and apply them.
+4. Consume each derived external log through the ordered effect applier and
+   enqueue its sends in effect order.
+5. Execute the message queue serially under an actor-registry checkpoint. A
+   synchronous `call` remains inside its current internal transaction. On
+   success, capture the actor commitment and storage pool, roll the direct VM
+   mutations back, then consume the derived log through the same ordered effect
+   applier. The replayed actor commitment and pool must match execution. Output
+   and send lanes exist only as effects and are moved into Utreexo and the FIFO
+   queue by this applier. A failed delivery instead derives exactly one refund
+   output containing the original portable payload.
+6. Recompute storage purchases from the ordered pool state while replaying and
+   require their expiry and fee fields to match the derived effects.
+7. Derive expiry destructions under a checkpoint, roll them back, replay the
+   ordered destruction logs, and require the resulting actor commitment and
+   pool to match.
 8. Normalize Utreexo, recompute all state commitments and resource totals, and
    compare them with the header.
 9. Commit the staged state and retain complete undo data.
@@ -180,7 +196,10 @@ message; a failed candidate never commits consumption without recovery.
 
 An internal transaction is a receipt of deterministic execution, not another
 consensus input. It starts from a `Send`, records its `Receive`, runs the target
-actor and synchronous calls, and records the resulting ordered effects. A
+actor and synchronous calls, and records the resulting ordered effects. First
+successful delivery to a constructor-form target records `ActorDeploy`
+immediately after `Receive`, binding the canonical actor id and full code; its
+initial state is the canonical empty state. A
 lease-expiry destruction is a system internal transaction with
 `ActorDestroy(actor)` instead of `Receive`; it recursively records token
 retirements and binds the expiry height. A failed delivery records `Receive` and
@@ -193,6 +212,15 @@ admission path. Its cost is that every validator must repeat serial actor
 execution. Internal receipts may be stored or committed for audit and light
 clients, but they cannot replace re-execution unless a future proof system is
 specified.
+
+Trust-boundary ownership is deliberately narrow:
+
+| Value | Source and decoder rule |
+| --- | --- |
+| `Block`, `BlockTx`, `ExternalTx` | Network consensus input; bounded canonical decoders are required when their still-TBD wire formats are frozen. |
+| Utreexo `Forest` and `Proof` | Consensus state/witness; use the exact bounded encodings above. |
+| FlameVM `TxLog`, `TxEntry`, `Message` | Derived by verified execution; canonical encode-only formats support commitments and archives, but consensus never admits decoded copies. |
+| `WorkForest`, `Catchup`, actor undo/checkpoints | Local transient or persistence data; Serde representation is non-consensus and cannot enter block application. |
 
 ## Consensus limits
 
