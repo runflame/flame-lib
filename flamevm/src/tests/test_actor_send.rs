@@ -3,6 +3,7 @@
 use super::test_helpers::*;
 use crate::tx::{TxEntry, TxID};
 use crate::{ActorID, Int253};
+use readerwriter::Encodable;
 
 fn send_script(target: &ActorID, refund: [u8; 32], selector: u64, gas: u64) -> Vec<u8> {
     ScriptBuilder::new()
@@ -163,6 +164,24 @@ fn external_send_has_no_caller() {
     while vm.step_internal().unwrap() {}
     let message = sends(&vm.txlog)[0];
     assert!(message.caller.is_none());
+}
+
+#[test]
+fn send_preserves_constructor_code_for_first_delivery() {
+    let target = ActorID::Constructor(ScriptBuilder::new().nop().to_bytecode());
+    let script = ScriptBuilder::new()
+        .push_int(0u64)
+        .push_str(String::from(vec![0; 32]))
+        .push_int(0u64)
+        .push_str(String::from(target.encode_to_vec()))
+        .send()
+        .to_bytecode();
+    let mut vm = vm_external_with_script(script);
+    vm.last_anchor = Some(Anchor([0x42; 32]));
+
+    run_to_end(&mut vm).unwrap();
+
+    assert_eq!(sends(&vm.txlog)[0].target, target);
 }
 
 #[test]

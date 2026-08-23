@@ -367,6 +367,9 @@ pub enum CallKind {
     CellOpen {
         predicate: Predicate,
         external_context: bool,
+        /// Canonical id of the directly invoking actor, for `callerid`
+        /// introspection only. This never grants actor authority.
+        caller_id: Option<[u8; 32]>,
     },
 }
 
@@ -381,16 +384,14 @@ impl CallKind {
     }
 
 
-    /// Returns the caller's actor id, if any. `op_callerid` reads
-    /// this — for `InternalRoot` with a `None` caller (the
-    /// originating tx came from an external sender) we surface
-    /// `Some(&zero_id)` via the dedicated method [`Self::caller_or_zero`]
-    /// so the opcode can push all-zeros instead of erroring.
-    pub fn caller(&self) -> Option<&ActorID> {
+    /// Returns only the caller's canonical id. `CellOpen` stores this
+    /// compact form for read-only attribution without inheriting the actor.
+    pub fn caller_id(&self) -> Option<[u8; 32]> {
         match self {
-            Self::InternalRoot { caller, .. } => caller.as_ref(),
-            Self::ActorCall { caller, .. } => Some(caller),
-            Self::ExternalRoot | Self::CellOpen { .. } => None,
+            Self::InternalRoot { caller, .. } => caller.as_ref().map(ActorID::to_hash),
+            Self::ActorCall { caller, .. } => Some(caller.to_hash()),
+            Self::CellOpen { caller_id, .. } => *caller_id,
+            Self::ExternalRoot => None,
         }
     }
 
@@ -2213,12 +2214,12 @@ impl VM {
     /// see spec.md §issuepub). Non-`Int253` qty hard-fails
     /// `TypeNotInt253`; the confidential path lives in [`op_issuepriv`].
     fn op_issuepub(&mut self) -> Result<(), VMError> {
+        let actor = self.require_actor()?.clone();
         let tag = self.pop_value()?.to_string()?;
         let qty = match self.pop_value()? {
             Value::Int253(i) => i,
             _ => return Err(VMError::TypeNotInt253),
         };
-        let actor = self.require_actor()?.clone();
         let flv = flavor_from_actor(&actor, &tag);
         // Cleartext qty + flv go straight into the txlog as `Int253`s —
         // no commitment indirection. The `IssuePub` entry is publicly
@@ -2615,12 +2616,14 @@ impl VM {
         self.current_call.snap_failure_values = failure_values;
         self.current_call.snap_failure_arg_count = args.len();
         let external_context = self.is_external();
+        let caller_id = self.current_call.kind.actor().map(ActorID::to_hash);
         let payload_len = cell.payload().len();
         let mut frame = CallFrame::from_code(
             code,
             CallKind::CellOpen {
                 predicate: cell.predicate.clone(),
                 external_context,
+                caller_id,
             },
             gas,
         )
@@ -2736,6 +2739,9 @@ impl VM {
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<(), VMError> {
+        // CellOpen caller attribution is not actor authority: only an actor
+        // frame may originate a synchronous actor call.
+        let caller = ActorID::Hash(self.require_actor()?.to_hash());
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let callee = self.pop_actor_id()?.to_canonical();
         let gas = self
@@ -2769,12 +2775,6 @@ impl VM {
                 return Err(VMError::OutOfGas);
             }
             let script = registry.load_code(&callee)?;
-            let caller = self
-                .current_call
-                .kind
-                .actor()
-                .cloned()
-                .unwrap_or(ActorID::Hash([0u8; 32]));
             Ok((script, caller, initial_gas))
         })();
         let (script, caller, initial_gas) = match pre_frame {
@@ -2841,8 +2841,8 @@ impl VM {
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<(), VMError> {
-        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let actor = self.require_actor()?.clone();
+        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let state_bytes = registry.actor_state_bytes(&actor)?;
         self.current_call
             .charge_gas(state_bytes.saturating_mul(GAS_PER_ALLOC_BYTE))?;
@@ -2867,8 +2867,8 @@ impl VM {
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<(), VMError> {
-        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
+        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let state = self.pop_value()?;
         // Portability is the canonical storage gate — checked here
         // before any registry mutation so a bad state is rejected
@@ -2910,8 +2910,8 @@ impl VM {
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<(), VMError> {
-        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
+        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let code_string = self.pop_value()?.to_string()?;
         self.charge_alloc_bytes(code_string.len())?;
         let code = code_string.to_bytes();
@@ -3024,11 +3024,14 @@ impl VM {
 
     /// **callerid** → _string_
     ///
-    /// Pushes the caller actor id, or all-zero String when the
-    /// originator is an external send.
+    /// Pushes the direct caller actor id, or all-zero String when no
+    /// authenticated actor directly invoked this frame. Available in actor
+    /// and CellOpen frames, but not ExternalRoot.
     fn op_callerid(&mut self) -> Result<(), VMError> {
-        self.require_actor()?;
-        let bytes = self.current_call.kind.caller().map(|c| c.to_hash()).unwrap_or([0u8; 32]);
+        if matches!(self.current_call.kind, CallKind::ExternalRoot) {
+            return Err(VMError::OpcodeRequiresActorContext);
+        }
+        let bytes = self.current_call.kind.caller_id().unwrap_or([0u8; 32]);
         self.push_value(Value::String(String::from(bytes.to_vec())));
         Ok(())
     }
@@ -3063,8 +3066,8 @@ impl VM {
         &mut self,
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<(), VMError> {
-        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let actor = self.require_actor()?;
+        let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let usage = registry.actor_usage(actor)?;
         self.push_value(Value::Int253(Int253::from(usage)));
         Ok(())

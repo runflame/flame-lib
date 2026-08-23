@@ -227,7 +227,7 @@ pub enum Instruction {
     Amount,                // t amount → t qty flv
     IssuePriv,             // qty:Variable tag issuepriv    → T  (predicate context)
     IssuePrivFlv,          // pred tag    issueprivflv      → int (consumer-side flv helper for issuepriv)
-    IssuePub,              // qty:Int253  tag issuepub      → CT (actor context)
+    IssuePub,              // qty:Int253 tag issuepub → CT (InternalRoot / ActorCall)
     IssuePubFlv,           // cid tag     issuepubflv       → int (consumer-side flv helper for issuepub)
     Retire,                // t retire → ø
     Borrow,                // qty flv borrow → -T +T
@@ -246,24 +246,24 @@ pub enum Instruction {
     Cell,                  // items… k pred cell → cell
     Output,                // items… k pred output → ø
     Open,                  // cell ik nbrs pos script gas portable-args… k open → results… k'
-    Send,                  // portable-args… k refund gas addr send → ø
-    Call,                  // portable-args… k gas addr call → results… k' 1 | args… k 0
-    Load,                  // ø load → value   (actor state, any Value)
-    Save,                  // value save → ø
-    Setcode,               // code setcode → ø  (replace actor code blob)
-    AddStorage,            // q addstorage → {debt 1 | 0}
-    QuoteStorage,          // q quotestorage → {fee 1 | 0}
+    Send,                  // portable-args… k refund gas addr send → ø (anonymous outside actor frames)
+    Call,                  // portable-args… k gas addr call → results… k' 1 | args… k 0 (actor-only)
+    Load,                  // ø load → value (actor-only)
+    Save,                  // value save → ø (actor-only)
+    Setcode,               // code setcode → ø (actor-only)
+    AddStorage,            // q addstorage → {debt 1 | 0} (actor-only)
+    QuoteStorage,          // q quotestorage → {fee 1 | 0} (actor-only)
     Signtx,                // cell signtx → items… k (external-only)
     Signcall,               // cell script sig gas portable-args… m signcall → results… k'
     Timelock,              // ø timelock → n {0|1}
     Version,               // ø version → n
-    Selfid,                // ø selfid → s
+    Selfid,                // ø selfid → s (actor-only)
     Anchor,                // ø anchor → s
     Gas,                   // ø gas → n
-    Usage,                 // ø usage → n
-    Callerid,              // ø callerid → s
+    Usage,                 // ø usage → n (actor-only)
+    Callerid,              // ø callerid → s (called frame; CellOpen uses read-only id)
     Gaslimit,              // ø gaslimit → n
-    Capacity,              // h capacity → n
+    Capacity,              // h capacity → n (actor-only)
     Height,                // ø height → n
     Ext(u8),               // unknown opcode byte; produced by the parser for any unassigned tag
 }

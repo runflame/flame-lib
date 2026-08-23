@@ -292,6 +292,7 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
+        caller_id: None,
     };
     let child = CallFrame::new(program.into_instructions(), child_kind, 20_000);
     let mut vm = VM::new(dummy_header(), parent);
@@ -374,6 +375,7 @@ fn issuepriv_in_internal_context_yields_failure_marker() {
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: false, // → require_external() will error
+        caller_id: None,
     };
     let child = CallFrame::new(
         ScriptBuilder::parse(&script).expect("parse").into_instructions(),

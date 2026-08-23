@@ -17,6 +17,7 @@ mod test_confidential_nm;
 mod test_confidential_value;
 mod test_constraints;
 mod test_control_flow;
+mod test_contexts;
 mod test_dict_ops;
 mod test_differential;
 mod test_dispatch;

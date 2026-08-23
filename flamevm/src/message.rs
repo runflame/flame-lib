@@ -35,9 +35,9 @@ pub struct Message {
     /// delivery, so Hash and Constructor forms have different MessageIDs.
     pub target: ActorID,
 
-    /// Originating actor's id if this send was emitted by an internal
-    /// tx; `None` if it was emitted by an external tx (the external
-    /// sender has no actor identity). Canonicalized during encoding so
+    /// Originating actor's id when the sending frame has actor authority.
+    /// `None` means no authenticated actor principal: this includes
+    /// ExternalRoot and CellOpen sends. Canonicalized during encoding so
     /// equivalent constructor-form caller ids commit identically.
     pub caller: Option<ActorID>,
 

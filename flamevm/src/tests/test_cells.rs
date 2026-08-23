@@ -1299,6 +1299,7 @@ fn op_open_cs_blocked_when_external_context_false() {
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: false,
+        caller_id: None,
     };
     let child = CallFrame::new(
         vec![Instruction::Alloc(None)],

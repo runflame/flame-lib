@@ -360,6 +360,7 @@ pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
+        caller_id: None,
     };
     let child = CallFrame::new(
         ScriptBuilder::parse(&script)

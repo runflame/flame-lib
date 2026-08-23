@@ -400,6 +400,7 @@ fn return_transfers_values_to_parent() {
     let child_kind = CallKind::CellOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
+        caller_id: None,
     };
     let child_frame = CallFrame::new(
         ScriptBuilder::parse(&child_script).expect("parse").into_instructions(),

@@ -132,27 +132,38 @@ when the specification, implementation, and focused regression tests agree.
      MSM work at the scheduling opcode; the measured curves are safely bounded
      by linear prices, so no arbitrary crypto-size cap is needed.
 
-7. [ ] Settle actor and call-context semantics.
+7. [x] Settle actor and call-context semantics.
 
-   - [ ] Decide whether `CellOpen` may `send` and, during internal execution,
-     `call` an actor with the zero caller identity. Align the context table and
-     handlers.
-   - [ ] Mark `selfid` and `callerid` as actor-context-only in the instruction
-     table; the handlers reject ExternalRoot and CellOpen.
-   - [ ] Remove the claim that `send` immediately fails for a checked-out actor,
-     or add a registry check with well-defined asynchronous semantics.
+   - [x] Keep `open` and `signcall` as isolated `CellOpen` predicate contexts.
+     They inherit external/CS availability, but never inherit an actor identity
+     or actor authority; actor-state, storage, code, issuance, and `selfid`
+     operations remain unavailable.
+   - [x] Store only the direct invoking actor's canonical 32-byte id in
+     `CellOpen` as `caller_id: Option<[u8; 32]>`, not a cloned `ActorID`.
+     `callerid` reports that id, or zero when the direct parent has no actor
+     context. A nested `CellOpen` therefore sees zero rather than transitively
+     inheriting an earlier actor's identity.
+   - [x] Restrict synchronous `call` to frames with a current actor identity.
+     Reject it from `ExternalRoot` and `CellOpen` before consuming operands, and
+     remove the fabricated zero-actor caller fallback.
+   - [x] Keep asynchronous `send` available from `CellOpen`, but always record
+     `Message.caller = None`: read-only `callerid` attribution does not delegate
+     the invoking actor's authority. Specify zero/`None` as "no authenticated
+     actor principal", not necessarily "originated in an external tx".
+   - [x] Align the instruction context table and handlers: `selfid` remains
+     actor-context-only, while `callerid` is also available in `CellOpen` with
+     the direct-caller semantics above.
+   - [x] Remove the claim that `send` immediately fails for a checked-out actor.
    - [x] Restrict `open` and `signcall` arguments to portable values, matching
      actor `call` and asynchronous `send`. Keep `return` unrestricted so
      negative ClearTokens, WideTokens, and other VM-local values can travel
      upward for resolution by the caller.
-   - [ ] Decide whether `issuepub` is valid in both `InternalRoot` and
-     `ActorCall`, or only in the latter.
-   - [ ] Remove the documented implicit default gas grant or add an operand form
-     that actually uses the caller's remaining gas.
-   - [ ] Make deploy-on-first-delivery reachable from bytecode or explicitly
-     specify it as a host-only message-construction path. `send` currently emits
-     only `ActorID::Hash` targets.
-   - [ ] Build one context matrix test covering ExternalRoot, InternalRoot,
+   - [x] `issuepub` is valid in both `InternalRoot` and `ActorCall`.
+   - [x] Remove the documented implicit default gas grant: `call`, `open`, and
+     `signcall` always consume an explicit gas operand.
+   - [x] Keep deploy-on-first-delivery bytecode-reachable: `send` accepts an
+     exact encoded `ActorID::Constructor` and preserves its code in the Message.
+   - [x] Build one context matrix test covering ExternalRoot, InternalRoot,
      ActorCall, and external/internal CellOpen for every restricted opcode.
 
 8. [ ] Finish actor-storage lease coverage.

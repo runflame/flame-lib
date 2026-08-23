@@ -152,7 +152,9 @@ tree can divide gas but cannot amplify it.
 
 Unused gas in a message send is discarded: transaction commits to full amount of gas before doing a message send. Unused gas in a call (within internal transaction) remains with the caller and therefore not lost. 
 
-Amount of gas available to each call can be limited by the caller. By default, the total remaining gas of the caller is available to the callee.
+Every `call`, `open`, and `signcall` has an explicit gas operand. There is no
+implicit default grant; a caller that wants to delegate its remaining budget
+must read `gas` and pass the desired amount explicitly.
 
 One Flame equals `100_000_000` sparks. Native token quantities and fees are
 integral sparks. 
@@ -614,9 +616,21 @@ FlameVM splits anchors at the source: every consume site produces two cryptograp
 Each instruction is a one-byte **opcode** optionally followed by **immediate data** encoded inline in the bytecode. Stack effects are written in left-to-right bottom-to-top order: in `a b → c`, `b` is the top of the stack on entry, `c` is the top on exit.
 
 **Context column.** The **Ctx** column in the instruction table marks opcodes that fail outside their supported context:
-- **ext.** — external-only. Hard-fails `ExternalOnly` from internal context. Covers `input`, the constraint-system opcodes (`scalar`, `commit`, `alloc`, `expr`, `range`), and the CS-consuming opcodes (`mix`, `fee`). Branch-polymorphic opcodes (`borrow`, `eq`, `add`, `and`, `or`) keep a blank Ctx marker; their CS-branch restriction is in the per-opcode prose. `decrypt` also has a blank marker: it batches its checks externally and performs them immediately internally.
-- **int.** — internal-only. Needs a registry handle. Covers `call`, `load`, `save`, and the chain-info family.
-- *(blank)* — works in either context. Most opcodes, including `send` (which emits messages from external txs too).
+- **ext.** — external execution, including an external `CellOpen`. Hard-fails
+  `ExternalOnly` from internal context. Covers `input`, the constraint-system
+  opcodes (`scalar`, `commit`, `alloc`, `expr`, `range`), and the CS-consuming
+  opcodes (`mix`, `fee`). Branch-polymorphic opcodes (`borrow`, `eq`, `add`,
+  `and`, `or`) keep a blank marker; their CS-branch restriction is in the
+  per-opcode prose. `decrypt` also has a blank marker: it batches externally and
+  checks immediately internally.
+- **actor** — requires a current actor identity. Available only in
+  `InternalRoot` and `ActorCall`, never `ExternalRoot` or `CellOpen`.
+- **pred.ext.** — requires an external `CellOpen` predicate context.
+- **caller** — requires a called frame (`InternalRoot`, `ActorCall`, or
+  `CellOpen`) with caller attribution; excludes `ExternalRoot`.
+- **int.** — internal chain context. Currently used only for planned chain-info
+  operations.
+- *(blank)* — works in either context. Most opcodes, including `send`.
 
 | Hex | Name | Ctx | Stack | Description |
 | --- | --- | --- | --- | --- |
@@ -686,9 +700,9 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 87 | [log](#log) | | s → ø | Emit a byte string as a data entry into the transaction log. |
 |    | **Tokens** | | | |
 | 90 | [amount](#amount) | | t → t qty flv | Peek the quantity and flavor of a token without consuming it. |
-| 91 | [issuepriv](#issuepriv) | ext. | qty tag → T | Mint a confidential token under the current predicate's identity + `tag`. CellOpen frames only. |
+| 91 | [issuepriv](#issuepriv) | pred.ext. | qty tag → T | Mint a confidential token under the current predicate's identity + `tag`. |
 | 92 | [issueprivflv](#issueprivflv) | | pred tag → int | Consumer-side helper: recompute `flavor_from_predicate(pred, tag)`. |
-| 93 | [issuepub](#issuepub) | int. | qty tag → CT | Mint a cleartext token under the current actor's identity + `tag`. ActorCall frames only. |
+| 93 | [issuepub](#issuepub) | actor | qty tag → CT | Mint a cleartext token under the current actor's identity + `tag`. |
 | 94 | [issuepubflv](#issuepubflv) | | cid tag → int | Consumer-side helper: recompute `flavor_from_actor(cid, tag)`. |
 | 95 | [retire](#retire) | | t → ø | Burn a token (emits a retire entry to the txlog). |
 | 96 | [borrow](#borrow) | | qty flv → −T +T | Borrow balanced ±token pair; debt must be balanced before tx end. |
@@ -713,20 +727,20 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | c5 | [signcall](#signcall) | | cell script sig gas args… m → {results… k' 1 \| cell args… m 0} | Run a script signed by the cell predicate in an isolated frame. |
 |    | **Actors** | | | |
 | d0 | [send](#send) | | args… k refund gas addr → ø | Queue an asynchronous actor message. |
-| d1 | [call](#call) | int. | args… k gas addr → {results… k' 1 \| args… k 0} | Synchronously call an actor. |
-| d2 | [load](#load) | int. | ø → value | Check out the actor's state (any portable Value; moves it out, locks re-entry). |
-| d3 | [save](#save) | int. | value → ø | Move the state value back in (requires checkout; unlocks). |
-| d4 | [setcode](#setcode) | int. | code → ø | Replace the actor's code blob (author-gated upgrade). |
-| d5 | [addstorage](#addstorage) | int. | q → {debt 1 \| 0} | Buy `q` bytes for one storage year and return a negative Flame token. |
-| d6 | [quotestorage](#quotestorage) | int. | q → {fee 1 \| 0} | Quote the positive integral storage fee in sparks without reserving bytes. |
+| d1 | [call](#call) | actor | args… k gas addr → {results… k' 1 \| args… k 0} | Synchronously call an actor. |
+| d2 | [load](#load) | actor | ø → value | Check out the actor's state (any portable Value; moves it out, locks re-entry). |
+| d3 | [save](#save) | actor | value → ø | Move the state value back in (requires checkout; unlocks). |
+| d4 | [setcode](#setcode) | actor | code → ø | Replace the actor's code blob (author-gated upgrade). |
+| d5 | [addstorage](#addstorage) | actor | q → {debt 1 \| 0} | Buy `q` bytes for one storage year and return a negative Flame token. |
+| d6 | [quotestorage](#quotestorage) | actor | q → {fee 1 \| 0} | Quote the positive integral storage fee in sparks without reserving bytes. |
 |    | **Frame introspection** | | | |
-| e0 | [selfid](#selfid) | | ø → s | Push the current actor's id (32-byte string). |
+| e0 | [selfid](#selfid) | actor | ø → s | Push the current actor's id (32-byte string). |
 | e1 | [anchor](#anchor) | | ø → s | Push the current frame's anchor (32-byte string). |
-| e2 | [callerid](#callerid) | | ø → s | Push the caller actor's id (zero string if invoked externally). |
+| e2 | [callerid](#callerid) | caller | ø → s | Push the direct caller actor's id, or zero when none. |
 | e4 | [gas](#gas) | | ø → n | Push remaining gas budget for the current call. |
 | e5 | [gaslimit](#gaslimit) | | ø → n | Push the call's total gas budget cap. |
-| e6 | [usage](#usage) | int. | ø → n | Push the actor's currently occupied storage bytes. |
-| e8 | [capacity](#capacity) | int. | h → n | Push actor storage capacity available at current or future core-block height `h`. |
+| e6 | [usage](#usage) | actor | ø → n | Push the actor's currently occupied storage bytes. |
+| e8 | [capacity](#capacity) | actor | h → n | Push actor storage capacity available at current or future core-block height `h`. |
 |    | **Tx & chain info** | | | |
 | f0 | [timelock](#timelock) | | ø → n {0\|1} | Push tx locktime and a flag for height (`0`) vs. timestamp (`1`). |
 | f1 | [version](#version) | | ø → n | Push tx version. |
@@ -1202,7 +1216,10 @@ _qty tag_ → _CT_
 
 Pops `tag` (String) and `qty` (`Int253` — cleartext). Builds `ClearToken(qty, flavor_from_actor(current_actor, tag))` and emits `TxEntry::IssuePub(qty, flv)` carrying the cleartext `(qty, flv)` pair directly as `Int253`s — publicly auditable on the wire without commitment indirection. Pushes the `ClearToken`.
 
-The current_actor is the actor stored on the enclosing `CallKind::ActorCall` frame. Hard-fails `OpcodeRequiresActorContext` from `ExternalRoot` and from any `CellOpen` frame (issuance binds to an actor, not a predicate; the two issuance domains are kept disjoint by construction). Runs without CS — internal context only.
+The current actor is stored on either `CallKind::InternalRoot` or
+`CallKind::ActorCall`. Both may issue. The opcode hard-fails
+`OpcodeRequiresActorContext` from `ExternalRoot` and `CellOpen` (issuance binds
+to an actor, not a predicate). It runs without CS in internal execution.
 
 `Variable` or `Point` operands hard-fail `TypeNotInt253` — `issuepub` is the cleartext path; for confidential qty, use [`issuepriv`](#issuepriv) from a `CellOpen` frame.
 
@@ -1414,9 +1431,22 @@ Verifies the Taproot proof against the cell's predicate:
 4. Pops `position` (String, bit-packed path), `neighbors` (list-Dict of 32-byte Strings, leaf-to-root), `internal_key` (Point).
 5. Pops `cell`.
 6. Constructs a `TaprootProof` and verifies `predicate.verify_taproot_proof` — checks the Merkle root and the tweaked-key relation `P = X + h(X, M)·B`.
-7. On success, creates a new isolated `CallKind::CellOpen { predicate: cell.predicate, external_context }` frame with the popped `gas` allotment, pours the cell's payload then the `args` onto the new frame's stack, and enters the unlocked `script`. The frame's starting anchor (the `CallFrame.anchor` field — todo #4, formerly carried in the variant) is the child-anchor split from the parent. The tx's `last_anchor` is set to that child-anchor on entry; `op_open` is intra-tx and doesn't mint anything cross-tx.
+7. On success, creates a new isolated `CallKind::CellOpen { predicate,
+   external_context, caller_id }` frame with the popped `gas` allotment, pours
+   the cell payload then `args` onto its stack, and enters the unlocked script.
+   `caller_id` is only the canonical 32-byte id of the directly invoking actor;
+   it is `None` when the direct parent has no actor identity. The frame's
+   starting anchor is the child-anchor split from the parent.
 
-The new frame has **no actor identity** by default — `op_load`/`op_save`/`op_call`/`op_send` all error from inside. The frame inherits CS access from the caller's context (external root → CS available; internal → not). Results return as `results… k' 1` via `return k'`; clean fall-through returns `0 1`; leftover gas refunds to the parent.
+The new frame never has actor identity or actor authority. Actor-state,
+storage, code, public issuance, `selfid`, and synchronous `call` operations
+hard-fail. `callerid` exposes only the direct `caller_id`; a nested `CellOpen`
+therefore sees zero instead of transitively inheriting an earlier actor.
+Asynchronous `send` remains available but is anonymous (`Message.caller =
+None`), so caller introspection cannot become delegated authority. The frame
+inherits CS access from its execution context (external root → available;
+internal → unavailable). Results return as `results… k' 1`; clean fall-through
+returns `0 1`; leftover gas refunds to the parent.
 
 Once the child is entered, any hard failure, out-of-gas condition, dirty EOF, or
 bad return arity rolls back its effects and returns the original locked `cell`
@@ -1450,7 +1480,14 @@ emitted. The grant is never refunded: asynchronous execution has no live caller
 to receive a remainder. An internal transaction therefore cannot reserve more
 gas across its own descendant sends than it received in its triggering Message.
 
-Splits the frame's `last_anchor` (see §Anchors): the `left` half becomes the message's `anchor`, the `right` half replaces `last_anchor`. Hard-fails `AnchorMissing` if no anchor has been claimed yet. Emits `TxEntry::Send(Message)` — the full `Message` lives in the entry, symmetric with `TxEntry::Output(Cell)`. There is no separate "sends queue"; the block builder reads `TxEntry::Send` records from the TxLog when constructing internal-tx deliveries. The originator's actor id (if any) becomes the message's `caller`.
+Splits the frame's `last_anchor` (see §Anchors): the `left` half becomes
+the message's `anchor`, the `right` half replaces `last_anchor`. Hard-fails
+`AnchorMissing` if no anchor has been claimed yet. Emits
+`TxEntry::Send(Message)`; the block builder reads these records when constructing
+internal deliveries. An actor frame contributes its actor id as
+`Message.caller`; `ExternalRoot` and `CellOpen` contribute `None`. `None` means
+“no authenticated actor principal,” not necessarily “originated in an external
+transaction.”
 
 The payload is admitted by `Message::new`, not by `Message::encode`.
 `Message::new` scans top-level arguments and uses the sticky Dict flag for O(1)
@@ -1488,6 +1525,11 @@ the callee's explicit decision. A constructor-form address is accepted but
 canonicalized to its hash for lookup: unlike first `send` delivery, `call` does
 not deploy an absent actor.
 
+Only `InternalRoot` and `ActorCall` may invoke `call`. `ExternalRoot` and
+`CellOpen` hard-fail `OpcodeRequiresActorContext` before consuming operands;
+caller attribution stored in a `CellOpen` is read-only and is never used to
+fabricate an actor caller.
+
 Before entering the callee, `call` rejects every non-portable argument with
 `NonPortableInCall`. This is a top-level scan; a nested Dict is checked in O(1)
 through its sticky flag.
@@ -1513,7 +1555,12 @@ hard-fail the current frame before this soft boundary.
 
 **Checks out** the current actor's state: moves the state `Value` out of the registry (the actor goes empty/`None`) and pushes it onto the stack. State is **any portable `Value`** — the author chooses its structure; the VM imposes no shape . Code is separate (`setcode`) and stays put during the call.
 
-While checked out, the actor has no data, so any `call`/`send`/`load` against it fails `ActorEmpty` — the **state's presence is the re-entrancy lock** . The state is a linear resource: `load` *moves* it (no copy); the frame must discharge it before returning, per the frame-end clean-stack rule. Re-loading an already-checked-out actor → `ActorEmpty`.
+While checked out, synchronous `call` and `load` against the actor fail
+`ActorEmpty` — the **state's presence is the re-entrancy lock**. `send` is
+asynchronous and does not inspect recipient state when queued; availability is
+resolved later during delivery. The state is a linear resource: `load` moves it
+(no copy); the frame must discharge it before returning, per the frame-end
+clean-stack rule. Re-loading an already-checked-out actor → `ActorEmpty`.
 
 Hard-fails: `OpcodeRequiresActorContext`, `RegistryUnavailable`, `ActorEmpty` (already checked out), `ActorNotFound`.
 
@@ -1748,7 +1795,12 @@ checked-out committed state until `save` supplies a replacement. Hard-fails
 
 ø → _s_
 
-Pushes the caller actor id as a 32-byte String. For `InternalRoot` triggered by an external send (caller = None), pushes the all-zero String. Hard-fails from `ExternalRoot` / `CellOpen` (no actor context).
+Pushes the directly invoking actor's canonical 32-byte id. `InternalRoot` and
+`ActorCall` use their recorded caller; `CellOpen` uses its compact read-only
+`caller_id`. It pushes the all-zero String when that caller is absent and
+hard-fails only from `ExternalRoot`, which has no caller frame. A `CellOpen`
+opened by another `CellOpen` sees zero: actor attribution is not propagated
+through predicate frames.
 
 ### gaslimit
 
