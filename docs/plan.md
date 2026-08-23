@@ -227,13 +227,18 @@ when the specification, implementation, and focused regression tests agree.
       `REGEN` path and cover every effect, ordered aggregate logs, actor roots,
       accumulator shapes, proof shapes, and malformed/non-canonical inputs.
 
-11. [ ] Decide how actor authors handle stale loaded snapshots.
+11. [x] Pin actor-state checkout and re-entrancy semantics.
 
-    - [ ] Either prevent holding loaded state across an external interaction, or
-      keep it legal and state checks-effects-interactions as an explicit author
-      obligation with a safe example.
-    - [ ] Add a regression example showing that checkout blocks observation but
-      does not make a stale application-level decision safe.
+    - [x] Keep holding loaded state across a nested interaction legal. Checkout
+      gives the current frame exclusive ownership until `save` or rollback, so
+      the loaded state cannot become stale through re-entrancy and no mandatory
+      checks-effects-interactions ordering is needed.
+    - [x] Keep the regression `reentrant_view_of_mid_update_state_is_blocked`,
+      which proves that a nested call cannot enter or observe a checked-out
+      actor, even through a read-only method.
+    - [x] Distinguish that VM guarantee from ordinary actor logic: an actor must
+      still account for a callee's success status and effects when deciding what
+      state to save, but the VM cannot infer or enforce that application policy.
 
 12. [ ] Enforce complete transaction and block resource limits.
 

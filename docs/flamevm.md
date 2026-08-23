@@ -45,10 +45,11 @@ VM-local values may travel upward so the caller can resolve them, but they may
 not be delegated to another callee.
 
 Actor state is its re-entrancy lock. `load` moves state out of the registry;
-while checked out, another frame cannot enter or observe that actor. Calling
-before `load` is safe because no partial state exists. Authors must still avoid
-holding a stale loaded snapshot across a call and then saving it: the VM prevents
-re-entrant observation, not application-level check-then-act mistakes.
+while checked out, another frame cannot enter, observe, or mutate that actor.
+The loaded value remains exclusively owned by the current frame across nested
+interactions and may be saved afterward; it cannot become stale through
+re-entrancy. The VM does not interpret actor policy, so the actor must still
+account for a callee's status and effects when deciding what state to save.
 
 Persistent actor storage is purchased in one-year leases by the actor itself.
 Purchases burn Flame at a deterministic reserve price; storage is neither a
@@ -1557,7 +1558,14 @@ Before entering the callee, `call` rejects every non-portable argument with
 `NonPortableInCall`. This is a top-level scan; a nested Dict is checked in O(1)
 through its sticky flag.
 
-**Re-entrancy:** the state-checkout lock closes issues with re-entracy: state is reachable **only** via `load`, which acquires the lock, and there is no peek-state opcode, so a half-applied update is never observable — a re-entrant `call`/`load` into an actor that has already `load`ed its state cannot enter. The lock does **not** enforce checks-effects-interactions ordering *within* a load/save window: holding a loaded state across a `call`/`send`/`open` is legal, but anything `save`d afterward is a pre-call snapshot — authors must `save` (or fully discharge) before calling out. Nested call depth is capped at `MAX_CALL_DEPTH` (64).
+**Re-entrancy:** state is reachable **only** via `load`, which acquires the
+state-checkout lock, and there is no peek-state opcode. A re-entrant `call` or
+`load` into an actor that has already loaded its state cannot enter, so no other
+frame can make that loaded value stale. Holding it across a `call`, `send`, or
+`open` is legal, and it may be saved afterward. Correctly accounting for the
+interaction's status and effects is ordinary actor logic rather than a
+concurrency guarantee the VM can infer. Nested call depth is capped at
+`MAX_CALL_DEPTH` (64).
 
 **Emits no txlog entry.** Calls are intra-tx control flow; the structural effects produced inside the callee (`Output`, `Send`, `ActorSave`, `SetCode`, `StoragePurchase`, `Issue`, `Retire`, `Fee`, `Data`, and actor destruction) are what the state machine reads. The `(External TxID, Internal TxID)` of a tx is a merkle root over effects only — see the effect model above.
 
