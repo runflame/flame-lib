@@ -1,6 +1,5 @@
 //! Small immutable binary objects with ordered links to more Chunks.
 
-use std::convert::TryFrom;
 use std::sync::Arc;
 
 use merlin::Transcript;
@@ -11,10 +10,12 @@ use readerwriter::{
 use crate::errors::VMError;
 
 /// Maximum payload carried directly by one [`Chunk`].
-pub const MAX_CHUNK_PAYLOAD: usize = 1024;
+pub const MAX_CHUNK_PAYLOAD: usize = 8191;
 
 /// Maximum number of ordered child references in one [`Chunk`].
 pub const MAX_CHUNK_REFS: usize = 4;
+
+const CHUNK_REF_COUNT_SHIFT: u32 = 13;
 
 /// Content identity of a [`Chunk`].
 pub type ChunkID = [u8; 32];
@@ -133,19 +134,20 @@ impl Chunk {
 
 /// Canonical encoding of one Chunk record:
 ///
-/// 1. payload length as little-endian `u64`;
+/// 1. a little-endian `u16` descriptor containing the reference count in its
+///    top three bits and the payload length in its lower thirteen bits;
 /// 2. payload bytes;
-/// 3. reference count as little-endian `u64`;
-/// 4. each ordered child [`ChunkID`].
+/// 3. each ordered child [`ChunkID`].
 ///
 /// Child bodies and residency are not encoded. Decoding therefore yields
 /// pruned references, while a graph store can encode every resident Chunk as
 /// its own record.
 impl Encodable for Chunk {
     fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
-        w.write_u64(b"chunk.payload.len", self.payload.len() as u64)?;
+        let descriptor =
+            ((self.refs.len() as u16) << CHUNK_REF_COUNT_SHIFT) | self.payload.len() as u16;
+        w.write(b"chunk.descriptor", &descriptor.to_le_bytes())?;
         w.write(b"chunk.payload", &self.payload)?;
-        w.write_u64(b"chunk.refs.len", self.refs.len() as u64)?;
         for reference in self.refs.iter() {
             w.write(b"chunk.ref", &reference.id())?;
         }
@@ -159,22 +161,19 @@ impl Encodable for Chunk {
 
 impl ExactSizeEncodable for Chunk {
     fn encoded_size(&self) -> usize {
-        16 + self.payload.len() + self.refs.len() * 32
+        2 + self.payload.len() + self.refs.len() * 32
     }
 }
 
 impl Decodable for Chunk {
     fn decode(r: &mut impl Reader) -> Result<Self, ReadError> {
-        let payload_len = usize::try_from(r.read_u64()?).map_err(|_| ReadError::InvalidFormat)?;
-        if payload_len > MAX_CHUNK_PAYLOAD {
-            return Err(ReadError::InvalidFormat);
-        }
-        let payload = r.read_bytes(payload_len)?;
-
-        let ref_count = usize::try_from(r.read_u64()?).map_err(|_| ReadError::InvalidFormat)?;
+        let descriptor = u16::from_le_bytes([r.read_u8()?, r.read_u8()?]);
+        let payload_len = usize::from(descriptor & MAX_CHUNK_PAYLOAD as u16);
+        let ref_count = usize::from(descriptor >> CHUNK_REF_COUNT_SHIFT);
         if ref_count > MAX_CHUNK_REFS {
             return Err(ReadError::InvalidFormat);
         }
+        let payload = r.read_bytes(payload_len)?;
         let mut refs = Vec::with_capacity(ref_count);
         for _ in 0..ref_count {
             refs.push(ChunkRef::Pruned(r.read_u8x32()?));
@@ -193,14 +192,14 @@ mod tests {
 
     #[test]
     fn enforces_limits() {
-        assert!(Chunk::new(vec![0; 1024], vec![]).is_ok());
+        assert!(Chunk::new(vec![0; 8191], vec![]).is_ok());
         assert!(matches!(
-            Chunk::new(vec![0; 1025], vec![]),
+            Chunk::new(vec![0; 8192], vec![]),
             Err(VMError::ChunkPayloadTooLarge)
         ));
 
         let four = (0..4).map(|n| ChunkRef::resident(empty(n))).collect();
-        let max = Chunk::new(vec![0; 1024], four).unwrap();
+        let max = Chunk::new(vec![0; 8191], four).unwrap();
         let wire = max.encode_to_vec();
         let mut encoded = wire.as_slice();
         let decoded = encoded.read_all(Chunk::decode).unwrap();
@@ -280,9 +279,8 @@ mod tests {
         let bytes = chunk.encode_to_vec();
 
         let mut expected = Vec::new();
-        expected.extend_from_slice(&3u64.to_le_bytes());
+        expected.extend_from_slice(&0x4003u16.to_le_bytes());
         expected.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
-        expected.extend_from_slice(&2u64.to_le_bytes());
         expected.extend_from_slice(&[0x11; 32]);
         expected.extend_from_slice(&[0x22; 32]);
         assert_eq!(bytes, expected);
@@ -302,9 +300,9 @@ mod tests {
         assert_eq!(
             chunk.id(),
             [
-                0xb1, 0x01, 0x69, 0x3c, 0x32, 0xf0, 0xf8, 0x50, 0x45, 0xcd, 0xd6, 0xbc, 0x8b, 0xdc,
-                0xbb, 0x8b, 0xc5, 0xcf, 0xec, 0x09, 0x3d, 0x87, 0xf4, 0x8b, 0x09, 0x43, 0x93, 0x61,
-                0x3a, 0x48, 0xde, 0xd5,
+                0x7f, 0xfa, 0x5f, 0x37, 0x96, 0x6c, 0x6f, 0x42, 0x18, 0xbe, 0x15, 0x1d, 0xde, 0x79,
+                0x74, 0xa6, 0x8f, 0x2d, 0x4b, 0x5c, 0xfd, 0x5e, 0xe0, 0x39, 0x84, 0x4a, 0x0e, 0x1c,
+                0xe2, 0x0f, 0xbd, 0xfc,
             ]
         );
     }
@@ -320,20 +318,13 @@ mod tests {
 
     #[test]
     fn decoder_enforces_bounds_and_record_shape() {
-        let mut oversized_payload = 1025u64.to_le_bytes().to_vec();
-        oversized_payload.extend_from_slice(&vec![0; 1025]);
-        oversized_payload.extend_from_slice(&0u64.to_le_bytes());
-        assert!(matches!(
-            Chunk::decode(&mut oversized_payload.as_slice()),
-            Err(ReadError::InvalidFormat)
-        ));
-
-        let mut too_many_refs = 0u64.to_le_bytes().to_vec();
-        too_many_refs.extend_from_slice(&5u64.to_le_bytes());
-        assert!(matches!(
-            Chunk::decode(&mut too_many_refs.as_slice()),
-            Err(ReadError::InvalidFormat)
-        ));
+        let first_invalid = ((MAX_CHUNK_REFS + 1) as u16) << CHUNK_REF_COUNT_SHIFT;
+        for descriptor in first_invalid..=u16::MAX {
+            assert!(matches!(
+                Chunk::decode(&mut descriptor.to_le_bytes().as_slice()),
+                Err(ReadError::InvalidFormat)
+            ));
+        }
 
         let mut truncated = empty(1).encode_to_vec();
         truncated.pop();

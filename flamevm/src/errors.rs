@@ -6,7 +6,7 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum VMError {
     /// A Chunk payload exceeded the format limit.
-    #[error("Chunk payload exceeds 1024 bytes")]
+    #[error("Chunk payload exceeds 8191 bytes")]
     ChunkPayloadTooLarge,
 
     /// A Chunk contained more than four child references.
