@@ -170,14 +170,8 @@ fn phase19_fee_qty_changes_txid() {
     // differs — TxID must diverge.
     use crate::tx::{TxEntry, TxID};
     let header = TxEntry::Header(dummy_header());
-    let log_a = vec![
-        TxEntry::Header(dummy_header()),
-        TxEntry::Fee(100),
-    ];
-    let log_b = vec![
-        TxEntry::Header(dummy_header()),
-        TxEntry::Fee(101),
-    ];
+    let log_a = vec![TxEntry::Header(dummy_header()), TxEntry::Fee(100)];
+    let log_b = vec![TxEntry::Header(dummy_header()), TxEntry::Fee(101)];
     let _ = header; // shut up unused
     let id_a = TxID::from_log(&log_a);
     let id_b = TxID::from_log(&log_b);

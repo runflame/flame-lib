@@ -22,9 +22,12 @@ fn dict_construction_two_pairs() {
     //   val_for_pair_1 (10), key_for_pair_1 (1),
     //   2, dict.
     let script = ScriptBuilder::new()
-        .push_int(50u64).push_int(5u64)
-        .push_int(10u64).push_int(1u64)
-        .push_int(2u64).dict()
+        .push_int(50u64)
+        .push_int(5u64)
+        .push_int(10u64)
+        .push_int(1u64)
+        .push_int(2u64)
+        .dict()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
@@ -37,9 +40,12 @@ fn dict_construction_two_pairs() {
 #[test]
 fn dict_construction_duplicate_keys_errors() {
     let script = ScriptBuilder::new()
-        .push_int(50u64).push_int(5u64)      // (5, 50)
-        .push_int(60u64).push_int(5u64)      // (5, 60) — duplicate!
-        .push_int(2u64).dict()
+        .push_int(50u64)
+        .push_int(5u64) // (5, 50)
+        .push_int(60u64)
+        .push_int(5u64) // (5, 60) — duplicate!
+        .push_int(2u64)
+        .dict()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     assert!(matches!(
@@ -52,9 +58,10 @@ fn dict_construction_duplicate_keys_errors() {
 fn put_inserts_into_empty() {
     // push:0, dict (empty)  →  put k=3, v=99
     let script = ScriptBuilder::new()
-        .push_int(0u64).dict()               // empty dict
-        .push_int(3u64)                      // key
-        .push_int(99u64)                     // value
+        .push_int(0u64)
+        .dict() // empty dict
+        .push_int(3u64) // key
+        .push_int(99u64) // value
         .put()
         .to_bytecode();
     let mut vm = vm_with_script(script);
@@ -74,8 +81,13 @@ fn put_inserts_into_empty() {
 #[test]
 fn put_on_occupied_key_errors() {
     let script = ScriptBuilder::new()
-        .push_int(50u64).push_int(5u64).push_int(1u64).dict()   // {5: 50}
-        .push_int(5u64).push_int(99u64).put()                   // put k=5 → conflict
+        .push_int(50u64)
+        .push_int(5u64)
+        .push_int(1u64)
+        .dict() // {5: 50}
+        .push_int(5u64)
+        .push_int(99u64)
+        .put() // put k=5 → conflict
         .to_bytecode();
     let mut vm = vm_with_script(script);
     assert!(matches!(
@@ -89,9 +101,11 @@ fn put_marks_dict_non_portable() {
     // Stack-local Dicts may contain non-portable values. The Dict keeps
     // that restriction as a sticky capability flag.
     let script = ScriptBuilder::new()
-        .push_int(0u64).dict()                         // {}
-        .push_int(0u64)                                // key
-        .push_str(String::from(Vec::<u8>::new())).transcript()  // → Merlin
+        .push_int(0u64)
+        .dict() // {}
+        .push_int(0u64) // key
+        .push_str(String::from(Vec::<u8>::new()))
+        .transcript() // → Merlin
         .put()
         .to_bytecode();
     let mut vm = vm_with_script(script);
@@ -107,8 +121,13 @@ fn replace_existing_returns_prev() {
     // Build {5: 50}, then replace v at key 5 with 99.
     // Spec stack: dict k v → dict' {prev 1 | 0}
     let script = ScriptBuilder::new()
-        .push_int(50u64).push_int(5u64).push_int(1u64).dict()
-        .push_int(5u64).push_int(99u64).replace()
+        .push_int(50u64)
+        .push_int(5u64)
+        .push_int(1u64)
+        .dict()
+        .push_int(5u64)
+        .push_int(99u64)
+        .replace()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
@@ -120,8 +139,11 @@ fn replace_existing_returns_prev() {
 #[test]
 fn replace_absent_returns_zero() {
     let script = ScriptBuilder::new()
-        .push_int(0u64).dict()                                  // empty
-        .push_int(5u64).push_int(99u64).replace()
+        .push_int(0u64)
+        .dict() // empty
+        .push_int(5u64)
+        .push_int(99u64)
+        .replace()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
@@ -133,8 +155,12 @@ fn replace_absent_returns_zero() {
 fn get_existing_returns_dict_k_v() {
     // {5: 50}, get key 5.
     let script = ScriptBuilder::new()
-        .push_int(50u64).push_int(5u64).push_int(1u64).dict()
-        .push_int(5u64).get()
+        .push_int(50u64)
+        .push_int(5u64)
+        .push_int(1u64)
+        .dict()
+        .push_int(5u64)
+        .get()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
@@ -150,7 +176,11 @@ fn get_existing_returns_dict_k_v() {
 #[test]
 fn get_missing_errors() {
     let script = ScriptBuilder::new()
-        .push_int(0u64).dict().push_int(5u64).get().to_bytecode();
+        .push_int(0u64)
+        .dict()
+        .push_int(5u64)
+        .get()
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
@@ -161,8 +191,12 @@ fn get_missing_errors() {
 #[test]
 fn getopt_existing() {
     let script = ScriptBuilder::new()
-        .push_int(50u64).push_int(5u64).push_int(1u64).dict()
-        .push_int(5u64).get_opt()
+        .push_int(50u64)
+        .push_int(5u64)
+        .push_int(1u64)
+        .dict()
+        .push_int(5u64)
+        .get_opt()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
@@ -173,7 +207,11 @@ fn getopt_existing() {
 #[test]
 fn getopt_missing() {
     let script = ScriptBuilder::new()
-        .push_int(0u64).dict().push_int(5u64).get_opt().to_bytecode();
+        .push_int(0u64)
+        .dict()
+        .push_int(5u64)
+        .get_opt()
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
@@ -184,8 +222,12 @@ fn getopt_missing() {
 fn getdup_copyable() {
     // {5: 50}; getdup k=5 → dict unchanged + 50 + 1
     let script = ScriptBuilder::new()
-        .push_int(50u64).push_int(5u64).push_int(1u64).dict()
-        .push_int(5u64).get_dup()
+        .push_int(50u64)
+        .push_int(5u64)
+        .push_int(1u64)
+        .dict()
+        .push_int(5u64)
+        .get_dup()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
@@ -201,7 +243,11 @@ fn getdup_copyable() {
 #[test]
 fn getdup_missing_pushes_zero() {
     let script = ScriptBuilder::new()
-        .push_int(0u64).dict().push_int(5u64).get_dup().to_bytecode();
+        .push_int(0u64)
+        .dict()
+        .push_int(5u64)
+        .get_dup()
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
@@ -212,10 +258,13 @@ fn getdup_missing_pushes_zero() {
 fn getdup_noncopyable_errors() {
     // {5: ClearToken(0, 7)}; getdup k=5 → TypeNotCopyable
     let script = ScriptBuilder::new()
-        .push_int(7u64).pushtoken()              // value = ClearToken(0, flavor=7)
-        .push_int(5u64)                          // key
-        .push_int(1u64).dict()                   // dict
-        .push_int(5u64).get_dup()
+        .push_int(7u64)
+        .pushtoken() // value = ClearToken(0, flavor=7)
+        .push_int(5u64) // key
+        .push_int(1u64)
+        .dict() // dict
+        .push_int(5u64)
+        .get_dup()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     assert!(matches!(
@@ -233,14 +282,18 @@ fn getdup_nested_token_dict_errors() {
     // outer = { 9: inner } where inner = { 5: ClearToken(0, 7) }.
     let script = ScriptBuilder::new()
         // build inner dict { 5: ClearToken(0,7) }
-        .push_int(7u64).pushtoken()
+        .push_int(7u64)
+        .pushtoken()
         .push_int(5u64)
-        .push_int(1u64).dict()
+        .push_int(1u64)
+        .dict()
         // build outer { 9: inner }
         .push_int(9u64)
-        .push_int(1u64).dict()
+        .push_int(1u64)
+        .dict()
         // getdup key 9 → would copy the token-bearing inner dict
-        .push_int(9u64).get_dup()
+        .push_int(9u64)
+        .get_dup()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     assert!(matches!(
@@ -251,7 +304,11 @@ fn getdup_nested_token_dict_errors() {
 
 #[test]
 fn first_of_empty_pushes_zero() {
-    let script = ScriptBuilder::new().push_int(0u64).dict().first().to_bytecode();
+    let script = ScriptBuilder::new()
+        .push_int(0u64)
+        .dict()
+        .first()
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
@@ -262,9 +319,12 @@ fn first_of_empty_pushes_zero() {
 fn first_returns_smallest_key() {
     // Build dict {5: 50, 1: 10}.
     let script = ScriptBuilder::new()
-        .push_int(50u64).push_int(5u64)
-        .push_int(10u64).push_int(1u64)
-        .push_int(2u64).dict()
+        .push_int(50u64)
+        .push_int(5u64)
+        .push_int(10u64)
+        .push_int(1u64)
+        .push_int(2u64)
+        .dict()
         .first()
         .to_bytecode();
     let mut vm = vm_with_script(script);
@@ -276,9 +336,12 @@ fn first_returns_smallest_key() {
 #[test]
 fn last_returns_largest_key() {
     let script = ScriptBuilder::new()
-        .push_int(50u64).push_int(5u64)
-        .push_int(10u64).push_int(1u64)
-        .push_int(2u64).dict()
+        .push_int(50u64)
+        .push_int(5u64)
+        .push_int(10u64)
+        .push_int(1u64)
+        .push_int(2u64)
+        .dict()
         .last()
         .to_bytecode();
     let mut vm = vm_with_script(script);
@@ -291,10 +354,14 @@ fn last_returns_largest_key() {
 fn next_finds_strictly_greater_key() {
     // {1: 10, 5: 50}; next of 1 → 5.
     let script = ScriptBuilder::new()
-        .push_int(50u64).push_int(5u64)
-        .push_int(10u64).push_int(1u64)
-        .push_int(2u64).dict()
-        .push_int(1u64).next()
+        .push_int(50u64)
+        .push_int(5u64)
+        .push_int(10u64)
+        .push_int(1u64)
+        .push_int(2u64)
+        .dict()
+        .push_int(1u64)
+        .next()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
@@ -305,8 +372,12 @@ fn next_finds_strictly_greater_key() {
 #[test]
 fn next_past_last_pushes_zero() {
     let script = ScriptBuilder::new()
-        .push_int(50u64).push_int(5u64).push_int(1u64).dict()
-        .push_int(5u64).next()
+        .push_int(50u64)
+        .push_int(5u64)
+        .push_int(1u64)
+        .dict()
+        .push_int(5u64)
+        .next()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
@@ -319,8 +390,11 @@ fn dict_with_token_is_noncopyable() {
     // Build {5: ClearToken(0, flavor=7)}; the dict should be marked
     // non-copyable.
     let script = ScriptBuilder::new()
-        .push_int(7u64).pushtoken()
-        .push_int(5u64).push_int(1u64).dict()
+        .push_int(7u64)
+        .pushtoken()
+        .push_int(5u64)
+        .push_int(1u64)
+        .dict()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
@@ -336,7 +410,11 @@ fn dict_with_token_is_noncopyable() {
 #[test]
 fn empty_dict_is_droppable() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_int(0u64).dict().drop_().to_bytecode(),
+        ScriptBuilder::new()
+            .push_int(0u64)
+            .dict()
+            .drop_()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert!(vm.current_call.stack.is_empty());
@@ -349,7 +427,10 @@ fn nonempty_dict_of_droppable_values_is_droppable() {
     // is droppable, including non-empty ones — dropping it has no
     // value-loss semantics.
     let script = ScriptBuilder::new()
-        .push_int(50u64).push_int(5u64).push_int(1u64).dict()
+        .push_int(50u64)
+        .push_int(5u64)
+        .push_int(1u64)
+        .dict()
         .drop_()
         .to_bytecode();
     let mut vm = vm_with_script(script);

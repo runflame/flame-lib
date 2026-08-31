@@ -6,8 +6,8 @@ use crate::errors::VMError;
 use crate::int253::Int253;
 use readerwriter::{Encodable, SizeWriter};
 
-use crate::ops::Instruction;
 use crate::cell::{Cell, Predicate};
+use crate::ops::Instruction;
 use crate::script::{Script, ScriptBuilder};
 
 /// Variable-length binary string with optional witness-bearing
@@ -222,9 +222,7 @@ impl String {
                 StringWitness::Script(instrs) => Ok(instrs),
                 _ => Err(VMError::TypeNotString),
             },
-            String::Opaque(data) => Ok(
-                ScriptBuilder::parse(&data)?.into_instructions(),
-            ),
+            String::Opaque(data) => Ok(ScriptBuilder::parse(&data)?.into_instructions()),
         }
     }
 

@@ -7,11 +7,12 @@ use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
-use readerwriter::{Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer};
+use readerwriter::{
+    Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer,
+};
 
 use crate::encoding::{
-    read_list_prefix, read_string, read_value, write_admitted_value,
-    write_list_prefix, write_value,
+    read_list_prefix, read_string, read_value, write_admitted_value, write_list_prefix, write_value,
 };
 use crate::errors::VMError;
 use crate::vm::Anchor;
@@ -107,9 +108,7 @@ impl fmt::Debug for Predicate {
     /// to the formatter (could be anything implementing
     /// `PredicateWitness`); we don't try to render it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Predicate")
-            .field(&self.point)
-            .finish()
+        f.debug_tuple("Predicate").field(&self.point).finish()
     }
 }
 
@@ -173,7 +172,10 @@ impl Predicate {
     /// verifier ever sees; constructing via `opaque` is what
     /// `op_input` and predicate decoding do.
     pub fn opaque(point: CompressedRistretto) -> Self {
-        Predicate { point, witness: None }
+        Predicate {
+            point,
+            witness: None,
+        }
     }
 
     /// Prover-style construction: attaches a typed witness. The
@@ -181,7 +183,10 @@ impl Predicate {
     /// stay in lockstep.
     pub fn with_witness<W: PredicateWitness>(witness: W) -> Self {
         let point = witness.to_point();
-        Predicate { point, witness: Some(Box::new(witness)) }
+        Predicate {
+            point,
+            witness: Some(Box::new(witness)),
+        }
     }
 
     /// Convenience: attach a [`PredicateTree`] witness. Equivalent
@@ -229,7 +234,9 @@ impl Encodable for Predicate {
 }
 
 impl ExactSizeEncodable for Predicate {
-    fn encoded_size(&self) -> usize { 32 }
+    fn encoded_size(&self) -> usize {
+        32
+    }
 }
 
 impl Decodable for Predicate {
@@ -240,7 +247,6 @@ impl Decodable for Predicate {
 }
 
 impl Predicate {
-
     /// The secondary Pedersen generator `B_blinding`, compressed.
     /// Suitable as an internal key when no key-path spend is desired:
     /// the discrete log of `B_blinding` w.r.t. the primary basepoint
@@ -256,10 +262,7 @@ impl Predicate {
     /// (path mismatch, decompression failure, etc.) returns
     /// `VMError::TaprootProofMismatch` — a hard error: cell-open
     /// failures must not be recoverable.
-    pub fn verify_taproot_proof<'a>(
-        &self,
-        cp: &'a TaprootProof,
-    ) -> Result<&'a [u8], VMError> {
+    pub fn verify_taproot_proof<'a>(&self, cp: &'a TaprootProof) -> Result<&'a [u8], VMError> {
         // Reconstruct the tweaked point P' = X + H(X, M)·B from the proof
         // and require it to equal the predicate's opaque point.
         let leaf = program_leaf_hash(&cp.program);
@@ -300,9 +303,7 @@ impl PredicateTree {
             return Err(VMError::EmptyPredicateTree);
         }
         let internal_key = internal_key.unwrap_or_else(Predicate::unspendable_key);
-        let x_point = internal_key
-            .decompress()
-            .ok_or(VMError::InvalidPoint)?;
+        let x_point = internal_key.decompress().ok_or(VMError::InvalidPoint)?;
         let leaves = create_merkle_leaves(&programs, &blinding_key);
         // Precompute the Taproot-tweaked point once at construction.
         // `Predicate::to_point()` returns this cached value in O(1);
@@ -312,7 +313,11 @@ impl PredicateTree {
         let root = merkle_root_of_leaves(&leaves);
         let h = taproot_tweak(&internal_key, &root);
         let point = (x_point + RISTRETTO_BASEPOINT_TABLE * &h).compress();
-        Ok(PredicateTree { internal_key, leaves, point })
+        Ok(PredicateTree {
+            internal_key,
+            leaves,
+            point,
+        })
     }
 
     /// Convenience: builds a tree with the unspendable internal key
@@ -509,15 +514,15 @@ pub struct Cell {
 
 impl Cell {
     /// Constructs a cell, rejecting any non-portable payload item.
-    pub fn new(
-        predicate: Predicate,
-        anchor: Anchor,
-        payload: Vec<Value>,
-    ) -> Result<Self, VMError> {
+    pub fn new(predicate: Predicate, anchor: Anchor, payload: Vec<Value>) -> Result<Self, VMError> {
         if payload.iter().any(|v| !v.is_portable()) {
             return Err(VMError::NonPortableInOutput);
         }
-        Ok(Cell { predicate, anchor, payload })
+        Ok(Cell {
+            predicate,
+            anchor,
+            payload,
+        })
     }
 
     /// Borrows the immutable payload.
@@ -532,9 +537,11 @@ impl Cell {
 
     /// Logical heap work needed to clone this cell for call-failure escrow.
     pub(crate) fn clone_gas(&self) -> u64 {
-        self.payload.iter().fold(self.payload.len() as u64, |gas, value| {
-            gas.saturating_add(value.clone_gas())
-        })
+        self.payload
+            .iter()
+            .fold(self.payload.len() as u64, |gas, value| {
+                gas.saturating_add(value.clone_gas())
+            })
     }
 
     /// Unique content identity of this cell — commits to its predicate,
@@ -554,8 +561,7 @@ impl Cell {
         let mut buf = Vec::new();
         for v in &self.payload {
             buf.clear();
-            write_value(&mut buf, v)
-                .expect("portable payload value must have a canonical encoder");
+            write_value(&mut buf, v).expect("portable payload value must have a canonical encoder");
             t.append_message(b"payload.item", &buf);
         }
         let mut h = [0u8; 32];
@@ -617,8 +623,7 @@ impl Decodable for Cell {
         let mut a = [0u8; 32];
         a.copy_from_slice(&anchor_bytes);
         let anchor = Anchor(a);
-        let payload_count =
-            read_list_prefix(r).map_err(|_| ReadError::InvalidFormat)?;
+        let payload_count = read_list_prefix(r).map_err(|_| ReadError::InvalidFormat)?;
         // Every payload value is ≥1 byte, so a count exceeding remaining
         // input is unsatisfiable — bound before allocating so a tiny
         // hostile length prefix can't force a multi-GB allocation.

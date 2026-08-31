@@ -66,9 +66,10 @@ fn prove_then_verify_with_commit_expr_eq() {
         .alloc(Some(witness_int))
         .eq()
         .verify();
-    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
-            .expect("prove succeeds");
-    let TxResult { bytecode, proof, .. } = _pp;
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
+    let TxResult {
+        bytecode, proof, ..
+    } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -93,14 +94,10 @@ fn op_decrypt_succeeds_on_matching_witness() {
     let f = Int253::from(7u64);
     let q_blind = Int253::from(11u64);
     let f_blind = Int253::from(13u64);
-    let qty_commit = Commitment::blinded_with_factor(
-        q,
-        curve25519_dalek::scalar::Scalar::from(11u64),
-    );
-    let flv_commit = Commitment::blinded_with_factor(
-        f,
-        curve25519_dalek::scalar::Scalar::from(13u64),
-    );
+    let qty_commit =
+        Commitment::blinded_with_factor(q, curve25519_dalek::scalar::Scalar::from(11u64));
+    let flv_commit =
+        Commitment::blinded_with_factor(f, curve25519_dalek::scalar::Scalar::from(13u64));
     let token = Token::new(qty_commit, flv_commit);
 
     let mut vm = vm_external_with_script(ScriptBuilder::new().decrypt().to_bytecode());
@@ -140,14 +137,10 @@ fn op_decrypt_rejects_wrong_witness() {
     // `BatchSignatureVerificationFailed` by `Verifier::verify`.
     let q = Int253::from(100u64);
     let f = Int253::from(7u64);
-    let qty_commit = Commitment::blinded_with_factor(
-        q,
-        curve25519_dalek::scalar::Scalar::from(11u64),
-    );
-    let flv_commit = Commitment::blinded_with_factor(
-        f,
-        curve25519_dalek::scalar::Scalar::from(13u64),
-    );
+    let qty_commit =
+        Commitment::blinded_with_factor(q, curve25519_dalek::scalar::Scalar::from(11u64));
+    let flv_commit =
+        Commitment::blinded_with_factor(f, curve25519_dalek::scalar::Scalar::from(13u64));
     let token = Token::new(qty_commit, flv_commit);
     let mut vm = vm_external_with_script(vec![0x9a]);
     vm.push_value(Value::Token(token));
@@ -209,8 +202,12 @@ fn decrypt_checks_matching_opening_immediately_in_internal_context() {
         vm.push_value(value);
     }
 
-    vm.step_internal().expect("matching opening succeeds immediately");
-    assert!(matches!(vm.current_call.stack.as_slice(), [Value::ClearToken(_)]));
+    vm.step_internal()
+        .expect("matching opening succeeds immediately");
+    assert!(matches!(
+        vm.current_call.stack.as_slice(),
+        [Value::ClearToken(_)]
+    ));
 }
 
 #[test]

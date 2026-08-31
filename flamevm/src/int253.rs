@@ -113,7 +113,9 @@ impl Int253 {
 
     /// Returns the absolute value as an `Int253` (always non-negative).
     pub fn abs(&self) -> Int253 {
-        Int253 { bytes: clear_high_bit(self.bytes) }
+        Int253 {
+            bytes: clear_high_bit(self.bytes),
+        }
     }
 
     /// The additive identity. `const`-usable counterpart of [`Self::zero`].
@@ -235,13 +237,19 @@ impl Mul for Int253 {
 }
 
 impl AddAssign for Int253 {
-    fn add_assign(&mut self, other: Int253) { *self = *self + other; }
+    fn add_assign(&mut self, other: Int253) {
+        *self = *self + other;
+    }
 }
 impl SubAssign for Int253 {
-    fn sub_assign(&mut self, other: Int253) { *self = *self - other; }
+    fn sub_assign(&mut self, other: Int253) {
+        *self = *self - other;
+    }
 }
 impl MulAssign for Int253 {
-    fn mul_assign(&mut self, other: Int253) { *self = *self * other; }
+    fn mul_assign(&mut self, other: Int253) {
+        *self = *self * other;
+    }
 }
 
 impl Ord for Int253 {
@@ -295,7 +303,9 @@ impl From<i64> for Int253 {
 
 impl From<Scalar> for Int253 {
     fn from(s: Scalar) -> Self {
-        Int253 { bytes: s.to_bytes() }
+        Int253 {
+            bytes: s.to_bytes(),
+        }
     }
 }
 
@@ -305,7 +315,9 @@ impl From<SignedInteger> for Int253 {
             Some(v) => (false, v),
             None => (
                 true,
-                (-si).to_u64().expect("negation of negative SignedInteger is non-negative"),
+                (-si)
+                    .to_u64()
+                    .expect("negation of negative SignedInteger is non-negative"),
             ),
         };
         Int253::from_parts(sign, Scalar::from(magnitude))
@@ -802,7 +814,17 @@ mod tests {
 
     #[test]
     fn div_rem_matches_i64() {
-        let xs = [i64::MIN + 1, -1_000_000, -7, -1, 0, 1, 7, 1_000_000, i64::MAX];
+        let xs = [
+            i64::MIN + 1,
+            -1_000_000,
+            -7,
+            -1,
+            0,
+            1,
+            7,
+            1_000_000,
+            i64::MAX,
+        ];
         let ys = [-1_000_000i64, -7, -1, 1, 7, 1_000_000];
         for &a in &xs {
             for &b in &ys {
@@ -839,12 +861,19 @@ mod tests {
                     assert_eq!(
                         q.is_negative(),
                         n.is_negative() ^ d.is_negative(),
-                        "q sign n={:?} d={:?}", n, d,
+                        "q sign n={:?} d={:?}",
+                        n,
+                        d,
                     );
                 }
                 if !r.is_zero() {
-                    assert_eq!(r.is_negative(), n.is_negative(),
-                               "r sign n={:?} d={:?}", n, d);
+                    assert_eq!(
+                        r.is_negative(),
+                        n.is_negative(),
+                        "r sign n={:?} d={:?}",
+                        n,
+                        d
+                    );
                 }
             }
         }

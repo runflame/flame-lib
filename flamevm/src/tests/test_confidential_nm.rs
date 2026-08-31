@@ -492,11 +492,11 @@ fn confidential_1_to_1_with_fee() {
     program = push_taproot_proof_to_program(program, &cp);
     program = program
         .push_int(1024u64) // gas
-        .push_int(0u64)    // k args
+        .push_int(0u64) // k args
         .open()
-        .verify()          // assert success marker
-        .drop_();          // discard count
-    // Fee opcode: pushes WideToken(-3, FLAME_FLAVOR).
+        .verify() // assert success marker
+        .drop_(); // discard count
+                  // Fee opcode: pushes WideToken(-3, FLAME_FLAVOR).
     program = program.push_int(3u64).fee();
     // Output commitment Strings (witness-bearing prover-side).
     // Clone so the post-prove assertion can still read the
@@ -514,18 +514,14 @@ fn confidential_1_to_1_with_fee() {
         .output();
 
     let prover_result =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
-            .expect("prove ok");
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove ok");
 
     // total_fee picked up the cleartext amount.
     assert_eq!(prover_result.total_fee, 3);
 
     // Txlog layout: Header, Input, Fee(3), Output.
     assert_eq!(prover_result.txlog.len(), 4);
-    assert!(matches!(
-        prover_result.txlog[0],
-        TxEntry::Header(_)
-    ));
+    assert!(matches!(prover_result.txlog[0], TxEntry::Header(_)));
     match &prover_result.txlog[1] {
         TxEntry::Input(id) => assert_eq!(*id, expected_input_id),
         _ => panic!("txlog[1] must be Input"),
@@ -549,7 +545,9 @@ fn confidential_1_to_1_with_fee() {
 
     // Verifier round-trip.
     let txid_p = prover_result.txid;
-    let TxResult { bytecode, proof, .. } = prover_result;
+    let TxResult {
+        bytecode, proof, ..
+    } = prover_result;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     let v = Verifier::verify(
@@ -588,16 +586,13 @@ fn confidential_unbalanced_inputs_rejected() {
         predicate_tag: 0xb1,
     }];
     let program = build_confidential_nm_program(&inputs, &outputs);
-    let prove_attempt = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-    );
+    let prove_attempt = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000);
     match prove_attempt {
         Err(_) => { /* prover refused — good */ }
         Ok(result) => {
-            let TxResult { bytecode, proof, .. } = result;
+            let TxResult {
+                bytecode, proof, ..
+            } = result;
             let proof = proof.expect("proof set");
             let pc_gens_v = PedersenGens::default();
             let err = Verifier::verify(
@@ -635,16 +630,13 @@ fn confidential_flavor_mismatch_rejected() {
         predicate_tag: 0xb1,
     }];
     let program = build_confidential_nm_program(&inputs, &outputs);
-    let prove_attempt = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-    );
+    let prove_attempt = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000);
     match prove_attempt {
         Err(_) => { /* prover refused — good */ }
         Ok(result) => {
-            let TxResult { bytecode, proof, .. } = result;
+            let TxResult {
+                bytecode, proof, ..
+            } = result;
             let proof = proof.expect("proof set");
             let pc_gens_v = PedersenGens::default();
             let err = Verifier::verify(
@@ -715,16 +707,13 @@ fn confidential_with_fee_undersupply_rejected() {
         .push_point(*out_pred.as_bytes())
         .output();
 
-    let prove_attempt = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-    );
+    let prove_attempt = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000);
     match prove_attempt {
         Err(_) => { /* prover refused the bad witness — good */ }
         Ok(result) => {
-            let TxResult { bytecode, proof, .. } = result;
+            let TxResult {
+                bytecode, proof, ..
+            } = result;
             let proof = proof.expect("proof set");
             let pc_gens_v = PedersenGens::default();
             let err = Verifier::verify(

@@ -79,8 +79,8 @@ fn cell_opcode_rejects_non_portable_payload() {
     // Merlin is always non-portable.
     let script = ScriptBuilder::new()
         .push_str(String::from(Vec::<u8>::new())) // empty label
-        .transcript()                                  // → Merlin (non-portable)
-        .push_int(1u64)                            // count
+        .transcript() // → Merlin (non-portable)
+        .push_int(1u64) // count
         .push_point([0xaa; 32])
         .cell()
         .to_bytecode();
@@ -173,19 +173,23 @@ fn open_with_valid_taproot_proof_runs_program() {
     // the payload inside the isolated CellOpen frame and returns 0
     // items to parent (ADR 0013). On clean return parent's stack
     // gets [count=0, success=1].
-    let inner_program = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
+    let inner_program = ScriptBuilder::new()
+        .drop_()
+        .push_int(0u64)
+        .return_()
+        .to_bytecode();
     let (tree, cp) = build_predicate_with_program(&inner_program, 7);
     let pred_point = tree.point;
 
     let mut program = ScriptBuilder::new()
-        .push_int(5u64)                                // payload
-        .push_int(1u64)                                // count
+        .push_int(5u64) // payload
+        .push_int(1u64) // count
         .push_point(*pred_point.as_bytes())
         .cell();
     program = push_taproot_proof_to_program(program, &cp);
     let script = program
-        .push_int(1024u64)                             // gas
-        .push_int(0u64)                                // k = 0 args
+        .push_int(1024u64) // gas
+        .push_int(0u64) // k = 0 args
         .open()
         .to_bytecode();
     let mut vm = vm_with_script(script);
@@ -200,8 +204,16 @@ fn open_with_valid_taproot_proof_runs_program() {
 #[test]
 fn open_with_wrong_program_hard_fails() {
     // Predicate commits to one leaf; taproot_proof claims a different one.
-    let real_program = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
-    let fake_program = ScriptBuilder::new().nop().push_int(0u64).return_().to_bytecode();
+    let real_program = ScriptBuilder::new()
+        .drop_()
+        .push_int(0u64)
+        .return_()
+        .to_bytecode();
+    let fake_program = ScriptBuilder::new()
+        .nop()
+        .push_int(0u64)
+        .return_()
+        .to_bytecode();
     let (tree, _real_cp) = build_predicate_with_program(&real_program, 7);
     let cp = TaprootProof {
         internal_key: tree.internal_key,
@@ -260,22 +272,15 @@ fn open_preserves_alloc_witnesses_via_script_string() {
     // Single-leaf predicate tree whose leaf == inner_bytes. The
     // NUMS-unspendable internal key means the only spend path is
     // the script leaf.
-    let tree = PredicateTree::scripts_only(
-        vec![inner_bytes.clone()],
-        TEST_BLINDING_KEY,
-    )
-    .expect("scripts_only tree");
+    let tree = PredicateTree::scripts_only(vec![inner_bytes.clone()], TEST_BLINDING_KEY)
+        .expect("scripts_only tree");
     let cp = tree.taproot_proof_for(0).expect("taproot_proof for leaf 0");
     let pred_point = tree.point;
 
     // Construct the input cell with an empty payload — the witness
     // we care about lives in the unlock script, not the payload.
-    let cell = Cell::new(
-        Predicate::opaque(pred_point),
-        Anchor([0xa1; 32]),
-        vec![],
-    )
-    .expect("empty payload is portable");
+    let cell = Cell::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![])
+        .expect("empty payload is portable");
     let cell_bytes = encode_cell_to_bytes(&cell);
 
     // Outer ScriptBuilder:
@@ -291,9 +296,7 @@ fn open_preserves_alloc_witnesses_via_script_string() {
         .input()
         .push_point(*cp.internal_key.as_bytes());
     for (i, h) in cp.neighbors.iter().enumerate() {
-        outer = outer
-            .push_str(String::from(h.to_vec()))
-            .push_int(i as u64);
+        outer = outer.push_str(String::from(h.to_vec())).push_int(i as u64);
     }
     let outer = outer
         .push_int(cp.neighbors.len() as u64)
@@ -301,17 +304,19 @@ fn open_preserves_alloc_witnesses_via_script_string() {
         .push_str(String::from(cp.position.clone()))
         .push_script(inner) // ← Script(instrs), witnesses intact
         .push_int(1024u64) // gas
-        .push_int(0u64)    // k args
+        .push_int(0u64) // k args
         .open()
-        .verify()  // pops success marker (1); errors if 0
-        .drop_();  // pops count
+        .verify() // pops success marker (1); errors if 0
+        .drop_(); // pops count
 
     // Prover round-trip.
     let pc_gens = bulletproofs::PedersenGens::default();
     let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000)
         .expect("prove with witness-bearing open");
     let txid_p = result.txid;
-    let TxResult { bytecode, proof, .. } = result;
+    let TxResult {
+        bytecode, proof, ..
+    } = result;
     let proof = proof.expect("proof set");
 
     // Verifier round-trip — same bytecode, no witnesses on the
@@ -336,7 +341,9 @@ fn open_passes_args_after_payload() {
     // frame the stack starts as [10, 20, 30] (payload then args). The
     // leaf drops all three and exits via `return 0`.
     let inner_program = ScriptBuilder::new()
-        .drop_().drop_().drop_()
+        .drop_()
+        .drop_()
+        .drop_()
         .push_int(0u64)
         .return_()
         .to_bytecode();
@@ -344,16 +351,16 @@ fn open_passes_args_after_payload() {
     let pred_point = tree.point;
 
     let mut program = ScriptBuilder::new()
-        .push_int(10u64)                               // payload
-        .push_int(1u64)                                // count
+        .push_int(10u64) // payload
+        .push_int(1u64) // count
         .push_point(*pred_point.as_bytes())
         .cell();
     program = push_taproot_proof_to_program(program, &cp);
     let script = program
-        .push_int(1024u64)                             // gas
-        .push_int(20u64)                               // arg[0]
-        .push_int(30u64)                               // arg[1]
-        .push_int(2u64)                                // k=2
+        .push_int(1024u64) // gas
+        .push_int(20u64) // arg[0]
+        .push_int(30u64) // arg[1]
+        .push_int(2u64) // k=2
         .open()
         .to_bytecode();
     let mut vm = vm_with_script(script);
@@ -453,11 +460,7 @@ fn predicate_tree_new_validates_inputs() {
     assert_eq!(*tree.internal_key(), Predicate::unspendable_key());
     // scripts_only is the documented convenience wrapper for the same
     // pattern; it must produce an identical tree.
-    let via_helper = PredicateTree::scripts_only(
-        vec![vec![0x1d]],
-        TEST_BLINDING_KEY,
-    )
-    .unwrap();
+    let via_helper = PredicateTree::scripts_only(vec![vec![0x1d]], TEST_BLINDING_KEY).unwrap();
     assert_eq!(via_helper.point, tree.point);
 }
 
@@ -467,24 +470,24 @@ fn scripts_only_predicate_opens_via_program_path() {
     // it, and unlock via `open` with the script-path proof. Leaf
     // `drop, push:0, return` drains the 1-item payload and exits the
     // isolated frame (ADR 0013).
-    let program = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
-    let tree = PredicateTree::scripts_only(
-        vec![program.clone()],
-        TEST_BLINDING_KEY,
-    )
-    .unwrap();
+    let program = ScriptBuilder::new()
+        .drop_()
+        .push_int(0u64)
+        .return_()
+        .to_bytecode();
+    let tree = PredicateTree::scripts_only(vec![program.clone()], TEST_BLINDING_KEY).unwrap();
     let cp = tree.taproot_proof_for(0).unwrap();
     let pred_point = tree.point;
 
     let mut p = ScriptBuilder::new()
-        .push_int(5u64)                                // payload
-        .push_int(1u64)                                // count = 1
+        .push_int(5u64) // payload
+        .push_int(1u64) // count = 1
         .push_point(*pred_point.as_bytes())
         .cell();
     p = push_taproot_proof_to_program(p, &cp);
     let script = p
-        .push_int(1024u64)                             // gas
-        .push_int(0u64)                                // 0 args
+        .push_int(1024u64) // gas
+        .push_int(0u64) // 0 args
         .open()
         .to_bytecode();
     let mut vm = vm_with_script(script);
@@ -502,13 +505,14 @@ fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
     // exit the isolated CellOpen frame with zero results.
     let leaf = |drops: usize| -> Vec<u8> {
         let mut p = ScriptBuilder::new();
-        for _ in 0..drops { p = p.drop_(); }
+        for _ in 0..drops {
+            p = p.drop_();
+        }
         p.push_int(0u64).return_().to_bytecode()
     };
     let programs: Vec<Vec<u8>> = vec![leaf(1), leaf(2), leaf(3)];
     for i in 0..programs.len() {
-        let (tree, cp) =
-            build_multi_leaf_predicate(programs.clone(), i, 11 + i as u64);
+        let (tree, cp) = build_multi_leaf_predicate(programs.clone(), i, 11 + i as u64);
         let pred_point = tree.point;
 
         // payload = i+1 copies of `5` (so program of length i+1
@@ -523,16 +527,11 @@ fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
             .push_point(*pred_point.as_bytes())
             .cell();
         p = push_taproot_proof_to_program(p, &cp);
-        let script = p
-            .push_int(1024u64)
-            .push_int(0u64)
-            .open()
-            .to_bytecode();
+        let script = p.push_int(1024u64).push_int(0u64).open().to_bytecode();
         let mut vm = vm_with_script(script);
         vm.last_anchor = Some(Anchor([0x42; 32]));
-        run_to_end(&mut vm).unwrap_or_else(|e| {
-            panic!("program index {} did not open cleanly: {:?}", i, e)
-        });
+        run_to_end(&mut vm)
+            .unwrap_or_else(|e| panic!("program index {} did not open cleanly: {:?}", i, e));
         // Parent stack: [count=0, success=1].
         assert_eq!(
             vm.current_call.stack.len(),
@@ -551,12 +550,13 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
     // but with the path that opens program[1]. Verification must fail.
     let leaf = |drops: usize| -> Vec<u8> {
         let mut p = ScriptBuilder::new();
-        for _ in 0..drops { p = p.drop_(); }
+        for _ in 0..drops {
+            p = p.drop_();
+        }
         p.push_int(0u64).return_().to_bytecode()
     };
     let programs: Vec<Vec<u8>> = vec![leaf(1), leaf(2), leaf(3)];
-    let (tree, valid_cp_for_1) =
-        build_multi_leaf_predicate(programs.clone(), 1, 7);
+    let (tree, valid_cp_for_1) = build_multi_leaf_predicate(programs.clone(), 1, 7);
     // Forge: use program[0]'s bytes but program[1]'s path/neighbors.
     let forged = TaprootProof {
         internal_key: valid_cp_for_1.internal_key,
@@ -572,11 +572,7 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
         .push_point(*pred_point.as_bytes())
         .cell();
     p = push_taproot_proof_to_program(p, &forged);
-    let script = p
-        .push_int(1024u64)
-        .push_int(0u64)
-        .open()
-        .to_bytecode();
+    let script = p.push_int(1024u64).push_int(0u64).open().to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     assert!(matches!(
@@ -589,12 +585,8 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
 fn taproot_proof_for_out_of_range_index_errors() {
     let secret = Scalar::from(1u64);
     let ik = (RISTRETTO_BASEPOINT_TABLE * &secret).compress();
-    let tree = PredicateTree::new(
-        Some(ik),
-        vec![vec![0x1d], vec![0x1c]],
-        TEST_BLINDING_KEY,
-    )
-    .unwrap();
+    let tree =
+        PredicateTree::new(Some(ik), vec![vec![0x1d], vec![0x1c]], TEST_BLINDING_KEY).unwrap();
     assert!(matches!(
         tree.taproot_proof_for(5).unwrap_err(),
         VMError::ProgramIndexOutOfRange
@@ -619,8 +611,8 @@ fn output_rejects_cell_as_payload_item() {
         .push_int(5u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
-        .cell()                            // cell A → on stack
-        .push_int(1u64)                    // outer payload count = 1
+        .cell() // cell A → on stack
+        .push_int(1u64) // outer payload count = 1
         .push_point([0xbb; 32])
         .output()
         .to_bytecode();
@@ -639,10 +631,10 @@ fn cell_opcode_rejects_cell_as_payload_item() {
         .push_int(5u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
-        .cell()                            // cell A
-        .push_int(1u64)                    // outer payload count
+        .cell() // cell A
+        .push_int(1u64) // outer payload count
         .push_point([0xbb; 32])
-        .cell()                            // attempted outer cell
+        .cell() // attempted outer cell
         .to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
@@ -660,11 +652,11 @@ fn output_rejects_dict_containing_a_cell() {
         .push_int(5u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
-        .cell()                            // cell A on stack
-        .push_int(0u64)                    // key = 0
-        .push_int(1u64)                    // 1 pair
-        .dict()                            // non-portable Dict { 0: cellA }
-        .push_int(1u64)                    // outer count = 1
+        .cell() // cell A on stack
+        .push_int(0u64) // key = 0
+        .push_int(1u64) // 1 pair
+        .dict() // non-portable Dict { 0: cellA }
+        .push_int(1u64) // outer count = 1
         .push_point([0xbb; 32])
         .output()
         .to_bytecode();
@@ -698,8 +690,7 @@ fn cell_decode_rejects_wrong_outer_count() {
     // Simpler: replace the *whole* string with a list-Dict of count 0,
     // which is canonical but wrong arity.
     bytes.clear();
-    write_list_prefix(&mut bytes, 0)
-        .expect("write prefix");
+    write_list_prefix(&mut bytes, 0).expect("write prefix");
     let err = decode_cell_dropping_ok(&bytes).unwrap_err();
     assert!(matches!(err, VMError::MalformedCellEncoding));
 }
@@ -709,20 +700,11 @@ fn cell_decode_rejects_wrong_anchor_length() {
     // Build an outer list-Dict of 3 entries by hand: Point predicate,
     // a String of wrong (31-byte) anchor, then an empty payload list.
     let mut bytes = Vec::new();
-    write_list_prefix(&mut bytes, 3)
-        .expect("write outer prefix");
-    write_value(
-        &mut bytes,
-        &Value::Point(Point::from_bytes([0xaa; 32])),
-    )
-    .expect("write point");
-    write_value(
-        &mut bytes,
-        &Value::String(String::from(vec![0u8; 31])),
-    )
-    .expect("write short anchor");
-    write_list_prefix(&mut bytes, 0)
-        .expect("write payload prefix");
+    write_list_prefix(&mut bytes, 3).expect("write outer prefix");
+    write_value(&mut bytes, &Value::Point(Point::from_bytes([0xaa; 32]))).expect("write point");
+    write_value(&mut bytes, &Value::String(String::from(vec![0u8; 31])))
+        .expect("write short anchor");
+    write_list_prefix(&mut bytes, 0).expect("write payload prefix");
     let err = decode_cell_dropping_ok(&bytes).unwrap_err();
     assert!(matches!(err, VMError::MalformedCellEncoding));
 }
@@ -739,16 +721,8 @@ fn cell_decode_rejects_nested_nonportable_payload_at_cell_boundary() {
 
     let mut bytes = Vec::new();
     write_list_prefix(&mut bytes, 3).unwrap();
-    write_value(
-        &mut bytes,
-        &Value::Point(Point::from_bytes([0xaa; 32])),
-    )
-    .unwrap();
-    write_value(
-        &mut bytes,
-        &Value::String(String::from(vec![0u8; 32])),
-    )
-    .unwrap();
+    write_value(&mut bytes, &Value::Point(Point::from_bytes([0xaa; 32]))).unwrap();
+    write_value(&mut bytes, &Value::String(String::from(vec![0u8; 32]))).unwrap();
     write_list_prefix(&mut bytes, 1).unwrap();
     write_value(&mut bytes, &Value::Dict(outer)).unwrap();
 
@@ -759,20 +733,11 @@ fn cell_decode_rejects_nested_nonportable_payload_at_cell_boundary() {
 fn cell_decode_rejects_predicate_not_a_point() {
     // First entry is a String where a Point is expected.
     let mut bytes = Vec::new();
-    write_list_prefix(&mut bytes, 3)
-        .expect("write outer prefix");
-    write_value(
-        &mut bytes,
-        &Value::String(String::from(vec![0u8; 32])),
-    )
-    .expect("write wrong predicate");
-    write_value(
-        &mut bytes,
-        &Value::String(String::from(vec![0u8; 32])),
-    )
-    .expect("write anchor");
-    write_list_prefix(&mut bytes, 0)
-        .expect("write payload prefix");
+    write_list_prefix(&mut bytes, 3).expect("write outer prefix");
+    write_value(&mut bytes, &Value::String(String::from(vec![0u8; 32])))
+        .expect("write wrong predicate");
+    write_value(&mut bytes, &Value::String(String::from(vec![0u8; 32]))).expect("write anchor");
+    write_list_prefix(&mut bytes, 0).expect("write payload prefix");
     let err = decode_cell_dropping_ok(&bytes).unwrap_err();
     assert!(matches!(err, VMError::MalformedCellEncoding));
 }
@@ -880,7 +845,11 @@ fn input_then_output_anchor_chain() {
     // The consumed cell's handle is still on the stack. For a stand-alone
     // anchor-chain test we don't care about authorizing it — drop it
     // directly so we can exercise `op_output` against the seeded anchor.
-    let _consumed = vm.pop_value().expect("pop value").to_cell().expect("pop cell handle");
+    let _consumed = vm
+        .pop_value()
+        .expect("pop value")
+        .to_cell()
+        .expect("pop cell handle");
 
     // Step 2: build an output through the real op_output handler.
     // Stack pre-output: [payload(5), count(1), predicate(Point)].
@@ -939,7 +908,6 @@ fn input_via_step_external_dispatch() {
 
 #[test]
 fn external_tx_one_input_one_output_via_signtx() {
-
     // A single external transaction consumes one cell (authorized
     // via signtx — the cell holder signs the whole tx via the
     // envelope) and emits a single fresh cell.
@@ -952,8 +920,7 @@ fn external_tx_one_input_one_output_via_signtx() {
     // 1. Construct the input cell, capture its identity, encode it.
     let input_cell = fixture_cell();
     let input_id = input_cell.id();
-    let input_predicate_point =
-        input_cell.predicate.to_point();
+    let input_predicate_point = input_cell.predicate.to_point();
     // After op_input, last_anchor == Anchor(input.id()) — split design
     // (no extra ratchet at input). When output consumes via split,
     // the output's stored anchor is the LEFT half.
@@ -979,11 +946,11 @@ fn external_tx_one_input_one_output_via_signtx() {
         .push_str(String::from(input_bytes))
         .input()
         .signtx()
-        .drop_()                           // drop count
-        .drop_()                           // drop "hello"
-        .drop_()                           // drop 7
+        .drop_() // drop count
+        .drop_() // drop "hello"
+        .drop_() // drop 7
         .push_int(42u64)
-        .push_int(1u64)                    // count = 1
+        .push_int(1u64) // count = 1
         .push_point(out_pred_bytes)
         .output()
         .to_bytecode();
@@ -1017,10 +984,7 @@ fn external_tx_one_input_one_output_via_signtx() {
                 _ => panic!("output payload[0] must be Int253(42)"),
             }
             // Output predicate is the point we pushed.
-            assert_eq!(
-                c.predicate.to_point().as_bytes(),
-                &out_pred_bytes
-            );
+            assert_eq!(c.predicate.to_point().as_bytes(), &out_pred_bytes);
             c.anchor
         }
         _ => panic!("txlog[2] must be Output"),
@@ -1035,7 +999,9 @@ fn external_tx_one_input_one_output_via_signtx() {
     //     key matching the input cell's predicate point.
     assert_eq!(vm.deferred_sigs.len(), 1);
     match &vm.deferred_sigs[0] {
-        DeferredSig::TxBound { verification_key, .. } => {
+        DeferredSig::TxBound {
+            verification_key, ..
+        } => {
             assert_eq!(
                 verification_key.as_bytes(),
                 input_predicate_point.as_bytes()
@@ -1055,7 +1021,6 @@ fn external_tx_one_input_one_output_via_signtx() {
 
 #[test]
 fn external_tx_two_inputs_two_outputs_via_open() {
-
     // External tx consumes two distinct cells via `open` (each
     // unlocked by a valid Taproot TaprootProof against its predicate
     // tree), then emits two fresh output cells. No `signtx` /
@@ -1064,7 +1029,11 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     // Each input cell's program is `drop` — it consumes the single
     // payload item the cell-open pours onto the stack.
 
-    let prog = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
+    let prog = ScriptBuilder::new()
+        .drop_()
+        .push_int(0u64)
+        .return_()
+        .to_bytecode();
 
     let (tree1, cp1) = build_predicate_with_program(&prog, 11);
     let cell1 = Cell::new(
@@ -1116,19 +1085,25 @@ fn external_tx_two_inputs_two_outputs_via_open() {
         .push_str(String::from(cell1_bytes))
         .input();
     p = push_taproot_proof_to_program(p, &cp1);
-    p = p.push_int(1024u64).push_int(0u64).open()
-        .verify().drop_();   // verify pops success marker; drop discards count
+    p = p.push_int(1024u64).push_int(0u64).open().verify().drop_(); // verify pops success marker; drop discards count
 
     // Consume cell 2
     p = p.push_str(String::from(cell2_bytes)).input();
     p = push_taproot_proof_to_program(p, &cp2);
-    p = p.push_int(1024u64).push_int(0u64).open()
-        .verify().drop_();
+    p = p.push_int(1024u64).push_int(0u64).open().verify().drop_();
 
     // Emit output 1
-    p = p.push_int(9u64).push_int(1u64).push_point(out1_pred_bytes).output();
+    p = p
+        .push_int(9u64)
+        .push_int(1u64)
+        .push_point(out1_pred_bytes)
+        .output();
     // Emit output 2
-    p = p.push_int(10u64).push_int(1u64).push_point(out2_pred_bytes).output();
+    p = p
+        .push_int(10u64)
+        .push_int(1u64)
+        .push_point(out2_pred_bytes)
+        .output();
 
     let script = p.to_bytecode();
 
@@ -1149,10 +1124,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
         _ => panic!("txlog[2] must be Input(cell2)"),
     }
     let (out1, out2) = match (&vm.txlog[3], &vm.txlog[4]) {
-        (
-            TxEntry::Output(o1),
-            TxEntry::Output(o2),
-        ) => (o1, o2),
+        (TxEntry::Output(o1), TxEntry::Output(o2)) => (o1, o2),
         _ => panic!("txlog[3..5] must be Output entries"),
     };
 
@@ -1213,8 +1185,8 @@ fn op_open_selfid_errors_no_actor_context() {
     let (tree, cp) = build_predicate_with_program(&inner, 5);
     let pred_point = tree.point;
     let mut p = ScriptBuilder::new()
-        .push_int(5u64)                                // payload
-        .push_int(1u64)                                // count
+        .push_int(5u64) // payload
+        .push_int(1u64) // count
         .push_point(*pred_point.as_bytes())
         .cell();
     p = push_taproot_proof_to_program(p, &cp);
@@ -1243,14 +1215,11 @@ fn op_open_return_arity_mismatch_errors() {
     let (tree, cp) = build_predicate_with_program(&inner, 0);
     let pred_point = tree.point;
     let mut p = ScriptBuilder::new()
-        .push_int(0u64)                                // payload count = 0
+        .push_int(0u64) // payload count = 0
         .push_point(*pred_point.as_bytes())
         .cell();
     p = push_taproot_proof_to_program(p, &cp);
-    let script = p
-        .push_int(1024u64).push_int(0u64)
-        .open()
-        .to_bytecode();
+    let script = p.push_int(1024u64).push_int(0u64).open().to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
@@ -1301,17 +1270,14 @@ fn op_open_cs_blocked_when_external_context_false() {
         external_context: false,
         caller_id: None,
     };
-    let child = CallFrame::new(
-        vec![Instruction::Alloc(None)],
-        child_kind,
-        500,
-    );
+    let child = CallFrame::new(vec![Instruction::Alloc(None)], child_kind, 500);
     let mut vm = VM::new(dummy_header(), parent);
     let parent_saved = std::mem::replace(&mut vm.current_call, child);
     vm.call_stack.push(parent_saved);
     // alloc errors ExternalOnly inside the child; step catches and
     // unwinds, leaving `[count=0, success=0]` on the parent's stack.
-    vm.step_internal().expect("step ok — error swallowed into marker");
+    vm.step_internal()
+        .expect("step ok — error swallowed into marker");
     assert!(vm.call_stack.is_empty());
     assert_eq!(vm.current_call.stack.len(), 2);
     assert_int(&vm.current_call.stack[0], Int253::ZERO);

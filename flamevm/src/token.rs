@@ -3,8 +3,8 @@
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
 
-use crate::constraints::Commitment;
 use crate::actor::ActorID;
+use crate::constraints::Commitment;
 use crate::{Int253, Predicate, String};
 
 /// Canonical flavor of the native Flame token.
@@ -210,10 +210,7 @@ pub fn flavor_from_actor(actor: &ActorID, tag: &String) -> Int253 {
 /// label as `flavor_from_actor` but a distinct first message (`b"predicate"`
 /// vs `b"actor"`), so actor- and predicate-issued flavors can never collide
 /// even when their 32-byte identities are numerically equal.
-pub fn flavor_from_predicate(
-    predicate: &Predicate,
-    tag: &String,
-) -> Int253 {
+pub fn flavor_from_predicate(predicate: &Predicate, tag: &String) -> Int253 {
     let mut t = Transcript::new(b"flamevm.issuepriv.flavor");
     let point_bytes = predicate.to_point().to_bytes();
     t.append_message(b"predicate", &point_bytes);

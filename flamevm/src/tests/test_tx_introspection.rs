@@ -34,10 +34,7 @@ fn timelock_reports_bip65_kind() {
 
 #[test]
 fn version_and_gas_limit_report_frame_values() {
-    let script = ScriptBuilder::new()
-        .version()
-        .gaslimit()
-        .to_bytecode();
+    let script = ScriptBuilder::new().version().gaslimit().to_bytecode();
     let mut vm = external_vm(
         TxHeader {
             version: 42,
@@ -106,8 +103,7 @@ fn storage_introspection_requires_registry() {
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(vec![Instruction::Usage], kind, 1_000_000)
-            .with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(vec![Instruction::Usage], kind, 1_000_000).with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
         vm.step_internal(),

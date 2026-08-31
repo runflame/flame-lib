@@ -7,8 +7,7 @@ use crate::cell::Predicate;
 use crate::crypto::Point;
 use crate::dict::Dict;
 use crate::encoding::{
-    read_list_prefix, read_string, read_value, write_admitted_value,
-    write_list_prefix,
+    read_list_prefix, read_string, read_value, write_admitted_value, write_list_prefix,
 };
 use crate::int253::Int253;
 use crate::string::String;
@@ -25,11 +24,7 @@ pub enum Address {
 
     /// Message routing target: deliver `args` to `dst` with the given gas
     /// allotment. A selector, when used, is an ordinary argument.
-    MessageTarget {
-        dst: ActorID,
-        args: Dict,
-        gas: u64,
-    },
+    MessageTarget { dst: ActorID, args: Dict, gas: u64 },
 }
 
 impl Address {
@@ -63,17 +58,10 @@ impl Encodable for Address {
         match self {
             Address::Predicate(p) => {
                 write_list_prefix(w, 2)?;
-                write_admitted_value(
-                    w,
-                    &Value::Int253(Int253::from(Self::TAG_PREDICATE as u64)),
-                )?;
+                write_admitted_value(w, &Value::Int253(Int253::from(Self::TAG_PREDICATE as u64)))?;
                 write_admitted_value(w, &Value::Point(Point::from_compressed(p.to_point())))
             }
-            Address::MessageTarget {
-                dst,
-                args,
-                gas,
-            } => {
+            Address::MessageTarget { dst, args, gas } => {
                 write_list_prefix(w, 4)?;
                 write_admitted_value(
                     w,
@@ -140,11 +128,7 @@ impl Decodable for Address {
                     }
                     _ => return Err(ReadError::InvalidFormat),
                 };
-                Ok(Address::MessageTarget {
-                    dst,
-                    args,
-                    gas,
-                })
+                Ok(Address::MessageTarget { dst, args, gas })
             }
             _ => Err(ReadError::InvalidFormat),
         }

@@ -3,11 +3,11 @@ use crate::Cell;
 use crate::Dict;
 use crate::Int253;
 use crate::Merlin;
+use crate::MultiscalarMul;
 use crate::Point;
 use crate::String;
 use crate::{ClearToken, Token, WideToken};
 use crate::{Constraint, Expression, SecretConstraint, Variable};
-use crate::MultiscalarMul;
 
 #[rustfmt::skip]
 impl Value {
@@ -100,12 +100,10 @@ impl Value {
         match self {
             Value::Int253(v) => Ok(Value::Int253(-v)),
             Value::Expression(e) => Ok(Value::Expression(-e)),
-            Value::Point(p) => Ok(Value::MultiscalarMul(
-                MultiscalarMul::term(
-                    -curve25519_dalek::scalar::Scalar::ONE,
-                    p.to_compressed(),
-                ),
-            )),
+            Value::Point(p) => Ok(Value::MultiscalarMul(MultiscalarMul::term(
+                -curve25519_dalek::scalar::Scalar::ONE,
+                p.to_compressed(),
+            ))),
             Value::MultiscalarMul(m) => Ok(Value::MultiscalarMul(m.negated())),
             _ => Err(VMError::TypeNotInt253),
         }
@@ -137,7 +135,6 @@ impl Value {
         }
     }
 
-
     /// _x_ **not** — cleartext if Int253; structural if Constraint.
     #[allow(clippy::should_implement_trait)]
     pub fn not(self) -> Result<Value, VMError> {
@@ -154,8 +151,8 @@ impl Value {
     /// _a b_ **and** — cleartext if both Int253; structural if a
     /// Constraint is involved (caller in external context).
     pub fn and(self, other: Value, can_constrain: bool) -> Result<Value, VMError> {
-        let either_constraint = matches!(self, Value::Constraint(_))
-            || matches!(other, Value::Constraint(_));
+        let either_constraint =
+            matches!(self, Value::Constraint(_)) || matches!(other, Value::Constraint(_));
         if can_constrain && either_constraint {
             let a = self.to_constraint()?;
             let b = other.to_constraint()?;
@@ -163,15 +160,19 @@ impl Value {
         } else {
             let a = self.to_int253()?;
             let b = other.to_int253()?;
-            let r = if !a.is_zero() && !b.is_zero() { 1u64 } else { 0u64 };
+            let r = if !a.is_zero() && !b.is_zero() {
+                1u64
+            } else {
+                0u64
+            };
             Ok(Value::Int253(Int253::from(r)))
         }
     }
 
     /// _a b_ **or** — mirror of [`Value::and`].
     pub fn or(self, other: Value, can_constrain: bool) -> Result<Value, VMError> {
-        let either_constraint = matches!(self, Value::Constraint(_))
-            || matches!(other, Value::Constraint(_));
+        let either_constraint =
+            matches!(self, Value::Constraint(_)) || matches!(other, Value::Constraint(_));
         if can_constrain && either_constraint {
             let a = self.to_constraint()?;
             let b = other.to_constraint()?;
@@ -179,7 +180,11 @@ impl Value {
         } else {
             let a = self.to_int253()?;
             let b = other.to_int253()?;
-            let r = if !a.is_zero() || !b.is_zero() { 1u64 } else { 0u64 };
+            let r = if !a.is_zero() || !b.is_zero() {
+                1u64
+            } else {
+                0u64
+            };
             Ok(Value::Int253(Int253::from(r)))
         }
     }
@@ -241,7 +246,10 @@ mod capability_tests {
         );
         assert!(!dict.is_droppable());
         dict.remove(&Int253::ONE);
-        assert!(!dict.is_droppable(), "a non-empty tainted dict stays non-droppable");
+        assert!(
+            !dict.is_droppable(),
+            "a non-empty tainted dict stays non-droppable"
+        );
         dict.remove(&Int253::ZERO);
         assert!(dict.is_droppable(), "a fully drained dict is droppable");
     }
@@ -376,9 +384,7 @@ impl Value {
             // Compare by canonical wire bytes so witness-bearing
             // variants (Point / Scalar / Script / Cell) match the
             // verifier's view of the same string.
-            (Value::String(a), Value::String(b)) => {
-                Ok(a.to_bytes_vec() == b.to_bytes_vec())
-            }
+            (Value::String(a), Value::String(b)) => Ok(a.to_bytes_vec() == b.to_bytes_vec()),
             (Value::Point(a), Value::Point(b)) => Ok(a.to_bytes() == b.to_bytes()),
             // Cross-variant always unequal.
             (sa, sb) if core::mem::discriminant(sa) != core::mem::discriminant(sb) => Ok(false),

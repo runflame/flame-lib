@@ -16,11 +16,7 @@ fn eq_external_strings_peek_compare_not_cs_lift() {
         .eq();
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(
-            prog.into_instructions(),
-            CallKind::ExternalRoot,
-            1_000_000,
-        ),
+        CallFrame::new(prog.into_instructions(), CallKind::ExternalRoot, 1_000_000),
     );
     let mut prover = Prover::new(&pc_gens);
     vm.step_external(&mut prover).expect("push a");
@@ -46,8 +42,7 @@ fn range_proof_accepts_in_range_value() {
         .alloc(Some(Int253::from(42u64)))
         .eq()
         .verify();
-    let _pp =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
         bytecode, proof, ..
     } = _pp;
@@ -154,8 +149,7 @@ fn constraint_and_overload_combines_two_constraints() {
         // AND the two Constraints
         .and()
         .verify();
-    let _pp =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
         bytecode, proof, ..
     } = _pp;
@@ -186,8 +180,7 @@ fn constraint_or_overload_combines_two_constraints() {
         .eq()
         .or()
         .verify();
-    let _pp =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
         bytecode, proof, ..
     } = _pp;
@@ -214,8 +207,7 @@ fn constraint_not_overload_negates_constraint() {
         .eq()
         .not()
         .verify();
-    let _pp =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
         bytecode, proof, ..
     } = _pp;
@@ -293,11 +285,8 @@ fn range_in_internal_context_errors_external_only() {
 fn open_with_inner(inner: ScriptBuilder, recover_failed_cell: bool) -> ScriptBuilder {
     let inner_bytes = inner.to_bytecode();
     let recovery = ScriptBuilder::new().push_int(0u64).return_().to_bytecode();
-    let tree = PredicateTree::scripts_only(
-        vec![inner_bytes.clone(), recovery],
-        TEST_BLINDING_KEY,
-    )
-    .expect("scripts_only tree");
+    let tree = PredicateTree::scripts_only(vec![inner_bytes.clone(), recovery], TEST_BLINDING_KEY)
+        .expect("scripts_only tree");
     let cp = tree.taproot_proof_for(0).expect("cp");
     let recovery_cp = tree.taproot_proof_for(1).expect("recovery cp");
     let pred_point = tree.point;

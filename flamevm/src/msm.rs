@@ -52,12 +52,16 @@ pub struct MultiscalarMul {
 impl MultiscalarMul {
     /// Constructs an MSM with a single term `(1, point)`.
     pub fn from_point(p: &Point) -> Self {
-        Self { terms: vec![(Scalar::ONE, p.to_compressed())] }
+        Self {
+            terms: vec![(Scalar::ONE, p.to_compressed())],
+        }
     }
 
     /// Constructs an MSM with a single term `(scalar, point)`.
     pub fn term(s: Scalar, p: CompressedRistretto) -> Self {
-        Self { terms: vec![(s, p)] }
+        Self {
+            terms: vec![(s, p)],
+        }
     }
 
     /// Term count. Useful for tests and gas accounting.

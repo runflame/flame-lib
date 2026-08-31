@@ -456,8 +456,7 @@ pub use crate::token::flavor_from_actor as test_flavor_from_actor;
 
 /// Convenience: builds a Token via the cleartext constructor for tests.
 pub(crate) fn make_cleartext_token(qty: u64, flv: u64) -> Token {
-    Token::cleartext(Int253::from(qty), Int253::from(flv))
-        .expect("u64 quantity is in range")
+    Token::cleartext(Int253::from(qty), Int253::from(flv)).expect("u64 quantity is in range")
 }
 
 /// Builds a VM running `script` under InternalRoot with a specific

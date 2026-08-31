@@ -18,9 +18,7 @@ fn token_cleartext_constructor_packs_unblinded_commitments() {
 fn token_cleartext_constructor_rejects_out_of_range_qty() {
     let flv = Int253::from(7u64);
     assert!(Token::cleartext(Int253::from(-1i64), flv).is_none());
-    assert!(
-        Token::cleartext(Int253::from(u128::from(u64::MAX) + 1), flv).is_none()
-    );
+    assert!(Token::cleartext(Int253::from(u128::from(u64::MAX) + 1), flv).is_none());
 }
 
 #[test]
@@ -33,7 +31,11 @@ fn negative_cleartoken_can_be_allocated_without_becoming_a_token() {
     )
     .expect("negative ClearToken is a valid mix input");
     assert_eq!(
-        allocated.assignment.as_deref().expect("cleartext assignment").q,
+        allocated
+            .assignment
+            .as_deref()
+            .expect("cleartext assignment")
+            .q,
         -spacesuit::SignedInteger::from(5u64)
     );
 }
@@ -196,8 +198,7 @@ fn issuepub_clear_path_emits_txlog_and_returns_cleartoken() {
 
     // Stack: [ClearToken(7, flavor)].
     assert_eq!(vm.current_call.stack.len(), 1);
-    let expected_flv =
-        test_flavor_from_actor(&actor, &String::from(b"gold".to_vec()));
+    let expected_flv = test_flavor_from_actor(&actor, &String::from(b"gold".to_vec()));
     match &vm.current_call.stack[0] {
         Value::ClearToken(t) => {
             assert_eq!(t.qty(), Int253::from(7u64));
@@ -245,8 +246,11 @@ fn issuepub_at_external_root_errors_actor_context() {
     let mut vm = VM::new(
         dummy_header(),
         CallFrame::new(
-            ScriptBuilder::parse(&script).expect("parse").into_instructions(),
-            CallKind::ExternalRoot, 1_000_000,
+            ScriptBuilder::parse(&script)
+                .expect("parse")
+                .into_instructions(),
+            CallKind::ExternalRoot,
+            1_000_000,
         ),
     );
     let mut delegate = make_stub_delegate();
@@ -305,9 +309,7 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
     }
 
     // After `return k=1`: parent stack = [Token, k=1, success=1].
-    let predicate = Predicate::opaque(
-        curve25519_dalek::ristretto::CompressedRistretto([0u8; 32]),
-    );
+    let predicate = Predicate::opaque(curve25519_dalek::ristretto::CompressedRistretto([0u8; 32]));
     let expected_flv = flavor_from_predicate(&predicate, &tag_str);
     assert_eq!(vm.current_call.stack.len(), 3);
     match &vm.current_call.stack[0] {
@@ -351,8 +353,11 @@ fn issuepriv_at_external_root_errors_predicate_context() {
     let mut vm = VM::new(
         dummy_header(),
         CallFrame::new(
-            ScriptBuilder::parse(&script).expect("parse").into_instructions(),
-            CallKind::ExternalRoot, 1_000_000,
+            ScriptBuilder::parse(&script)
+                .expect("parse")
+                .into_instructions(),
+            CallKind::ExternalRoot,
+            1_000_000,
         ),
     );
     let mut delegate = make_stub_delegate();
@@ -378,14 +383,17 @@ fn issuepriv_in_internal_context_yields_failure_marker() {
         caller_id: None,
     };
     let child = CallFrame::new(
-        ScriptBuilder::parse(&script).expect("parse").into_instructions(),
+        ScriptBuilder::parse(&script)
+            .expect("parse")
+            .into_instructions(),
         child_kind,
         500,
     );
     let mut vm = VM::new(dummy_header(), parent);
     let p = core::mem::replace(&mut vm.current_call, child);
     vm.call_stack.push(p);
-    vm.step_internal().expect("step ok — error swallowed into marker");
+    vm.step_internal()
+        .expect("step ok — error swallowed into marker");
     // Child frame unwound back into parent (ExternalRoot).
     assert!(vm.call_stack.is_empty());
     // Parent carries `[count=0, success=0]` (this direct child has no escrow).
@@ -430,21 +438,14 @@ fn issuepriv_prove_then_verify_end_to_end() {
     let inner_bytes = inner.to_bytecode();
 
     // Single-leaf NUMS-only predicate tree.
-    let tree = PredicateTree::scripts_only(
-        vec![inner_bytes.clone()],
-        TEST_BLINDING_KEY,
-    )
-    .expect("scripts_only tree");
+    let tree = PredicateTree::scripts_only(vec![inner_bytes.clone()], TEST_BLINDING_KEY)
+        .expect("scripts_only tree");
     let cp = tree.taproot_proof_for(0).expect("taproot_proof for leaf 0");
     let pred_point = tree.point;
 
     // Cell with empty payload — the witness rides on the open arg.
-    let cell = Cell::new(
-        Predicate::opaque(pred_point),
-        Anchor([0xa1; 32]),
-        vec![],
-    )
-    .expect("empty payload is portable");
+    let cell = Cell::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![])
+        .expect("empty payload is portable");
     let cell_bytes = encode_cell_to_bytes(&cell);
 
     // Outer:
@@ -460,27 +461,26 @@ fn issuepriv_prove_then_verify_end_to_end() {
         .input()
         .push_point(*cp.internal_key.as_bytes());
     for (i, h) in cp.neighbors.iter().enumerate() {
-        outer = outer
-            .push_str(String::from(h.to_vec()))
-            .push_int(i as u64);
+        outer = outer.push_str(String::from(h.to_vec())).push_int(i as u64);
     }
     let outer = outer
         .push_int(cp.neighbors.len() as u64)
         .dict()
         .push_str(String::from(cp.position.clone()))
-        .push_script(inner)                                  // witness-bearing
-        .push_int(20_000u64)                                 // gas
+        .push_script(inner) // witness-bearing
+        .push_int(20_000u64) // gas
         .push_str(String::commitment(qty_commit.clone())) // qty witness arg
-        .push_int(1u64)                                      // k = 1 arg
+        .push_int(1u64) // k = 1 arg
         .open()
-        .verify()                                            // pops success marker (1)
-        .drop_();                                            // pops count (0)
+        .verify() // pops success marker (1)
+        .drop_(); // pops count (0)
 
     // Prove.
-    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000)
-        .expect("prove ok");
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000).expect("prove ok");
     let txid_p = result.txid;
-    let TxResult { bytecode, proof, .. } = result;
+    let TxResult {
+        bytecode, proof, ..
+    } = result;
     let proof = proof.expect("proof set");
 
     // Verify against the same bytecode — the verifier sees no
@@ -506,15 +506,22 @@ fn issuepriv_prove_then_verify_end_to_end() {
     let expected_flv = flavor_from_predicate(&predicate, &tag_str);
     let expected_flv_pt = Commitment::unblinded(expected_flv).to_point();
     let expected_qty_pt = qty_commit.to_point();
-    let has_issue = verified.txlog.iter().any(|e| matches!(
-        e,
-        TxEntry::IssuePriv(q, f) if *q == expected_qty_pt && *f == expected_flv_pt,
-    ));
-    assert!(has_issue, "verifier's txlog must contain IssuePriv(qty, flv)");
-    let has_retire = verified.txlog.iter().any(|e| matches!(
-        e,
-        TxEntry::Retire(q, f) if *q == expected_qty_pt && *f == expected_flv_pt,
-    ));
+    let has_issue = verified.txlog.iter().any(|e| {
+        matches!(
+            e,
+            TxEntry::IssuePriv(q, f) if *q == expected_qty_pt && *f == expected_flv_pt,
+        )
+    });
+    assert!(
+        has_issue,
+        "verifier's txlog must contain IssuePriv(qty, flv)"
+    );
+    let has_retire = verified.txlog.iter().any(|e| {
+        matches!(
+            e,
+            TxEntry::Retire(q, f) if *q == expected_qty_pt && *f == expected_flv_pt,
+        )
+    });
     assert!(has_retire, "verifier's txlog must contain matching Retire");
 }
 
@@ -531,7 +538,8 @@ fn issuepriv_with_int_qty_yields_failure_marker() {
     let mut vm = vm_with_nested_child_script(script);
     vm.step_internal().expect("step push:7");
     vm.step_internal().expect("step pushstr");
-    vm.step_internal().expect("step issuepriv — error swallowed into marker");
+    vm.step_internal()
+        .expect("step issuepriv — error swallowed into marker");
     assert!(vm.call_stack.is_empty());
     assert_eq!(vm.current_call.stack.len(), 2);
     assert_int(&vm.current_call.stack[0], Int253::ZERO);
@@ -604,7 +612,11 @@ fn retire_non_token_errors_typenottoken() {
 fn borrow_clear_path_returns_neg_pos_pair() {
     // Stack: [qty=5, flv=7] then `borrow` → [neg5, pos5].
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_int(5u64).push_int(7u64).borrow().to_bytecode(),
+        ScriptBuilder::new()
+            .push_int(5u64)
+            .push_int(7u64)
+            .borrow()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).expect("borrow ok");
     assert_eq!(vm.current_call.stack.len(), 2);
@@ -630,7 +642,11 @@ fn borrow_clear_path_returns_neg_pos_pair() {
 fn borrow_with_point_errors_tokenrequirescs() {
     // pushpoint, push:7, borrow → Point qty → CS required.
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_point([0u8; 32]).push_int(7u64).borrow().to_bytecode(),
+        ScriptBuilder::new()
+            .push_point([0u8; 32])
+            .push_int(7u64)
+            .borrow()
+            .to_bytecode(),
     );
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::TokenRequiresCS));
@@ -722,10 +738,8 @@ fn issuepubflv_pushes_correct_flavor() {
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).expect("issuepubflv ok");
-    let expected = test_flavor_from_actor(
-        &ActorID::Hash(actor_bytes),
-        &String::from(b"gold".to_vec()),
-    );
+    let expected =
+        test_flavor_from_actor(&ActorID::Hash(actor_bytes), &String::from(b"gold".to_vec()));
     assert_eq!(vm.current_call.stack.len(), 1);
     assert_int(&vm.current_call.stack[0], expected);
 }
@@ -733,7 +747,7 @@ fn issuepubflv_pushes_correct_flavor() {
 #[test]
 fn issuepubflv_rejects_non_32_byte_cid() {
     let script = ScriptBuilder::new()
-        .push_str(String::from(vec![0xab; 16]))     // bad 16-byte cid
+        .push_str(String::from(vec![0xab; 16])) // bad 16-byte cid
         .push_str(String::from(b"gold".to_vec()))
         .issuepubflv()
         .to_bytecode();
@@ -753,13 +767,8 @@ fn issueprivflv_pushes_correct_flavor() {
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).expect("issueprivflv ok");
-    let predicate = Predicate::opaque(
-        curve25519_dalek::ristretto::CompressedRistretto(pred_bytes),
-    );
-    let expected = flavor_from_predicate(
-        &predicate,
-        &String::from(b"gold".to_vec()),
-    );
+    let predicate = Predicate::opaque(curve25519_dalek::ristretto::CompressedRistretto(pred_bytes));
+    let expected = flavor_from_predicate(&predicate, &String::from(b"gold".to_vec()));
     assert_eq!(vm.current_call.stack.len(), 1);
     assert_int(&vm.current_call.stack[0], expected);
 }
@@ -767,7 +776,7 @@ fn issueprivflv_pushes_correct_flavor() {
 #[test]
 fn issueprivflv_rejects_non_32_byte_predicate() {
     let script = ScriptBuilder::new()
-        .push_str(String::from(vec![0xcd; 16]))     // bad 16-byte predicate
+        .push_str(String::from(vec![0xcd; 16])) // bad 16-byte predicate
         .push_str(String::from(b"gold".to_vec()))
         .issueprivflv()
         .to_bytecode();

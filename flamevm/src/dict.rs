@@ -131,9 +131,11 @@ impl Dict {
     /// Logical heap work needed for a Rust-level rollback clone. Used only
     /// for gas charging; VM copyability remains governed by `try_clone`.
     pub(crate) fn clone_gas(&self) -> u64 {
-        self.entries.values().fold(self.entries.len() as u64, |gas, value| {
-            gas.saturating_add(value.clone_gas())
-        })
+        self.entries
+            .values()
+            .fold(self.entries.len() as u64, |gas, value| {
+                gas.saturating_add(value.clone_gas())
+            })
     }
 
     /// VM-level clone — always fails: dicts are non-copyable.
@@ -183,7 +185,9 @@ mod tests {
     use super::*;
     use crate::{Merlin, String};
 
-    fn v(n: u64) -> Value { Value::Int253(Int253::from(n)) }
+    fn v(n: u64) -> Value {
+        Value::Int253(Int253::from(n))
+    }
 
     #[test]
     fn empty_dict() {
@@ -201,7 +205,10 @@ mod tests {
         assert!(d.insert(Int253::from(1u64), v(10)).is_none());
         assert!(d.insert(Int253::from(3u64), v(30)).is_none());
         let keys: Vec<_> = d.entries().map(|(k, _)| *k).collect();
-        assert_eq!(keys, vec![Int253::from(1u64), Int253::from(3u64), Int253::from(5u64)]);
+        assert_eq!(
+            keys,
+            vec![Int253::from(1u64), Int253::from(3u64), Int253::from(5u64)]
+        );
     }
 
     #[test]
@@ -224,7 +231,10 @@ mod tests {
     fn get_present_and_absent() {
         let mut d = Dict::new();
         d.insert(Int253::from(1u64), v(10));
-        d.insert(Int253::from(99u64), Value::String(String::from(b"hi".to_vec())));
+        d.insert(
+            Int253::from(99u64),
+            Value::String(String::from(b"hi".to_vec())),
+        );
         assert!(d.get(&Int253::from(50u64)).is_none());
         match d.get(&Int253::from(99u64)) {
             Some(Value::String(s)) => assert_eq!(s.as_opaque().unwrap(), b"hi"),
@@ -269,7 +279,10 @@ mod tests {
         assert_eq!(d.len(), 3);
         assert!(d.is_portable());
         let keys: Vec<_> = d.entries().map(|(k, _)| *k).collect();
-        assert_eq!(keys, vec![Int253::from(0u64), Int253::from(1u64), Int253::from(2u64)]);
+        assert_eq!(
+            keys,
+            vec![Int253::from(0u64), Int253::from(1u64), Int253::from(2u64)]
+        );
     }
 
     #[test]

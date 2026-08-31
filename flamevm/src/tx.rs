@@ -12,9 +12,9 @@ use crate::actor::{code_root, state_root, ActorID, ActorRegistry};
 use crate::cell::{Cell, CellID};
 use crate::encoding::{write_admitted_value, write_int253};
 use crate::errors::VMError;
-use crate::script::ScriptBuilder;
-use crate::prover::Prover;
 use crate::message::Message;
+use crate::prover::Prover;
+use crate::script::ScriptBuilder;
 use crate::verifier::Verifier;
 use crate::vm::{BlockContext, DeferredSig, VM};
 use crate::{Int253, Value};
@@ -311,9 +311,10 @@ impl ScriptBuilder {
             .deferred_sigs
             .iter()
             .filter_map(|s| match s {
-                DeferredSig::TxBound { verification_key, cell_id } => {
-                    Some((*verification_key, *cell_id))
-                }
+                DeferredSig::TxBound {
+                    verification_key,
+                    cell_id,
+                } => Some((*verification_key, *cell_id)),
                 DeferredSig::Explicit { .. } => None,
             })
             .collect();
@@ -366,7 +367,10 @@ impl Message {
     ) -> Result<InternalTx, VMError> {
         // Internal-tx header: fixed default for now — its source is part
         // of the block envelope design.
-        let header = TxHeader { version: 1, locktime: 0 };
+        let header = TxHeader {
+            version: 1,
+            locktime: 0,
+        };
         let result = VM::execute_internal(header, self, registry, block)?;
         Ok(InternalTx {
             log: TxLog(result.txlog),
@@ -378,7 +382,6 @@ impl Message {
         })
     }
 }
-
 
 /// Transaction ID is a unique 32-byte identifier of a transaction effects represented by `TxLog`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -419,10 +422,7 @@ pub enum TxEntry {
     /// canonical actor id and full constructor code so state-machine replay
     /// does not need the original Message. The initial state is the canonical
     /// empty state.
-    ActorDeploy {
-        actor: ActorID,
-        code: Vec<u8>,
-    },
+    ActorDeploy { actor: ActorID, code: Vec<u8> },
 
     /// Output: a newly sealed cell, emitted by the `output` opcode.
     Output(Cell),
@@ -467,19 +467,13 @@ pub enum TxEntry {
     /// state_root(&state))` — i.e. the merkle leaf commits to the
     /// canonical state root, not the full bytes, just as
     /// `Output(Cell)`'s leaf commits to `cell.id()`.
-    ActorSave {
-        actor: ActorID,
-        state: Value,
-    },
+    ActorSave { actor: ActorID, state: Value },
 
     /// Actor-code replacement recorded by `setcode`. Carries the full
     /// new code blob for state-machine replay; the merkle leaf commits
     /// to `(actor.to_hash(), code_root(&code))`. Symmetric with
     /// `ActorSave`. See ADR 0018.
-    SetCode {
-        actor: ActorID,
-        code: Vec<u8>,
-    },
+    SetCode { actor: ActorID, code: Vec<u8> },
 
     /// Outbound asynchronous message scheduled by `op_send`. Carries
     /// the full [`Message`](Message) — its `anchor` is
@@ -679,7 +673,12 @@ impl MerkleItem for TxEntry {
                 // delivered with.
                 t.append_message(b"send", msg.id().as_bytes());
             }
-            TxEntry::StoragePurchase { actor, bytes, expiry_height, fee_sparks } => {
+            TxEntry::StoragePurchase {
+                actor,
+                bytes,
+                expiry_height,
+                fee_sparks,
+            } => {
                 t.append_message(b"storage.actor", &actor.to_hash());
                 t.append_message(b"storage.bytes", &bytes.to_le_bytes());
                 t.append_message(b"storage.expiry", &expiry_height.to_le_bytes());
@@ -784,7 +783,12 @@ impl Encodable for TxEntry {
                 w.write_u8(b"txentry.tag", Self::TAG_SEND)?;
                 msg.encode(w)
             }
-            TxEntry::StoragePurchase { actor, bytes, expiry_height, fee_sparks } => {
+            TxEntry::StoragePurchase {
+                actor,
+                bytes,
+                expiry_height,
+                fee_sparks,
+            } => {
                 w.write_u8(b"txentry.tag", Self::TAG_STORAGE_PURCHASE)?;
                 actor.to_canonical().encode(w)?;
                 w.write_u64(b"storage.bytes", *bytes)?;

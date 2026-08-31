@@ -275,7 +275,10 @@ fn read_int253_with_tag(r: &mut impl Reader, tag: u8) -> Result<Int253, ReadErro
         INT_NEG1 => Ok(Int253::from(-1i64)),
         INT_NU8 => {
             let b = r.read_u8()?;
-            Ok(Int253::from_parts(true, Scalar::from(NU8_BASE + (b as u64))))
+            Ok(Int253::from_parts(
+                true,
+                Scalar::from(NU8_BASE + (b as u64)),
+            ))
         }
         INT_NU32 => {
             let w = r.read_u32()? as u64;
@@ -435,10 +438,7 @@ pub fn read_value(r: &mut impl Reader) -> Result<Option<Value>, ReadError> {
     read_value_with_depth(r, 0)
 }
 
-fn read_value_with_depth(
-    r: &mut impl Reader,
-    depth: u32,
-) -> Result<Option<Value>, ReadError> {
+fn read_value_with_depth(r: &mut impl Reader, depth: u32) -> Result<Option<Value>, ReadError> {
     if depth >= MAX_DEPTH {
         return Err(ReadError::InvalidFormat);
     }
@@ -538,10 +538,7 @@ fn read_value_with_depth(
 
 /// Writes a `Dict`. Uses the list-style encoding when keys are
 /// sequential 0, 1, 2, ...; otherwise uses the dict-style encoding.
-pub(crate) fn write_dict(
-    w: &mut impl Writer,
-    dict: &Dict,
-) -> Result<(), ValueEncodeError> {
+pub(crate) fn write_dict(w: &mut impl Writer, dict: &Dict) -> Result<(), ValueEncodeError> {
     if keys_are_sequential(dict.entries().map(|(k, _)| k)) {
         write_list_prefix(w, dict.len())?;
         for (_, v) in dict.entries() {
@@ -561,10 +558,7 @@ pub(crate) fn write_dict(
 /// portability policy. Negative ClearTokens and representable non-portable
 /// Dicts are accepted; VM-only variants with no byte format return
 /// [`ValueEncodeError::UnsupportedType`].
-pub(crate) fn write_value(
-    w: &mut impl Writer,
-    val: &Value,
-) -> Result<(), ValueEncodeError> {
+pub(crate) fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), ValueEncodeError> {
     match val {
         Value::Int253(i) => Ok(write_int253(w, i)?),
         Value::String(s) => Ok(write_string(w, s)?),
@@ -597,10 +591,7 @@ pub(crate) fn write_value(
 
 /// Writes a value already admitted to a domain whose invariant guarantees a
 /// canonical representation. This does not perform a portability check.
-pub(crate) fn write_admitted_value(
-    w: &mut impl Writer,
-    val: &Value,
-) -> Result<(), WriteError> {
+pub(crate) fn write_admitted_value(w: &mut impl Writer, val: &Value) -> Result<(), WriteError> {
     match write_value(w, val) {
         Ok(()) => Ok(()),
         Err(ValueEncodeError::Writer(error)) => Err(error),
@@ -691,16 +682,28 @@ mod tests {
             (Int253::from(315u64), "3c00000000"),
             (Int253::from(PU32_TOP), "3cffffffff"),
             (Int253::from(PU64_BASE), "3d0000000000000000"),
-            (Int253::from(PU64_BASE) + Int253::from(u64::MAX), "3dffffffffffffffff"),
-            (positive_full, "3e3b01000001000000010000000000000000000000000000000000000000000000"),
+            (
+                Int253::from(PU64_BASE) + Int253::from(u64::MAX),
+                "3dffffffffffffffff",
+            ),
+            (
+                positive_full,
+                "3e3b01000001000000010000000000000000000000000000000000000000000000",
+            ),
             (Int253::from(-1i64), "3f"),
             (Int253::from(-2i64), "4000"),
             (Int253::from(-257i64), "40ff"),
             (Int253::from(-258i64), "4100000000"),
             (-Int253::from(NU32_TOP), "41ffffffff"),
             (-Int253::from(NU64_BASE), "420000000000000000"),
-            (-(Int253::from(NU64_BASE) + Int253::from(u64::MAX)), "42ffffffffffffffff"),
-            (negative_full, "430201000001000000010000000000000000000000000000000000000000000080"),
+            (
+                -(Int253::from(NU64_BASE) + Int253::from(u64::MAX)),
+                "42ffffffffffffffff",
+            ),
+            (
+                negative_full,
+                "430201000001000000010000000000000000000000000000000000000000000080",
+            ),
         ] {
             assert_int_wire(value, expected);
         }
@@ -710,7 +713,10 @@ mod tests {
     fn golden_supported_value_tags() {
         let values = [
             (Value::Int253(Int253::from(7u64)), "07".to_owned()),
-            (Value::String(String::from(vec![0xaa, 0xbb])), "46aabb".to_owned()),
+            (
+                Value::String(String::from(vec![0xaa, 0xbb])),
+                "46aabb".to_owned(),
+            ),
             (
                 Value::Dict(Dict::from_values(vec![
                     Value::Int253(Int253::ONE),
@@ -718,11 +724,14 @@ mod tests {
                 ])),
                 "820102".to_owned(),
             ),
-            ({
-                let mut dict = Dict::new();
-                dict.insert(Int253::from(2u64), Value::Int253(Int253::from(3u64)));
-                Value::Dict(dict)
-            }, "bd0203".to_owned()),
+            (
+                {
+                    let mut dict = Dict::new();
+                    dict.insert(Int253::from(2u64), Value::Int253(Int253::from(3u64)));
+                    Value::Dict(dict)
+                },
+                "bd0203".to_owned(),
+            ),
             (
                 Value::Point(Point::from_compressed(CompressedRistretto([0x11; 32]))),
                 format!("f8{}", "11".repeat(32)),
@@ -895,10 +904,7 @@ mod tests {
 
     #[test]
     fn negative_cleartoken_encoding_is_domain_neutral() {
-        let value = Value::ClearToken(ClearToken::new(
-            Int253::from(-1i64),
-            Int253::ZERO,
-        ));
+        let value = Value::ClearToken(ClearToken::new(Int253::from(-1i64), Int253::ZERO));
         let mut encoded = Vec::new();
         write_value(&mut encoded, &value).unwrap();
 
@@ -947,10 +953,10 @@ mod tests {
         // re-encode → bytes equal. Decoded Token holds Closed
         // commitments; original holds Open ones, so we compare bytes
         // and structural shape rather than struct equality.
-        let original = Value::Token(Token::cleartext(
-            Int253::from(123u64),
-            Int253::from(7u64),
-        ).expect("test quantity is in range"));
+        let original = Value::Token(
+            Token::cleartext(Int253::from(123u64), Int253::from(7u64))
+                .expect("test quantity is in range"),
+        );
         let mut buf = Vec::new();
         write_value(&mut buf, &original).expect("encodes");
         // Wire shape: 1 tag byte + 32 qty bytes + 32 flv bytes.
@@ -992,16 +998,15 @@ mod tests {
 
     #[test]
     fn cleartoken_encode_decode_roundtrip() {
-        let original = Value::ClearToken(ClearToken::new(
-            Int253::from(5u64),
-            Int253::from(7u64),
-        ));
+        let original = Value::ClearToken(ClearToken::new(Int253::from(5u64), Int253::from(7u64)));
         let mut buf = Vec::new();
         write_value(&mut buf, &original).expect("encodes");
         assert_eq!(buf[0], CLEAR_TOKEN_TAG);
 
         let mut r = buf.as_slice();
-        let decoded = read_value(&mut r).expect("decodes").expect("cleartoken tag");
+        let decoded = read_value(&mut r)
+            .expect("decodes")
+            .expect("cleartoken tag");
         match &decoded {
             Value::ClearToken(t) => {
                 assert_eq!(t.qty(), Int253::from(5u64));

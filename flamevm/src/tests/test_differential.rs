@@ -6,8 +6,8 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::tx::TxID;
 use crate::encoding::read_value;
+use crate::tx::TxID;
 
 fn internal_kind() -> CallKind {
     CallKind::InternalRoot {
@@ -22,7 +22,9 @@ fn assert_backends_agree(bytecode: &[u8]) {
     let mut vm_instrs = VM::new(
         dummy_header(),
         CallFrame::new(
-            ScriptBuilder::parse(bytecode).expect("parse").into_instructions(),
+            ScriptBuilder::parse(bytecode)
+                .expect("parse")
+                .into_instructions(),
             internal_kind(),
             100_000,
         )
@@ -57,7 +59,11 @@ fn assert_backends_agree(bytecode: &[u8]) {
 fn backends_agree_across_sample_programs() {
     let programs: Vec<ScriptBuilder> = vec![
         // Arithmetic, clean exit.
-        ScriptBuilder::new().push_int(2u64).push_int(3u64).add().drop_(),
+        ScriptBuilder::new()
+            .push_int(2u64)
+            .push_int(3u64)
+            .add()
+            .drop_(),
         // Countdown loop (label re-visit + back-edges).
         ScriptBuilder::new()
             .push_int(3u64)
@@ -73,7 +79,11 @@ fn backends_agree_across_sample_programs() {
             .build_if_else(|p| p.push_int(9u64), |p| p.push_int(8u64))
             .drop_(),
         // Forward jump skip-scan over dead code.
-        ScriptBuilder::new().jump(0).push_int(7u64).push_int(8u64).label(0),
+        ScriptBuilder::new()
+            .jump(0)
+            .push_int(7u64)
+            .push_int(8u64)
+            .label(0),
         // String growth (charges allocation gas identically) + type probe.
         ScriptBuilder::new()
             .push_str(String::from(b"ab".to_vec()))
@@ -83,8 +93,8 @@ fn backends_agree_across_sample_programs() {
         ScriptBuilder::new().push_int(5u64).type_().drop_().drop_(),
         // Failing programs must fail identically.
         ScriptBuilder::new().push_int(0u64).verify(),
-        ScriptBuilder::new().label(1), // out-of-order label
-        ScriptBuilder::new().jump(9), // missing label
+        ScriptBuilder::new().label(1),       // out-of-order label
+        ScriptBuilder::new().jump(9),        // missing label
         ScriptBuilder::new().push_int(7u64), // dirty stack at exit
     ];
     for p in programs {

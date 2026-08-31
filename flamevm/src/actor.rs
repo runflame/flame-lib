@@ -135,8 +135,7 @@ pub fn empty_state() -> Value {
 /// portable values are wire-encodable.
 pub fn state_root(state: &Value) -> [u8; 32] {
     let mut buf = Vec::new();
-    write_value(&mut buf, state)
-        .expect("actor state in valid registry context is wire-encodable");
+    write_value(&mut buf, state).expect("actor state in valid registry context is wire-encodable");
     let mut t = Transcript::new(b"flamevm.actor.state.root");
     t.append_message(b"state", &buf);
     let mut h = [0u8; 32];
@@ -248,11 +247,7 @@ pub trait ActorRegistry {
 
     /// Checks the post-mutation `usage <= capacity(current_height)` invariant.
     /// This is also the final gate for a provisionally deployed actor.
-    fn validate_actor_storage(
-        &self,
-        actor: &ActorID,
-        current_height: u64,
-    ) -> Result<(), VMError>;
+    fn validate_actor_storage(&self, actor: &ActorID, current_height: u64) -> Result<(), VMError>;
 
     /// True iff a row exists in the registry for `actor`. Used by
     /// `op_call` / message delivery to distinguish "actor doesn't exist"
@@ -295,10 +290,5 @@ pub trait ActorRegistry {
     /// Installs a provisional actor with no lease. Its constructor may buy
     /// storage; the containing transaction commits only after
     /// [`Self::validate_actor_storage`] succeeds.
-    fn deploy(
-        &mut self,
-        id: ActorID,
-        code: Vec<u8>,
-        state: Value,
-    ) -> Result<(), VMError>;
+    fn deploy(&mut self, id: ActorID, code: Vec<u8>, state: Value) -> Result<(), VMError>;
 }

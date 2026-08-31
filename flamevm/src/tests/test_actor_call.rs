@@ -153,7 +153,8 @@ fn failed_internal_decrypt_restores_call_arguments() {
     vm.push_value(Value::Token(token));
 
     while vm.call_stack.is_empty() {
-        vm.step_internal_with_registry(&mut reg).expect("enter callee");
+        vm.step_internal_with_registry(&mut reg)
+            .expect("enter callee");
     }
     while !vm.call_stack.is_empty() {
         vm.step_internal_with_registry(&mut reg)

@@ -127,10 +127,7 @@ impl Constraint {
     pub fn eq(e1: Expression, e2: Expression) -> Self {
         match (e1, e2) {
             (Expression::Constant(a), Expression::Constant(b)) => Constraint::Cleartext(a == b),
-            (e1, e2) => Constraint::Secret(SecretConstraint::Eq(
-                Box::new(e1),
-                Box::new(e2),
-            )),
+            (e1, e2) => Constraint::Secret(SecretConstraint::Eq(Box::new(e1), Box::new(e2))),
         }
     }
 
@@ -225,11 +222,7 @@ impl SecretConstraint {
                 let (xy_assg, xw_assg, y_assg) = match x_assg {
                     Some(x) => {
                         let is_zero = x.ct_eq(&Scalar::ZERO);
-                        let y = Scalar::conditional_select(
-                            &Scalar::ZERO,
-                            &Scalar::ONE,
-                            is_zero,
-                        );
+                        let y = Scalar::conditional_select(&Scalar::ZERO, &Scalar::ONE, is_zero);
                         let w = Scalar::conditional_select(&x, &Scalar::ONE, is_zero);
                         let w = w.invert();
                         (Some((x, y)), Some((x, w)), Some(y))

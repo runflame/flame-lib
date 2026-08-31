@@ -143,19 +143,25 @@ fn golden_txlog_wire_encoding() {
             actor: actor.clone(),
             code: vec![0x1d],
         },
-        TxEntry::Output(Cell::new(
-            Predicate::opaque(CR([0x77; 32])),
-            Anchor([0x88; 32]),
-            vec![Value::Int253(Int253::from(9u64))],
-        ).expect("payload is portable")),
-        TxEntry::Send(Message::new(
-            actor,
-            None,
-            Anchor([0x99; 32]),
-            Vec::new(),
-            50,
-            Predicate::opaque(CR([0xaa; 32])),
-        ).expect("message payload is portable")),
+        TxEntry::Output(
+            Cell::new(
+                Predicate::opaque(CR([0x77; 32])),
+                Anchor([0x88; 32]),
+                vec![Value::Int253(Int253::from(9u64))],
+            )
+            .expect("payload is portable"),
+        ),
+        TxEntry::Send(
+            Message::new(
+                actor,
+                None,
+                Anchor([0x99; 32]),
+                Vec::new(),
+                50,
+                Predicate::opaque(CR([0xaa; 32])),
+            )
+            .expect("message payload is portable"),
+        ),
     ]);
     let wire = log.encode_to_vec();
     let hex: std::string::String = wire.iter().map(|b| format!("{b:02x}")).collect();

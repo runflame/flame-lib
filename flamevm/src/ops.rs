@@ -7,9 +7,9 @@ use readerwriter::{Encodable, Reader, WriteError, Writer};
 use crate::crypto::Point;
 use crate::encoding::{read_subvarint, write_subvarint};
 use crate::errors::VMError;
-use core::convert::TryFrom;
 use crate::int253::Int253;
 use crate::string::String;
+use core::convert::TryFrom;
 
 // ── Opcode bytes ─────────────────────────────────────────────────────
 
@@ -169,7 +169,7 @@ const OP_HEIGHT: u8 = 0xf2;
 pub enum Instruction {
     PushInt(Int253),       // ø push → int
     PushStr(String),       // ø pushstr → str
-    PushPoint(Point), // ø pushpoint → point (witness-bearing on prover)
+    PushPoint(Point),      // ø pushpoint → point (witness-bearing on prover)
     PushToken,             // flv pushtoken → token
     Drop,                  // x drop → ø
     Nop,                   // ø nop → ø
@@ -226,46 +226,46 @@ pub enum Instruction {
     Log,                   // s log → ø
     Amount,                // t amount → t qty flv
     IssuePriv,             // qty:Variable tag issuepriv    → T  (predicate context)
-    IssuePrivFlv,          // pred tag    issueprivflv      → int (consumer-side flv helper for issuepriv)
-    IssuePub,              // qty:Int253 tag issuepub → CT (InternalRoot / ActorCall)
-    IssuePubFlv,           // cid tag     issuepubflv       → int (consumer-side flv helper for issuepub)
-    Retire,                // t retire → ø
-    Borrow,                // qty flv borrow → -T +T
-    Merge,                 // a b merge → {c 1 | a b 0}
-    Split,                 // a q split → a' b
-    Mix,                   // tokens… cmts… m n mix → tokens
-    Decrypt,               // T f f' q q' decrypt → CT
-    Verify,                // x verify → ø
-    Fee,                   // qty fee → -WT
-    Label(u32),            // ø label:n → ø  (operand: label number)
-    Jump(u32),             // ø jump:n → ø   (unconditional)
-    JumpIf(u32),           // x jumpif:n → ø (jump iff x ≠ 0)
-    Return,                // a(k-1) … a(0) k return → ø
-    Type,                  // x type → x code
-    Input,                 // s input → cell
-    Cell,                  // items… k pred cell → cell
-    Output,                // items… k pred output → ø
-    Open,                  // cell ik nbrs pos script gas portable-args… k open → results… k'
-    Send,                  // portable-args… k refund gas addr send → ø (anonymous outside actor frames)
-    Call,                  // portable-args… k gas addr call → results… k' 1 | args… k 0 (actor-only)
-    Load,                  // ø load → value (actor-only)
-    Save,                  // value save → ø (actor-only)
-    Setcode,               // code setcode → ø (actor-only)
-    AddStorage,            // q addstorage → {debt 1 | 0} (actor-only)
-    QuoteStorage,          // q quotestorage → {fee 1 | 0} (actor-only)
-    Signtx,                // cell signtx → items… k (external-only)
-    Signcall,               // cell script sig gas portable-args… m signcall → results… k'
-    Timelock,              // ø timelock → n {0|1}
-    Version,               // ø version → n
-    Selfid,                // ø selfid → s (actor-only)
-    Anchor,                // ø anchor → s
-    Gas,                   // ø gas → n
-    Usage,                 // ø usage → n (actor-only)
-    Callerid,              // ø callerid → s (called frame; CellOpen uses read-only id)
-    Gaslimit,              // ø gaslimit → n
-    Capacity,              // h capacity → n (actor-only)
-    Height,                // ø height → n
-    Ext(u8),               // unknown opcode byte; produced by the parser for any unassigned tag
+    IssuePrivFlv, // pred tag    issueprivflv      → int (consumer-side flv helper for issuepriv)
+    IssuePub,     // qty:Int253 tag issuepub → CT (InternalRoot / ActorCall)
+    IssuePubFlv,  // cid tag     issuepubflv       → int (consumer-side flv helper for issuepub)
+    Retire,       // t retire → ø
+    Borrow,       // qty flv borrow → -T +T
+    Merge,        // a b merge → {c 1 | a b 0}
+    Split,        // a q split → a' b
+    Mix,          // tokens… cmts… m n mix → tokens
+    Decrypt,      // T f f' q q' decrypt → CT
+    Verify,       // x verify → ø
+    Fee,          // qty fee → -WT
+    Label(u32),   // ø label:n → ø  (operand: label number)
+    Jump(u32),    // ø jump:n → ø   (unconditional)
+    JumpIf(u32),  // x jumpif:n → ø (jump iff x ≠ 0)
+    Return,       // a(k-1) … a(0) k return → ø
+    Type,         // x type → x code
+    Input,        // s input → cell
+    Cell,         // items… k pred cell → cell
+    Output,       // items… k pred output → ø
+    Open,         // cell ik nbrs pos script gas portable-args… k open → results… k'
+    Send,         // portable-args… k refund gas addr send → ø (anonymous outside actor frames)
+    Call,         // portable-args… k gas addr call → results… k' 1 | args… k 0 (actor-only)
+    Load,         // ø load → value (actor-only)
+    Save,         // value save → ø (actor-only)
+    Setcode,      // code setcode → ø (actor-only)
+    AddStorage,   // q addstorage → {debt 1 | 0} (actor-only)
+    QuoteStorage, // q quotestorage → {fee 1 | 0} (actor-only)
+    Signtx,       // cell signtx → items… k (external-only)
+    Signcall,     // cell script sig gas portable-args… m signcall → results… k'
+    Timelock,     // ø timelock → n {0|1}
+    Version,      // ø version → n
+    Selfid,       // ø selfid → s (actor-only)
+    Anchor,       // ø anchor → s
+    Gas,          // ø gas → n
+    Usage,        // ø usage → n (actor-only)
+    Callerid,     // ø callerid → s (called frame; CellOpen uses read-only id)
+    Gaslimit,     // ø gaslimit → n
+    Capacity,     // h capacity → n (actor-only)
+    Height,       // ø height → n
+    Ext(u8),      // unknown opcode byte; produced by the parser for any unassigned tag
 }
 
 impl Encodable for Instruction {
@@ -409,7 +409,6 @@ impl Encodable for Instruction {
 }
 
 impl Instruction {
-
     /// Heap bytes needed to materialize the next decoded instruction.
     /// Only `pushstr` is variable-sized; inspect its length prefix before
     /// `parse` allocates the owned buffer.
@@ -421,8 +420,7 @@ impl Instruction {
         if opcode != OP_PUSHSTR {
             return Ok(0);
         }
-        let len = read_subvarint(&mut reader)
-            .map_err(|_| VMError::UnexpectedEndOfScript)?;
+        let len = read_subvarint(&mut reader).map_err(|_| VMError::UnexpectedEndOfScript)?;
         let len = usize::try_from(len).map_err(|_| VMError::OutOfGas)?;
         if len > reader.remaining_bytes() {
             return Err(VMError::UnexpectedEndOfScript);
@@ -442,12 +440,12 @@ impl Instruction {
     /// erroring, so future protocol versions can introduce new opcodes
     /// without breaking older verifiers.
     pub fn parse(reader: &mut impl Reader) -> Result<Instruction, VMError> {
-        let byte = reader.read_u8().map_err(|_| VMError::UnexpectedEndOfScript)?;
+        let byte = reader
+            .read_u8()
+            .map_err(|_| VMError::UnexpectedEndOfScript)?;
         match byte {
             // push:k
-            0x00..=OP_PUSH_SMALL_MAX => {
-                Ok(Instruction::PushInt(Int253::from(byte as u64)))
-            }
+            0x00..=OP_PUSH_SMALL_MAX => Ok(Instruction::PushInt(Int253::from(byte as u64))),
             // pushint{8,16,64,128} pos/neg
             OP_PUSHINT8_POS => parse_pushint_n(reader, 1, false),
             OP_PUSHINT8_NEG => parse_pushint_n(reader, 1, true),
@@ -459,8 +457,8 @@ impl Instruction {
             OP_PUSHINT128_NEG => parse_pushint_n(reader, 16, true),
             OP_PUSHINT_FULL => parse_pushint_full(reader),
             OP_PUSHSTR => {
-                let len = read_subvarint(reader)
-                    .map_err(|_| VMError::UnexpectedEndOfScript)? as usize;
+                let len =
+                    read_subvarint(reader).map_err(|_| VMError::UnexpectedEndOfScript)? as usize;
                 // Bound the claimed length against remaining input BEFORE
                 // allocating — a tiny length prefix must not force a giant
                 // allocation on adversarial bytecode.
@@ -597,8 +595,7 @@ fn parse_label_op(
     reader: &mut impl Reader,
     build: fn(u32) -> Instruction,
 ) -> Result<Instruction, VMError> {
-    let n = read_subvarint(reader)
-        .map_err(|_| VMError::UnexpectedEndOfScript)?;
+    let n = read_subvarint(reader).map_err(|_| VMError::UnexpectedEndOfScript)?;
     if n > u32::MAX as u64 {
         return Err(VMError::LabelOutOfOrder);
     }
@@ -630,19 +627,47 @@ fn encode_push_int(i: &Int253, w: &mut impl Writer) -> Result<(), WriteError> {
         buf.copy_from_slice(&mag_bytes[..16]);
         let v = u128::from_le_bytes(buf);
         if v <= u8::MAX as u128 {
-            w.write_u8(b"pushint.tag", if neg { OP_PUSHINT8_NEG } else { OP_PUSHINT8_POS })?;
+            w.write_u8(
+                b"pushint.tag",
+                if neg {
+                    OP_PUSHINT8_NEG
+                } else {
+                    OP_PUSHINT8_POS
+                },
+            )?;
             return w.write_u8(b"pushint8", v as u8);
         }
         if v <= u16::MAX as u128 {
-            w.write_u8(b"pushint.tag", if neg { OP_PUSHINT16_NEG } else { OP_PUSHINT16_POS })?;
+            w.write_u8(
+                b"pushint.tag",
+                if neg {
+                    OP_PUSHINT16_NEG
+                } else {
+                    OP_PUSHINT16_POS
+                },
+            )?;
             return w.write(b"pushint16", &(v as u16).to_le_bytes());
         }
         if v <= u64::MAX as u128 {
-            w.write_u8(b"pushint.tag", if neg { OP_PUSHINT64_NEG } else { OP_PUSHINT64_POS })?;
+            w.write_u8(
+                b"pushint.tag",
+                if neg {
+                    OP_PUSHINT64_NEG
+                } else {
+                    OP_PUSHINT64_POS
+                },
+            )?;
             return w.write(b"pushint64", &(v as u64).to_le_bytes());
         }
         // 16-byte fits but not 8.
-        w.write_u8(b"pushint.tag", if neg { OP_PUSHINT128_NEG } else { OP_PUSHINT128_POS })?;
+        w.write_u8(
+            b"pushint.tag",
+            if neg {
+                OP_PUSHINT128_NEG
+            } else {
+                OP_PUSHINT128_POS
+            },
+        )?;
         return w.write(b"pushint128", &v.to_le_bytes());
     }
 
@@ -709,9 +734,7 @@ mod tests {
     fn bytes(hex: &str) -> Vec<u8> {
         hex.as_bytes()
             .chunks_exact(2)
-            .map(|pair| {
-                u8::from_str_radix(core::str::from_utf8(pair).unwrap(), 16).unwrap()
-            })
+            .map(|pair| u8::from_str_radix(core::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect()
     }
 
@@ -731,7 +754,10 @@ mod tests {
             (Int253::from(u64::MAX), "14ffffffffffffffff"),
             (u64_next, "1600000000000000000100000000000000"),
             (u128_top, "16ffffffffffffffffffffffffffffffff"),
-            (u128_next, "180000000000000000000000000000000001000000000000000000000000000000"),
+            (
+                u128_next,
+                "180000000000000000000000000000000001000000000000000000000000000000",
+            ),
             (Int253::from(-1i64), "1101"),
             (Int253::from(-255i64), "11ff"),
             (-Int253::from(256u64), "130001"),
@@ -740,7 +766,10 @@ mod tests {
             (-Int253::from(u64::MAX), "15ffffffffffffffff"),
             (-u64_next, "1700000000000000000100000000000000"),
             (-u128_top, "17ffffffffffffffffffffffffffffffff"),
-            (-u128_next, "180000000000000000000000000000000001000000000000000000000000000080"),
+            (
+                -u128_next,
+                "180000000000000000000000000000000001000000000000000000000000000080",
+            ),
         ] {
             let encoded = Instruction::PushInt(value).encode_to_vec();
             assert_eq!(encoded, bytes(expected));

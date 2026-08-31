@@ -3,30 +3,30 @@
 use bulletproofs::r1cs;
 use bulletproofs::r1cs::R1CSProof;
 use core::convert::TryFrom;
+use core::mem;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
-use core::mem;
 use merlin::Transcript;
-use readerwriter::{Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer};
+use readerwriter::{
+    Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer,
+};
 
-use crate::errors::VMError;
-use crate::tx::TxHeader;
-use crate::cell::{TaprootProof, Cell, CellID, Predicate};
+use crate::actor::{empty_state, ActorID, ActorRegistry};
+use crate::cell::{Cell, CellID, Predicate, TaprootProof};
 use crate::constraints::Commitment;
+use crate::errors::VMError;
 use crate::fees::CheckedFee;
-use crate::token::{
-    flavor_from_actor, flavor_from_predicate, FLAME_FLAVOR,
-};
-use crate::tx::{TxEntry, TxID};
-use crate::{
-    ClearToken, Constraint, Dict, Expression, Int253, Merlin, Point, String, Token, Value, Variable,
-    WideToken,
-};
+use crate::message::Message;
 use crate::ops::Instruction;
 use crate::script::{Script, ScriptBuilder};
-use crate::actor::{empty_state, ActorID, ActorRegistry};
-use crate::message::Message;
 use crate::string::array32;
+use crate::token::{flavor_from_actor, flavor_from_predicate, FLAME_FLAVOR};
+use crate::tx::TxHeader;
+use crate::tx::{TxEntry, TxID};
+use crate::{
+    ClearToken, Constraint, Dict, Expression, Int253, Merlin, Point, String, Token, Value,
+    Variable, WideToken,
+};
 
 /// Bitcoin BIP-65 convention threshold for distinguishing
 /// `TxHeader::locktime` as a block height vs. a Unix timestamp:
@@ -70,7 +70,9 @@ impl Encodable for Anchor {
 }
 
 impl ExactSizeEncodable for Anchor {
-    fn encoded_size(&self) -> usize { 32 }
+    fn encoded_size(&self) -> usize {
+        32
+    }
 }
 
 impl Decodable for Anchor {
@@ -138,7 +140,6 @@ pub trait Delegate {
         &mut self,
         commitment: &Commitment,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError>;
-
 }
 
 /// No-op [`Delegate`] used by internal-context steps. CS opcodes
@@ -236,9 +237,7 @@ impl CallFrame {
     /// Returns the next instruction; `Ok(None)` at end of program. For
     /// `Script::Opaque` this decodes one instruction at the cursor and
     /// advances by its encoded length.
-    pub(crate) fn next_instruction(
-        &mut self,
-    ) -> Result<Option<Instruction>, VMError> {
+    pub(crate) fn next_instruction(&mut self) -> Result<Option<Instruction>, VMError> {
         let cursor = self.cursor;
         let allocation_bytes = match &self.code {
             Script::Transparent(instrs) => {
@@ -355,10 +354,7 @@ pub enum CallKind {
     },
 
     /// Synchronous actor-to-actor call inside an internal tx.
-    ActorCall {
-        actor: ActorID,
-        caller: ActorID,
-    },
+    ActorCall { actor: ActorID, caller: ActorID },
 
     /// `open` / `signcall` of a cell predicate. `external_context`
     /// snapshots the caller's `is_external()` at frame creation so
@@ -383,7 +379,6 @@ impl CallKind {
         }
     }
 
-
     /// Returns only the caller's canonical id. `CellOpen` stores this
     /// compact form for read-only attribution without inheriting the actor.
     pub fn caller_id(&self) -> Option<[u8; 32]> {
@@ -394,7 +389,6 @@ impl CallKind {
             Self::ExternalRoot => None,
         }
     }
-
 }
 
 /// An isolated execution scope with its own stack, code, and gas budget.
@@ -466,28 +460,19 @@ pub struct CallFrame {
     /// constraints the failed callee made are dropped. `None` in
     /// internal context (no real CS).
     pub(crate) snap_cs: Option<r1cs::Checkpoint>,
-
 }
 
 impl CallFrame {
     /// Builds a fresh CallFrame over pre-decoded `instructions` (prover
     /// and pre-parsed paths). The verifier / internal execution uses
     /// [`CallFrame::from_bytecode`] to stream raw bytecode instead.
-    pub fn new(
-        instructions: Vec<Instruction>,
-        kind: CallKind,
-        gas_limit: u64,
-    ) -> Self {
+    pub fn new(instructions: Vec<Instruction>, kind: CallKind, gas_limit: u64) -> Self {
         Self::from_code(Script::Transparent(instructions), kind, gas_limit)
     }
 
     /// Builds a CallFrame that decodes raw `bytecode` on demand — no
     /// `Vec<Instruction>` is materialized. See ADR 0015.
-    pub(crate) fn from_bytecode(
-        bytecode: Vec<u8>,
-        kind: CallKind,
-        gas_limit: u64,
-    ) -> Self {
+    pub(crate) fn from_bytecode(bytecode: Vec<u8>, kind: CallKind, gas_limit: u64) -> Self {
         Self::from_code(Script::Opaque(bytecode), kind, gas_limit)
     }
 
@@ -498,11 +483,7 @@ impl CallFrame {
         self
     }
 
-    pub(crate) fn from_code(
-        code: Script,
-        kind: CallKind,
-        gas_limit: u64,
-    ) -> Self {
+    pub(crate) fn from_code(code: Script, kind: CallKind, gas_limit: u64) -> Self {
         Self {
             stack: Vec::new(),
             code,
@@ -606,7 +587,6 @@ pub(crate) struct VM {
     /// Multiplications added by deferred randomized constraints. Ordinary
     /// gates are read from the finalized constraint system by the delegate.
     deferred_multiplications: usize,
-
 }
 
 impl VM {
@@ -620,11 +600,7 @@ impl VM {
         gas_limit: u64,
         mut delegate: D,
     ) -> Result<TxResult, VMError> {
-        let mut frame = CallFrame::from_bytecode(
-            script.clone(),
-            CallKind::ExternalRoot,
-            gas_limit,
-        );
+        let mut frame = CallFrame::from_bytecode(script.clone(), CallKind::ExternalRoot, gas_limit);
         frame.charge_gas(alloc_byte_gas(script.len())?)?;
         frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
         let mut vm = Self::new(header, frame);
@@ -663,11 +639,8 @@ impl VM {
         gas_limit: u64,
         delegate: &mut D,
     ) -> Result<TxResult, VMError> {
-        let mut frame = CallFrame::from_bytecode(
-            bytecode.clone(),
-            CallKind::ExternalRoot,
-            gas_limit,
-        );
+        let mut frame =
+            CallFrame::from_bytecode(bytecode.clone(), CallKind::ExternalRoot, gas_limit);
         frame.charge_gas(alloc_byte_gas(bytecode.len())?)?;
         frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
         let mut vm = Self::new(header, frame);
@@ -703,11 +676,9 @@ impl VM {
         let mut deployed_code = None;
         if !registry.exists(&message.target) {
             if let ActorID::Constructor(bytes) = &message.target {
-                if let Err(e) = registry.deploy(
-                    message.target.clone(),
-                    bytes.clone(),
-                    empty_state(),
-                ) {
+                if let Err(e) =
+                    registry.deploy(message.target.clone(), bytes.clone(), empty_state())
+                {
                     registry.pop_checkpoint_rollback();
                     return Err(e);
                 }
@@ -748,12 +719,7 @@ impl VM {
             actor: target.clone(),
             caller,
         };
-        let mut frame = CallFrame::from_bytecode(
-            script,
-            kind,
-            gas,
-        )
-        .with_anchor(anchor);
+        let mut frame = CallFrame::from_bytecode(script, kind, gas).with_anchor(anchor);
         if let Err(e) = frame.charge_gas(initial_gas) {
             registry.pop_checkpoint_rollback();
             return Err(e);
@@ -827,7 +793,6 @@ impl VM {
         }
     }
 
-
     /// Splits `last_anchor`: returns the `left` half (to embed in
     /// a fresh unique-anchored entity — cell, message), and writes
     /// the `right` half back. Hard-fails `AnchorMissing` if no
@@ -860,11 +825,7 @@ impl VM {
     }
 
     /// Drains the VM into a `TxResult`, computing TxID from the txlog.
-    fn into_result(
-        mut self,
-        bytecode: Vec<u8>,
-        proof: Option<R1CSProof>,
-    ) -> TxResult {
+    fn into_result(mut self, bytecode: Vec<u8>, proof: Option<R1CSProof>) -> TxResult {
         let txlog = mem::take(&mut self.txlog);
         let deferred_sigs = mem::take(&mut self.deferred_sigs);
         let txid = TxID::from_log(&txlog);
@@ -895,16 +856,15 @@ impl VM {
     fn is_external(&self) -> bool {
         match self.current_call.kind {
             CallKind::ExternalRoot => true,
-            CallKind::CellOpen { external_context, .. } => external_context,
+            CallKind::CellOpen {
+                external_context, ..
+            } => external_context,
             _ => false,
         }
     }
 
     /// External-context step.
-    pub(crate) fn step_external<D: Delegate>(
-        &mut self,
-        delegate: &mut D,
-    ) -> Result<bool, VMError> {
+    pub(crate) fn step_external<D: Delegate>(&mut self, delegate: &mut D) -> Result<bool, VMError> {
         self.step(delegate, None)
     }
 
@@ -1024,7 +984,6 @@ impl VM {
         };
         use Instruction as I;
         match instr {
-
             I::PushInt(i) => {
                 self.push_value(Value::Int253(i));
                 Ok(())
@@ -1135,16 +1094,25 @@ impl VM {
 
             I::Timelock => self.op_timelock(),
             // version → tx header version (spec §version).
-            I::Version => { self.push_value(Value::Int253(Int253::from(self.header.version as u64))); Ok(()) }
+            I::Version => {
+                self.push_value(Value::Int253(Int253::from(self.header.version as u64)));
+                Ok(())
+            }
             I::Selfid => self.op_selfid(),
             I::Anchor => self.op_anchor(),
             I::Gas => self.op_gas(),
             I::Usage => self.op_usage(registry),
             I::Callerid => self.op_callerid(),
             // gaslimit → immutable frame budget.
-            I::Gaslimit => { self.push_value(Value::Int253(Int253::from(self.current_call.gas_limit))); Ok(()) }
+            I::Gaslimit => {
+                self.push_value(Value::Int253(Int253::from(self.current_call.gas_limit)));
+                Ok(())
+            }
             I::Capacity => self.op_capacity(registry),
-            I::Height => { self.push_value(Value::Int253(Int253::from(self.block_height))); Ok(()) }
+            I::Height => {
+                self.push_value(Value::Int253(Int253::from(self.block_height)));
+                Ok(())
+            }
 
             I::Ext(b) => Err(VMError::UnknownOpcode(b)),
         }?;
@@ -1161,10 +1129,7 @@ impl VM {
     /// (failure-path only). Order is load-bearing — identical in
     /// `finish_call` and `op_return`.
     fn clean_exit_to_parent(&mut self, leftover_gas: u64) {
-        self.current_call.gas_used = self
-            .current_call
-            .gas_used
-            .saturating_sub(leftover_gas);
+        self.current_call.gas_used = self.current_call.gas_used.saturating_sub(leftover_gas);
         if let Some(post) = self.current_call.post_call_anchor.take() {
             self.last_anchor = Some(post);
         }
@@ -1187,7 +1152,9 @@ impl VM {
             self.current_call = parent;
             self.clean_exit_to_parent(leftover_gas);
             // Success marker with k=0: stack += [count=0, success=1].
-            self.current_call.stack.push(Value::Int253(Int253::from(0u64)));
+            self.current_call
+                .stack
+                .push(Value::Int253(Int253::from(0u64)));
             self.current_call.stack.push(Value::Int253(Int253::ONE));
             return Ok(true);
         }
@@ -1227,7 +1194,8 @@ impl VM {
         // Roll back side effects via the snapshots taken at call
         // entry.
         self.txlog.truncate(self.current_call.snap_txlog_len);
-        self.deferred_sigs.truncate(self.current_call.snap_deferred_sigs_len);
+        self.deferred_sigs
+            .truncate(self.current_call.snap_deferred_sigs_len);
         self.deferred_multiplications = self.current_call.snap_deferred_multiplications;
         self.total_fee = self.current_call.snap_total_fee;
         // Restore actor registry state (F1).
@@ -1271,9 +1239,7 @@ impl VM {
         self.current_call
             .stack
             .push(Value::Int253(Int253::from(arg_count as u64)));
-        self.current_call
-            .stack
-            .push(Value::Int253(Int253::ZERO));
+        self.current_call.stack.push(Value::Int253(Int253::ZERO));
     }
 
     fn charge_clone_values(&mut self, values: &[Value]) -> Result<(), VMError> {
@@ -1392,7 +1358,10 @@ impl VM {
         let data = self.pop_value()?.to_string()?;
         let label = self.pop_value()?.to_string()?;
         self.charge_alloc_bytes(
-            label.len().checked_add(data.len()).ok_or(VMError::OutOfGas)?,
+            label
+                .len()
+                .checked_add(data.len())
+                .ok_or(VMError::OutOfGas)?,
         )?;
         let mut m = self.pop_value()?.to_merlin()?;
         m.write_bytes(&label.to_bytes(), &data.to_bytes());
@@ -1420,7 +1389,8 @@ impl VM {
     /// (pre-FIPS Keccak, Ethereum-compatible).
     fn op_hash<H: sha2::Digest>(&mut self, block_bytes: usize) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
-        self.current_call.charge_gas(hash_gas(s.len(), block_bytes)?)?;
+        self.current_call
+            .charge_gas(hash_gas(s.len(), block_bytes)?)?;
         let digest = H::digest(s.to_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
@@ -1717,9 +1687,7 @@ impl VM {
         let n_bytes = n / 8;
         let x = self.pop_value()?.to_int253()?;
         let s = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(
-            s.len().checked_add(n_bytes).ok_or(VMError::OutOfGas)?,
-        )?;
+        self.charge_alloc_bytes(s.len().checked_add(n_bytes).ok_or(VMError::OutOfGas)?)?;
         // Raw 32-byte sign-magnitude form; low `n` bits = first `n_bytes`.
         let raw = x.to_bytes();
         let appended = s.append_bytes(&raw[..n_bytes]);
@@ -1744,9 +1712,7 @@ impl VM {
     fn op_append(&mut self) -> Result<(), VMError> {
         let s2 = self.pop_value()?.to_string()?;
         let s1 = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(
-            s1.len().checked_add(s2.len()).ok_or(VMError::OutOfGas)?,
-        )?;
+        self.charge_alloc_bytes(s1.len().checked_add(s2.len()).ok_or(VMError::OutOfGas)?)?;
         self.push_value(Value::String(s1.append_bytes(&s2.to_bytes())));
         Ok(())
     }
@@ -1875,16 +1841,20 @@ impl VM {
         // Expression). A "non-Int253" test would wrongly route String /
         // Point comparisons (e.g. the `anchor … eq verify` binding idiom)
         // into `to_expression()` and hard-fail in external context.
-        let cs_involved = matches!(self.current_call.stack[n - 1], Value::Variable(_) | Value::Expression(_))
-            || matches!(self.current_call.stack[n - 2], Value::Variable(_) | Value::Expression(_));
+        let cs_involved = matches!(
+            self.current_call.stack[n - 1],
+            Value::Variable(_) | Value::Expression(_)
+        ) || matches!(
+            self.current_call.stack[n - 2],
+            Value::Variable(_) | Value::Expression(_)
+        );
         if self.is_external() && cs_involved {
             self.charge_top_value_growth(2)?;
             let b = self.pop_value()?.to_expression()?;
             let a = self.pop_value()?.to_expression()?;
             self.push_value(Value::Constraint(Constraint::eq(a, b)));
         } else {
-            let eq = self.current_call.stack[n - 1]
-                .try_eq(&self.current_call.stack[n - 2])?;
+            let eq = self.current_call.stack[n - 1].try_eq(&self.current_call.stack[n - 2])?;
             let bit = if eq { 1u64 } else { 0u64 };
             self.push_value(Value::Int253(Int253::from(bit)));
         }
@@ -1923,9 +1893,10 @@ impl VM {
             }
             // scalar * point / point * scalar → MSM with one term.
             (Value::Int253(s), Value::Point(p)) | (Value::Point(p), Value::Int253(s)) => {
-                self.push_value(Value::MultiscalarMul(
-                    MultiscalarMul::term(int_to_scalar(s), p.to_compressed()),
-                ));
+                self.push_value(Value::MultiscalarMul(MultiscalarMul::term(
+                    int_to_scalar(s),
+                    p.to_compressed(),
+                )));
                 Ok(())
             }
             // scalar * MSM / MSM * scalar → scale coefficients.
@@ -1939,9 +1910,7 @@ impl VM {
             (Value::Point(_), Value::Point(_))
             | (Value::Point(_), Value::MultiscalarMul(_))
             | (Value::MultiscalarMul(_), Value::Point(_))
-            | (Value::MultiscalarMul(_), Value::MultiscalarMul(_)) => {
-                Err(VMError::TypeNotInt253)
-            }
+            | (Value::MultiscalarMul(_), Value::MultiscalarMul(_)) => Err(VMError::TypeNotInt253),
             (a, b) if self.is_external() => {
                 let aexpr = a.to_expression()?;
                 let bexpr = b.to_expression()?;
@@ -2152,7 +2121,9 @@ impl VM {
         self.clean_exit_to_parent(leftover_gas);
         // Pour return values, then count, then success marker (1).
         self.current_call.stack.extend(return_values);
-        self.current_call.stack.push(Value::Int253(Int253::from(k as u64)));
+        self.current_call
+            .stack
+            .push(Value::Int253(Int253::from(k as u64)));
         self.current_call.stack.push(Value::Int253(Int253::ONE));
         Ok(())
     }
@@ -2301,10 +2272,7 @@ impl VM {
             qty_var.commitment.to_point(),
             flv_commit.to_point(),
         ));
-        self.push_value(Value::Token(Token::new(
-            qty_var.commitment,
-            flv_commit,
-        )));
+        self.push_value(Value::Token(Token::new(qty_var.commitment, flv_commit)));
         Ok(())
     }
 
@@ -2326,10 +2294,8 @@ impl VM {
                 Ok(())
             }
             Value::Token(t) => {
-                self.txlog.push(TxEntry::Retire(
-                    t.qty.to_point(),
-                    t.flv.to_point(),
-                ));
+                self.txlog
+                    .push(TxEntry::Retire(t.qty.to_point(), t.flv.to_point()));
                 Ok(())
             }
             other => {
@@ -2425,9 +2391,7 @@ impl VM {
         let tag = self.pop_value()?.to_string()?;
         let pred = self.pop_value()?.to_string()?;
         let bytes = array32(&pred.to_bytes()).ok_or(VMError::IndexOutOfRange)?;
-        let predicate = Predicate::opaque(
-            curve25519_dalek::ristretto::CompressedRistretto(bytes),
-        );
+        let predicate = Predicate::opaque(curve25519_dalek::ristretto::CompressedRistretto(bytes));
         let flv = flavor_from_predicate(&predicate, &tag);
         self.push_value(Value::Int253(flv));
         Ok(())
@@ -2541,12 +2505,7 @@ impl VM {
         self.charge_alloc_bytes(proof_bytes)?;
         self.current_call.charge_gas(GAS_POINT_DECOMPRESS)?;
 
-        let cp = Self::taproot_proof_from_stack_pieces(
-            internal_key,
-            &neighbors,
-            &position,
-            &prog,
-        )?;
+        let cp = Self::taproot_proof_from_stack_pieces(internal_key, &neighbors, &position, &prog)?;
         let _ = cell.predicate.verify_taproot_proof(&cp)?;
         // `Script` keeps prover witnesses inline; `Opaque` streams bytes
         // (no parse) on the verifier. See ADR 0015.
@@ -2590,8 +2549,8 @@ impl VM {
         let verification_key = cell.predicate.verification_key();
         let external = self.is_external();
         if !external {
-            let signature = musig::Signature::from_bytes(sig)
-                .map_err(|_| VMError::BadSignatureBytes)?;
+            let signature =
+                musig::Signature::from_bytes(sig).map_err(|_| VMError::BadSignatureBytes)?;
             let key = musig::VerificationKey::from_compressed(verification_key);
             signature
                 .verify(&mut signcall_verification_transcript(&msg), key)
@@ -2630,10 +2589,11 @@ impl VM {
         }
         let failure_count = args.len().saturating_add(1);
         self.charge_alloc_items(failure_count)?;
-        let clone_gas = args.iter().fold(
-            1u64.saturating_add(cell.clone_gas()),
-            |gas, value| gas.saturating_add(value.clone_gas()),
-        );
+        let clone_gas = args
+            .iter()
+            .fold(1u64.saturating_add(cell.clone_gas()), |gas, value| {
+                gas.saturating_add(value.clone_gas())
+            });
         self.current_call.charge_gas(clone_gas)?;
         let mut failure_values = Vec::with_capacity(failure_count);
         failure_values.push(Value::Cell(Box::new(cell.clone())));
@@ -2669,8 +2629,7 @@ impl VM {
 
     /// Pops the child gas grant as a non-negative `u64`.
     fn pop_gas_limit(&mut self) -> Result<u64, VMError> {
-        self
-            .pop_value()?
+        self.pop_value()?
             .to_int253()?
             .to_u64()
             .ok_or(VMError::InvalidBitrange)
@@ -2723,9 +2682,9 @@ impl VM {
             .to_int253()?
             .to_u64()
             .ok_or(VMError::InvalidBitrange)?;
-        let refund_predicate = Predicate::opaque(
-            curve25519_dalek::ristretto::CompressedRistretto(self.pop_string_32()?),
-        );
+        let refund_predicate = Predicate::opaque(curve25519_dalek::ristretto::CompressedRistretto(
+            self.pop_string_32()?,
+        ));
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
 
@@ -2736,14 +2695,7 @@ impl VM {
         // `TxEntry::Output(Cell)`. The block builder scans these
         // entries to construct internal-tx deliveries; no separate
         // queue.
-        let message = Message::new(
-            target,
-            caller,
-            anchor,
-            args,
-            gas,
-            refund_predicate,
-        )?;
+        let message = Message::new(target, caller, anchor, args, gas, refund_predicate)?;
         // A send reserves future execution from the active frame. The grant is
         // intentionally not refunded: asynchronous execution has no live
         // caller to receive it, and descendants must divide an existing grant
@@ -2760,10 +2712,7 @@ impl VM {
     /// re-entry is permitted. There is no VM-level method operand
     /// (ADR 0020). Calls emit no txlog entry; a callee state mutation is
     /// recorded later by `op_save`.
-    fn op_call(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_call(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         // CellOpen caller attribution is not actor authority: only an actor
         // frame may originate a synchronous actor call.
         let caller = ActorID::Hash(self.require_actor()?.to_hash());
@@ -2809,8 +2758,7 @@ impl VM {
                 // restore the moved arguments. Availability failures refund
                 // the grant; an insufficient child budget burns it.
                 if !matches!(error, VMError::OutOfGas) {
-                    self.current_call.gas_used =
-                        self.current_call.gas_used.saturating_sub(gas);
+                    self.current_call.gas_used = self.current_call.gas_used.saturating_sub(gas);
                 }
                 let arg_count = args.len();
                 self.push_failed_values(args, arg_count);
@@ -2862,10 +2810,7 @@ impl VM {
     /// before returning; leftover state fails the clean-stack rule and
     /// rolls back. State shape is not VM-enforced. Re-loading an
     /// already-checked-out actor errors `ActorEmpty`.
-    fn op_load(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_load(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = self.require_actor()?.clone();
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let state_bytes = registry.actor_state_bytes(&actor)?;
@@ -2888,10 +2833,7 @@ impl VM {
     /// values (`Cell`, `Merlin`, `Variable`, `Expression`,
     /// `Constraint`, `MultiscalarMul`, `WideToken`, negative
     /// `ClearToken`) hard-fail `NonPortableInState`.
-    fn op_save(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_save(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let state = self.pop_value()?;
@@ -2931,10 +2873,7 @@ impl VM {
     /// call this) is the author's, gated in the actor's own code via
     /// `callerid` — actors authenticate by identity, not signatures.
     /// See ADR 0018.
-    fn op_setcode(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_setcode(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let code_string = self.pop_value()?.to_string()?;
@@ -2949,10 +2888,7 @@ impl VM {
 
     /// _q_ **addstorage** → _debt 1 | 0_. Invalid market requests are
     /// soft failures; type, context, and host invariant errors are hard.
-    fn op_addstorage(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_addstorage(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
         let request = self.pop_value()?.to_int253()?;
         let Some(bytes) = request.to_u64() else {
@@ -2984,10 +2920,7 @@ impl VM {
 
     /// _q_ **quotestorage** → _fee 1 | 0_. Read-only counterpart to
     /// [`Self::op_addstorage`].
-    fn op_quotestorage(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_quotestorage(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = self.require_actor()?.clone();
         let request = self.pop_value()?.to_int253()?;
         let Some(bytes) = request.to_u64() else {
@@ -3061,7 +2994,6 @@ impl VM {
         Ok(())
     }
 
-
     /// **timelock** → _n {0|1}_
     ///
     /// Pushes the transaction's `locktime` and a unit flag
@@ -3070,7 +3002,11 @@ impl VM {
     /// (i.e. ≥ 500_000_000, approximately 1985-11-05 Unix time).
     fn op_timelock(&mut self) -> Result<(), VMError> {
         let lt = self.header.locktime as u64;
-        let flag: u64 = if lt >= LOCKTIME_TIMESTAMP_THRESHOLD as u64 { 1 } else { 0 };
+        let flag: u64 = if lt >= LOCKTIME_TIMESTAMP_THRESHOLD as u64 {
+            1
+        } else {
+            0
+        };
         self.push_value(Value::Int253(Int253::from(lt)));
         self.push_value(Value::Int253(Int253::from(flag)));
         Ok(())
@@ -3087,10 +3023,7 @@ impl VM {
     }
 
     /// **usage** → _n_.
-    fn op_usage(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_usage(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = self.require_actor()?;
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let usage = registry.actor_usage(actor)?;
@@ -3099,10 +3032,7 @@ impl VM {
     }
 
     /// _height_ **capacity** → _bytes_.
-    fn op_capacity(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_capacity(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = self.require_actor()?.clone();
         let height = self
             .pop_value()?
@@ -3155,10 +3085,7 @@ impl VM {
         let var = self.pop_value()?.to_variable()?;
         let (_point, r1cs_var) = delegate.commit_variable(&var.commitment)?;
         let witness = var.commitment.assignment();
-        let expr = Expression::LinearCombination(
-            vec![(r1cs_var, Scalar::ONE)],
-            witness,
-        );
+        let expr = Expression::LinearCombination(vec![(r1cs_var, Scalar::ONE)], witness);
         self.push_value(Value::Expression(expr));
         Ok(())
     }
@@ -3315,9 +3242,15 @@ impl VM {
         self.total_fee.add(qty_u64)?;
         let qty_scalar: curve25519_dalek::scalar::Scalar = qty.into();
         let flv_scalar: curve25519_dalek::scalar::Scalar = FLAME_FLAVOR.into();
-        let q_var = delegate.cs().allocate(Some(-qty_scalar)).map_err(VMError::R1CSError)?;
+        let q_var = delegate
+            .cs()
+            .allocate(Some(-qty_scalar))
+            .map_err(VMError::R1CSError)?;
         delegate.cs().constrain(q_var + qty_scalar);
-        let f_var = delegate.cs().allocate(Some(flv_scalar)).map_err(VMError::R1CSError)?;
+        let f_var = delegate
+            .cs()
+            .allocate(Some(flv_scalar))
+            .map_err(VMError::R1CSError)?;
         delegate.cs().constrain(f_var - flv_scalar);
         let assignment = Some(Box::new(spacesuit::Value {
             q: -spacesuit::SignedInteger::from(qty_u64),
@@ -3384,8 +3317,7 @@ impl VM {
         let mix_items = m.checked_add(n).ok_or(VMError::OutOfGas)?;
         let quadratic_work = mix_items.checked_mul(mix_items).ok_or(VMError::OutOfGas)?;
         self.charge_alloc_items(quadratic_work)?;
-        self.current_call
-            .charge_gas(r1cs_gas(quadratic_work)?)?;
+        self.current_call.charge_gas(r1cs_gas(quadratic_work)?)?;
         // Stack depth check: we'll pop 2n commitment Strings + m token values.
         let needed = m.saturating_add(n.saturating_mul(2));
         if needed > self.current_call.stack.len() {
@@ -3404,10 +3336,7 @@ impl VM {
             let qty_commit = qty_str.to_commitment()?;
             let token = Token::new(qty_commit, flv_commit);
             // Build the AllocatedValue against the CS.
-            let allocated = Self::value_to_allocated(
-                Value::Token(token.clone()),
-                delegate,
-            )?;
+            let allocated = Self::value_to_allocated(Value::Token(token.clone()), delegate)?;
             // Insert at front so the deepest output ends up at cloak_outs[0].
             output_tokens.insert(0, token);
             cloak_outs.insert(0, allocated);
@@ -3421,8 +3350,7 @@ impl VM {
         }
         // Run the cloak gadget. On constraint-system error, surface
         // as R1CSError; the verifier will reject the proof.
-        spacesuit::cloak(delegate.cs(), cloak_ins, cloak_outs)
-            .map_err(VMError::R1CSError)?;
+        spacesuit::cloak(delegate.cs(), cloak_ins, cloak_outs).map_err(VMError::R1CSError)?;
         // Push the output Tokens in the same order (deepest first).
         for token in output_tokens {
             self.push_value(Value::Token(token));
@@ -3456,11 +3384,8 @@ impl VM {
         // Two point decompressions and two two-term opening equations. The
         // charge is identical whether they are checked immediately or batched.
         let opening_gas = linear_gas(GAS_MSM_VERIFY_BASE, GAS_MSM_VERIFY_TERM, 2)?;
-        self.current_call.charge_gas(
-            opening_gas
-                .checked_mul(2)
-                .ok_or(VMError::OutOfGas)?,
-        )?;
+        self.current_call
+            .charge_gas(opening_gas.checked_mul(2).ok_or(VMError::OutOfGas)?)?;
         let gens = PedersenGens::default();
         let qty_point = token.qty.to_point().decompress();
         let flv_point = token.flv.to_point().decompress();

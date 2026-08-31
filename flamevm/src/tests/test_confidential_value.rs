@@ -124,7 +124,11 @@ fn cleartext_borrow_unaffected_by_overload() {
     // remains the existing Phase-8 behavior because top-two aren't
     // Variables (the new dispatch peek doesn't catch them).
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_int(5u64).push_int(7u64).borrow().to_bytecode(),
+        ScriptBuilder::new()
+            .push_int(5u64)
+            .push_int(7u64)
+            .borrow()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).expect("cleartext borrow ok");
     assert_eq!(vm.current_call.stack.len(), 2);

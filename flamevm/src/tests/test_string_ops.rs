@@ -6,7 +6,9 @@ use super::test_helpers::*;
 
 /// Convenience for `push_str(String::from(bytes.to_vec()))` — every
 /// test here pushes a fixed byte string as the operand under test.
-fn s(bytes: &[u8]) -> String { String::from(bytes.to_vec()) }
+fn s(bytes: &[u8]) -> String {
+    String::from(bytes.to_vec())
+}
 
 #[test]
 fn read_bits_n_zero_succeeds_and_yields_zero() {
@@ -89,10 +91,8 @@ fn read_bits_negative_count_hard_fails() {
 /// Canonical curve order ℓ (Ristretto subgroup order) — first byte
 /// non-canonical when interpreted as a scalar magnitude.
 const ELL_LE: [u8; 32] = [
-    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
-    0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
 ];
 
 #[test]
@@ -196,7 +196,10 @@ fn read_bits_roundtrip_negative_at_n_256() {
 fn read_int_positive_roundtrip() {
     let value = Int253::from(1u64);
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_str(s(&value.to_bytes())).read_int().to_bytecode(),
+        ScriptBuilder::new()
+            .push_str(s(&value.to_bytes()))
+            .read_int()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[1], value);
@@ -207,7 +210,10 @@ fn read_int_positive_roundtrip() {
 fn read_int_negative_roundtrip() {
     let value = Int253::from_parts(true, Scalar::from(1u64));
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_str(s(&value.to_bytes())).read_int().to_bytecode(),
+        ScriptBuilder::new()
+            .push_str(s(&value.to_bytes()))
+            .read_int()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[1], value);
@@ -217,7 +223,10 @@ fn read_int_negative_roundtrip() {
 fn read_int_zero_roundtrip() {
     let value = Int253::ZERO;
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_str(s(&value.to_bytes())).read_int().to_bytecode(),
+        ScriptBuilder::new()
+            .push_str(s(&value.to_bytes()))
+            .read_int()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[1], value);
@@ -229,7 +238,10 @@ fn read_int_large_magnitude_roundtrip() {
     let mut ell_minus_1 = ELL_LE;
     ell_minus_1[0] = 0xec;
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_str(s(&ell_minus_1)).read_int().to_bytecode(),
+        ScriptBuilder::new()
+            .push_str(s(&ell_minus_1))
+            .read_int()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[1] {
@@ -242,7 +254,10 @@ fn read_int_large_magnitude_roundtrip() {
 #[test]
 fn read_int_too_short_preserves_string() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_str(s(&[0xaa; 31])).read_int().to_bytecode(),
+        ScriptBuilder::new()
+            .push_str(s(&[0xaa; 31]))
+            .read_int()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
@@ -255,7 +270,10 @@ fn read_int_negative_zero_soft_fails() {
     let mut bytes = [0u8; 32];
     bytes[31] = 0x80;
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_str(s(&bytes)).read_int().to_bytecode(),
+        ScriptBuilder::new()
+            .push_str(s(&bytes))
+            .read_int()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &bytes);
@@ -296,7 +314,10 @@ fn read_point_success() {
     let mut bytes = vec![0x55u8; 32];
     bytes.push(0xaa);
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_str(s(&bytes)).read_point().to_bytecode(),
+        ScriptBuilder::new()
+            .push_str(s(&bytes))
+            .read_point()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[0xaa]);
@@ -310,7 +331,10 @@ fn read_point_success() {
 #[test]
 fn read_point_too_short() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_str(s(&[0; 31])).read_point().to_bytecode(),
+        ScriptBuilder::new()
+            .push_str(s(&[0; 31]))
+            .read_point()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[1], Int253::from(0u64));
@@ -448,15 +472,11 @@ fn write_then_read_int_roundtrip_signs_and_extremes() {
                 .read_int()
                 .to_bytecode(),
         );
-        run_to_end(&mut vm)
-            .unwrap_or_else(|e| panic!("value={:?} err={:?}", v, e));
+        run_to_end(&mut vm).unwrap_or_else(|e| panic!("value={:?} err={:?}", v, e));
         match &vm.current_call.stack[1] {
-            Value::Int253(i) => assert_eq!(
-                i.to_bytes(),
-                v.to_bytes(),
-                "roundtrip differed for {:?}",
-                v
-            ),
+            Value::Int253(i) => {
+                assert_eq!(i.to_bytes(), v.to_bytes(), "roundtrip differed for {:?}", v)
+            }
             other => panic!("expected Int253, got {}", value_kind(other)),
         }
         assert_int(&vm.current_call.stack[2], Int253::from(1u64));
@@ -479,7 +499,10 @@ fn write_zeros_appends_n_zero_bytes() {
 #[test]
 fn bit_not_inverts() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_str(s(&[0x00, 0xff, 0xa5])).bit_not().to_bytecode(),
+        ScriptBuilder::new()
+            .push_str(s(&[0x00, 0xff, 0xa5]))
+            .bit_not()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[0xff, 0x00, 0x5a]);
@@ -614,7 +637,7 @@ fn shift_too_large_errors() {
     let mut vm = vm_with_script(
         ScriptBuilder::new()
             .push_str(s(&[0xab]))
-            .push_int(257u64)                   // > 256
+            .push_int(257u64) // > 256
             .shift_left()
             .to_bytecode(),
     );

@@ -29,4 +29,3 @@ fn log_opcode_requires_string() {
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::TypeNotString));
 }
-

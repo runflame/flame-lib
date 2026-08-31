@@ -72,7 +72,9 @@ fn alloc_prepays_one_r1cs_item() {
     let mut vm = vm_external_with_script(ScriptBuilder::new().alloc(None).to_bytecode());
     vm.current_call.gas_limit = expected;
     let mut delegate = make_stub_delegate();
-    assert!(vm.step_external(&mut delegate).expect("exact budget succeeds"));
+    assert!(vm
+        .step_external(&mut delegate)
+        .expect("exact budget succeeds"));
     assert_eq!(vm.current_call.gas_used, expected);
 
     let mut short = vm_external_with_script(ScriptBuilder::new().alloc(None).to_bytecode());
@@ -99,15 +101,11 @@ fn prove_then_verify_alloc_arithmetic_equality() {
         .eq()
         .verify();
 
-    let _pp = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-    )
-    .expect("prove succeeds");
-let TxResult { bytecode, proof, .. } = _pp;
-let proof = proof.expect("proof set");
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
+    let TxResult {
+        bytecode, proof, ..
+    } = _pp;
+    let proof = proof.expect("proof set");
 
     // Verifier walks the same bytecode and accepts the proof.
     let pc_gens_v = PedersenGens::default();
@@ -132,22 +130,17 @@ fn prove_succeeds_but_verify_fails_on_tampered_proof() {
         .alloc(Some(Int253::from(10u64)))
         .eq()
         .verify();
-    let _pp = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-    )
-    .expect("prove succeeds");
-let TxResult { bytecode, proof, .. } = _pp;
-let proof = proof.expect("proof set");
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
+    let TxResult {
+        bytecode, proof, ..
+    } = _pp;
+    let proof = proof.expect("proof set");
 
     // Flip a byte deep in the proof body.
     let mut proof_bytes = proof.to_bytes();
     let last = proof_bytes.len() - 1;
     proof_bytes[last] ^= 0x01;
-    let tampered = bulletproofs::r1cs::R1CSProof::from_bytes(&proof_bytes)
-        .expect("re-parses");
+    let tampered = bulletproofs::r1cs::R1CSProof::from_bytes(&proof_bytes).expect("re-parses");
 
     let pc_gens_v = PedersenGens::default();
     let err = Verifier::verify(
@@ -176,15 +169,12 @@ fn prove_fails_for_unsatisfiable_equality() {
         .alloc(Some(Int253::from(99u64)))
         .eq()
         .verify();
-    let _pp = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-    )
-    .expect("prover doesn't refuse construction");
-let TxResult { bytecode, proof, .. } = _pp;
-let proof = proof.expect("proof set");
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
+        .expect("prover doesn't refuse construction");
+    let TxResult {
+        bytecode, proof, ..
+    } = _pp;
+    let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();
     let err = Verifier::verify(
@@ -212,11 +202,7 @@ fn alloc_pushes_expression_with_witness() {
     let kind = CallKind::ExternalRoot;
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(
-            program.into_instructions(),
-            kind,
-            1_000_000,
-        ),
+        CallFrame::new(program.into_instructions(), kind, 1_000_000),
     );
     // One step → executes the alloc.
     vm.step_external(&mut prover).expect("alloc step ok");
@@ -242,15 +228,11 @@ fn prove_then_verify_alloc_multiplication() {
         .alloc(Some(Int253::from(20u64)))
         .eq()
         .verify();
-    let _pp = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-    )
-    .expect("prove succeeds");
-let TxResult { bytecode, proof, .. } = _pp;
-let proof = proof.expect("proof set");
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
+    let TxResult {
+        bytecode, proof, ..
+    } = _pp;
+    let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -274,15 +256,11 @@ fn prove_then_verify_alloc_with_negation() {
         .alloc(Some(Int253::from(-5i64)))
         .eq()
         .verify();
-    let _pp = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-    )
-    .expect("prove succeeds");
-let TxResult { bytecode, proof, .. } = _pp;
-let proof = proof.expect("proof set");
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
+    let TxResult {
+        bytecode, proof, ..
+    } = _pp;
+    let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -313,15 +291,11 @@ fn alloc_without_witness_works_in_verifier_path() {
         .alloc(Some(Int253::from(0u64)))
         .eq()
         .verify();
-    let _pp = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-    )
-    .expect("prove succeeds");
-let TxResult { bytecode, proof, .. } = _pp;
-let proof = proof.expect("proof set");
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
+    let TxResult {
+        bytecode, proof, ..
+    } = _pp;
+    let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -375,9 +349,11 @@ fn phase18_txid_deterministic_for_equal_inputs() {
             .verify()
     };
     let txid1 = Prover::prove(&pc_gens, mk_program(), header, 1_000_000)
-        .expect("prove #1").txid;
+        .expect("prove #1")
+        .txid;
     let txid2 = Prover::prove(&pc_gens, mk_program(), header, 1_000_000)
-        .expect("prove #2").txid;
+        .expect("prove #2")
+        .txid;
     assert_eq!(txid1, txid2);
 }
 
@@ -411,11 +387,14 @@ fn phase18_txid_changes_when_header_changes() {
         locktime: 0,
     };
     let id1 = Prover::prove(&pc_gens, mk_program(), h1, 1_000_000)
-        .expect("prove h1").txid;
+        .expect("prove h1")
+        .txid;
     let id2 = Prover::prove(&pc_gens, mk_program(), h2, 1_000_000)
-        .expect("prove h2").txid;
+        .expect("prove h2")
+        .txid;
     let id3 = Prover::prove(&pc_gens, mk_program(), h3, 1_000_000)
-        .expect("prove h3").txid;
+        .expect("prove h3")
+        .txid;
     assert_ne!(id1, id2, "locktime change must alter TxID");
     assert_ne!(id1, id3, "version change must alter TxID");
     assert_ne!(id2, id3, "locktime+version both alter TxID");
@@ -436,21 +415,15 @@ fn phase18_prove_verify_roundtrip_binds_txid() {
         .alloc(Some(Int253::from(10u64)))
         .eq()
         .verify();
-    let prover_result = Prover::prove(&pc_gens, program, header, 1_000_000)
-        .expect("prove ok");
+    let prover_result = Prover::prove(&pc_gens, program, header, 1_000_000).expect("prove ok");
     let txid_p = prover_result.txid;
-    let TxResult { bytecode, proof, .. } = prover_result;
+    let TxResult {
+        bytecode, proof, ..
+    } = prover_result;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    let verifier_result = Verifier::verify(
-        &pc_gens_v,
-        bytecode,
-        &proof,
-        header,
-        1_000_000,
-        None,
-    )
-    .expect("verify ok");
+    let verifier_result =
+        Verifier::verify(&pc_gens_v, bytecode, &proof, header, 1_000_000, None).expect("verify ok");
     assert_eq!(
         txid_p, verifier_result.txid,
         "prover and verifier must agree on TxID"
@@ -479,9 +452,10 @@ fn phase18_verifier_rejects_proof_under_different_header() {
         .alloc(Some(Int253::from(10u64)))
         .eq()
         .verify();
-    let _pp = Prover::prove(&pc_gens, program, prove_header, 1_000_000)
-            .expect("prove ok");
-    let TxResult { bytecode, proof, .. } = _pp;
+    let _pp = Prover::prove(&pc_gens, program, prove_header, 1_000_000).expect("prove ok");
+    let TxResult {
+        bytecode, proof, ..
+    } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     let err = Verifier::verify(
@@ -503,20 +477,18 @@ fn phase18_verifier_rejects_proof_under_different_header() {
 #[test]
 fn phase21_txresult_populated_for_trivial_program() {
     let pc_gens = PedersenGens::default();
-    let header = TxHeader { version: 7, locktime: 13 };
+    let header = TxHeader {
+        version: 7,
+        locktime: 13,
+    };
     let program = ScriptBuilder::new()
         .alloc(Some(Int253::from(5u64)))
         .alloc(Some(Int253::from(5u64)))
         .eq()
         .verify();
-    let prover_result =
-        Prover::prove(&pc_gens, program, header, 1_000_000)
-            .expect("prove ok");
+    let prover_result = Prover::prove(&pc_gens, program, header, 1_000_000).expect("prove ok");
     // Txlog has Header at [0].
-    assert!(matches!(
-        prover_result.txlog[0],
-        TxEntry::Header(_)
-    ));
+    assert!(matches!(prover_result.txlog[0], TxEntry::Header(_)));
     // total_fee = 0 (no fee opcodes); bytecode populated; proof Some;
     // deferred_sigs empty; sends empty.
     assert_eq!(prover_result.total_fee, 0);
@@ -524,10 +496,15 @@ fn phase21_txresult_populated_for_trivial_program() {
     assert!(!prover_result.bytecode.is_empty());
     assert!(prover_result.proof.is_some());
     assert!(prover_result.deferred_sigs.is_empty());
-    assert!(!prover_result.txlog.iter().any(|e| matches!(e, TxEntry::Send(_))));
+    assert!(!prover_result
+        .txlog
+        .iter()
+        .any(|e| matches!(e, TxEntry::Send(_))));
     // Verifier side: same TxID and txlog; proof is None (consumed).
     let prover_txid = prover_result.txid;
-    let TxResult { bytecode, proof, .. } = prover_result;
+    let TxResult {
+        bytecode, proof, ..
+    } = prover_result;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     let verifier_result = Verifier::verify(
@@ -557,9 +534,7 @@ fn phase21_total_fee_flows_through_to_txresult() {
     let pc_gens = PedersenGens::default();
     // Build script directly to avoid the non-droppable WideToken
     // (we step through manually).
-    let program = ScriptBuilder::new()
-        .push_int(123u64)
-        .fee();
+    let program = ScriptBuilder::new().push_int(123u64).fee();
     let mut vm = VM::new(
         dummy_header(),
         CallFrame::new(
@@ -587,22 +562,16 @@ fn phase21_txlog_ordering_in_txresult() {
     // TxResult shape, easier setup. Build a script that pushes a
     // string and logs it twice.
     let script = ScriptBuilder::new()
-        .push_str(String::from(b"a".to_vec())).log()
-        .push_str(String::from(b"b".to_vec())).log()
+        .push_str(String::from(b"a".to_vec()))
+        .log()
+        .push_str(String::from(b"b".to_vec()))
+        .log()
         .to_bytecode();
     let delegate = StubDelegate::new();
-    let result = VM::execute_external(
-        dummy_header(),
-        script,
-        1_000_000,
-        delegate,
-    )
-    .expect("execute ok");
+    let result =
+        VM::execute_external(dummy_header(), script, 1_000_000, delegate).expect("execute ok");
     assert_eq!(result.txlog.len(), 3, "Header + 2 Data entries");
-    assert!(matches!(
-        result.txlog[0],
-        TxEntry::Header(_)
-    ));
+    assert!(matches!(result.txlog[0], TxEntry::Header(_)));
     match &result.txlog[1] {
         TxEntry::Data(b) => assert_eq!(b, b"a"),
         _ => panic!("txlog[1] must be Data(a)"),
@@ -625,11 +594,12 @@ fn phase21_deferred_sigs_in_txresult() {
     let (script, cell_id) = make_signtx_script_with_cell(vk);
     let program = ScriptBuilder::parse(&script).expect("decode");
     let prover_result =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
-            .expect("prove ok");
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove ok");
     assert_eq!(prover_result.deferred_sigs.len(), 1);
     let prover_txid = prover_result.txid;
-    let TxResult { bytecode, proof, .. } = prover_result;
+    let TxResult {
+        bytecode, proof, ..
+    } = prover_result;
     let proof = proof.expect("proof");
     // Sign + verify.
     let mut t = merlin::Transcript::new(b"flamevm.signtx");
@@ -653,7 +623,10 @@ fn phase21_deferred_sigs_in_txresult() {
     // Verifier-side TxResult also exposes the deferred_sigs.
     assert_eq!(verifier_result.deferred_sigs.len(), 1);
     match &verifier_result.deferred_sigs[0] {
-        DeferredSig::TxBound { verification_key, cell_id: cid } => {
+        DeferredSig::TxBound {
+            verification_key,
+            cell_id: cid,
+        } => {
             assert_eq!(verification_key, &vk);
             assert_eq!(*cid, cell_id);
         }

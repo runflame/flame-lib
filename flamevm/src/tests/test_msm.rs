@@ -35,7 +35,11 @@ fn op_add_point_point_lifts_to_msm() {
 #[test]
 fn op_mul_int_point_lifts_to_msm() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_int(3u64).push_point([0x55; 32]).mul().to_bytecode(),
+        ScriptBuilder::new()
+            .push_int(3u64)
+            .push_point([0x55; 32])
+            .mul()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[0] {
@@ -48,7 +52,11 @@ fn op_mul_int_point_lifts_to_msm() {
 #[test]
 fn op_mul_point_int_lifts_to_msm() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_point([0x55; 32]).push_int(3u64).mul().to_bytecode(),
+        ScriptBuilder::new()
+            .push_point([0x55; 32])
+            .push_int(3u64)
+            .mul()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert!(matches!(vm.current_call.stack[0], Value::MultiscalarMul(_)));
@@ -58,7 +66,10 @@ fn op_mul_point_int_lifts_to_msm() {
 #[test]
 fn op_neg_point_lifts_to_msm() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_point([0x55; 32]).neg().to_bytecode(),
+        ScriptBuilder::new()
+            .push_point([0x55; 32])
+            .neg()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[0] {
@@ -72,9 +83,13 @@ fn op_neg_point_lifts_to_msm() {
 fn op_add_msm_msm_concatenates() {
     // Build two MSMs (each of size 2 via point+point), then add them.
     let script = ScriptBuilder::new()
-        .push_point([0x11; 32]).push_point([0x22; 32]).add()   // MSM_A
-        .push_point([0x33; 32]).push_point([0x44; 32]).add()   // MSM_B
-        .add()                                                  // MSM_A + MSM_B
+        .push_point([0x11; 32])
+        .push_point([0x22; 32])
+        .add() // MSM_A
+        .push_point([0x33; 32])
+        .push_point([0x44; 32])
+        .add() // MSM_B
+        .add() // MSM_A + MSM_B
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
@@ -88,8 +103,11 @@ fn op_add_msm_msm_concatenates() {
 #[test]
 fn op_mul_msm_int_scales() {
     let script = ScriptBuilder::new()
-        .push_point([0x11; 32]).push_point([0x22; 32]).add()   // MSM size 2
-        .push_int(7u64).mul()                                   // scaled MSM
+        .push_point([0x11; 32])
+        .push_point([0x22; 32])
+        .add() // MSM size 2
+        .push_int(7u64)
+        .mul() // scaled MSM
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
@@ -103,8 +121,11 @@ fn op_mul_msm_int_scales() {
 #[test]
 fn op_add_msm_point_appends_either_order() {
     let script = ScriptBuilder::new()
-        .push_point([0x11; 32]).push_point([0x22; 32]).add()   // MSM size 2
-        .push_point([0x33; 32]).add()                           // MSM + point
+        .push_point([0x11; 32])
+        .push_point([0x22; 32])
+        .add() // MSM size 2
+        .push_point([0x33; 32])
+        .add() // MSM + point
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
@@ -120,7 +141,9 @@ fn op_add_msm_point_appends_either_order() {
 fn op_mul_point_point_rejected() {
     let mut vm = vm_with_script(
         ScriptBuilder::new()
-            .push_point([0x55; 32]).push_point([0x66; 32]).mul()
+            .push_point([0x55; 32])
+            .push_point([0x66; 32])
+            .mul()
             .to_bytecode(),
     );
     assert!(matches!(
@@ -133,8 +156,12 @@ fn op_mul_point_point_rejected() {
 #[test]
 fn op_mul_msm_msm_rejected() {
     let script = ScriptBuilder::new()
-        .push_point([0x11; 32]).push_point([0x22; 32]).add()
-        .push_point([0x33; 32]).push_point([0x44; 32]).add()
+        .push_point([0x11; 32])
+        .push_point([0x22; 32])
+        .add()
+        .push_point([0x33; 32])
+        .push_point([0x44; 32])
+        .add()
         .mul()
         .to_bytecode();
     let mut vm = vm_with_script(script);
@@ -150,7 +177,11 @@ fn op_mul_msm_msm_rejected() {
 #[test]
 fn msm_dup_rejects() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_point([0x55; 32]).neg().dup_k(0).to_bytecode(),
+        ScriptBuilder::new()
+            .push_point([0x55; 32])
+            .neg()
+            .dup_k(0)
+            .to_bytecode(),
     );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
@@ -163,7 +194,11 @@ fn msm_dup_rejects() {
 #[test]
 fn msm_drop_succeeds() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_point([0x55; 32]).neg().drop_().to_bytecode(),
+        ScriptBuilder::new()
+            .push_point([0x55; 32])
+            .neg()
+            .drop_()
+            .to_bytecode(),
     );
     run_to_end(&mut vm).expect("MSM is droppable (pure computation)");
     assert!(vm.current_call.stack.is_empty());
@@ -173,9 +208,10 @@ fn msm_drop_succeeds() {
 #[test]
 fn msm_in_cell_payload_rejected() {
     let script = ScriptBuilder::new()
-        .push_point([0x55; 32]).neg()                  // → MSM
-        .push_int(1u64)                                // count = 1
-        .push_point([0xaa; 32])                        // predicate
+        .push_point([0x55; 32])
+        .neg() // → MSM
+        .push_int(1u64) // count = 1
+        .push_point([0xaa; 32]) // predicate
         .cell()
         .to_bytecode();
     let mut vm = vm_with_script(script);
@@ -204,9 +240,10 @@ fn verify_msm_identity_succeeds_end_to_end() {
         .push_point(g_bytes)
         .mul()
         .verify();
-    let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000)
-        .expect("prove succeeds");
-    let TxResult { bytecode, proof, .. } = result;
+    let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000).expect("prove succeeds");
+    let TxResult {
+        bytecode, proof, ..
+    } = result;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     Verifier::verify(
@@ -233,17 +270,25 @@ fn verify_msm_negation_sum_identity_succeeds() {
     // Stack after neg: [G_msm(-1)] then push G → [MSM(-1,G), G]; add → MSM with terms [(-1,G), (1,G)].
     let prog = ScriptBuilder::new()
         .push_point(g_bytes)
-        .neg()                                     // → MSM(-1, G)
+        .neg() // → MSM(-1, G)
         .push_point(g_bytes)
-        .add()                                     // → MSM with [(-1,G), (1,G)]
+        .add() // → MSM with [(-1,G), (1,G)]
         .verify();
-    let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000)
-        .expect("prove");
-    let TxResult { bytecode, proof, .. } = result;
+    let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000).expect("prove");
+    let TxResult {
+        bytecode, proof, ..
+    } = result;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(&pc_gens_v, bytecode, &proof, dummy_header(), 1_000_000, None)
-        .expect("verify");
+    Verifier::verify(
+        &pc_gens_v,
+        bytecode,
+        &proof,
+        dummy_header(),
+        1_000_000,
+        None,
+    )
+    .expect("verify");
 }
 
 /// Non-identity MSM: `1 * G` where G is the basepoint — the sum is G
@@ -262,7 +307,9 @@ fn verify_msm_nonidentity_rejected_at_batch() {
         .verify();
     let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000)
         .expect("prover produces proof regardless of MSM correctness");
-    let TxResult { bytecode, proof, .. } = result;
+    let TxResult {
+        bytecode, proof, ..
+    } = result;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
     let err = Verifier::verify(
@@ -293,13 +340,21 @@ fn verify_msm_invalid_point_rejected_at_batch() {
         .push_point(bad)
         .mul()
         .verify();
-    let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000)
-        .expect("prove");
-    let TxResult { bytecode, proof, .. } = result;
+    let result = Prover::prove(&pc_gens, prog, dummy_header(), 1_000_000).expect("prove");
+    let TxResult {
+        bytecode, proof, ..
+    } = result;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    let err = Verifier::verify(&pc_gens_v, bytecode, &proof, dummy_header(), 1_000_000, None)
-        .expect_err("verify must reject");
+    let err = Verifier::verify(
+        &pc_gens_v,
+        bytecode,
+        &proof,
+        dummy_header(),
+        1_000_000,
+        None,
+    )
+    .expect_err("verify must reject");
     assert!(matches!(err, VMError::BatchSignatureVerificationFailed));
 }
 
@@ -307,7 +362,11 @@ fn verify_msm_invalid_point_rejected_at_batch() {
 #[test]
 fn verify_msm_in_internal_context_rejected() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_point([0x55; 32]).neg().verify().to_bytecode(),
+        ScriptBuilder::new()
+            .push_point([0x55; 32])
+            .neg()
+            .verify()
+            .to_bytecode(),
     );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
@@ -328,7 +387,9 @@ fn verify_msm_debits_decompression_and_finalization_work() {
     vm.current_call.stack = vec![Value::MultiscalarMul(msm.clone())];
     vm.current_call.gas_limit = expected;
     let mut delegate = make_stub_delegate();
-    assert!(vm.step_external(&mut delegate).expect("exact budget succeeds"));
+    assert!(vm
+        .step_external(&mut delegate)
+        .expect("exact budget succeeds"));
     assert_eq!(vm.current_call.gas_used, expected);
 
     let mut short = vm_external_with_script(ScriptBuilder::new().verify().to_bytecode());
@@ -349,10 +410,8 @@ fn verify_msm_debits_decompression_and_finalization_work() {
 fn open_with_inner(inner: ScriptBuilder, recover_failed_cell: bool) -> ScriptBuilder {
     let inner_bytes = inner.to_bytecode();
     let recovery = ScriptBuilder::new().push_int(0u64).return_().to_bytecode();
-    let tree = PredicateTree::scripts_only(
-        vec![inner_bytes.clone(), recovery],
-        TEST_BLINDING_KEY,
-    ).expect("scripts_only tree");
+    let tree = PredicateTree::scripts_only(vec![inner_bytes.clone(), recovery], TEST_BLINDING_KEY)
+        .expect("scripts_only tree");
     let cp = tree.taproot_proof_for(0).expect("cp");
     let recovery_cp = tree.taproot_proof_for(1).expect("recovery cp");
     let pred_point = tree.point;
@@ -365,9 +424,7 @@ fn open_with_inner(inner: ScriptBuilder, recover_failed_cell: bool) -> ScriptBui
         .input()
         .push_point(*cp.internal_key.as_bytes());
     for (i, h) in cp.neighbors.iter().enumerate() {
-        outer = outer
-            .push_str(String::from(h.to_vec()))
-            .push_int(i as u64);
+        outer = outer.push_str(String::from(h.to_vec())).push_int(i as u64);
     }
     outer = outer
         .push_int(cp.neighbors.len() as u64)
@@ -409,9 +466,9 @@ fn failed_call_msm_does_not_pollute_parent_batch() {
         .push_int(1u64)
         .push_point(g_bytes)
         .mul()
-        .verify()                              // appends 1·G to pending_batch
+        .verify() // appends 1·G to pending_batch
         .push_int(0u64)
-        .verify()                              // VerifyFailed → frame unwinds
+        .verify() // VerifyFailed → frame unwinds
         .push_int(0u64)
         .return_();
     let outer = open_with_inner(inner, true)
@@ -420,9 +477,10 @@ fn failed_call_msm_does_not_pollute_parent_batch() {
         .alloc(Some(Int253::from(7u64)))
         .eq()
         .verify();
-    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000)
-        .expect("prove ok");
-    let TxResult { bytecode, proof, .. } = result;
+    let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000).expect("prove ok");
+    let TxResult {
+        bytecode, proof, ..
+    } = result;
     let proof = proof.expect("proof set");
 
     // Verifier-side must accept: the parent's batch contains only the
@@ -459,12 +517,14 @@ fn clean_call_msm_propagates_to_parent_batch() {
         .push_int(0u64)
         .return_();
     let outer = open_with_inner(inner, false)
-        .verify()                              // pop success marker
-        .drop_();                              // drop count
+        .verify() // pop success marker
+        .drop_(); // drop count
 
     let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000)
         .expect("prove ok (prover always builds something)");
-    let TxResult { bytecode, proof, .. } = result;
+    let TxResult {
+        bytecode, proof, ..
+    } = result;
     let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();

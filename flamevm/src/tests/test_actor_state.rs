@@ -160,11 +160,7 @@ fn load_in_external_root_errors_actor_context() {
     let kind = CallKind::ExternalRoot;
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(
-            ScriptBuilder::new().load().into_instructions(),
-            kind,
-            1000,
-        ),
+        CallFrame::new(ScriptBuilder::new().load().into_instructions(), kind, 1000),
     );
     let err = vm
         .step_internal_with_registry(&mut reg)
@@ -420,11 +416,7 @@ fn load_without_discharge_errors_stack_not_clean() {
     // Dict is left on the stack at frame end → StackNotClean (rolled
     // back). A missing `save` is never a silent self-destruct.
     let mut reg = MemRegistry::new();
-    let id = deploy_with_recv(
-        &mut reg,
-        ScriptBuilder::new().load().to_bytecode(),
-        10_000,
-    );
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().load().to_bytecode(), 10_000);
     let block = BlockContext { height: 100 };
     let msg = Message::new(
         id.clone(),
@@ -487,11 +479,7 @@ fn receive_committed_as_first_effect_after_header() {
     let mut reg = MemRegistry::new();
     // Minimal recv: a single `nop`. The script does nothing, but
     // execute_internal still pushes Header + Receive into the txlog.
-    let id = deploy_with_recv(
-        &mut reg,
-        ScriptBuilder::new().nop().to_bytecode(),
-        10_000,
-    );
+    let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 10_000);
     let block = BlockContext { height: 100 };
     let known_anchor = [0xab; 32];
     let msg = Message::new(
@@ -535,11 +523,7 @@ fn receive_committed_as_first_effect_after_header() {
 fn receive_makes_internal_txid_bind_to_send_anchor() {
     fn run_with_anchor(anchor_bytes: [u8; 32]) -> TxID {
         let mut reg = MemRegistry::new();
-        let id = deploy_with_recv(
-            &mut reg,
-            ScriptBuilder::new().nop().to_bytecode(),
-            10_000,
-        );
+        let id = deploy_with_recv(&mut reg, ScriptBuilder::new().nop().to_bytecode(), 10_000);
         let block = BlockContext { height: 100 };
         let msg = Message::new(
             id,

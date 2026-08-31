@@ -48,15 +48,20 @@ fn eq_cross_type_is_zero() {
 
 #[test]
 fn eq_underflow_errors() {
-    assert!(matches!(run_err(b().push_int(5u64).eq()), VMError::StackUnderflow));
+    assert!(matches!(
+        run_err(b().push_int(5u64).eq()),
+        VMError::StackUnderflow
+    ));
 }
 
 #[test]
 fn eq_noncomparable_linear_type_errors() {
     // Two ClearTokens of same flavor — same variant, but linear.
     let s = b()
-        .push_int(7u64).pushtoken()
-        .push_int(7u64).pushtoken()
+        .push_int(7u64)
+        .pushtoken()
+        .push_int(7u64)
+        .pushtoken()
         .eq();
     assert!(matches!(run_err(s), VMError::TypeNotComparable));
 }
@@ -118,7 +123,10 @@ fn divmod_negative_dividend() {
 
 #[test]
 fn divmod_by_zero_errors() {
-    assert!(matches!(run_err(b().push_int(7u64).push_int(0u64).divmod()), VMError::DivByZero));
+    assert!(matches!(
+        run_err(b().push_int(7u64).push_int(0u64).divmod()),
+        VMError::DivByZero
+    ));
 }
 
 #[test]
@@ -128,7 +136,10 @@ fn divmod_full_width_magnitude_succeeds() {
     let mut huge = [0u8; 32];
     huge[16] = 1; // 2^128
     let huge_int = Int253::from_bytes(huge).unwrap();
-    assert_stack(b().push_int(huge_int).push_int(1u64).divmod(), &[Int253::ZERO, huge_int]);
+    assert_stack(
+        b().push_int(huge_int).push_int(1u64).divmod(),
+        &[Int253::ZERO, huge_int],
+    );
 }
 
 #[test]
@@ -139,14 +150,20 @@ fn mod252_empty_string_is_zero() {
 #[test]
 fn mod252_short_string_is_le_value() {
     // [0x07, 0x00, 0x01] LE = 7 + 0*256 + 1*65536 = 65543.
-    assert_stack_ints(b().push_str(String::from(vec![0x07, 0x00, 0x01])).mod252(), &[65543]);
+    assert_stack_ints(
+        b().push_str(String::from(vec![0x07, 0x00, 0x01])).mod252(),
+        &[65543],
+    );
 }
 
 #[test]
 fn mod252_64_bytes_reduces() {
     // 64 bytes of 0xff — should equal 2^512 - 1 reduced mod ℓ.
     let expected = Int253::from(Scalar::from_bytes_mod_order_wide(&[0xff; 64]));
-    assert_stack(b().push_str(String::from(vec![0xffu8; 64])).mod252(), &[expected]);
+    assert_stack(
+        b().push_str(String::from(vec![0xffu8; 64])).mod252(),
+        &[expected],
+    );
 }
 
 #[test]
@@ -189,7 +206,10 @@ fn size_of_string() {
 
 #[test]
 fn size_of_int_errors() {
-    assert!(matches!(run_err(b().push_int(5u64).size()), VMError::TypeHasNoLength));
+    assert!(matches!(
+        run_err(b().push_int(5u64).size()),
+        VMError::TypeHasNoLength
+    ));
 }
 
 #[test]
