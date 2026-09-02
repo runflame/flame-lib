@@ -453,7 +453,7 @@ fn return_transfers_values_to_parent() {
         .return_()
         .to_bytecode();
     let parent_frame = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500);
-    let child_kind = CallKind::CellOpen {
+    let child_kind = CallKind::ContractOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
         caller_id: None,

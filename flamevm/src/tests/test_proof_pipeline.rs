@@ -591,7 +591,7 @@ fn phase21_deferred_sigs_in_txresult() {
     use musig::Multisignature;
     let pc_gens = PedersenGens::default();
     let (vk, sk) = signing_keypair(7);
-    let (script, cell_id) = make_signtx_script_with_cell(vk);
+    let (script, contract_id) = make_signtx_script_with_contract(vk);
     let program = ScriptBuilder::parse(&script).expect("decode");
     let prover_result =
         Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove ok");
@@ -606,7 +606,7 @@ fn phase21_deferred_sigs_in_txresult() {
     t.append_message(b"txid", &prover_txid.0);
     let sig = musig::Signature::sign_multi(
         vec![sk],
-        vec![(musig::VerificationKey::from_compressed(vk), cell_id)],
+        vec![(musig::VerificationKey::from_compressed(vk), contract_id)],
         &mut t,
     )
     .expect("sign_multi");
@@ -625,10 +625,10 @@ fn phase21_deferred_sigs_in_txresult() {
     match &verifier_result.deferred_sigs[0] {
         DeferredSig::TxBound {
             verification_key,
-            cell_id: cid,
+            contract_id: cid,
         } => {
             assert_eq!(verification_key, &vk);
-            assert_eq!(*cid, cell_id);
+            assert_eq!(*cid, contract_id);
         }
         _ => panic!("expected TxBound"),
     }

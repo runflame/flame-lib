@@ -667,18 +667,18 @@ impl ScriptBuilder {
         self.jump(top)
     }
 
-    // ── Cell + I/O ───────────────────────────────────
+    // ── Contract + I/O ───────────────────────────────────
 
-    /// `input` (0x90). Witness data (open commitments on Token
+    /// `input`. Witness data (open commitments on Token
     /// payloads) rides on the pushed String value — call
-    /// `push_str(String::cell(c))` before this on the prover side;
-    /// verifiers push `String::Opaque(cell.to_bytes())`.
+    /// `push_str(String::contract(c))` before this on the prover side;
+    /// verifiers push `String::Opaque(contract.to_bytes())`.
     pub fn input(mut self) -> Self {
         self.instructions.push(Instruction::Input);
         self
     }
-    pub fn cell(mut self) -> Self {
-        self.instructions.push(Instruction::Cell);
+    pub fn contract(mut self) -> Self {
+        self.instructions.push(Instruction::Contract);
         self
     }
     pub fn output(mut self) -> Self {
@@ -698,7 +698,7 @@ impl ScriptBuilder {
         self
     }
 
-    // ── Actor invocation + state (0x94..=0x97) ─────────
+    // ── Actor invocation + state ─────────
 
     pub fn send(mut self) -> Self {
         self.instructions.push(Instruction::Send);
@@ -729,7 +729,7 @@ impl ScriptBuilder {
         self
     }
 
-    // ── Tx-level & frame introspection (0xe0..=0xf1) ───
+    // ── Tx-level & frame introspection ───
 
     pub fn timelock(mut self) -> Self {
         self.instructions.push(Instruction::Timelock);

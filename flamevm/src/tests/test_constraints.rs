@@ -278,11 +278,11 @@ fn range_in_internal_context_errors_external_only() {
 
 // ── CS rollback on call failure ─────────────────────────────────
 
-/// Wraps `inner` in an `open` of a single-leaf cell that consumes
+/// Wraps `inner` in an `open` of a single-leaf contract that consumes
 /// itself (`input` then `open`) so the script runs under a real
 /// `last_anchor`. The outer program returns the inner's failure
 /// or success marker on the stack for the caller's continuation.
-fn open_with_inner(inner: ScriptBuilder, recover_failed_cell: bool) -> ScriptBuilder {
+fn open_with_inner(inner: ScriptBuilder, recover_failed_contract: bool) -> ScriptBuilder {
     let inner_bytes = inner.to_bytecode();
     let recovery = ScriptBuilder::new().push_int(0u64).return_().to_bytecode();
     let tree = PredicateTree::scripts_only(vec![inner_bytes.clone(), recovery], TEST_BLINDING_KEY)
@@ -290,12 +290,12 @@ fn open_with_inner(inner: ScriptBuilder, recover_failed_cell: bool) -> ScriptBui
     let cp = tree.taproot_proof_for(0).expect("cp");
     let recovery_cp = tree.taproot_proof_for(1).expect("recovery cp");
     let pred_point = tree.point;
-    let cell = Cell::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![])
+    let contract = Contract::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![])
         .expect("empty payload is portable");
-    let cell_bytes = encode_cell_to_bytes(&cell);
+    let contract_bytes = encode_contract_to_bytes(&contract);
 
     let mut outer = ScriptBuilder::new()
-        .push_str(String::from(cell_bytes))
+        .push_str(String::from(contract_bytes))
         .input()
         .push_point(*cp.internal_key.as_bytes());
     for (i, h) in cp.neighbors.iter().enumerate() {
@@ -309,7 +309,7 @@ fn open_with_inner(inner: ScriptBuilder, recover_failed_cell: bool) -> ScriptBui
         .push_int(1024u64)
         .push_int(0u64)
         .open();
-    if recover_failed_cell {
+    if recover_failed_contract {
         outer = push_taproot_proof_to_program(outer.drop_().drop_(), &recovery_cp)
             .push_int(1024u64)
             .push_int(0u64)
@@ -374,7 +374,7 @@ fn failed_call_unsat_cs_does_not_pollute_parent_proof() {
     .expect("verify must accept — failed call's CS contributions rolled back");
 }
 
-/// Inverse: when the cell-open succeeds cleanly, its allocations
+/// Inverse: when the contract-open succeeds cleanly, its allocations
 /// and constraints stay in the CS. If the child's constraint is
 /// unsatisfiable, the verifier rejects — confirming the rollback
 /// only fires on the failure path.
@@ -421,7 +421,7 @@ fn clean_call_cs_alloc_propagates_to_parent_proof() {
 ///
 ///   1. `output` — emits `TxEntry::Output` (lane: TxLog truncate).
 ///   2. `send`   — emits `TxEntry::Send`   (lane: TxLog truncate).
-///   3. `cell` + `signtx` — records a `DeferredSig::TxBound`
+///   3. `contract` + `signtx` — records a `DeferredSig::TxBound`
 ///      (lane: deferred_sigs truncate).
 ///   4. MSM `verify` with a non-identity statement (lane: batch
 ///      rollback via `BatchCheckpoint::restore`).
@@ -457,7 +457,7 @@ fn failed_call_rolls_back_every_state_lane() {
         // ── lane 3: deferred_sigs (signtx records TxBound) ──────
         .push_int(0u64) // payload count = 0
         .push_point([0xdd; 32]) // predicate
-        .cell() // → Cell on stack
+        .contract() // → Contract on stack
         .signtx() // pours payload + count; records TxBound
         .drop_() // drop count = 0
         // ── lane 4: MSM/sig batch (non-identity 1·G) ────────────

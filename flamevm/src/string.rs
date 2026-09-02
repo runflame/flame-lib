@@ -6,7 +6,7 @@ use crate::errors::VMError;
 use crate::int253::Int253;
 use readerwriter::{Encodable, SizeWriter};
 
-use crate::cell::{Cell, Predicate};
+use crate::contract::{Contract, Predicate};
 use crate::ops::Instruction;
 use crate::script::{Script, ScriptBuilder};
 
@@ -37,13 +37,13 @@ pub enum StringWitness {
     /// [`String::to_instructions`] — verifier sees `Opaque(bytes)`
     /// and parses, prover keeps witnesses inline.
     Script(Vec<Instruction>),
-    /// Prover-side cell with witness-bearing `Commitment::Open`
+    /// Prover-side contract with witness-bearing `Commitment::Open`
     /// quantities/flavors on its Token payloads. Encodes to the
-    /// canonical cell bytes — verifier sees `Opaque(bytes)` and
-    /// decodes via `Cell::decode` to closed commitments. Consumed
-    /// by `op_input` via [`String::to_cell`], which moves the cell out
+    /// canonical contract bytes — verifier sees `Opaque(bytes)` and
+    /// decodes via `Contract::decode` to closed commitments. Consumed
+    /// by `op_input` via [`String::to_contract`], which moves the contract out
     /// of the enclosing witness box.
-    Cell(Cell),
+    Contract(Contract),
 }
 
 impl StringWitness {
@@ -52,7 +52,7 @@ impl StringWitness {
             Self::Point(p) => p.to_bytes().to_vec(),
             Self::Scalar(s) => s.to_bytes().to_vec(),
             Self::Script(instrs) => compile_instructions(instrs),
-            Self::Cell(c) => c.to_bytes(),
+            Self::Contract(c) => c.to_bytes(),
         }
     }
 
@@ -66,9 +66,9 @@ impl StringWitness {
                 }
                 size.len()
             }
-            Self::Cell(c) => {
+            Self::Contract(c) => {
                 let mut size = SizeWriter::new();
-                c.encode(&mut size).expect("admitted cell is encodable");
+                c.encode(&mut size).expect("admitted contract is encodable");
                 size.len()
             }
         }
@@ -77,7 +77,7 @@ impl StringWitness {
     fn is_empty(&self) -> bool {
         match self {
             Self::Script(instrs) => instrs.is_empty(),
-            // Point / Scalar are 32 bytes; Cell has a non-empty header.
+            // Point / Scalar are 32 bytes; Contract has a non-empty header.
             _ => false,
         }
     }
@@ -114,12 +114,12 @@ impl String {
         String::Witness(Box::new(StringWitness::Script(instructions)))
     }
 
-    /// Constructs a witness-bearing Cell-String. Used by the prover
-    /// before `op_input` to push a cell whose Token payloads still
+    /// Constructs a witness-bearing Contract-String. Used by the prover
+    /// before `op_input` to push a contract whose Token payloads still
     /// carry `Commitment::Open` quantities/flavors. The verifier-side
-    /// equivalent is `String::Opaque(cell.to_bytes())`.
-    pub fn cell(c: Cell) -> String {
-        String::Witness(Box::new(StringWitness::Cell(c)))
+    /// equivalent is `String::Opaque(contract.to_bytes())`.
+    pub fn contract(c: Contract) -> String {
+        String::Witness(Box::new(StringWitness::Contract(c)))
     }
 
     // ── Byte views ──────────────────────────────────────────────
@@ -155,8 +155,8 @@ impl String {
     }
 
     /// Length in canonical wire bytes. 32 bytes for Point/Scalar,
-    /// compiled bytecode length for Script, serialized cell length
-    /// for Cell.
+    /// compiled bytecode length for Script, serialized contract length
+    /// for Contract.
     pub fn len(&self) -> usize {
         match self {
             String::Opaque(d) => d.len(),
@@ -257,28 +257,28 @@ impl String {
         }
     }
 
-    /// Downcasts to a `Cell`. For `StringWitness::Cell(c)`, returns the
-    /// witness-bearing cell directly (Token payloads keep their
+    /// Downcasts to a `Contract`. For `StringWitness::Contract(c)`, returns the
+    /// witness-bearing contract directly (Token payloads keep their
     /// `Commitment::Open` quantities/flavors). For `Opaque`, decodes
-    /// the canonical wire bytes via `Cell::decode` (yields
-    /// `Commitment::Closed`). Hard-fails `MalformedCellEncoding` on
+    /// the canonical wire bytes via `Contract::decode` (yields
+    /// `Commitment::Closed`). Hard-fails `MalformedContractEncoding` on
     /// malformed bytes, trailing data, or any non-decodable variant.
     ///
     /// Used by `op_input`.
-    pub fn to_cell(self) -> Result<Cell, VMError> {
+    pub fn to_contract(self) -> Result<Contract, VMError> {
         match self {
             String::Witness(w) => match *w {
-                StringWitness::Cell(cell) => Ok(cell),
-                _ => Err(VMError::MalformedCellEncoding),
+                StringWitness::Contract(contract) => Ok(contract),
+                _ => Err(VMError::MalformedContractEncoding),
             },
             String::Opaque(data) => {
                 let mut reader: &[u8] = &data;
-                let cell = <Cell as readerwriter::Decodable>::decode(&mut reader)
-                    .map_err(|_| VMError::MalformedCellEncoding)?;
+                let contract = <Contract as readerwriter::Decodable>::decode(&mut reader)
+                    .map_err(|_| VMError::MalformedContractEncoding)?;
                 if !reader.is_empty() {
-                    return Err(VMError::MalformedCellEncoding);
+                    return Err(VMError::MalformedContractEncoding);
                 }
-                Ok(cell)
+                Ok(contract)
             }
         }
     }

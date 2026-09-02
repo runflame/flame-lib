@@ -1,8 +1,8 @@
 mod actor;
 mod address;
-mod cell;
 mod chunk;
 mod constraints;
+mod contract;
 mod crypto;
 mod dict;
 mod dict2;
@@ -27,11 +27,11 @@ pub use actor::{
     code_root, code_state_bytes, empty_state, state_root, ActorID, ActorRegistry, StoragePurchase,
 };
 pub use address::Address;
-pub use cell::{Cell, CellID, Predicate, PredicateTree, TaprootProof};
 pub use chunk::{Chunk, ChunkID, ChunkRef, MAX_CHUNK_PAYLOAD, MAX_CHUNK_REFS};
 pub use constraints::{
     Commitment, CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,
 };
+pub use contract::{Contract, ContractID, Predicate, PredicateTree, TaprootProof};
 pub use crypto::{Merlin, Point};
 pub use dict::Dict;
 pub use dict2::{int253_to_ordered_key, ordered_key_to_int253, Dict2, DICT2_KEY_BYTES};
@@ -57,7 +57,7 @@ pub use vm::{Anchor, BlockContext};
 
 // Re-export the wire-format traits so downstream crates don't need
 // a direct `readerwriter` dep. Most flamevm types implement these
-// (ActorID, Anchor, Predicate, Cell, Message, Address, Instruction).
+// (ActorID, Anchor, Predicate, Contract, Message, Address, Instruction).
 pub use readerwriter::{
     Codable, Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer,
 };

@@ -9,7 +9,7 @@ use readerwriter::{Encodable, ExactSizeEncodable, ReadError, Reader, WriteError,
 use serde::{Deserialize, Serialize};
 
 use crate::actor::{code_root, state_root, ActorID, ActorRegistry};
-use crate::cell::{Cell, CellID};
+use crate::contract::{Contract, ContractID};
 use crate::encoding::{write_admitted_value, write_int253};
 use crate::errors::VMError;
 use crate::message::Message;
@@ -223,7 +223,7 @@ impl TxLog {
     }
 
     /// Consumes the log and returns its ordered effects. Consensus code uses
-    /// this to move linear cells and messages into the block transition
+    /// this to move linear contracts and messages into the block transition
     /// without cloning bearer values.
     pub fn into_entries(self) -> Vec<TxEntry> {
         self.0
@@ -245,9 +245,9 @@ pub struct TxMetrics {
 /// `b"txid"`; pass the result to [`UnsignedTx::sign`].
 pub struct SigningInstructions {
     pub txid: TxID,
-    /// The tx-bound `(verification_key, cell_id)` authorizations, in
+    /// The tx-bound `(verification_key, contract_id)` authorizations, in
     /// `signtx` order — the multi-message context to sign.
-    pub items: Vec<(CompressedRistretto, CellID)>,
+    pub items: Vec<(CompressedRistretto, ContractID)>,
 }
 
 /// A built-but-unsigned external transaction (lifecycle step 1→2).
@@ -257,7 +257,7 @@ pub struct UnsignedTx {
     proof: R1CSProof,
     log: TxLog,
     metrics: TxMetrics,
-    txbound_items: Vec<(CompressedRistretto, CellID)>,
+    txbound_items: Vec<(CompressedRistretto, ContractID)>,
 }
 
 impl UnsignedTx {
@@ -313,8 +313,8 @@ impl ScriptBuilder {
             .filter_map(|s| match s {
                 DeferredSig::TxBound {
                     verification_key,
-                    cell_id,
-                } => Some((*verification_key, *cell_id)),
+                    contract_id,
+                } => Some((*verification_key, *contract_id)),
                 DeferredSig::Explicit { .. } => None,
             })
             .collect();
@@ -391,7 +391,7 @@ pub struct TxID(pub Hash);
 /// Entry in a transaction log. All entries are hashed into a [transaction ID](TxID).
 ///
 /// `Clone`/`Serialize`/`Deserialize` are still withheld (the linear
-/// `Cell`/`Token` payloads don't participate); downstream code wanting
+/// `Contract`/`Token` payloads don't participate); downstream code wanting
 /// those should hash entries to bytes first.
 #[derive(Debug)]
 pub enum TxEntry {
@@ -402,11 +402,11 @@ pub enum TxEntry {
     /// Plain data entry created by `log` instruction. Contains arbitrary binary string.
     Data(Vec<u8>),
 
-    /// Input: a consumed cell's identity. Emitted by `input` (external-only).
-    /// Commits the cell that the transaction has consumed without re-storing
-    /// the payload — the existence of the cell is independently asserted by
+    /// Input: a consumed contract's identity. Emitted by `input` (external-only).
+    /// Commits the contract that the transaction has consumed without re-storing
+    /// the payload — the existence of the contract is independently asserted by
     /// the Utreexo proof outside the VM.
-    Input(CellID),
+    Input(ContractID),
 
     /// Receive: the MessageID consumed by an internal transaction. Emitted
     /// by `VM::execute_internal` as the first effect after `Header`,
@@ -424,8 +424,8 @@ pub enum TxEntry {
     /// empty state.
     ActorDeploy { actor: ActorID, code: Vec<u8> },
 
-    /// Output: a newly sealed cell, emitted by the `output` opcode.
-    Output(Cell),
+    /// Output: a newly sealed contract, emitted by the `output` opcode.
+    Output(Contract),
 
     /// Cleartext issuance (emitted by `op_issuepub`). Carries the
     /// cleartext `(qty, flv)` pair as `Int253`s — public on the wire,
@@ -437,7 +437,7 @@ pub enum TxEntry {
     /// `(qty_point, flv_point)` — the live Pedersen commitment to the
     /// qty and the unblinded commitment to the flavor scalar. Flavor
     /// is `flavor_from_predicate(predicate, tag)` for the predicate
-    /// whose `CellOpen` frame ran `issuepriv`. Soundness of the qty
+    /// whose `ContractOpen` frame ran `issuepriv`. Soundness of the qty
     /// commitment + 64-bit range proof is established through the
     /// constraint system.
     IssuePriv(CompressedRistretto, CompressedRistretto),
@@ -457,7 +457,7 @@ pub enum TxEntry {
 
     /// Actor-state mutation recorded by `op_save`. Carries the
     /// actor's identity and the **full** post-save state Value —
-    /// symmetric with `Output(Cell)` which carries the full Cell.
+    /// symmetric with `Output(Contract)` which carries the full Contract.
     /// The state machine consumes this entry by replacing the
     /// actor's stored state with `state`; no re-execution of the
     /// script needed. See docs/flamevm.md §"Design"; TxLog records effects, not
@@ -466,7 +466,7 @@ pub enum TxEntry {
     /// The MerkleItem encoding hashes `(actor.to_hash(),
     /// state_root(&state))` — i.e. the merkle leaf commits to the
     /// canonical state root, not the full bytes, just as
-    /// `Output(Cell)`'s leaf commits to `cell.id()`.
+    /// `Output(Contract)`'s leaf commits to `contract.id()`.
     ActorSave { actor: ActorID, state: Value },
 
     /// Actor-code replacement recorded by `setcode`. Carries the full
@@ -484,7 +484,7 @@ pub enum TxEntry {
     /// The block builder reads `TxEntry::Send` entries directly from
     /// the TxLog — there is no separate "sends" queue — and feeds the
     /// embedded `Message` straight into `VM::execute_internal`.
-    /// Symmetric with `TxEntry::Output(Cell)`: each effect that owns
+    /// Symmetric with `TxEntry::Output(Contract)`: each effect that owns
     /// an addressable artifact embeds the artifact itself.
     Send(Message),
 
@@ -614,8 +614,8 @@ impl MerkleItem for TxEntry {
             TxEntry::Data(bytes) => {
                 t.append_message(b"data", bytes);
             }
-            TxEntry::Input(cell_id) => {
-                t.append_message(b"input", cell_id);
+            TxEntry::Input(contract_id) => {
+                t.append_message(b"input", contract_id);
             }
             TxEntry::Receive(send_id) => {
                 t.append_message(b"receive.send_id", send_id);
@@ -624,11 +624,11 @@ impl MerkleItem for TxEntry {
                 t.append_message(b"deploy.actor", &actor.to_hash());
                 t.append_message(b"deploy.code_root", &code_root(code));
             }
-            TxEntry::Output(cell) => {
-                // Bind to the cell's canonical 32-byte identity hash.
-                // Cell::id() already absorbs predicate / anchor /
+            TxEntry::Output(contract) => {
+                // Bind to the contract's canonical 32-byte identity hash.
+                // Contract::id() already absorbs predicate / anchor /
                 // payload bytes via Merlin.
-                let id = cell.id();
+                let id = contract.id();
                 t.append_message(b"output", &id);
             }
             TxEntry::IssuePub(qty, flv) => {
@@ -654,7 +654,7 @@ impl MerkleItem for TxEntry {
                 // root: actor identity (canonical 32-byte hash, not
                 // variant-tagged wire form) + state root. State bytes
                 // ride in the entry itself; the merkle leaf commits
-                // only to the root, matching Output's Cell-as-id
+                // only to the root, matching Output's Contract-as-id
                 // pattern.
                 t.append_message(b"save.actor", &actor.to_hash());
                 t.append_message(b"save.post_state_root", &state_root(state));
@@ -665,8 +665,8 @@ impl MerkleItem for TxEntry {
             }
             TxEntry::Send(msg) => {
                 // Bind to the send's canonical 32-byte MessageID hash,
-                // analogous to `Output(Cell)` committing only to
-                // `cell.id()`. `Message::id()` absorbs the message's
+                // analogous to `Output(Contract)` committing only to
+                // `contract.id()`. `Message::id()` absorbs the message's
                 // canonical wire encoding under domain
                 // `flamevm.message.id`, so this single leaf commits to
                 // every parameter the future internal tx will be
@@ -714,7 +714,7 @@ impl TxEntry {
 
 /// Canonical wire serialization of one effect: a tag byte followed by
 /// the variant's fields, each in its existing canonical form (reusing
-/// `Cell`/`Message`/`ActorID` encoders and `write_value`/`write_int253`
+/// `Contract`/`Message`/`ActorID` encoders and `write_value`/`write_int253`
 /// — never a parallel re-implementation, per spec §TxLog transport).
 /// All integers little-endian (ADR 0006); byte blobs are u64-LE
 /// length-prefixed (matching `Message` payload / `ActorID` ctor style).
@@ -731,9 +731,9 @@ impl Encodable for TxEntry {
                 w.write_u64(b"data.len", bytes.len() as u64)?;
                 w.write(b"data.bytes", bytes)
             }
-            TxEntry::Input(cell_id) => {
+            TxEntry::Input(contract_id) => {
                 w.write_u8(b"txentry.tag", Self::TAG_INPUT)?;
-                w.write(b"input.cell_id", cell_id)
+                w.write(b"input.contract_id", contract_id)
             }
             TxEntry::Receive(send_id) => {
                 w.write_u8(b"txentry.tag", Self::TAG_RECEIVE)?;
@@ -745,9 +745,9 @@ impl Encodable for TxEntry {
                 w.write_u64(b"deploy.len", code.len() as u64)?;
                 w.write(b"deploy.bytes", code)
             }
-            TxEntry::Output(cell) => {
+            TxEntry::Output(contract) => {
                 w.write_u8(b"txentry.tag", Self::TAG_OUTPUT)?;
-                cell.encode(w)
+                contract.encode(w)
             }
             TxEntry::IssuePub(qty, flv) => {
                 w.write_u8(b"txentry.tag", Self::TAG_ISSUE_PUB)?;

@@ -1,4 +1,4 @@
-//! Cells, predicates, and taproot-proofs.
+//! Contracts, predicates, and taproot-proofs.
 
 use bulletproofs::PedersenGens;
 use core::any::Any;
@@ -18,11 +18,11 @@ use crate::errors::VMError;
 use crate::vm::Anchor;
 use crate::{Point, String, Value};
 
-/// 32-byte canonical identifier of a `Cell`. Computed via Merlin
-/// transcript over the cell's canonical wire encoding (see `Cell::id`).
-/// Stored in `TxEntry::Input` to commit a consumed cell's identity
+/// 32-byte canonical identifier of a `Contract`. Computed via Merlin
+/// transcript over the contract's canonical wire encoding (see `Contract::id`).
+/// Stored in `TxEntry::Input` to commit a consumed contract's identity
 /// without re-storing its payload.
-pub type CellID = [u8; 32];
+pub type ContractID = [u8; 32];
 
 // ── Predicate ────────────────────────────────────────────────────
 
@@ -45,7 +45,7 @@ pub type CellID = [u8; 32];
 ///
 /// `Any` lets prover-side code downcast via
 /// [`Predicate::witness_as`]. `Send + Sync` keeps `Predicate`
-/// usable across threads (the txlog's `Output(Cell)` carries it).
+/// usable across threads (the txlog's `Output(Contract)` carries it).
 /// `Debug` supports the manual `Debug` impl on `Predicate`.
 pub trait PredicateWitness: Any + Send + Sync + fmt::Debug {
     /// Canonical 32-byte compressed Ristretto point this witness
@@ -61,7 +61,7 @@ pub trait PredicateWitness: Any + Send + Sync + fmt::Debug {
     fn as_any(&self) -> &dyn Any;
 }
 
-/// Unlock condition for a cell — a Taproot-compressed point
+/// Unlock condition for a contract — a Taproot-compressed point
 /// `P = X + H(X, M) · B` where `X` is the internal key and `M` is
 /// the merkle root over the program tree.
 ///
@@ -118,7 +118,7 @@ impl fmt::Debug for Predicate {
 /// merkle proof cannot tell program leaves apart from blinding leaves.
 #[derive(Clone, Debug)]
 pub enum PredicateLeaf {
-    /// A script program that, if matched by a `TaprootProof`, unlocks the cell.
+    /// A script program that, if matched by a `TaprootProof`, unlocks the contract.
     Program(Vec<u8>),
     /// A 32-byte random sibling that hides its program partner's position.
     Blinding([u8; 32]),
@@ -136,7 +136,7 @@ pub enum PredicateLeaf {
 /// needed for [`point`](Self::point) or [`taproot_proof_for`](Self::taproot_proof_for).
 ///
 /// `point` caches `X + H(X, M) · B` so subsequent reads are O(1).
-/// `flamevm` reads it via `Predicate::to_point()` from the per-cell
+/// `flamevm` reads it via `Predicate::to_point()` from the per-contract
 /// txid hash, the txlog's `Send.refund_predicate` encoding, and the
 /// `signtx`/`signcall` verification-key lookup — a hot path that
 /// previously re-walked the merkle root and re-multiplied the
@@ -202,7 +202,7 @@ impl Predicate {
     }
 
     /// Strips any prover-side witness data, leaving only the opaque
-    /// point. Used when sealing a cell into wire encoding.
+    /// point. Used when sealing a contract into wire encoding.
     pub fn to_opaque(&self) -> Predicate {
         Predicate::opaque(self.point)
     }
@@ -260,7 +260,7 @@ impl Predicate {
     /// Verifies a `TaprootProof` against this predicate. On success returns
     /// the unlocked program bytes (the leaf the proof opens). On failure
     /// (path mismatch, decompression failure, etc.) returns
-    /// `VMError::TaprootProofMismatch` — a hard error: cell-open
+    /// `VMError::TaprootProofMismatch` — a hard error: contract-open
     /// failures must not be recoverable.
     pub fn verify_taproot_proof<'a>(&self, cp: &'a TaprootProof) -> Result<&'a [u8], VMError> {
         // Reconstruct the tweaked point P' = X + H(X, M)·B from the proof
@@ -307,7 +307,7 @@ impl PredicateTree {
         let leaves = create_merkle_leaves(&programs, &blinding_key);
         // Precompute the Taproot-tweaked point once at construction.
         // `Predicate::to_point()` returns this cached value in O(1);
-        // hot paths (per-cell `Cell::id`, txid hashing, sig vk lookup)
+        // hot paths (per-contract `Contract::id`, txid hashing, sig vk lookup)
         // would otherwise re-walk the merkle tree and re-multiply the
         // basepoint table on every call.
         let root = merkle_root_of_leaves(&leaves);
@@ -494,31 +494,31 @@ pub struct TaprootProof {
     pub program: Vec<u8>,
 }
 
-// ── Cell ─────────────────────────────────────────────────────────
+// ── Contract ─────────────────────────────────────────────────────────
 
-/// A linear-typed cell carrying a payload under an unlock predicate.
+/// A linear-typed contract carrying a payload under an unlock predicate.
 ///
 /// `Clone` is the Rust-level deep copy (witnesses on Token payloads
-/// survive). It is not VM copyability — cells are linear on the stack
+/// survive). It is not VM copyability — contracts are linear on the stack
 /// (`is_copyable` denies `dup`); they move, not copy, in script flow.
 #[derive(Clone, Debug)]
-pub struct Cell {
-    /// Unlock predicate. Always opaque when the cell crosses the wire;
-    /// may carry prover-witness when the cell is freshly built in-VM.
+pub struct Contract {
+    /// Unlock predicate. Always opaque when the contract crosses the wire;
+    /// may carry prover-witness when the contract is freshly built in-VM.
     pub predicate: Predicate,
     /// 32-byte anchor — derived by ratcheting from the prior anchor.
     pub anchor: Anchor,
-    /// Immutable payload, admitted only through checked Cell construction.
+    /// Immutable payload, admitted only through checked Contract construction.
     payload: Vec<Value>,
 }
 
-impl Cell {
-    /// Constructs a cell, rejecting any non-portable payload item.
+impl Contract {
+    /// Constructs a contract, rejecting any non-portable payload item.
     pub fn new(predicate: Predicate, anchor: Anchor, payload: Vec<Value>) -> Result<Self, VMError> {
         if payload.iter().any(|v| !v.is_portable()) {
             return Err(VMError::NonPortableInOutput);
         }
-        Ok(Cell {
+        Ok(Contract {
             predicate,
             anchor,
             payload,
@@ -530,12 +530,12 @@ impl Cell {
         &self.payload
     }
 
-    /// Consumes the cell and returns its payload.
+    /// Consumes the contract and returns its payload.
     pub fn into_payload(self) -> Vec<Value> {
         self.payload
     }
 
-    /// Logical heap work needed to clone this cell for call-failure escrow.
+    /// Logical heap work needed to clone this contract for call-failure escrow.
     pub(crate) fn clone_gas(&self) -> u64 {
         self.payload
             .iter()
@@ -544,14 +544,14 @@ impl Cell {
             })
     }
 
-    /// Unique content identity of this cell — commits to its predicate,
+    /// Unique content identity of this contract — commits to its predicate,
     /// anchor, and payload. Used as the `Output` txlog entry and as the
     /// `signtx`/`signcall` signed message. Uniqueness comes from the anchor;
     /// the payload bytes are bound so the id is a true content commitment.
     ///
-    /// Cannot fail: all Cell construction paths admit only portable values.
+    /// Cannot fail: all Contract construction paths admit only portable values.
     pub fn id(&self) -> [u8; 32] {
-        let mut t = Transcript::new(b"flamevm.cell.id");
+        let mut t = Transcript::new(b"flamevm.contract.id");
         t.append_message(b"predicate", self.predicate.to_point().as_bytes());
         t.append_message(b"anchor", &self.anchor.0);
         let len = self.payload.len() as u64;
@@ -570,7 +570,7 @@ impl Cell {
     }
 
     /// Canonical wire bytes — thin wrapper over `Encodable::encode_to_vec`
-    /// for callers that want an owned `Vec<u8>` (e.g. a cell String witness
+    /// for callers that want an owned `Vec<u8>` (e.g. a contract String witness
     /// serialization). Cannot fail: `Vec<u8>` is an infallible writer
     /// and payload entries are guaranteed portable by construction.
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -580,9 +580,9 @@ impl Cell {
 
 /// Canonical wire form: a list-style `Dict` with three entries —
 /// predicate (`Point`), anchor (32-byte `String`), payload (nested
-/// list-style `Dict` of values). Encoding is representation-only; Cell
+/// list-style `Dict` of values). Encoding is representation-only; Contract
 /// construction owns the portability invariant.
-impl Encodable for Cell {
+impl Encodable for Contract {
     fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
         write_list_prefix(w, 3)?;
         let pred_point = Point::from_compressed(self.predicate.to_point());
@@ -597,7 +597,7 @@ impl Encodable for Cell {
 }
 
 /// Reads the canonical wire form, then admits the decoded payload through
-/// [`Cell::new`]. This top-level Cell-domain check is independent of parsing;
+/// [`Contract::new`]. This top-level Contract-domain check is independent of parsing;
 /// nested Dict checks remain O(1) through their sticky metadata.
 ///
 /// `ReadError::InvalidFormat` on:
@@ -606,8 +606,8 @@ impl Encodable for Cell {
 /// - entry 1 not a 32-byte `String`,
 /// - entry 2 not a list-Dict,
 /// - any payload value missing or unparseable.
-impl Decodable for Cell {
-    fn decode(r: &mut impl Reader) -> Result<Cell, ReadError> {
+impl Decodable for Contract {
+    fn decode(r: &mut impl Reader) -> Result<Contract, ReadError> {
         let outer_count = read_list_prefix(r).map_err(|_| ReadError::InvalidFormat)?;
         if outer_count != 3 {
             return Err(ReadError::InvalidFormat);
@@ -637,7 +637,7 @@ impl Decodable for Cell {
                 _ => return Err(ReadError::InvalidFormat),
             }
         }
-        Cell::new(predicate, anchor, payload).map_err(|_| ReadError::InvalidFormat)
+        Contract::new(predicate, anchor, payload).map_err(|_| ReadError::InvalidFormat)
     }
 }
 

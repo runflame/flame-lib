@@ -262,7 +262,7 @@ fn issuepub_at_external_root_errors_actor_context() {
 
 #[test]
 fn issuepriv_emits_token_with_predicate_bound_flavor() {
-    // Inside a CellOpen frame in external context: push a blinded
+    // Inside a ContractOpen frame in external context: push a blinded
     // commitment as a witness-bearing String, lift it to a Variable
     // via `commit`, push a tag, run `issuepriv`. Then `push:1 return`
     // so the Token returns to the parent frame cleanly. The opcode
@@ -293,7 +293,7 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
         .push_int(1u64)
         .return_();
     let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 20_000);
-    let child_kind = CallKind::CellOpen {
+    let child_kind = CallKind::ContractOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
         caller_id: None,
@@ -367,17 +367,17 @@ fn issuepriv_at_external_root_errors_predicate_context() {
 
 #[test]
 fn issuepriv_in_internal_context_yields_failure_marker() {
-    // CellOpen with external_context: false: `require_external()` in
+    // ContractOpen with external_context: false: `require_external()` in
     // op_issuepriv errors `ExternalOnly`. Since it's inside a nested
     // frame, `fail_current_call` swallows the error and pushes
     // `[count=0, status=0]` onto the parent's stack — mirrors the
     // `op_open_cs_blocked_when_external_context_false` pattern in
-    // test_cells.rs.
+    // test_contracts.rs.
     use crate::vm::{Anchor, CallFrame, CallKind, VM};
     use curve25519_dalek::ristretto::CompressedRistretto;
     let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500);
     let script = ScriptBuilder::new().issuepriv().to_bytecode();
-    let child_kind = CallKind::CellOpen {
+    let child_kind = CallKind::ContractOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: false, // → require_external() will error
         caller_id: None,
@@ -404,9 +404,9 @@ fn issuepriv_in_internal_context_yields_failure_marker() {
 
 #[test]
 fn issuepriv_prove_then_verify_end_to_end() {
-    // End-to-end: outer external script opens a cell whose leaf
+    // End-to-end: outer external script opens a contract whose leaf
     // contains `commit ; pushstr(tag) ; issuepriv ; retire ; push:0 ;
-    // return`. The leaf mints a confidential token under the cell's
+    // return`. The leaf mints a confidential token under the contract's
     // predicate identity, then retires it (so the child stack is
     // clean at frame exit). Prover produces a proof; Verifier
     // verifies it against the same bytecode. The full pipeline —
@@ -421,7 +421,7 @@ fn issuepriv_prove_then_verify_end_to_end() {
     let qty_commit = Commitment::blinded_with_factor(qty_int, qty_blind);
     let tag_str = String::from(b"gold".to_vec());
 
-    // Leaf script — runs inside the isolated CellOpen frame on open:
+    // Leaf script — runs inside the isolated ContractOpen frame on open:
     //   stack at entry: [qty_witness_string]  (k=1 arg from `open`)
     //   commit:    pop String → Variable
     //   pushstr:   tag
@@ -443,13 +443,13 @@ fn issuepriv_prove_then_verify_end_to_end() {
     let cp = tree.taproot_proof_for(0).expect("taproot_proof for leaf 0");
     let pred_point = tree.point;
 
-    // Cell with empty payload — the witness rides on the open arg.
-    let cell = Cell::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![])
+    // Contract with empty payload — the witness rides on the open arg.
+    let contract = Contract::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![])
         .expect("empty payload is portable");
-    let cell_bytes = encode_cell_to_bytes(&cell);
+    let contract_bytes = encode_contract_to_bytes(&contract);
 
     // Outer:
-    //   pushstr(cell_bytes); input;
+    //   pushstr(contract_bytes); input;
     //   pushpoint(internal_key);
     //   neighbors-dict; position;
     //   push_script(inner) (witness-preserving);
@@ -457,7 +457,7 @@ fn issuepriv_prove_then_verify_end_to_end() {
     //   pushstr(qty_witness); k=1; open;
     //   verify; drop  (consume the success + count markers)
     let mut outer = ScriptBuilder::new()
-        .push_str(String::from(cell_bytes))
+        .push_str(String::from(contract_bytes))
         .input()
         .push_point(*cp.internal_key.as_bytes());
     for (i, h) in cp.neighbors.iter().enumerate() {

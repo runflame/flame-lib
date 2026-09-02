@@ -17,15 +17,17 @@ Successful VM execution equals to successful transaction verification. Therefore
 
 ## Design overview
 
-Flame combines single-use **cells** with persistent stateful **actors**. One
-stack machine verifies both: external transactions consume and create cells and
-may emit messages; internal transactions deliver messages and synchronously call
-actors.
+Flame supports two forms of smart contract. **Contracts** are immutable,
+single-use values held in Utreexo; each locks a payload under a **Predicate**.
+**Actors** are persistent identities with state and directly executable code,
+entered through asynchronous `send` or synchronous `call`. One stack machine
+verifies both: external transactions consume and create Contracts and may emit
+messages; internal transactions deliver messages and synchronously call Actors.
 
 Values have explicit copy and drop capabilities. Bearer values—including tokens
-and cells—are linear. Portable values may cross cell, message, and actor-state
-boundaries; ephemeral verification values such as transcripts, expressions,
-constraints, and MSMs may not.
+and Contracts—are linear. Portable values may cross Contract, Message, and
+actor-state boundaries; ephemeral verification values such as transcripts,
+expressions, constraints, and MSMs may not.
 
 The VM emits an ordered log of state effects. Inputs, outputs, issuance,
 retirement, fees, sends, actor saves, storage purchases, actor destruction, and
@@ -37,8 +39,9 @@ Every `open`, `signcall`, and actor `call` runs in an isolated frame with its ow
 stack, control flow, and gas budget. Successful calls return only explicitly
 selected values. Failed calls restore state effects, constraints, deferred
 signatures, fees, and batch-verification work to their entry checkpoints. They
-also return entry-owned values: actor calls return their arguments, while cell
-calls return the original locked Cell followed by their explicit arguments.
+also return entry-owned values: actor calls return their arguments, while Contract
+predicate calls return the original locked Contract followed by their explicit
+arguments.
 All downward call arguments must be portable, just like asynchronous `send`
 payloads. Return values are unrestricted: non-portable liabilities and
 VM-local values may travel upward so the caller can resolve them, but they may
@@ -81,7 +84,7 @@ External transactions are best used for private transactions between few parties
 
 External transactions produce the following effects:
 
-1. Inputs — consumption of entries from Utreexo that produce *cells* on VM stack.
+1. Inputs — consumption of entries from Utreexo that produce *contracts* on VM stack.
 2. Outputs — creation of new entries in the Utreexo.
 3. Sends — messages sent to actors that produce *internal transactions*.
 4. Fee — payment of the transaction fees.
@@ -100,7 +103,7 @@ Internal transactions do not have a pre-determined effect and therefore do not s
 
 Like external, internal transactions produce effects:
 
-1. `Receive(MessageID)` (txlog variant `TxEntry::Receive`) — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating `MessageID` (canonical 32-byte hash of the whole Send: anchor, target, caller, payload, gas, refund predicate — analogous to `CellID` for cells) into the Internal TxID merkle root. Symmetric with `Input` for external transactions. The message **payload is delivered onto the recv frame's stack** in payload order before code runs — symmetric with `op_call` pushing its args; a conventional dispatch selector rides as the topmost payload arg.
+1. `Receive(MessageID)` (txlog variant `TxEntry::Receive`) — the consumed Send's id. Emitted automatically as the first effect after `Header` by `VM::execute_internal`, committing the originating `MessageID` (canonical 32-byte hash of the whole Send: anchor, target, caller, payload, gas, refund predicate — analogous to `ContractID` for contracts) into the Internal TxID merkle root. Symmetric with `Input` for external transactions. The message **payload is delivered onto the recv frame's stack** in payload order before code runs — symmetric with `op_call` pushing its args; a conventional dispatch selector rides as the topmost payload arg.
 2. Actor deployment — successful first delivery to a constructor-form target emits an immediate `ActorDeploy { actor, code }`; replay starts it with the canonical empty state.
 3. Outputs — creation of new entries in the Utreexo.
 4. Sends — messages sent to actors that produce other internal transactions.
@@ -121,7 +124,7 @@ Calls themselves are intra-transaction control flow, not effects. Anything a cal
 
 Canonical internal log shapes are enforced by the state machine. Success is `Header, Receive, [ActorDeploy], effects...`, where deployment is permitted only immediately after `Receive` and any `ActorDestroy` entries form a suffix. Failed delivery is exactly `Header, Receive, Output(refund)`. Lease-expiry destruction is exactly `Header, Data(height), Retire..., ActorDestroy`. External logs start with one `Header` and cannot contain internal-only actor effects.
 
-**TxLog transport.** The TxLog (`Vec<TxEntry>`) is **re-derived by re-executing** the bytecode under the proof + signature binding — it is never trusted from the wire. `ExternalTx::verify` re-runs the script and rebuilds the log from scratch, so full-node consensus needs no TxLog decoding and a forged TxLog cannot be injected. For archival and light-client transport the crate provides a canonical **encode-only** serialization (`Encodable` for `TxEntry`/`TxLog`): a u64-LE entry count, then each entry's stable tag and fields. Existing tags are never renumbered: `0 Header, 1 Data, 2 Input, 3 Receive, 4 Output, 5 IssuePub, 6 IssuePriv, 7 Retire, 8 Fee, 9 ActorSave, 10 SetCode, 11 Send, 12 StoragePurchase, 13 ActorDestroy, 14 ActorDeploy`. Fields reuse the canonical `Cell`, `Message`, `ActorID`, `Value`, and `Int253` encodings; integers are little-endian and byte blobs are u64-LE length-prefixed. `ActorDeploy` encodes canonical actor id and constructor code; `StoragePurchase` encodes actor, bytes, expiry height, and fee sparks. No consensus decoder accepts a TxLog: a future archival decoder must remain outside the application path.
+**TxLog transport.** The TxLog (`Vec<TxEntry>`) is **re-derived by re-executing** the bytecode under the proof + signature binding — it is never trusted from the wire. `ExternalTx::verify` re-runs the script and rebuilds the log from scratch, so full-node consensus needs no TxLog decoding and a forged TxLog cannot be injected. For archival and light-client transport the crate provides a canonical **encode-only** serialization (`Encodable` for `TxEntry`/`TxLog`): a u64-LE entry count, then each entry's stable tag and fields. Existing tags are never renumbered: `0 Header, 1 Data, 2 Input, 3 Receive, 4 Output, 5 IssuePub, 6 IssuePriv, 7 Retire, 8 Fee, 9 ActorSave, 10 SetCode, 11 Send, 12 StoragePurchase, 13 ActorDestroy, 14 ActorDeploy`. Fields reuse the canonical `Contract`, `Message`, `ActorID`, `Value`, and `Int253` encodings; integers are little-endian and byte blobs are u64-LE length-prefixed. `ActorDeploy` encodes canonical actor id and constructor code; `StoragePurchase` encodes actor, bytes, expiry height, and fee sparks. No consensus decoder accepts a TxLog: a future archival decoder must remain outside the application path.
 
 Internal transactions do not pay transaction-prioritization fees. Actors may
 nevertheless burn Flame for storage through `addstorage`. Internal transactions
@@ -197,7 +200,7 @@ Plain data types: integers, byte strings, Ristretto points. These can be copied 
 
 Structured data types: dicts that are used as lists, dictionaries and enum variants. Dicts are **never copyable** and cache sticky portability and droppability capabilities (see §Dict).
 
-Bearer types: Cell, WideToken, Token and ClearToken.
+Bearer types: Contract, WideToken, Token and ClearToken.
 
 Constraint-system types: Variable, Expression and Constraint.
 
@@ -205,7 +208,7 @@ Cryptography types: Merlin transcript. (Batched scalar-point
 checks are not user-visible — see the note on `MultiscalarMul`
 below.)
 
-Portable types can cross a Cell, Message, actor-call, or actor-state boundary.
+Portable types can cross a Contract, Message, actor-call, or actor-state boundary.
 
 Copyable types can be duplicated by the VM. Every copyable value is also
 droppable, but non-copyable pure-computation values may be droppable too.
@@ -216,7 +219,7 @@ droppable, but non-copyable pure-computation values may be droppable too.
 | Dict | no | empty or sticky flag | sticky flag |
 | Token | no | no | yes |
 | ClearToken | no | quantity is zero | quantity is non-negative |
-| WideToken, Cell | no | no | no |
+| WideToken, Contract | no | no | no |
 | Merlin, Variable, Expression, Constraint, MultiscalarMul | no | yes | no |
 
 Droppability tracks asset ownership, not whether a value is mutable or useful.
@@ -228,7 +231,7 @@ is nevertheless droppable, allowing the empty container shell to be discarded.
 Portability is a business-logic capability, not a serialization property.
 Generic value codecs describe representation only. For example, a negative
 `ClearToken`, or a Dict containing one, may be encoded and decoded for
-diagnostics even though Cell, Message, call, and actor-state admission reject
+diagnostics even though Contract, Message, call, and actor-state admission reject
 it. A type may also be non-portable and have no implemented value encoding;
 these are separate questions.
 
@@ -238,7 +241,7 @@ Optionals are not distinct types, but a convention to return tuple (values…, 1
 
 **Implementation layout (not consensus).** Heap-indirection keeps the Rust
 `Value` enum compact without changing VM semantics: `Merlin` boxes its
-`Transcript`, `Value::Cell` boxes the otherwise unchanged `Cell`, secret
+`Transcript`, `Value::Contract` boxes the otherwise unchanged `Contract`, secret
 equality constraints box both `Expression`s, and `String` boxes all typed
 `StringWitness` variants while leaving `Opaque(Vec<u8>)` inline, and
 `spacesuit::AllocatedValue` boxes its optional cleartext assignment. On the
@@ -265,7 +268,7 @@ Stack-only types (non-portable and without an implemented `Value` encoding):
 
 | Type | Description |
 | --- | --- |
-| Cell | Linear cell handle. `Cell` has its own top-level encoding, but `Value::Cell` has no generic value tag. |
+| Contract | Linear contract handle. `Contract` has its own top-level encoding, but `Value::Contract` has no generic value tag. |
 | WideToken | Possibly-negative encrypted token tied to the current constraint system. |
 | Merlin | Mutable transcript state tied to the current execution. |
 | Variable | Secret value in the constraint system, tied to a Pedersen commitment. |
@@ -282,14 +285,14 @@ no choice about which tag to use.
 
 The generic codec does not enforce portability. It accepts representable
 non-portable values, including negative `ClearToken`s and Dicts whose current
-members are representable but non-portable. Admission into a Cell, Message,
+members are representable but non-portable. Admission into a Contract, Message,
 synchronous actor call, or actor state is checked by that domain's
 business-logic boundary. At the `readerwriter` layer, writes fail only when the
 destination lacks capacity, so encoding an admitted, representable value into
 a `Vec<u8>` is infallible. VM-only variants without an implemented encoding are
 outside this codec's input domain rather than rejected for being non-portable.
 
-**Group-element validation is lazy.** `Point` (`POINT_TAG`) and `Token` (`TOKEN_TAG`) bytes are accepted at decode **without** Ristretto decompression — they land as `Point::Opaque` / `Commitment::Closed` and are validated only at first cryptographic use (signature batch, `verify_taproot_proof`, CS decompression), where an invalid element fails the proof. A structurally-invalid group element may therefore sit inside a committed Cell / actor-state / Send until used; this is deliberate (it preserves byte-identical prover/verifier round-tripping and keeps decode allocation-free), not a malleability hole — the 32 bytes are canonical, and any non-decompressable element is unusable. **Length-prefixed counts (list/dict/string payloads) are always bounded against remaining input before allocation** (`Cell::decode` payload count, `pushstr`/`ActorID` lengths), so a small hostile prefix cannot force a large allocation.
+**Group-element validation is lazy.** `Point` (`POINT_TAG`) and `Token` (`TOKEN_TAG`) bytes are accepted at decode **without** Ristretto decompression — they land as `Point::Opaque` / `Commitment::Closed` and are validated only at first cryptographic use (signature batch, `verify_taproot_proof`, CS decompression), where an invalid element fails the proof. A structurally-invalid group element may therefore sit inside a committed Contract / actor-state / Send until used; this is deliberate (it preserves byte-identical prover/verifier round-tripping and keeps decode allocation-free), not a malleability hole — the 32 bytes are canonical, and any non-decompressable element is unusable. **Length-prefixed counts (list/dict/string payloads) are always bounded against remaining input before allocation** (`Contract::decode` payload count, `pushstr`/`ActorID` lengths), so a small hostile prefix cannot force a large allocation.
 
 Tag namespace (one byte, 256 values total):
 
@@ -440,12 +443,12 @@ Each string acts as a builder and a reader.
 
 **Prover-side witness variants.** `String` has two in-memory shapes: `String::Opaque(Vec<u8>)` and `String::Witness(Box<StringWitness>)`. Boxing the uncommon witness shape keeps every `String` the size of a `Vec`. The witness encodes to the same canonical bytes the verifier sees while preserving typed data through `dup` / `open` / `signcall` / `call` / payload-pour boundaries:
 
-- `StringWitness::Point(Point)` — point-shaped witness; the inner [`Point`](#point) is `Opaque`, `Commitment(Open(value, blinding))` (used before `commit`, `scalar`, `expr`), or `Predicate(p)` (used before `signtx`, `signcall`, `cell`, `output`).
+- `StringWitness::Point(Point)` — point-shaped witness; the inner [`Point`](#point) is `Opaque`, `Commitment(Open(value, blinding))` (used before `commit`, `scalar`, `expr`), or `Predicate(p)` (used before `signtx`, `signcall`, `contract`, `output`).
 - `StringWitness::Scalar(int)` — used before `scalar`.
 - `StringWitness::Script(instructions)` — used before `open` / `signcall` / `call`.
-- `StringWitness::Cell(c)` — used before `input`, carrying open commitments on Token payloads.
+- `StringWitness::Contract(c)` — used before `input`, carrying open commitments on Token payloads.
 
-The verifier always sees `String::Opaque(bytes)`; the downcasts (`to_commitment`, `to_scalar`, `to_predicate`, `to_instructions`, `to_cell`) handle both shapes uniformly. There is no separate witness queue or per-opcode witness operand — witnesses ride on the pushed value itself.
+The verifier always sees `String::Opaque(bytes)`; the downcasts (`to_commitment`, `to_scalar`, `to_predicate`, `to_instructions`, `to_contract`) handle both shapes uniformly. There is no separate witness queue or per-opcode witness operand — witnesses ride on the pushed value itself.
 
 **`pushpoint` also carries witnesses.** Because the `pushpoint` instruction's in-memory operand is a `Point` (not a raw `[u8; 32]`), the prover can attach a `Point::Commitment` / `Point::Predicate` witness to a literal point pushed via `pushpoint` — not only via `pushstr` + `String::point`. The wire encoding stays the canonical 32 bytes regardless.
 
@@ -457,7 +460,7 @@ Ristretto255 group element. Stored as compressed 32-byte encoding. Used to repre
 
 - `Point::Opaque(CompressedRistretto)` — verifier's view; no witness.
 - `Point::Commitment(Commitment::Open(value, blinding))` — Pedersen commitment with cleartext opening (used by [`commit`](#commit) / [`expr`](#expr) to skip re-opening).
-- `Point::Predicate(PredicateTree)` — Taproot predicate with merkle tree (used by [`cell`](#cell) / [`output`](#output) to attach an unlock witness, and by [`signtx`](#signtx) / [`signcall`](#signcall) for the verification key).
+- `Point::Predicate(PredicateTree)` — Taproot predicate with merkle tree (used by [`contract`](#contract) / [`output`](#output) to attach an unlock witness, and by [`signtx`](#signtx) / [`signcall`](#signcall) for the verification key).
 
 A Point on the value stack downcasts via `to_commitment` / `to_predicate` to extract its witness (preserved through `Point::Commitment` / `Point::Predicate`) or to wrap an `Opaque` as the verifier's `Closed` / `Opaque` form.
 
@@ -499,7 +502,7 @@ keys. List-style encoding remains limited to the exact keys `0..n-1`.
 
 **Dicts are never copyable**: `dup`/`getdup` of a Dict value always fails `TypeNotCopyable`. Each Dict carries independent sticky `portable` and `droppable` flags. A newly constructed empty Dict starts with both flags true. Every successful insertion applies `dict.portable &= value.is_portable()` and `dict.droppable &= value.is_droppable()`. Removal and replacement never restore a cleared flag; a rejected strict insertion does not change either flag. Emptiness overrides only droppability: after every member is extracted, the empty Dict can be dropped while the extracted bearer values remain owned by the script. Portability remains sticky because it governs domain admission rather than disposal.
 
-The `dict` / `put` / `replace` opcodes may insert any Value. A non-portable Dict remains usable on the stack, but `cell`, `output`, `send`, `call`, `open`, `signcall`, and actor-state storage reject it at their portability boundary. Checking a Dict is O(1), including when it is nested: inserting a nested Dict reads that Dict's already-cached flag. Dict values are owned and cannot be mutated through an alias, so the cached parent flag cannot become stale.
+The `dict` / `put` / `replace` opcodes may insert any Value. A non-portable Dict remains usable on the stack, but `contract`, `output`, `send`, `call`, `open`, `signcall`, and actor-state storage reject it at their portability boundary. Checking a Dict is O(1), including when it is nested: inserting a nested Dict reads that Dict's already-cached flag. Dict values are owned and cannot be mutated through an alias, so the cached parent flag cannot become stale.
 
 The flags are runtime metadata and are not serialized. Both Dict byte forms
 reconstruct them bottom-up from the members that are decoded. This preserves
@@ -507,7 +510,7 @@ the capability of a Dict that still contains a non-portable member, but not its
 history: if a Dict was poisoned and the offending member was removed, a debug
 encode/decode round-trip produces a fresh Dict whose flag reflects only the
 remaining members. Persistent domains reject the sticky-false Dict before
-encoding, so serialized Cell, Message, and actor-state values never rely on
+encoding, so serialized Contract, Message, and actor-state values never rely on
 historical taint surviving the byte representation.
 
 Drilling down the nested dict preserving ownership with `get` and `put` instructions: 
@@ -581,7 +584,7 @@ Messages are unique by construction, not by a duplicate-message table. Each
 accepted `send` embeds the left child of the current anchor ratchet and leaves
 the right child for subsequent execution. Calls split disjoint callee and
 caller-continuation subtrees. A failed delivery rolls back its actor effects and
-produces one Cell containing the original payload under `refund_predicate`; it
+produces one Contract containing the original payload under `refund_predicate`; it
 does not enqueue another Message. Failure to apply that refund rejects the
 whole candidate, so the originating Send does not commit.
 
@@ -623,9 +626,9 @@ growth.
 
 ## Anchors
 
-Every new cell and message is **anchored** by a unique 32-byte value embedded in its wire form, so two cells with the same predicate + payload but different anchors hash to different ids. Uniqueness is the core safety property — without it, cell ids collide across txs and authors can be tricked into operating on the wrong entity.
+Every new contract and message is **anchored** by a unique 32-byte value embedded in its wire form, so two contracts with the same predicate + payload but different anchors hash to different ids. Uniqueness is the core safety property — without it, contract ids collide across txs and authors can be tricked into operating on the wrong entity.
 
-**Uniqueness source.** Anchors are unique only when they descend from a *spend-once source*: a UTXO consumed via [`input`](#input), or the `anchor` of a Message that triggered an internal tx (which is itself a split-child of an external tx's `op_send`). Cell ids are themselves anchored (`Cell::id = H(predicate, anchor, payload)`), so each input cell's id is unique on the network. Any anchor derived deterministically from such a source remains unique.
+**Uniqueness source.** Anchors are unique only when they descend from a *spend-once source*: a UTXO consumed via [`input`](#input), or the `anchor` of a Message that triggered an internal tx (which is itself a split-child of an external tx's `op_send`). Contract ids are themselves anchored (`Contract::id = H(predicate, anchor, payload)`), so each input contract's id is unique on the network. Any anchor derived deterministically from such a source remains unique.
 
 **Per-tx slot.** The VM carries a single `last_anchor: Option<Anchor>` for the entire transaction. It is:
 - `None` at the start of an external tx — [`input`](#input) is the only way to seed it.
@@ -633,7 +636,7 @@ Every new cell and message is **anchored** by a unique 32-byte value embedded in
 
 Calls split the anchor at entry. `op_call`, `op_open`, and `op_signcall` each split `last_anchor` into `(left, right)` at frame entry. The child's frame starts with `last_anchor = left`; the parent frame stashes `right` in its `post_call_anchor` slot, and `last_anchor` is restored to `right` when control returns (success or failure). This keeps the caller's anchor chain independent of whatever the callee does with its own half.
 
-**Splitting.** Each opcode that produces a new unique-anchored *cross-tx* entity (cell-on-wire, message-to-actor) consumes `last_anchor` and replaces it with a fresh derived value. The split is a single Merlin transcript:
+**Splitting.** Each opcode that produces a new unique-anchored *cross-tx* entity (contract-on-wire, message-to-actor) consumes `last_anchor` and replaces it with a fresh derived value. The split is a single Merlin transcript:
 
 ```
 t = Transcript::new(b"flamevm.anchor.split");
@@ -642,24 +645,24 @@ left  = t.challenge_bytes(b"left",  32);
 right = t.challenge_bytes(b"right", 32);
 ```
 
-The `left` half is embedded in the new entity (cell anchor / MessageID); the `right` half replaces `last_anchor`. Authors never see `left` and `right` separately — the VM picks them automatically at the consume site.
+The `left` half is embedded in the new entity (contract anchor / MessageID); the `right` half replaces `last_anchor`. Authors never see `left` and `right` separately — the VM picks them automatically at the consume site.
 
-**Sites that consume + split**: [`cell`](#cell), [`output`](#output), [`send`](#send). Each hard-fails `AnchorMissing` if no prior input claim has seeded the tx's anchor.
+**Sites that consume + split**: [`contract`](#contract), [`output`](#output), [`send`](#send). Each hard-fails `AnchorMissing` if no prior input claim has seeded the tx's anchor.
 
-**Site that seeds without consuming**: [`input`](#input) sets `last_anchor = Anchor(cell.id())` directly (the spent UTXO's id is already unique on the wire — no split needed). Replacing any prior value is intentional: it lets a partial transaction depend only on its own input claim, not on what other parts of the tx contributed before it.
+**Site that seeds without consuming**: [`input`](#input) sets `last_anchor = Anchor(contract.id())` directly (the spent UTXO's id is already unique on the wire — no split needed). Replacing any prior value is intentional: it lets a partial transaction depend only on its own input claim, not on what other parts of the tx contributed before it.
 
 **Sites that split at call entry**: [`call`](#call), [`open`](#open), [`signcall`](#signcall). All three create new call frames and each splits `last_anchor` at entry. The `left` half seeds the child frame's `last_anchor`; the `right` half is held in the parent frame's `post_call_anchor` slot and replaces `last_anchor` when control returns. This makes anchor flow deterministic across call success/failure boundaries — the caller's anchor chain is independent of whatever the callee did with its left half.
 
-**Locality across parties.** Each `op_input` *replaces* the anchor unconditionally rather than mixing into a chain. So a multi-party tx where party A claims input A_in and produces outputs, then party B claims input B_in and produces outputs, has each party's output anchors rooted only in their own input id. B's claim wipes A's residue; that's fine because B's outputs derive from B_in's split-children, not from anything A did. A party signing their portion can predict their own output anchors locally from their own input cell ids.
+**Locality across parties.** Each `op_input` *replaces* the anchor unconditionally rather than mixing into a chain. So a multi-party tx where party A claims input A_in and produces outputs, then party B claims input B_in and produces outputs, has each party's output anchors rooted only in their own input id. B's claim wipes A's residue; that's fine because B's outputs derive from B_in's split-children, not from anything A did. A party signing their portion can predict their own output anchors locally from their own input contract ids.
 
-FlameVM splits anchors at the source: every consume site produces two cryptographically independent children, so neither the cell's stored anchor nor the residual anchor can be reused without the matching half of the original split.
+FlameVM splits anchors at the source: every consume site produces two cryptographically independent children, so neither the contract's stored anchor nor the residual anchor can be reused without the matching half of the original split.
 
 ## Instruction set
 
 Each instruction is a one-byte **opcode** optionally followed by **immediate data** encoded inline in the bytecode. Stack effects are written in left-to-right bottom-to-top order: in `a b → c`, `b` is the top of the stack on entry, `c` is the top on exit.
 
 **Context column.** The **Ctx** column in the instruction table marks opcodes that fail outside their supported context:
-- **ext.** — external execution, including an external `CellOpen`. Hard-fails
+- **ext.** — external execution, including an external `ContractOpen`. Hard-fails
   `ExternalOnly` from internal context. Covers `input`, the constraint-system
   opcodes (`scalar`, `commit`, `alloc`, `expr`, `range`), and the CS-consuming
   opcodes (`mix`, `fee`). Branch-polymorphic opcodes (`borrow`, `eq`, `add`,
@@ -667,10 +670,10 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
   per-opcode prose. `decrypt` also has a blank marker: it batches externally and
   checks immediately internally.
 - **actor** — requires a current actor identity. Available only in
-  `InternalRoot` and `ActorCall`, never `ExternalRoot` or `CellOpen`.
-- **pred.ext.** — requires an external `CellOpen` predicate context.
+  `InternalRoot` and `ActorCall`, never `ExternalRoot` or `ContractOpen`.
+- **pred.ext.** — requires an external `ContractOpen` predicate context.
 - **caller** — requires a called frame (`InternalRoot`, `ActorCall`, or
-  `CellOpen`) with caller attribution; excludes `ExternalRoot`.
+  `ContractOpen`) with caller attribution; excludes `ExternalRoot`.
 - **int.** — internal chain context. Currently used only for planned chain-info
   operations.
 - *(blank)* — works in either context. Most opcodes, including `send`.
@@ -761,13 +764,13 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | a3 | [jumpif](#jumpif) | | x → ø | Pop an int; jump to a label iff non-zero (operand: label number). |
 | a4 | [return](#return) | | a\_{k-1} … a\_0 k → ø | Exit current call frame, returning `k` items to the parent. |
 | a5 | [type](#type) | | x → x code | Push the type code of the top value (peek). |
-|    | **Cells & predicates** | | | |
-| c0 | [input](#input) | ext. | s → cell | Materialize a cell from a Utreexo-validated input encoding. |
-| c1 | [cell](#cell) | | items… k pred → cell | Build a new cell from `k` portable items under predicate `pred`. |
-| c2 | [output](#output) | | items… k pred → ø | Like `cell`, but emits the cell directly as a tx Output. |
-| c3 | [open](#open) | | cell ik nbrs pos script gas args… k → {results… k' 1 \| cell args… k 0} | Reveal a taproot leaf and run it in an isolated call frame. |
-| c4 | [signtx](#signtx) | ext. | cell → items… k | Authorize the tx with the cell predicate's signature; pour payload. |
-| c5 | [signcall](#signcall) | | cell script sig gas args… m → {results… k' 1 \| cell args… m 0} | Run a script signed by the cell predicate in an isolated frame. |
+|    | **Contracts & predicates** | | | |
+| c0 | [input](#input) | ext. | s → contract | Materialize a contract from a Utreexo-validated input encoding. |
+| c1 | [contract](#contract) | | items… k pred → contract | Build a new contract from `k` portable items under predicate `pred`. |
+| c2 | [output](#output) | | items… k pred → ø | Like `contract`, but emits the contract directly as a tx Output. |
+| c3 | [open](#open) | | contract ik nbrs pos script gas args… k → {results… k' 1 \| contract args… k 0} | Reveal a taproot leaf and run it in an isolated call frame. |
+| c4 | [signtx](#signtx) | ext. | contract → items… k | Authorize the tx with the contract predicate's signature; pour payload. |
+| c5 | [signcall](#signcall) | | contract script sig gas args… m → {results… k' 1 \| contract args… m 0} | Run a script signed by the contract predicate in an isolated frame. |
 |    | **Actors** | | | |
 | d0 | [send](#send) | | args… k refund gas addr → ø | Queue an asynchronous actor message. |
 | d1 | [call](#call) | actor | args… k gas addr → {results… k' 1 \| args… k 0} | Synchronously call an actor. |
@@ -829,11 +832,11 @@ Canonical failure-shape vectors (stack order is bottom-to-top):
 | `merge`: `CT(1,7), CT(2,8)` | `CT(1,7), CT(2,8), 0` | neither token |
 | unavailable `addstorage` / `quotestorage`: `q` | `0` | request `q` |
 | failed entered `call`: `A, B` with `k=2` | `A, B, 2, 0` | address and gas; arguments are restored and count is re-emitted |
-| failed entered `open`: `Cell, A, B` with `k=2` | `Cell, A, B, 2, 0` | proof/script/gas operands; Cell and arguments are restored, count excludes Cell |
-| failed entered `signcall`: `Cell, A, B` with `k=2` | `Cell, A, B, 2, 0` | script/signature/gas operands; Cell and arguments are restored, count excludes Cell |
+| failed entered `open`: `Contract, A, B` with `k=2` | `Contract, A, B, 2, 0` | proof/script/gas operands; Contract and arguments are restored, count excludes Contract |
+| failed entered `signcall`: `Contract, A, B` with `k=2` | `Contract, A, B, 2, 0` | script/signature/gas operands; Contract and arguments are restored, count excludes Contract |
 
 Thus count and lookup-key operands do not need restitution: they are copyable
-control data, not linear values. The source String, Dict, tokens, Cell, and call
+control data, not linear values. The source String, Dict, tokens, Contract, and call
 arguments follow the exact shapes above.
 
 ### Stack instructions
@@ -1017,7 +1020,7 @@ _a b_ **eq** → _a b {0|1}_ (cleartext) | → _constraint_ (CS branch)
 
 Two stack diagrams depending on operand types and context:
 
-1. **Cleartext branch.** When neither operand is a CS type (`Variable` / `Expression`), or in internal context, peeks at the top two values and pushes `1` if equal or `0` otherwise. Operands stay on the stack. Equality is type-aware via `Value::try_eq`: `Int253` / `String` / `Point` compare by value; **same-variant `Dict` and all linear types (`Token`, `ClearToken`, `Cell`, …) hard-fail `TypeNotComparable`** (linear values have no equality; Dicts would cost unbounded recursion).
+1. **Cleartext branch.** When neither operand is a CS type (`Variable` / `Expression`), or in internal context, peeks at the top two values and pushes `1` if equal or `0` otherwise. Operands stay on the stack. Equality is type-aware via `Value::try_eq`: `Int253` / `String` / `Point` compare by value; **same-variant `Dict` and all linear types (`Token`, `ClearToken`, `Contract`, …) hard-fail `TypeNotComparable`** (linear values have no equality; Dicts would cost unbounded recursion).
 2. **Lifted branch.** When at least one operand is `Expression` or `Variable` *and* the context is external, both operands are popped, lifted to `Expression` (Int253 → `Expression::Constant`), and the result is `Constraint::eq(a, b)`.
 
 ### neg
@@ -1243,11 +1246,11 @@ _qty tag_ → _T_
 
 Pops `tag` (String) and `qty` (`Variable` — a Pedersen commitment lifted via [`commit`](#commit)). Allocates a 64-bit range proof on `qty`. Builds `Token(qty_commitment, unblinded(flavor))` where `flavor = flavor_from_predicate(current_predicate, tag)`. Emits `TxEntry::IssuePriv(qty_commitment_point, unblinded_flv_point)` — the confidential-issuance txlog effect. Pushes the `Token`.
 
-The current_predicate is the predicate stored on the enclosing `CallKind::CellOpen` frame — created by [`open`](#open) or [`signcall`](#signcall) against an empty cell whose predicate is the desired issuer. Hard-fails `OpcodeRequiresPredicateContext` from `ExternalRoot` (no enclosing predicate) and from any `ActorCall` frame (issuance binds to a predicate, not an actor; the two issuance domains are kept disjoint by construction). Hard-fails `ExternalOnly` in internal context (the CS lane is required for the range proof and the qty commitment).
+The current_predicate is the predicate stored on the enclosing `CallKind::ContractOpen` frame — created by [`open`](#open) or [`signcall`](#signcall) against an empty contract whose predicate is the desired issuer. Hard-fails `OpcodeRequiresPredicateContext` from `ExternalRoot` (no enclosing predicate) and from any `ActorCall` frame (issuance binds to a predicate, not an actor; the two issuance domains are kept disjoint by construction). Hard-fails `ExternalOnly` in internal context (the CS lane is required for the range proof and the qty commitment).
 
 `Int253` or `Point` operands hard-fail `TypeNotVariable` — lift to a `Variable` via [`commit`](#commit) first.
 
-**Non-fungible tokens.** Mix the cell's [`anchor`](#anchor) into `tag` (e.g. `anchor … keccak256` against domain bytes) to derive a fresh flavor per issuance — the result is a non-fungible Token, since no other issuance will share the flavor. Use [`issueprivflv`](#issueprivflv) on the consumer side to recompute the same flavor scalar for verification.
+**Non-fungible tokens.** Mix the contract's [`anchor`](#anchor) into `tag` (e.g. `anchor … keccak256` against domain bytes) to derive a fresh flavor per issuance — the result is a non-fungible Token, since no other issuance will share the flavor. Use [`issueprivflv`](#issueprivflv) on the consumer side to recompute the same flavor scalar for verification.
 
 ### issueprivflv
 
@@ -1265,10 +1268,10 @@ Pops `tag` (String) and `qty` (`Int253` — cleartext). Builds `ClearToken(qty, 
 
 The current actor is stored on either `CallKind::InternalRoot` or
 `CallKind::ActorCall`. Both may issue. The opcode hard-fails
-`OpcodeRequiresActorContext` from `ExternalRoot` and `CellOpen` (issuance binds
+`OpcodeRequiresActorContext` from `ExternalRoot` and `ContractOpen` (issuance binds
 to an actor, not a predicate). It runs without CS in internal execution.
 
-`Variable` or `Point` operands hard-fail `TypeNotInt253` — `issuepub` is the cleartext path; for confidential qty, use [`issuepriv`](#issuepriv) from a `CellOpen` frame.
+`Variable` or `Point` operands hard-fail `TypeNotInt253` — `issuepub` is the cleartext path; for confidential qty, use [`issuepriv`](#issuepriv) from a `ContractOpen` frame.
 
 **Non-fungible tokens.** Mix the call's [`anchor`](#anchor) into `tag` to derive a fresh flavor per call — yields a unique non-fungible token. Use [`issuepubflv`](#issuepubflv) on the consumer side to recompute the same flavor scalar for verification.
 
@@ -1404,7 +1407,7 @@ Atomic cross-frame return:
 3. Asserts the callee stack has exactly `k` items left (otherwise `BadReturnArity` or `StackNotClean`).
 4. Pops the call frame.
 5. Refunds leftover gas to the parent.
-6. Pushes the `k` items onto the parent's stack, then the count `k`, then a **success marker `1`** — the parent observes `results… k 1`. A clean run-off-the-end exit pushes `0 1`. A failed child instead restores its entry escrow followed by the escrow count and `0`; callers branch on this trailing status. Actor calls escrow their arguments. `open` and `signcall` escrow the original locked Cell plus their explicit arguments, never the Cell payload separately.
+6. Pushes the `k` items onto the parent's stack, then the count `k`, then a **success marker `1`** — the parent observes `results… k 1`. A clean run-off-the-end exit pushes `0 1`. A failed child instead restores its entry escrow followed by the escrow count and `0`; callers branch on this trailing status. Actor calls escrow their arguments. `open` and `signcall` escrow the original locked Contract plus their explicit arguments, never the Contract payload separately.
 
 `return` deliberately performs no portability check. Non-portable values,
 including negative `ClearToken`s and `WideToken`s, may move upward to the
@@ -1422,7 +1425,7 @@ Pushes the type code of the top value as `Int253`, leaving the value on the stac
 
 | Code | Type | Code | Type |
 | --- | --- | --- | --- |
-| 0 | Int253 | 7 | Cell |
+| 0 | Int253 | 7 | Contract |
 | 1 | String | 8 | Merlin |
 | 2 | Dict | 9 | Variable |
 | 3 | Point | 10 | Expression |
@@ -1430,31 +1433,31 @@ Pushes the type code of the top value as `Int253`, leaving the value on the stac
 | 5 | WideToken | 12 | MultiscalarMul |
 | 6 | ClearToken | | |
 
-### Cell, actor, and send instructions
+### Contract, actor, and send instructions
 
-[`open`](#open), [`signcall`](#signcall), and [`call`](#call) all create isolated call frames as described in [Design](#design).
+[`open`](#open), [`signcall`](#signcall), and [`call`](#call) all create isolated call frames as described in [Design overview](#design-overview).
 
 ### input
 
-_s_ → _cell_
+_s_ → _contract_
 
-Materializes a `cell` handle from the String on top of the stack. Seeds the frame's `last_anchor` to `Anchor(cell.id())` (the input cell's id is a spend-once unique source — see §Anchors), unconditionally replacing any prior value. Emits `TxEntry::Input(cell_id)`.
+Materializes a `contract` handle from the String on top of the stack. Seeds the frame's `last_anchor` to `Anchor(contract.id())` (the input contract's id is a spend-once unique source — see §Anchors), unconditionally replacing any prior value. Emits `TxEntry::Input(contract_id)`.
 
-**Witness path (prover).** The prover pushes `StringWitness::Cell(c)` through `String::cell(c)`; its Token payloads still carry `Commitment::Open` quantities and flavors. `to_cell()` extracts the cell directly, so open commitments survive into downstream `mix`/`commit` without a separate witness queue.
+**Witness path (prover).** The prover pushes `StringWitness::Contract(c)` through `String::contract(c)`; its Token payloads still carry `Commitment::Open` quantities and flavors. `to_contract()` extracts the contract directly, so open commitments survive into downstream `mix`/`commit` without a separate witness queue.
 
-**Opaque path (verifier).** The verifier pushes `String::Opaque(cell_bytes)`. `to_cell()` runs `Cell::decode`, producing `Commitment::Closed` everywhere. The verifier-side CS rebuilds the commitments from points only.
+**Opaque path (verifier).** The verifier pushes `String::Opaque(contract_bytes)`. `to_contract()` runs `Contract::decode`, producing `Commitment::Closed` everywhere. The verifier-side CS rebuilds the commitments from points only.
 
-Both paths produce the same `cell.id()` and the same `TxEntry::Input` (the txlog is byte-canonical regardless of which String variant the prover chose). Cell payloads are immutable after construction. The public `Cell::new` constructor rejects any non-portable top-level item, including a Dict whose sticky `portable` flag has been cleared. `Cell::decode` applies the same admission rule after representation decoding. That top-level Cell-domain scan is intentional and sufficient: nested Dict portability is an O(1) lookup of the flag reconstructed while decoding, not a recursive walk. Generic `read_value` itself remains policy-neutral and may decode values that no Cell may contain.
+Both paths produce the same `contract.id()` and the same `TxEntry::Input` (the txlog is byte-canonical regardless of which String variant the prover chose). Contract payloads are immutable after construction. The public `Contract::new` constructor rejects any non-portable top-level item, including a Dict whose sticky `portable` flag has been cleared. `Contract::decode` applies the same admission rule after representation decoding. That top-level Contract-domain scan is intentional and sufficient: nested Dict portability is an O(1) lookup of the flag reconstructed while decoding, not a recursive walk. Generic `read_value` itself remains policy-neutral and may decode values that no Contract may contain.
 
 **The VM does not consult any Utreexo accumulator.** The caller must validate the supplied bytes against the Utreexo proof outside the VM before invoking the script. The txlog entry commits the script's reliance on that external check.
 
-Hard-fails on non-String top, malformed bytes (`MalformedCellEncoding`, including trailing bytes), or invocation from internal context.
+Hard-fails on non-String top, malformed bytes (`MalformedContractEncoding`, including trailing bytes), or invocation from internal context.
 
-### cell
+### contract
 
-_items… k pred_ → _cell_
+_items… k pred_ → _contract_
 
-Pops `pred: Point`, then `k` portable items. Consumes the frame's `last_anchor` via a split (see §Anchors): the `left` half goes into the new cell's `anchor` field, the `right` half replaces `last_anchor`. Wraps everything into a linear `cell` handle.
+Pops `pred: Point`, then `k` portable items. Consumes the frame's `last_anchor` via a split (see §Anchors): the `left` half goes into the new contract's `anchor` field, the `right` half replaces `last_anchor`. Wraps everything into a linear `contract` handle.
 
 Hard-fails `AnchorMissing` if no anchor has been claimed yet, `NonPortableInOutput` if any item isn't portable.
 
@@ -1462,32 +1465,32 @@ Hard-fails `AnchorMissing` if no anchor has been claimed yet, `NonPortableInOutp
 
 _items… k pred_ → ø
 
-Same construction as [`cell`](#cell) but emits an `Output` effect into the txlog instead of pushing the handle.
+Same construction as [`contract`](#contract) but emits an `Output` effect into the txlog instead of pushing the handle.
 
 ### open
 
-_cell internal_key neighbors position script gas args… k_ →
-_{results… k' 1 | cell args… k 0}_
+_contract internal_key neighbors position script gas args… k_ →
+_{results… k' 1 | contract args… k 0}_
 
-Verifies the Taproot proof against the cell's predicate:
+Verifies the Taproot proof against the contract's predicate:
 
 1. Pops `k` (Int253) and `args` (k portable values). A non-portable argument
    hard-fails `NonPortableInCall` before child entry.
 2. Pops `gas` as a non-negative `Int253` gas allotment.
 3. Pops `script` (String) — the revealed leaf bytes (or witness-bearing `StringWitness::Script` on the prover).
 4. Pops `position` (String, bit-packed path), `neighbors` (list-Dict of 32-byte Strings, leaf-to-root), `internal_key` (Point).
-5. Pops `cell`.
+5. Pops `contract`.
 6. Constructs a `TaprootProof` and verifies `predicate.verify_taproot_proof` — checks the Merkle root and the tweaked-key relation `P = X + h(X, M)·B`.
-7. On success, creates a new isolated `CallKind::CellOpen { predicate,
+7. On success, creates a new isolated `CallKind::ContractOpen { predicate,
    external_context, caller_id }` frame with the popped `gas` allotment, pours
-   the cell payload then `args` onto its stack, and enters the unlocked script.
+   the contract payload then `args` onto its stack, and enters the unlocked script.
    `caller_id` is only the canonical 32-byte id of the directly invoking actor;
    it is `None` when the direct parent has no actor identity. The frame's
    starting anchor is the child-anchor split from the parent.
 
 The new frame never has actor identity or actor authority. Actor-state,
 storage, code, public issuance, `selfid`, and synchronous `call` operations
-hard-fail. `callerid` exposes only the direct `caller_id`; a nested `CellOpen`
+hard-fail. `callerid` exposes only the direct `caller_id`; a nested `ContractOpen`
 therefore sees zero instead of transitively inheriting an earlier actor.
 Asynchronous `send` remains available but is anonymous (`Message.caller =
 None`), so caller introspection cannot become delegated authority. The frame
@@ -1496,10 +1499,10 @@ internal → unavailable). Results return as `results… k' 1`; clean fall-throu
 returns `0 1`; leftover gas refunds to the parent.
 
 Once the child is entered, any hard failure, out-of-gas condition, dirty EOF, or
-bad return arity rolls back its effects and returns the original locked `cell`
-followed by the explicit `args`, their count `k`, and status `0`. The Cell is
+bad return arity rolls back its effects and returns the original locked `contract`
+followed by the explicit `args`, their count `k`, and status `0`. The Contract is
 contextual and is not included in that count. The payload is not
-returned separately: it remains sealed in the restored Cell. Invalid operands,
+returned separately: it remains sealed in the restored Contract. Invalid operands,
 invalid proofs, non-portable arguments, insufficient caller gas, and call-depth
 rejection occur before child entry and hard-fail the current frame.
 
@@ -1532,7 +1535,7 @@ the message's `anchor`, the `right` half replaces `last_anchor`. Hard-fails
 `AnchorMissing` if no anchor has been claimed yet. Emits
 `TxEntry::Send(Message)`; the block builder reads these records when constructing
 internal deliveries. An actor frame contributes its actor id as
-`Message.caller`; `ExternalRoot` and `CellOpen` contribute `None`. `None` means
+`Message.caller`; `ExternalRoot` and `ContractOpen` contribute `None`. `None` means
 “no authenticated actor principal,” not necessarily “originated in an external
 transaction.”
 
@@ -1551,7 +1554,7 @@ The send's identity is the canonical 32-byte `MessageID = H(b"flamevm.message.id
 5. `gas` — little-endian u64.
 6. `payload` — little-endian u64 count, then each value's canonical `Value` encoding.
 
-The merkle leaf for `TxEntry::Send` commits to this single 32-byte MessageID, just as `TxEntry::Output(Cell)`'s leaf commits to `Cell::id()`. Uniqueness is inherited from `anchor`: every distinct send carries a distinct anchor, hence a distinct MessageID.
+The merkle leaf for `TxEntry::Send` commits to this single 32-byte MessageID, just as `TxEntry::Output(Contract)`'s leaf commits to `Contract::id()`. Uniqueness is inherited from `anchor`: every distinct send carries a distinct anchor, hence a distinct MessageID.
 
 Available in both contexts. Hard-fails `MalformedAddress` when `addr` is neither
 a bare hash nor one complete canonical `ActorID`, or when `refund` has the wrong
@@ -1559,7 +1562,7 @@ size; `NonPortableInSend` on non-portable args; and `InvalidBitrange` on a
 negative or overflowing gas allotment. It hard-fails `OutOfGas` when the active
 frame cannot prepay the requested grant.
 
-On internal-tx failure during delivery, consensus seals the message payload into a fresh cell under `refund_predicate` and emits it as an Output effect — see the design.
+On internal-tx failure during delivery, consensus seals the message payload into a fresh contract under `refund_predicate` and emits it as an Output effect — see the design.
 
 ### call
 
@@ -1573,8 +1576,8 @@ canonicalized to its hash for lookup: unlike first `send` delivery, `call` does
 not deploy an absent actor.
 
 Only `InternalRoot` and `ActorCall` may invoke `call`. `ExternalRoot` and
-`CellOpen` hard-fail `OpcodeRequiresActorContext` before consuming operands;
-caller attribution stored in a `CellOpen` is read-only and is never used to
+`ContractOpen` hard-fail `OpcodeRequiresActorContext` before consuming operands;
+caller attribution stored in a `ContractOpen` is read-only and is never used to
 fabricate an actor caller.
 
 Before entering the callee, `call` rejects every non-portable argument with
@@ -1630,11 +1633,11 @@ caught loudly by `StackNotClean` and rolls the transaction back.
 
 _value_ → ø
 
-Pops the state `Value`, **validates portability**, measures the prospective actor usage according to [Actor storage](storage.md), and **moves it back** into the current actor — which must be **checked out** by a prior `load`, else `SaveWithoutLoad` (saving to a non-checked-out actor would clobber, and silently drop the tokens of, live state). `save` hard-fails `StorageCapacityExceeded` if prospective usage exceeds capacity at the current core-block height. Emits `TxEntry::ActorSave { actor, state }` carrying the **full** post-save state — symmetric with `Output(Cell)` which carries the full Cell. The merkle leaf for this entry hashes `(actor.to_hash(), state_root(&state))`, so the TxID commits to the canonical state root while consumers reading the txlog directly get the bytes (no separate state-witness channel needed).
+Pops the state `Value`, **validates portability**, measures the prospective actor usage according to [Actor storage](storage.md), and **moves it back** into the current actor — which must be **checked out** by a prior `load`, else `SaveWithoutLoad` (saving to a non-checked-out actor would clobber, and silently drop the tokens of, live state). `save` hard-fails `StorageCapacityExceeded` if prospective usage exceeds capacity at the current core-block height. Emits `TxEntry::ActorSave { actor, state }` carrying the **full** post-save state — symmetric with `Output(Contract)` which carries the full Contract. The merkle leaf for this entry hashes `(actor.to_hash(), state_root(&state))`, so the TxID commits to the canonical state root while consumers reading the txlog directly get the bytes (no separate state-witness channel needed).
 
 **State is any portable Value.** The author structures state however they like (a Dict, an Int, a Token, …).
 
-**Portability is the canonical storage gate.** Portable values: `Int253`, `String`, `Point`, `Dict` of portable, non-negative `ClearToken`, `Token`. Non-portable values (`Cell`, `Merlin`, `Variable`, `Expression`, `Constraint`, `MultiscalarMul`, `WideToken`, negative `ClearToken`) hard-fail `NonPortableInState`.
+**Portability is the canonical storage gate.** Portable values: `Int253`, `String`, `Point`, `Dict` of portable, non-negative `ClearToken`, `Token`. Non-portable values (`Contract`, `Merlin`, `Variable`, `Expression`, `Constraint`, `MultiscalarMul`, `WideToken`, negative `ClearToken`) hard-fail `NonPortableInState`.
 
 The registry repeats this check on direct save and deploy entry points, so the
 actor-state invariant does not depend on `op_save` being the caller. As at the
@@ -1707,13 +1710,13 @@ violations hard-fail under the same conditions as `addstorage`.
 
 ### signtx
 
-_cell_ → _items… k_
+_contract_ → _items… k_
 
-Pops the cell, records a `DeferredSig::TxBound { verification_key: cell.predicate.point, cell_id }` for the delegate to verify at finalize against the eventual TxID, pours the cell's payload onto the current frame's stack, and pushes the count `k`.
+Pops the contract, records a `DeferredSig::TxBound { verification_key: contract.predicate.point, contract_id }` for the delegate to verify at finalize against the eventual TxID, pours the contract's payload onto the current frame's stack, and pushes the count `k`.
 
-**No new frame** — the cell-holder is authorizing the existing transaction in place.
+**No new frame** — the contract-holder is authorizing the existing transaction in place.
 
-`signtx` is external-only and checks its context before consuming the Cell.
+`signtx` is external-only and checks its context before consuming the Contract.
 Internal transactions have no signature envelope and their final TxID does not
 exist when the opcode executes, so the TxID-bound signature cannot be verified
 immediately. Internal authorization uses `signcall` instead.
@@ -1722,30 +1725,30 @@ The deferred signature is verified at finalize: the prover aggregates all `TxBou
 
 ### signcall
 
-_cell script sig gas args… m_ →
-_{results… k' 1 | cell args… m 0}_
+_contract script sig gas args… m_ →
+_{results… k' 1 | contract args… m 0}_
 
 Same call-frame mechanics as [`open`](#open) — taproot reveal is replaced by signature verification:
 
 1. Pops `m` (Int253), `args` (m portable values), and `gas`. A non-portable
    argument hard-fails `NonPortableInCall` before child entry.
 2. Pops `sig` (String, exactly 64 bytes — Schnorr signature).
-3. Pops `script` (String) and `cell`.
+3. Pops `script` (String) and `contract`.
 4. Builds `signcall_message(script_bytes)` via a Merlin transcript labelled
    `flamevm.signcall`. Scripts bind themselves to further context (anchor,
    actor identity, tx data) through explicit checks inside the signed program.
 5. In external execution, records `DeferredSig::Explicit` for final batch
    verification. In internal execution, parses and verifies the signature
-   immediately against the Cell predicate; malformed bytes fail
+   immediately against the Contract predicate; malformed bytes fail
    `BadSignatureBytes`, while a validly encoded but incorrect signature fails
    `SignatureVerificationFailed`. Internal execution records no deferred item.
 6. After verification or deferral, snapshots rollback state, creates the
-   isolated `CellOpen` frame, and pours payload + args into the signed script.
+   isolated `ContractOpen` frame, and pours payload + args into the signed script.
 
 External deferred signatures are batch-verified at finalize alongside any
 `signtx` items. Entered-child failure removes an external deferred signature
-and returns the original Cell plus explicit arguments using the same failure
-shape as `open`; the count is `m`, excluding the contextual Cell. Internal
+and returns the original Contract plus explicit arguments using the same failure
+shape as `open`; the count is `m`, excluding the contextual Contract. Internal
 signature failure occurs before child entry and hard-fails the current frame.
 
 ### timelock
@@ -1764,13 +1767,13 @@ Pushes `TxHeader::version` as a non-negative `Int253`. Available in either conte
 
 ø → _s_
 
-Pushes the current frame's actor id as a 32-byte String. Hard-fails `OpcodeRequiresActorContext` from `ExternalRoot` or `CellOpen` (no actor identity).
+Pushes the current frame's actor id as a 32-byte String. Hard-fails `OpcodeRequiresActorContext` from `ExternalRoot` or `ContractOpen` (no actor identity).
 
 ### anchor
 
 ø → _s_
 
-Pushes the frame's *current* `last_anchor` as a 32-byte String — the value the next consume site would split. Hard-fails `AnchorMissing` if no anchor has been claimed yet (same rule as `cell` / `output` / `send` / `call`). Available in either context.
+Pushes the frame's *current* `last_anchor` as a 32-byte String — the value the next consume site would split. Hard-fails `AnchorMissing` if no anchor has been claimed yet (same rule as `contract` / `output` / `send` / `call`). Available in either context.
 
 ### gas
 
@@ -1850,10 +1853,10 @@ checked-out committed state until `save` supplies a replacement. Hard-fails
 ø → _s_
 
 Pushes the directly invoking actor's canonical 32-byte id. `InternalRoot` and
-`ActorCall` use their recorded caller; `CellOpen` uses its compact read-only
+`ActorCall` use their recorded caller; `ContractOpen` uses its compact read-only
 `caller_id`. It pushes the all-zero String when that caller is absent and
-hard-fails only from `ExternalRoot`, which has no caller frame. A `CellOpen`
-opened by another `CellOpen` sees zero: actor attribution is not propagated
+hard-fails only from `ExternalRoot`, which has no caller frame. A `ContractOpen`
+opened by another `ContractOpen` sees zero: actor attribution is not propagated
 through predicate frames.
 
 ### gaslimit
@@ -1892,7 +1895,7 @@ below remain planned: their bytes are reserved but currently fail
 ø → _n_
 
 Pushes the current core-block height during an internal transaction. Pushes zero
-throughout an external transaction, including its nested `CellOpen` frames.
+throughout an external transaction, including its nested `ContractOpen` frames.
 
 ### blockhash
 
@@ -1929,6 +1932,6 @@ Pushes a Dict of block stats at height `n`.
 
 ## Isolation & binding notes
 
-**Cell-open trust model.** `open`, `signcall`, and `call` all create isolated call frames: the unlocked / signed / called script runs in its own stack, gas budget, and identity scope, with no implicit access to the host's actor state, gas pool, or identity. This eliminates the confused-deputy class of bugs — an actor accepting an untrusted-source cell need not audit the predicate as a global authorization filter, because the script cannot reach the actor's state regardless of what the predicate authorizes .
+**Contract-open trust model.** `open`, `signcall`, and `call` all create isolated call frames: the unlocked / signed / called script runs in its own stack, gas budget, and identity scope, with no implicit access to the host's actor state, gas pool, or identity. This eliminates the confused-deputy class of bugs — an actor accepting an untrusted-source contract need not audit the predicate as a global authorization filter, because the script cannot reach the actor's state regardless of what the predicate authorizes .
 
 **`signcall` binding policy.** The `signcall` signature commits to the script bytes only, whether it is verified immediately in internal execution or deferred in external execution. The script binds itself to further context (anchor, actor identity, tx-level data) via explicit checks such as `anchor <expected> eq verify`. Binding policy lives in the author's hands — flexibility at the price of footgun.

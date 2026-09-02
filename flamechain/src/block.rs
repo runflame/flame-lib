@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use flamevm::{
-    ActorID, ActorRegistry, BlockContext, Cell, CellID, Commitment, ExternalTx, Limits, Message,
-    TxEntry, TxHeader, TxID, TxLog, VMError, Value,
+    ActorID, ActorRegistry, BlockContext, Commitment, Contract, ContractID, ExternalTx, Limits,
+    Message, TxEntry, TxHeader, TxID, TxLog, VMError, Value,
 };
 use merkle::{Hash, MerkleItem, MerkleTree};
 use merlin::Transcript;
@@ -174,7 +174,7 @@ impl MerkleItem for WitnessHash {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StateCommitment {
-    pub cells: Hash,
+    pub contracts: Hash,
     pub actors: Hash,
     pub available_storage_units: u64,
 }
@@ -224,7 +224,7 @@ impl Encodable for BlockHeader {
         writer.write(b"block.parent", self.parent.as_bytes())?;
         writer.write(b"block.witness_root", &self.witness_root.0)?;
         writer.write(b"block.effects_root", &self.effects_root.0)?;
-        writer.write(b"block.cell_root", &self.state.cells.0)?;
+        writer.write(b"block.contract_root", &self.state.contracts.0)?;
         writer.write(b"block.actor_root", &self.state.actors.0)?;
         writer.write_u64(
             b"block.available_storage_units",
@@ -249,7 +249,7 @@ impl Decodable for BlockHeader {
             witness_root: Hash(reader.read_u8x32()?),
             effects_root: Hash(reader.read_u8x32()?),
             state: StateCommitment {
-                cells: Hash(reader.read_u8x32()?),
+                contracts: Hash(reader.read_u8x32()?),
                 actors: Hash(reader.read_u8x32()?),
                 available_storage_units: reader.read_u64()?,
             },
@@ -377,12 +377,12 @@ pub struct ReorgOutcome {
 #[derive(Clone)]
 struct BlockUndo {
     header: BlockHeader,
-    cells: Forest,
+    contracts: Forest,
     actors: RegistryUndo,
 }
 
 struct Transition {
-    cells: Forest,
+    contracts: Forest,
     catchup: Catchup,
     records: Vec<ExecutionRecord>,
     state: StateCommitment,
@@ -394,7 +394,7 @@ struct Transition {
 pub struct Blockchain {
     params: ChainParams,
     header: BlockHeader,
-    cells: Forest,
+    contracts: Forest,
     actors: ActorStore,
     active: Vec<BlockHash>,
     undo: BTreeMap<BlockHash, BlockUndo>,
@@ -406,8 +406,8 @@ impl Blockchain {
             return Err(ChainError::UnsupportedVersion);
         }
         let actors = ActorStore::new(params.storage)?;
-        let cells = Forest::new();
-        let cell_root = cells.root(&utreexo::utreexo_hasher::<CellLeaf>());
+        let contracts = Forest::new();
+        let contract_root = contracts.root(&utreexo::utreexo_hasher::<ContractLeaf>());
         let header = BlockHeader {
             version: params.version,
             height: 0,
@@ -416,7 +416,7 @@ impl Blockchain {
             witness_root: MerkleTree::empty_root(b"flamechain.block.witnesses"),
             effects_root: MerkleTree::empty_root(b"flamechain.block.effects"),
             state: StateCommitment {
-                cells: cell_root,
+                contracts: contract_root,
                 actors: actors.actor_root(),
                 available_storage_units: actors.available_units(),
             },
@@ -425,7 +425,7 @@ impl Blockchain {
         Ok(Self {
             params,
             header,
-            cells,
+            contracts,
             actors,
             active: vec![genesis],
             undo: BTreeMap::new(),
@@ -470,8 +470,8 @@ impl Blockchain {
         Ok(self.actors.actor_capacity(actor, height)?)
     }
 
-    pub(crate) fn cell_forest(&self) -> &Forest {
-        &self.cells
+    pub(crate) fn contract_forest(&self) -> &Forest {
+        &self.contracts
     }
 
     /// Builds a candidate by running the same transition as validation, then
@@ -514,7 +514,7 @@ impl Blockchain {
         self.check_header(block)?;
         self.actors.push_outer_checkpoint();
         let old_header = self.header.clone();
-        let old_cells = self.cells.clone();
+        let old_contracts = self.contracts.clone();
 
         let transition = match self.execute_body(block) {
             Ok(transition)
@@ -533,7 +533,7 @@ impl Blockchain {
             }
         };
 
-        self.cells = transition.cells;
+        self.contracts = transition.contracts;
         self.header = block.header.clone();
         let id = self.header.id();
         let actors = self.actors.take_outer_checkpoint();
@@ -541,7 +541,7 @@ impl Blockchain {
             id,
             BlockUndo {
                 header: old_header,
-                cells: old_cells,
+                contracts: old_contracts,
                 actors,
             },
         );
@@ -555,8 +555,8 @@ impl Blockchain {
 
     fn execute_body(&mut self, block: &Block) -> Result<Transition, ChainError> {
         self.actors.begin_block(block.header.height)?;
-        let mut work = self.cells.work_forest();
-        let hasher = utreexo::utreexo_hasher::<CellLeaf>();
+        let mut work = self.contracts.work_forest();
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
         let mut records = Vec::new();
         let mut sends = VecDeque::new();
         let mut seen_outputs = BTreeSet::new();
@@ -689,9 +689,9 @@ impl Blockchain {
             return Err(ChainError::CommitmentMismatch);
         }
 
-        let (cells, catchup) = work.normalize(&hasher);
+        let (contracts, catchup) = work.normalize(&hasher);
         let state = StateCommitment {
-            cells: cells.root(&hasher),
+            contracts: contracts.root(&hasher),
             actors: self.actors.actor_root(),
             available_storage_units: self.actors.available_units(),
         };
@@ -701,7 +701,7 @@ impl Blockchain {
         );
         self.actors.assert_supply(block.header.height)?;
         Ok(Transition {
-            cells,
+            contracts,
             catchup,
             records,
             state,
@@ -720,11 +720,7 @@ impl Blockchain {
                 locktime: 0,
             }),
             TxEntry::Receive(receive),
-            TxEntry::Output(Cell::new(
-                refund_predicate,
-                anchor,
-                payload,
-            )?),
+            TxEntry::Output(Contract::new(refund_predicate, anchor, payload)?),
         ]))
     }
 
@@ -772,12 +768,12 @@ impl Blockchain {
     fn apply_log(
         &mut self,
         work: &mut utreexo::WorkForest,
-        hasher: &merkle::Hasher<CellLeaf>,
+        hasher: &merkle::Hasher<ContractLeaf>,
         kind: ExecutionKind,
         log: TxLog,
         proofs: &[Proof],
         sends: &mut VecDeque<Message>,
-        seen_outputs: &mut BTreeSet<CellID>,
+        seen_outputs: &mut BTreeSet<ContractID>,
         height: u64,
     ) -> Result<(), ChainError> {
         Self::validate_log_shape(kind, &log, height)?;
@@ -798,14 +794,14 @@ impl Blockchain {
             for entry in log.into_entries() {
                 match entry {
                     TxEntry::Input(id) => {
-                        work.delete(&CellLeaf(id), proofs.next().unwrap(), hasher)?;
+                        work.delete(&ContractLeaf(id), proofs.next().unwrap(), hasher)?;
                     }
-                    TxEntry::Output(cell) => {
-                        let id = cell.id();
+                    TxEntry::Output(contract) => {
+                        let id = contract.id();
                         if seen_outputs.contains(&id) || !new_outputs.insert(id) {
-                            return Err(ChainError::DuplicateCell);
+                            return Err(ChainError::DuplicateContract);
                         }
-                        work.insert(&CellLeaf(id), hasher);
+                        work.insert(&ContractLeaf(id), hasher);
                     }
                     TxEntry::Send(message) => new_sends.push(message),
                     TxEntry::ActorDeploy { actor, code } => {
@@ -1016,7 +1012,7 @@ impl Blockchain {
             .remove(&expected)
             .ok_or(ChainError::UndoUnavailable)?;
         self.actors.apply_undo(undo.actors);
-        self.cells = undo.cells;
+        self.contracts = undo.contracts;
         self.header = undo.header;
         self.active.pop();
         Ok(())
@@ -1052,7 +1048,7 @@ impl Blockchain {
         // shows reorg-time cloning matters.
         let snapshot = (
             self.header.clone(),
-            self.cells.clone(),
+            self.contracts.clone(),
             self.actors.clone(),
             self.active.clone(),
             self.undo.clone(),
@@ -1074,7 +1070,7 @@ impl Blockchain {
 
         if result.is_err() {
             self.header = snapshot.0;
-            self.cells = snapshot.1;
+            self.contracts = snapshot.1;
             self.actors = snapshot.2;
             self.active = snapshot.3;
             self.undo = snapshot.4;
@@ -1084,11 +1080,11 @@ impl Blockchain {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct CellLeaf(pub CellID);
+pub(crate) struct ContractLeaf(pub ContractID);
 
-impl MerkleItem for CellLeaf {
+impl MerkleItem for ContractLeaf {
     fn commit(&self, t: &mut Transcript) {
-        t.append_message(b"cell.id", &self.0);
+        t.append_message(b"contract.id", &self.0);
     }
 }
 
@@ -1104,8 +1100,8 @@ pub enum ChainError {
     LimitExceeded,
     #[error("missing or trailing Utreexo proof")]
     ProofCount,
-    #[error("duplicate cell id in one block")]
-    DuplicateCell,
+    #[error("duplicate contract id in one block")]
+    DuplicateContract,
     #[error("invalid transaction effect log")]
     InvalidEffectLog,
     #[error("block commitment mismatch")]
@@ -1186,16 +1182,16 @@ mod tests {
             log.entries()[1],
             TxEntry::Receive(id) if id == *original.id().as_bytes()
         ));
-        let TxEntry::Output(cell) = &log.entries()[2] else {
+        let TxEntry::Output(contract) = &log.entries()[2] else {
             panic!("bounce must contain exactly one output");
         };
-        assert_eq!(cell.anchor, original.anchor.split().0);
+        assert_eq!(contract.anchor, original.anchor.split().0);
         assert_eq!(
-            cell.predicate.verification_key(),
+            contract.predicate.verification_key(),
             original.refund_predicate.verification_key()
         );
-        assert_eq!(cell.payload().len(), original.payload().len());
-        for (actual, expected) in cell.payload().iter().zip(original.payload()) {
+        assert_eq!(contract.payload().len(), original.payload().len());
+        for (actual, expected) in contract.payload().iter().zip(original.payload()) {
             assert_eq!(state_root(actual), state_root(expected));
         }
     }
@@ -1293,7 +1289,7 @@ mod tests {
             "26561ed94f8fb233d630a2613228b0d4f78fed918f02fdc1df974cf563af64d9"
         );
         assert_eq!(
-            hex::encode(block.header.state.cells.0),
+            hex::encode(block.header.state.contracts.0),
             "4ef24bb0e331b2a6fb5de8c786cd2f1ee3853690086b1b7cccefd750ea22a538"
         );
         assert_eq!(
@@ -1335,6 +1331,18 @@ mod tests {
     }
 
     #[test]
+    fn canonical_single_contract_root_vector() {
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
+        let mut work = Forest::new().work_forest();
+        work.insert(&ContractLeaf([0x42; 32]), &hasher);
+        let (forest, _) = work.normalize(&hasher);
+        assert_eq!(
+            hex::encode(forest.root(&hasher).0),
+            "5836e5e33bc7a3d77ed86cb4e23717d995cd4bb7d57f6d26f5c98cafae40a01a"
+        );
+    }
+
+    #[test]
     fn canonical_block_tx_witness_vector() {
         const BLOCK_TX: &str = "010000000200000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a101000000000000007e5de4349c5b87f2e1003095aff2e310801e2504b706bc6c062076eee49f90366625b75748908fb2492dd909a6d1428001dfdd201a0a7fae70911cf29112c8319e9d0eba4ca7fe137d5f8026614ab8736204ea46c213d9a20d0d663aa3e8ff1676fcd93dc1cba92d2f820b5b8ae5c99bacce0610dc799f050d1dec5effd5cb6c96950b0ad392e7414252008e6ff97d385437f30c74f106ae586522db4a9d73241ca0ed4f24798b31981e98e96bc121852a567728380ca00d12ee8556c220c13c3ed16d35fca58a3a3773120657b5b49cac1830a472bd083c51f4012ab7de25450a4544cdee6b7577d97a9c3e5a3267da4e13e2ef36a65ce83697cc498f00d005000000000000000000000000000000000000000000000000000000000000000027e4219ec9efc32f50b4b1c8766037a812d135363cbaa38be71527de967eb20839057e9d2324d2932cba8c6a646bb2b9f09661cd1ef8977bbd1df4813803e4040000000000000000000000000000000000000000000000000000000000000000ecd3f55c1a631258d69cf7a2def9de140000000000000000000000000000001010270000000000000000000000000000";
         let bytes = hex::decode(BLOCK_TX).unwrap();
@@ -1354,7 +1362,7 @@ mod tests {
                 witness_root: Hash([0; 32]),
                 effects_root: Hash([0; 32]),
                 state: StateCommitment {
-                    cells: Hash([0; 32]),
+                    contracts: Hash([0; 32]),
                     actors: Hash([0; 32]),
                     available_storage_units: 0,
                 },
@@ -1603,8 +1611,8 @@ mod tests {
 
         let mut chain = Blockchain::new(ChainParams::default()).unwrap();
         chain.actors = baseline;
-        let hasher = utreexo::utreexo_hasher::<CellLeaf>();
-        let mut work = chain.cells.work_forest();
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
+        let mut work = chain.contracts.work_forest();
         let mut sends = VecDeque::new();
         let mut seen_outputs = BTreeSet::new();
         chain
@@ -1637,8 +1645,8 @@ mod tests {
         let mut chain = Blockchain::new(ChainParams::default()).unwrap();
         let actor_root = chain.actors.actor_root();
         let pool = chain.actors.available_units();
-        let hasher = utreexo::utreexo_hasher::<CellLeaf>();
-        let mut work = chain.cells.work_forest();
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
+        let mut work = chain.contracts.work_forest();
         let mut sends = VecDeque::new();
         let mut seen_outputs = BTreeSet::new();
         let code = ScriptBuilder::new().nop().to_bytecode();
@@ -1682,7 +1690,7 @@ mod tests {
             TxEntry::Receive([2; 32]),
             TxEntry::ActorDeploy { actor, code },
         ]);
-        let mut work = chain.cells.work_forest();
+        let mut work = chain.contracts.work_forest();
         assert!(matches!(
             chain.apply_log(
                 &mut work,
@@ -1743,8 +1751,8 @@ mod tests {
 
         let mut chain = Blockchain::new(ChainParams::default()).unwrap();
         chain.actors = baseline;
-        let hasher = utreexo::utreexo_hasher::<CellLeaf>();
-        let mut work = chain.cells.work_forest();
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
+        let mut work = chain.contracts.work_forest();
         chain
             .apply_log(
                 &mut work,
@@ -1794,8 +1802,8 @@ mod tests {
 
         let mut chain = Blockchain::new(ChainParams::default()).unwrap();
         chain.actors = baseline;
-        let hasher = utreexo::utreexo_hasher::<CellLeaf>();
-        let mut work = chain.cells.work_forest();
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
+        let mut work = chain.contracts.work_forest();
         chain
             .apply_log(
                 &mut work,
@@ -1820,9 +1828,9 @@ mod tests {
     #[test]
     fn output_and_send_effects_move_into_chain_lanes() {
         let mut chain = Blockchain::new(ChainParams::default()).unwrap();
-        let hasher = utreexo::utreexo_hasher::<CellLeaf>();
-        let mut work = chain.cells.work_forest();
-        let output = Cell::new(
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
+        let mut work = chain.contracts.work_forest();
+        let output = Contract::new(
             refund_predicate(),
             Anchor([91; 32]),
             vec![Value::Int253(Int253::ONE)],
@@ -1927,8 +1935,8 @@ mod tests {
     #[test]
     fn bounce_collisions_reject_atomically() {
         let mut chain = Blockchain::new(ChainParams::default()).unwrap();
-        let hasher = utreexo::utreexo_hasher::<CellLeaf>();
-        let mut work = chain.cells.work_forest();
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
+        let mut work = chain.contracts.work_forest();
         let mut sends = VecDeque::new();
         let mut seen_outputs = BTreeSet::new();
         let original = message(ActorID::Hash([50; 32]), Vec::new(), 1_000, 50);
@@ -1936,7 +1944,7 @@ mod tests {
         let bounce_id = bounce
             .iter()
             .find_map(|entry| match entry {
-                TxEntry::Output(cell) => Some(cell.id()),
+                TxEntry::Output(contract) => Some(contract.id()),
                 _ => None,
             })
             .unwrap();
@@ -1952,7 +1960,7 @@ mod tests {
                 &mut seen_outputs,
                 0,
             ),
-            Err(ChainError::DuplicateCell)
+            Err(ChainError::DuplicateContract)
         ));
         assert_eq!(work.normalize(&hasher).0.count(), 0);
     }

@@ -448,7 +448,7 @@ fn confidential_2_to_3_two_flavors() {
 ///
 /// Script shape (single flavor 0):
 ///
-///   pushstr <cell>; input(w); <taproot_proof>; push:0; open
+///   pushstr <contract>; input(w); <taproot_proof>; push:0; open
 ///       → stack: [Token(10, 0)]
 ///   push:3; push:0; fee
 ///       → stack: [Token(10, 0), WideToken(-3, 0)]
@@ -472,8 +472,8 @@ fn confidential_1_to_1_with_fee() {
         flv_blind: 13,
         anchor: [0xa1; 32],
     };
-    let (cell, cp) = build_input_cell(&inp);
-    let expected_input_id = cell.id();
+    let (contract, cp) = build_input_contract(&inp);
+    let expected_input_id = contract.id();
 
     let out = NMOutputSpec {
         qty: 7,
@@ -485,9 +485,9 @@ fn confidential_1_to_1_with_fee() {
     let (q_out, f_out) = open_commitments_for_output(&out);
 
     let mut program = ScriptBuilder::new();
-    // Consume the input cell — push the witness-bearing StringWitness::Cell
+    // Consume the input contract — push the witness-bearing StringWitness::Contract
     // so the Token's open commitments survive into the CS.
-    program = program.push_str(String::cell(cell));
+    program = program.push_str(String::contract(contract));
     program = program.input();
     program = push_taproot_proof_to_program(program, &cp);
     program = program
@@ -506,7 +506,7 @@ fn confidential_1_to_1_with_fee() {
         .push_str(String::commitment(f_out.clone()));
     // mix: m=2 (real Token + fee WideToken), n=1 (output).
     program = program.push_int(2u64).push_int(1u64).mix();
-    // Emit the output cell.
+    // Emit the output contract.
     let out_pred = output_predicate_point(out.predicate_tag);
     program = program
         .push_int(1u64)
@@ -672,7 +672,7 @@ fn confidential_with_fee_undersupply_rejected() {
         flv_blind: 13,
         anchor: [0xa1; 32],
     };
-    let (cell, cp) = build_input_cell(&inp);
+    let (contract, cp) = build_input_contract(&inp);
 
     // Output qty = 10 (NOT 7) — fee is unfunded.
     let out = NMOutputSpec {
@@ -688,7 +688,7 @@ fn confidential_with_fee_undersupply_rejected() {
     // the unbalanced output qty.
     let out_pred = output_predicate_point(out.predicate_tag);
     let mut program = ScriptBuilder::new();
-    program = program.push_str(String::cell(cell));
+    program = program.push_str(String::contract(contract));
     program = program.input();
     program = push_taproot_proof_to_program(program, &cp);
     program = program

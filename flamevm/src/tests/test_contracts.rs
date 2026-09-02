@@ -1,4 +1,4 @@
-//! Tests for cells.
+//! Tests for contracts.
 
 #![allow(unused_imports)]
 
@@ -6,42 +6,42 @@ use super::test_helpers::*;
 use crate::encoding::{write_list_prefix, write_value};
 use crate::state_root;
 
-/// `Cell::decode` must reject an oversized payload-count prefix before
+/// `Contract::decode` must reject an oversized payload-count prefix before
 /// allocating — a tiny hostile input claiming billions of payload items
 /// is unsatisfiable and must error, not OOM (audit p7 critical).
 #[test]
-fn cell_decode_rejects_payload_count_bomb() {
+fn contract_decode_rejects_payload_count_bomb() {
     use readerwriter::Decodable;
-    // A valid empty-payload cell ends with the payload list prefix
+    // A valid empty-payload contract ends with the payload list prefix
     // (LIST_IMM 0 = 128). Swap it for LIST_VAR + a ~4.3 GB sub-varint
     // count (U32 form, below the U64-overflow guard so we exercise the
     // remaining-bytes bound itself).
-    let cell = Cell::new(
+    let contract = Contract::new(
         Predicate::opaque(CompressedRistretto([2u8; 32])),
         Anchor([0u8; 32]),
         Vec::new(),
     )
     .expect("empty payload is portable");
-    let mut bytes = cell.to_bytes();
+    let mut bytes = contract.to_bytes();
     assert_eq!(*bytes.last().unwrap(), 128, "empty-payload list prefix");
     bytes.pop();
     bytes.push(187); // LIST_VAR
     bytes.push(2); // SUBVARINT_U32
     bytes.extend_from_slice(&u32::MAX.to_le_bytes());
     let mut r: &[u8] = &bytes;
-    assert!(Cell::decode(&mut r).is_err());
+    assert!(Contract::decode(&mut r).is_err());
 }
 
 #[test]
-fn cell_opcode_requires_seeded_anchor() {
-    // push:7 (payload), push:1 (count), pushpoint(some), cell —
+fn contract_opcode_requires_seeded_anchor() {
+    // push:7 (payload), push:1 (count), pushpoint(some), contract —
     // run from an ExternalRoot frame whose last_anchor is `None`
-    // (no prior `op_input` to seed it). `op_cell` must hard-fail.
+    // (no prior `op_input` to seed it). `op_contract` must hard-fail.
     let script = ScriptBuilder::new()
         .push_int(7u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
-        .cell()
+        .contract()
         .to_bytecode();
     let mut vm = vm_external_with_script(script);
     let err = run_to_end(&mut vm).unwrap_err();
@@ -49,40 +49,40 @@ fn cell_opcode_requires_seeded_anchor() {
 }
 
 #[test]
-fn cell_opcode_builds_a_cell_and_ratchets_anchor() {
-    // Seed an anchor, then build a cell.
+fn contract_opcode_builds_a_contract_and_ratchets_anchor() {
+    // Seed an anchor, then build a contract.
     let script = ScriptBuilder::new()
         .push_int(7u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
-        .cell()
+        .contract()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     let seed = Anchor([0x42; 32]);
     vm.last_anchor = Some(seed);
     run_to_end(&mut vm).unwrap();
-    // The cell took the LEFT half of split(seed) as its anchor;
+    // The contract took the LEFT half of split(seed) as its anchor;
     // last_anchor is now the RIGHT half.
     let (expected_left, expected_right) = seed.split();
     assert_eq!(vm.current_call.stack.len(), 1);
     match &vm.current_call.stack[0] {
-        Value::Cell(c) => {
+        Value::Contract(c) => {
             assert_eq!(c.anchor.0, expected_left.0);
             assert_eq!(vm.last_anchor.unwrap().0, expected_right.0);
         }
-        other => panic!("expected Cell, got {}", value_kind(other)),
+        other => panic!("expected Contract, got {}", value_kind(other)),
     }
 }
 
 #[test]
-fn cell_opcode_rejects_non_portable_payload() {
+fn contract_opcode_rejects_non_portable_payload() {
     // Merlin is always non-portable.
     let script = ScriptBuilder::new()
         .push_str(String::from(Vec::<u8>::new())) // empty label
         .transcript() // → Merlin (non-portable)
         .push_int(1u64) // count
         .push_point([0xaa; 32])
-        .cell()
+        .contract()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
@@ -93,7 +93,7 @@ fn cell_opcode_rejects_non_portable_payload() {
 }
 
 #[test]
-fn cell_constructor_rejects_nested_non_portable_payload() {
+fn contract_constructor_rejects_nested_non_portable_payload() {
     let mut inner = Dict::new();
     inner.insert(Int253::ZERO, Value::Merlin(Merlin::new(b"test")));
     let mut outer = Dict::new();
@@ -101,7 +101,7 @@ fn cell_constructor_rejects_nested_non_portable_payload() {
     assert!(!outer.is_portable());
 
     assert!(matches!(
-        Cell::new(
+        Contract::new(
             Predicate::opaque(CompressedRistretto([2u8; 32])),
             Anchor([0u8; 32]),
             vec![Value::Dict(outer)],
@@ -111,13 +111,13 @@ fn cell_constructor_rejects_nested_non_portable_payload() {
 }
 
 #[test]
-fn cell_is_noncopyable_and_nondroppable() {
-    // build cell, then dup → TypeNotCopyable
+fn contract_is_noncopyable_and_nondroppable() {
+    // build contract, then dup → TypeNotCopyable
     let script = ScriptBuilder::new()
         .push_int(7u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
-        .cell()
+        .contract()
         .dup_k(0)
         .to_bytecode();
     let mut vm = vm_with_script(script);
@@ -127,12 +127,12 @@ fn cell_is_noncopyable_and_nondroppable() {
         VMError::TypeNotCopyable
     ));
 
-    // build cell, then drop → TypeNotDroppable
+    // build contract, then drop → TypeNotDroppable
     let script = ScriptBuilder::new()
         .push_int(7u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
-        .cell()
+        .contract()
         .drop_()
         .to_bytecode();
     let mut vm = vm_with_script(script);
@@ -169,8 +169,8 @@ fn output_opcode_emits_to_txlog_without_pushing() {
 
 #[test]
 fn open_with_valid_taproot_proof_runs_program() {
-    // Cell payload: 5. Inner program: drop, push:0, return — drains
-    // the payload inside the isolated CellOpen frame and returns 0
+    // Contract payload: 5. Inner program: drop, push:0, return — drains
+    // the payload inside the isolated ContractOpen frame and returns 0
     // items to parent (ADR 0013). On clean return parent's stack
     // gets [count=0, success=1].
     let inner_program = ScriptBuilder::new()
@@ -185,7 +185,7 @@ fn open_with_valid_taproot_proof_runs_program() {
         .push_int(5u64) // payload
         .push_int(1u64) // count
         .push_point(*pred_point.as_bytes())
-        .cell();
+        .contract();
     program = push_taproot_proof_to_program(program, &cp);
     let script = program
         .push_int(1024u64) // gas
@@ -227,7 +227,7 @@ fn open_with_wrong_program_hard_fails() {
         .push_int(5u64)
         .push_int(1u64)
         .push_point(*pred_point.as_bytes())
-        .cell();
+        .contract();
     program = push_taproot_proof_to_program(program, &cp);
     let script = program
         .push_int(1024u64)
@@ -244,7 +244,7 @@ fn open_with_wrong_program_hard_fails() {
 
 /// Prover-side: the unlock script pushed as the taproot_proof's
 /// `program` component can be a `StringWitness::Script(instrs)` carrying
-/// witnesses. `op_open` verifies the taproot_proof against the cell's
+/// witnesses. `op_open` verifies the taproot_proof against the contract's
 /// predicate (the bytes must match the leaf stored in the
 /// predicate tree), then uses `program_str.to_instructions()` so
 /// the witness slots survive into the new Run. End-to-end via
@@ -256,7 +256,7 @@ fn open_with_wrong_program_hard_fails() {
 #[test]
 fn open_preserves_alloc_witnesses_via_script_string() {
     // Inner unlock script with `alloc(Some(_))` witnesses. Ends with
-    // `push:0, return` so the isolated CellOpen frame exits cleanly
+    // `push:0, return` so the isolated ContractOpen frame exits cleanly
     // after `verify` drains the constraint (ADR 0013).
     let inner = ScriptBuilder::new()
         .alloc(Some(Int253::from(7u64)))
@@ -277,14 +277,14 @@ fn open_preserves_alloc_witnesses_via_script_string() {
     let cp = tree.taproot_proof_for(0).expect("taproot_proof for leaf 0");
     let pred_point = tree.point;
 
-    // Construct the input cell with an empty payload — the witness
+    // Construct the input contract with an empty payload — the witness
     // we care about lives in the unlock script, not the payload.
-    let cell = Cell::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![])
+    let contract = Contract::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![])
         .expect("empty payload is portable");
-    let cell_bytes = encode_cell_to_bytes(&cell);
+    let contract_bytes = encode_contract_to_bytes(&contract);
 
     // Outer ScriptBuilder:
-    //   pushstr <cell_bytes>; input;
+    //   pushstr <contract_bytes>; input;
     //   pushpoint <internal_key>;
     //   for each neighbor: pushstr <h>; push:i;     // N neighbors
     //   push:N; dict;
@@ -292,7 +292,7 @@ fn open_preserves_alloc_witnesses_via_script_string() {
     //   push_script(inner);                          // witness-bearing
     //   push:0; open
     let mut outer = ScriptBuilder::new()
-        .push_str(String::from(cell_bytes))
+        .push_str(String::from(contract_bytes))
         .input()
         .push_point(*cp.internal_key.as_bytes());
     for (i, h) in cp.neighbors.iter().enumerate() {
@@ -337,7 +337,7 @@ fn open_preserves_alloc_witnesses_via_script_string() {
 
 #[test]
 fn open_passes_args_after_payload() {
-    // Cell payload: [10]. args: [20, 30]. Inside the isolated CellOpen
+    // Contract payload: [10]. args: [20, 30]. Inside the isolated ContractOpen
     // frame the stack starts as [10, 20, 30] (payload then args). The
     // leaf drops all three and exits via `return 0`.
     let inner_program = ScriptBuilder::new()
@@ -354,7 +354,7 @@ fn open_passes_args_after_payload() {
         .push_int(10u64) // payload
         .push_int(1u64) // count
         .push_point(*pred_point.as_bytes())
-        .cell();
+        .contract();
     program = push_taproot_proof_to_program(program, &cp);
     let script = program
         .push_int(1024u64) // gas
@@ -373,17 +373,17 @@ fn open_passes_args_after_payload() {
 }
 
 #[test]
-fn failed_open_restores_cell_and_explicit_bearers() {
+fn failed_open_restores_contract_and_explicit_bearers() {
     let inner = ScriptBuilder::new().push_int(0u64).verify().to_bytecode();
     let (tree, proof) = build_predicate_with_program(&inner, 12);
     let payload_token = Token::cleartext(Int253::from(31u64), FLAME_FLAVOR).unwrap();
-    let cell = Cell::new(
+    let contract = Contract::new(
         Predicate::opaque(tree.point),
         Anchor([0x31; 32]),
         vec![Value::Token(payload_token.clone())],
     )
     .expect("token payload is portable");
-    let cell_id = cell.id();
+    let contract_id = contract.id();
 
     let clear = ClearToken::new(Int253::from(37u64), FLAME_FLAVOR);
     let dict_token = Token::cleartext(Int253::from(41u64), FLAME_FLAVOR).unwrap();
@@ -401,7 +401,7 @@ fn failed_open_restores_cell_and_explicit_bearers() {
     let mut vm = vm_with_script(ScriptBuilder::new().open().to_bytecode());
     vm.last_anchor = Some(Anchor([0x42; 32]));
     vm.current_call.stack = vec![
-        Value::Cell(Box::new(cell)),
+        Value::Contract(Box::new(contract)),
         Value::Point(Point::from_compressed(proof.internal_key)),
         Value::Dict(neighbors),
         Value::String(String::from(proof.position)),
@@ -415,12 +415,12 @@ fn failed_open_restores_cell_and_explicit_bearers() {
     run_to_end(&mut vm).unwrap();
 
     assert_eq!(vm.current_call.stack.len(), 5);
-    let Value::Cell(restored_cell) = &vm.current_call.stack[0] else {
-        panic!("expected restored Cell");
+    let Value::Contract(restored_contract) = &vm.current_call.stack[0] else {
+        panic!("expected restored Contract");
     };
-    assert_eq!(restored_cell.id(), cell_id);
+    assert_eq!(restored_contract.id(), contract_id);
     assert!(matches!(
-        restored_cell.payload(),
+        restored_contract.payload(),
         [Value::Token(token)] if token.qty() == payload_token.qty() && token.flv() == payload_token.flv()
     ));
     assert!(matches!(
@@ -466,7 +466,7 @@ fn predicate_tree_new_validates_inputs() {
 
 #[test]
 fn scripts_only_predicate_opens_via_program_path() {
-    // End-to-end: build a scripts-only predicate, lock a cell under
+    // End-to-end: build a scripts-only predicate, lock a contract under
     // it, and unlock via `open` with the script-path proof. Leaf
     // `drop, push:0, return` drains the 1-item payload and exits the
     // isolated frame (ADR 0013).
@@ -483,7 +483,7 @@ fn scripts_only_predicate_opens_via_program_path() {
         .push_int(5u64) // payload
         .push_int(1u64) // count = 1
         .push_point(*pred_point.as_bytes())
-        .cell();
+        .contract();
     p = push_taproot_proof_to_program(p, &cp);
     let script = p
         .push_int(1024u64) // gas
@@ -502,7 +502,7 @@ fn scripts_only_predicate_opens_via_program_path() {
 #[test]
 fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
     // Three programs; each drops its payload then `push:0, return` —
-    // exit the isolated CellOpen frame with zero results.
+    // exit the isolated ContractOpen frame with zero results.
     let leaf = |drops: usize| -> Vec<u8> {
         let mut p = ScriptBuilder::new();
         for _ in 0..drops {
@@ -525,7 +525,7 @@ fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
         p = p
             .push_int(payload_count as u64)
             .push_point(*pred_point.as_bytes())
-            .cell();
+            .contract();
         p = push_taproot_proof_to_program(p, &cp);
         let script = p.push_int(1024u64).push_int(0u64).open().to_bytecode();
         let mut vm = vm_with_script(script);
@@ -570,7 +570,7 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
         .push_int(5u64)
         .push_int(1u64)
         .push_point(*pred_point.as_bytes())
-        .cell();
+        .contract();
     p = push_taproot_proof_to_program(p, &forged);
     let script = p.push_int(1024u64).push_int(0u64).open().to_bytecode();
     let mut vm = vm_with_script(script);
@@ -594,24 +594,24 @@ fn taproot_proof_for_out_of_range_index_errors() {
 }
 
 //
-// A cell's payload bytes can only return to the stack via `open`,
-// `signtx`, or `signcall` — each of which consumes the source cell
+// A contract's payload bytes can only return to the stack via `open`,
+// `signtx`, or `signcall` — each of which consumes the source contract
 // and records (open) or defers (signtx/signcall) an authorization
-// check. There is no "transfer the cell handle into a new output"
-// shortcut, because `Value::Cell` is non-portable and the cell
-// construction opcodes (`cell`, `output`) reject non-portable
+// check. There is no "transfer the contract handle into a new output"
+// shortcut, because `Value::Contract` is non-portable and the contract
+// construction opcodes (`contract`, `output`) reject non-portable
 // payload items.
 
 #[test]
-fn output_rejects_cell_as_payload_item() {
-    // Build cell A on stack. Then try: count=1, predicate_point, output
-    //   — the output op pops pred + count + 1 payload item (cell A)
-    //     and checked Cell construction must reject cell A.
+fn output_rejects_contract_as_payload_item() {
+    // Build contract A on stack. Then try: count=1, predicate_point, output
+    //   — the output op pops pred + count + 1 payload item (contract A)
+    //     and checked Contract construction must reject contract A.
     let script = ScriptBuilder::new()
         .push_int(5u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
-        .cell() // cell A → on stack
+        .contract() // contract A → on stack
         .push_int(1u64) // outer payload count = 1
         .push_point([0xbb; 32])
         .output()
@@ -625,16 +625,16 @@ fn output_rejects_cell_as_payload_item() {
 }
 
 #[test]
-fn cell_opcode_rejects_cell_as_payload_item() {
-    // Symmetric protection on the `cell` construction op.
+fn contract_opcode_rejects_contract_as_payload_item() {
+    // Symmetric protection on the `contract` construction op.
     let script = ScriptBuilder::new()
         .push_int(5u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
-        .cell() // cell A
+        .contract() // contract A
         .push_int(1u64) // outer payload count
         .push_point([0xbb; 32])
-        .cell() // attempted outer cell
+        .contract() // attempted outer contract
         .to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
@@ -645,17 +645,17 @@ fn cell_opcode_rejects_cell_as_payload_item() {
 }
 
 #[test]
-fn output_rejects_dict_containing_a_cell() {
-    // A stack-local Dict may hold a Cell, but its sticky portability flag
+fn output_rejects_dict_containing_a_contract() {
+    // A stack-local Dict may hold a Contract, but its sticky portability flag
     // prevents the whole Dict from crossing an output boundary.
     let script = ScriptBuilder::new()
         .push_int(5u64)
         .push_int(1u64)
         .push_point([0xaa; 32])
-        .cell() // cell A on stack
+        .contract() // contract A on stack
         .push_int(0u64) // key = 0
         .push_int(1u64) // 1 pair
-        .dict() // non-portable Dict { 0: cellA }
+        .dict() // non-portable Dict { 0: contractA }
         .push_int(1u64) // outer count = 1
         .push_point([0xbb; 32])
         .output()
@@ -669,21 +669,21 @@ fn output_rejects_dict_containing_a_cell() {
 }
 
 #[test]
-fn cell_decode_rejects_empty_input() {
-    let err = decode_cell_dropping_ok(&[]).unwrap_err();
-    assert!(matches!(err, VMError::MalformedCellEncoding));
+fn contract_decode_rejects_empty_input() {
+    let err = decode_contract_dropping_ok(&[]).unwrap_err();
+    assert!(matches!(err, VMError::MalformedContractEncoding));
 }
 
 #[test]
-fn cell_decode_rejects_wrong_outer_count() {
+fn contract_decode_rejects_wrong_outer_count() {
     // Outer list-Dict with two entries instead of three (anchor +
     // payload prefix, no predicate). Bytes are hand-rolled to make
     // the outer prefix valid but the inner shape wrong.
     // Outer count = 2 (immediate small list-Dict tag in the encoding).
     // We exploit the fact that any prefix that successfully reads as
     // a list-Dict with count != 3 must fail.
-    // Construct a real cell and then patch the outer count.
-    let mut bytes = encode_cell_to_bytes(&fixture_cell());
+    // Construct a real contract and then patch the outer count.
+    let mut bytes = encode_contract_to_bytes(&fixture_contract());
     // First byte encodes the outer list-Dict prefix; just rewrite the
     // top-level prefix byte to a list-Dict of count 2. We use the
     // round-trip helper: build a 2-element list-Dict by hand.
@@ -691,12 +691,12 @@ fn cell_decode_rejects_wrong_outer_count() {
     // which is canonical but wrong arity.
     bytes.clear();
     write_list_prefix(&mut bytes, 0).expect("write prefix");
-    let err = decode_cell_dropping_ok(&bytes).unwrap_err();
-    assert!(matches!(err, VMError::MalformedCellEncoding));
+    let err = decode_contract_dropping_ok(&bytes).unwrap_err();
+    assert!(matches!(err, VMError::MalformedContractEncoding));
 }
 
 #[test]
-fn cell_decode_rejects_wrong_anchor_length() {
+fn contract_decode_rejects_wrong_anchor_length() {
     // Build an outer list-Dict of 3 entries by hand: Point predicate,
     // a String of wrong (31-byte) anchor, then an empty payload list.
     let mut bytes = Vec::new();
@@ -705,12 +705,12 @@ fn cell_decode_rejects_wrong_anchor_length() {
     write_value(&mut bytes, &Value::String(String::from(vec![0u8; 31])))
         .expect("write short anchor");
     write_list_prefix(&mut bytes, 0).expect("write payload prefix");
-    let err = decode_cell_dropping_ok(&bytes).unwrap_err();
-    assert!(matches!(err, VMError::MalformedCellEncoding));
+    let err = decode_contract_dropping_ok(&bytes).unwrap_err();
+    assert!(matches!(err, VMError::MalformedContractEncoding));
 }
 
 #[test]
-fn cell_decode_rejects_nested_nonportable_payload_at_cell_boundary() {
+fn contract_decode_rejects_nested_nonportable_payload_at_contract_boundary() {
     let mut inner = Dict::new();
     inner.insert(
         Int253::ZERO,
@@ -726,11 +726,11 @@ fn cell_decode_rejects_nested_nonportable_payload_at_cell_boundary() {
     write_list_prefix(&mut bytes, 1).unwrap();
     write_value(&mut bytes, &Value::Dict(outer)).unwrap();
 
-    assert!(decode_cell_dropping_ok(&bytes).is_err());
+    assert!(decode_contract_dropping_ok(&bytes).is_err());
 }
 
 #[test]
-fn cell_decode_rejects_predicate_not_a_point() {
+fn contract_decode_rejects_predicate_not_a_point() {
     // First entry is a String where a Point is expected.
     let mut bytes = Vec::new();
     write_list_prefix(&mut bytes, 3).expect("write outer prefix");
@@ -738,35 +738,35 @@ fn cell_decode_rejects_predicate_not_a_point() {
         .expect("write wrong predicate");
     write_value(&mut bytes, &Value::String(String::from(vec![0u8; 32]))).expect("write anchor");
     write_list_prefix(&mut bytes, 0).expect("write payload prefix");
-    let err = decode_cell_dropping_ok(&bytes).unwrap_err();
-    assert!(matches!(err, VMError::MalformedCellEncoding));
+    let err = decode_contract_dropping_ok(&bytes).unwrap_err();
+    assert!(matches!(err, VMError::MalformedContractEncoding));
 }
 
 #[test]
-fn input_pushes_cell_seeds_anchor_and_emits_txlog() {
-    let cell = fixture_cell();
-    let expected_id = cell.id();
-    let bytes = encode_cell_to_bytes(&cell);
+fn input_pushes_contract_seeds_anchor_and_emits_txlog() {
+    let contract = fixture_contract();
+    let expected_id = contract.id();
+    let bytes = encode_contract_to_bytes(&contract);
 
     // Build an ExternalRoot VM with the wire bytes on the stack as a String.
     let mut vm = vm_external_with_script(Vec::new());
     vm.push_value(Value::String(String::from(bytes)));
     vm.op_input().expect("input succeeds");
 
-    // Top of stack is the decoded Cell.
+    // Top of stack is the decoded Contract.
     assert_eq!(vm.current_call.stack.len(), 1);
     match &vm.current_call.stack[0] {
-        Value::Cell(c) => {
+        Value::Contract(c) => {
             assert_eq!(c.id(), expected_id);
         }
-        other => panic!("expected Cell on stack, got {}", value_kind(other)),
+        other => panic!("expected Contract on stack, got {}", value_kind(other)),
     }
 
-    // last_anchor seeded to the input cell's id (split design — no
-    // extra ratchet; cell.id() is the unique spend-once source).
+    // last_anchor seeded to the input contract's id (split design — no
+    // extra ratchet; contract.id() is the unique spend-once source).
     assert_eq!(vm.last_anchor.expect("anchor seeded").0, expected_id);
 
-    // Txlog has Header + one Input entry committing the cell id.
+    // Txlog has Header + one Input entry committing the contract id.
     assert_eq!(vm.txlog.len(), 2);
     assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
     match &vm.txlog[1] {
@@ -790,21 +790,21 @@ fn input_rejects_malformed_bytes() {
     let mut vm = vm_external_with_script(Vec::new());
     vm.push_value(Value::String(String::from(vec![0xffu8; 8])));
     let err = vm.op_input().unwrap_err();
-    assert!(matches!(err, VMError::MalformedCellEncoding));
+    assert!(matches!(err, VMError::MalformedContractEncoding));
 }
 
 #[test]
-fn input_rejects_trailing_bytes_after_cell() {
+fn input_rejects_trailing_bytes_after_contract() {
     // Append a stray byte after a canonical encoding so the inner
-    // reader leaves bytes unread → MalformedCellEncoding.
-    let cell = fixture_cell();
-    let mut bytes = encode_cell_to_bytes(&cell);
+    // reader leaves bytes unread → MalformedContractEncoding.
+    let contract = fixture_contract();
+    let mut bytes = encode_contract_to_bytes(&contract);
     bytes.push(0x00); // trailing garbage
 
     let mut vm = vm_external_with_script(Vec::new());
     vm.push_value(Value::String(String::from(bytes)));
     let err = vm.op_input().unwrap_err();
-    assert!(matches!(err, VMError::MalformedCellEncoding));
+    assert!(matches!(err, VMError::MalformedContractEncoding));
 }
 
 #[test]
@@ -815,41 +815,41 @@ fn input_in_internal_context_errors_external_only() {
     let mut vm = vm_with_script(ScriptBuilder::new().input().to_bytecode());
     // Even with a well-formed string on the stack, internal context
     // rejects the opcode before any decoding happens.
-    let cell_bytes = encode_cell_to_bytes(&fixture_cell());
-    vm.push_value(Value::String(String::from(cell_bytes)));
+    let contract_bytes = encode_contract_to_bytes(&fixture_contract());
+    vm.push_value(Value::String(String::from(contract_bytes)));
     let err = vm.step_internal().unwrap_err();
     assert!(matches!(err, VMError::ExternalOnly));
 }
 
 #[test]
 fn input_then_output_anchor_chain() {
-    // Round-trip: input a cell, then output a new cell whose anchor
-    // is derived from the consumed cell. Confirms `last_anchor` is
+    // Round-trip: input a contract, then output a new contract whose anchor
+    // is derived from the consumed contract. Confirms `last_anchor` is
     // wired through `input` so a subsequent `output` doesn't need an
     // external seed.
-    let cell = fixture_cell();
-    let bytes = encode_cell_to_bytes(&cell);
-    let expected_anchor_after_input = Anchor(cell.id());
+    let contract = fixture_contract();
+    let bytes = encode_contract_to_bytes(&contract);
+    let expected_anchor_after_input = Anchor(contract.id());
 
     let mut vm = vm_external_with_script(Vec::new());
 
-    // Step 1: feed cell bytes into op_input.
+    // Step 1: feed contract bytes into op_input.
     vm.push_value(Value::String(String::from(bytes)));
     vm.op_input().expect("input ok");
-    // Stack: [Cell]. last_anchor: Some(cell.id()).
+    // Stack: [Contract]. last_anchor: Some(contract.id()).
     assert_eq!(
         vm.last_anchor.expect("anchor").0,
         expected_anchor_after_input.0
     );
 
-    // The consumed cell's handle is still on the stack. For a stand-alone
+    // The consumed contract's handle is still on the stack. For a stand-alone
     // anchor-chain test we don't care about authorizing it — drop it
     // directly so we can exercise `op_output` against the seeded anchor.
     let _consumed = vm
         .pop_value()
         .expect("pop value")
-        .to_cell()
-        .expect("pop cell handle");
+        .to_contract()
+        .expect("pop contract handle");
 
     // Step 2: build an output through the real op_output handler.
     // Stack pre-output: [payload(5), count(1), predicate(Point)].
@@ -858,7 +858,7 @@ fn input_then_output_anchor_chain() {
     vm.push_value(Value::Point(Point::from_bytes([0xbb; 32])));
     vm.op_output().expect("output ok");
 
-    // Txlog now has: Header, Input(consumed_id), Output(new_cell).
+    // Txlog now has: Header, Input(consumed_id), Output(new_contract).
     assert_eq!(vm.txlog.len(), 3);
     assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
     match &vm.txlog[1] {
@@ -869,7 +869,7 @@ fn input_then_output_anchor_chain() {
         TxEntry::Output(_) => {}
         _ => panic!("third entry must be Output"),
     }
-    // last_anchor advanced again past the output cell.
+    // last_anchor advanced again past the output contract.
     assert_ne!(
         vm.last_anchor.expect("anchor").0,
         expected_anchor_after_input.0
@@ -882,9 +882,9 @@ fn input_via_step_external_dispatch() {
     // step through `step_external` to confirm 0x90 routes to op_input.
     // Use a stub delegate that never actually runs (we only step once,
     // and the input opcode does not consult the delegate).
-    let cell = fixture_cell();
-    let expected_id = cell.id();
-    let bytes = encode_cell_to_bytes(&cell);
+    let contract = fixture_contract();
+    let expected_id = contract.id();
+    let bytes = encode_contract_to_bytes(&contract);
 
     let mut vm = vm_external_with_script(ScriptBuilder::new().input().to_bytecode());
     vm.push_value(Value::String(String::from(bytes)));
@@ -893,10 +893,10 @@ fn input_via_step_external_dispatch() {
     let cont = vm.step_external(&mut delegate).expect("step ok");
     assert!(cont, "still running (script not exhausted)");
 
-    // Stack now has the decoded cell; txlog has Header + Input entry.
+    // Stack now has the decoded contract; txlog has Header + Input entry.
     match &vm.current_call.stack[0] {
-        Value::Cell(c) => assert_eq!(c.id(), expected_id),
-        other => panic!("expected Cell, got {}", value_kind(other)),
+        Value::Contract(c) => assert_eq!(c.id(), expected_id),
+        other => panic!("expected Contract, got {}", value_kind(other)),
     }
     assert_eq!(vm.txlog.len(), 2);
     assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
@@ -908,31 +908,31 @@ fn input_via_step_external_dispatch() {
 
 #[test]
 fn external_tx_one_input_one_output_via_signtx() {
-    // A single external transaction consumes one cell (authorized
-    // via signtx — the cell holder signs the whole tx via the
-    // envelope) and emits a single fresh cell.
+    // A single external transaction consumes one contract (authorized
+    // via signtx — the contract holder signs the whole tx via the
+    // envelope) and emits a single fresh contract.
     //
-    // Cell life-cycle traced end-to-end:
-    //   bytes  → input  → cell on stack → signtx (deferred sig +
+    // Contract life-cycle traced end-to-end:
+    //   bytes  → input  → contract on stack → signtx (deferred sig +
     //   payload poured) → drop payload → push fresh payload →
     //   output → TxEntry::Output → finalize.
 
-    // 1. Construct the input cell, capture its identity, encode it.
-    let input_cell = fixture_cell();
-    let input_id = input_cell.id();
-    let input_predicate_point = input_cell.predicate.to_point();
+    // 1. Construct the input contract, capture its identity, encode it.
+    let input_contract = fixture_contract();
+    let input_id = input_contract.id();
+    let input_predicate_point = input_contract.predicate.to_point();
     // After op_input, last_anchor == Anchor(input.id()) — split design
     // (no extra ratchet at input). When output consumes via split,
     // the output's stored anchor is the LEFT half.
-    let (input_left, _input_right) = Anchor(input_cell.id()).split();
-    let input_bytes = encode_cell_to_bytes(&input_cell);
+    let (input_left, _input_right) = Anchor(input_contract.id()).split();
+    let input_bytes = encode_contract_to_bytes(&input_contract);
 
     // 2. Assemble the script.
     //
     // Stack diagram (top of stack on the right):
     //   pushstr <bytes>       []                  → [String]
-    //   input                 [String]            → [Cell]
-    //   signtx                [Cell]              → [Int253(7), String, Int253(2)]
+    //   input                 [String]            → [Contract]
+    //   signtx                [Contract]              → [Int253(7), String, Int253(2)]
     //                          (payload + count poured; TxBound recorded)
     //   drop                  [..7, "hello", 2]   → [..7, "hello"]
     //   drop                  [..7, "hello"]      → [..7]
@@ -967,15 +967,15 @@ fn external_tx_one_input_one_output_via_signtx() {
         vm.current_call.stack.len()
     );
 
-    // 4b. Txlog: Header(index 0), Input(cell_in_id) at 1,
-    //     Output(cell_out) at 2.
+    // 4b. Txlog: Header(index 0), Input(contract_in_id) at 1,
+    //     Output(contract_out) at 2.
     assert_eq!(vm.txlog.len(), 3, "expected Header + Input + Output txlog");
     assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
     match &vm.txlog[1] {
         TxEntry::Input(id) => assert_eq!(*id, input_id),
         _ => panic!("txlog[1] must be Input"),
     }
-    let output_cell_anchor = match &vm.txlog[2] {
+    let output_contract_anchor = match &vm.txlog[2] {
         TxEntry::Output(c) => {
             // Output payload was [Int253(42)].
             assert_eq!(c.payload().len(), 1);
@@ -991,12 +991,12 @@ fn external_tx_one_input_one_output_via_signtx() {
     };
 
     // 4c. Anchor chain: input seeds last_anchor = Anchor(input.id()),
-    //     then output's split gives the LEFT half to the output cell
+    //     then output's split gives the LEFT half to the output contract
     //     and keeps RIGHT in last_anchor.
-    assert_eq!(output_cell_anchor.0, input_left.0);
+    assert_eq!(output_contract_anchor.0, input_left.0);
 
     // 4d. Deferred sigs: exactly one TxBound entry, with verification
-    //     key matching the input cell's predicate point.
+    //     key matching the input contract's predicate point.
     assert_eq!(vm.deferred_sigs.len(), 1);
     match &vm.deferred_sigs[0] {
         DeferredSig::TxBound {
@@ -1016,18 +1016,18 @@ fn external_tx_one_input_one_output_via_signtx() {
     //     the output — distinct from the output's stored anchor
     //     (which is the LEFT half).
     assert!(vm.last_anchor.is_some());
-    assert_ne!(vm.last_anchor.unwrap().0, output_cell_anchor.0);
+    assert_ne!(vm.last_anchor.unwrap().0, output_contract_anchor.0);
 }
 
 #[test]
 fn external_tx_two_inputs_two_outputs_via_open() {
-    // External tx consumes two distinct cells via `open` (each
+    // External tx consumes two distinct contracts via `open` (each
     // unlocked by a valid Taproot TaprootProof against its predicate
-    // tree), then emits two fresh output cells. No `signtx` /
+    // tree), then emits two fresh output contracts. No `signtx` /
     // `signcall` here, so `deferred_sigs` stays empty.
     //
-    // Each input cell's program is `drop` — it consumes the single
-    // payload item the cell-open pours onto the stack.
+    // Each input contract's program is `drop` — it consumes the single
+    // payload item the contract-open pours onto the stack.
 
     let prog = ScriptBuilder::new()
         .drop_()
@@ -1036,37 +1036,37 @@ fn external_tx_two_inputs_two_outputs_via_open() {
         .to_bytecode();
 
     let (tree1, cp1) = build_predicate_with_program(&prog, 11);
-    let cell1 = Cell::new(
+    let contract1 = Contract::new(
         Predicate::opaque(tree1.point),
         Anchor([0xa1; 32]),
         vec![Value::Int253(Int253::from(11u64))],
     )
     .expect("payload is portable");
-    let cell1_id = cell1.id();
-    let cell1_bytes = encode_cell_to_bytes(&cell1);
+    let contract1_id = contract1.id();
+    let contract1_bytes = encode_contract_to_bytes(&contract1);
 
     let (tree2, cp2) = build_predicate_with_program(&prog, 22);
-    let cell2 = Cell::new(
+    let contract2 = Contract::new(
         Predicate::opaque(tree2.point),
         Anchor([0xa2; 32]),
         vec![Value::Int253(Int253::from(22u64))],
     )
     .expect("payload is portable");
-    let cell2_id = cell2.id();
-    let cell2_bytes = encode_cell_to_bytes(&cell2);
+    let contract2_id = contract2.id();
+    let contract2_bytes = encode_contract_to_bytes(&contract2);
 
     //
-    //   ┌─── consume cell 1 ─────────────────────────────────┐
-    //   │ pushstr <cell1_bytes>                              │
-    //   │ input                — pops String → pushes Cell1  │
+    //   ┌─── consume contract 1 ─────────────────────────────────┐
+    //   │ pushstr <contract1_bytes>                              │
+    //   │ input                — pops String → pushes Contract1  │
     //   │ <taproot_proof1 pieces>                                │
     //   │ push:0               — k = 0 args                  │
     //   │ open                 — verifies cp1, pours [11],   │
     //   │                       enters Run over `drop`;      │
     //   │                       inner Run pops the 11        │
     //   └────────────────────────────────────────────────────┘
-    //   ┌─── consume cell 2 ─────────────────────────────────┐
-    //   │ pushstr <cell2_bytes>                              │
+    //   ┌─── consume contract 2 ─────────────────────────────────┐
+    //   │ pushstr <contract2_bytes>                              │
     //   │ input                                              │
     //   │ <taproot_proof2 pieces>                                │
     //   │ push:0                                             │
@@ -1080,15 +1080,15 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     //   └────────────────────────────────────────────────────┘
     let out1_pred_bytes = [0xc1; 32];
     let out2_pred_bytes = [0xc2; 32];
-    // Consume cell 1
+    // Consume contract 1
     let mut p = ScriptBuilder::new()
-        .push_str(String::from(cell1_bytes))
+        .push_str(String::from(contract1_bytes))
         .input();
     p = push_taproot_proof_to_program(p, &cp1);
     p = p.push_int(1024u64).push_int(0u64).open().verify().drop_(); // verify pops success marker; drop discards count
 
-    // Consume cell 2
-    p = p.push_str(String::from(cell2_bytes)).input();
+    // Consume contract 2
+    p = p.push_str(String::from(contract2_bytes)).input();
     p = push_taproot_proof_to_program(p, &cp2);
     p = p.push_int(1024u64).push_int(0u64).open().verify().drop_();
 
@@ -1116,12 +1116,12 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     assert_eq!(vm.txlog.len(), 5, "expected Header + 2 inputs + 2 outputs");
     assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
     match &vm.txlog[1] {
-        TxEntry::Input(id) => assert_eq!(*id, cell1_id),
-        _ => panic!("txlog[1] must be Input(cell1)"),
+        TxEntry::Input(id) => assert_eq!(*id, contract1_id),
+        _ => panic!("txlog[1] must be Input(contract1)"),
     }
     match &vm.txlog[2] {
-        TxEntry::Input(id) => assert_eq!(*id, cell2_id),
-        _ => panic!("txlog[2] must be Input(cell2)"),
+        TxEntry::Input(id) => assert_eq!(*id, contract2_id),
+        _ => panic!("txlog[2] must be Input(contract2)"),
     }
     let (out1, out2) = match (&vm.txlog[3], &vm.txlog[4]) {
         (TxEntry::Output(o1), TxEntry::Output(o2)) => (o1, o2),
@@ -1144,17 +1144,17 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     assert_eq!(out2.predicate.to_point().as_bytes(), &out2_pred_bytes);
 
     // Anchor chain (split-at-each-call design):
-    //   - input₁: last_anchor = Anchor(cell1.id())
-    //   - open₁: split(Anchor(cell1.id())) → (left to child, right to
+    //   - input₁: last_anchor = Anchor(contract1.id())
+    //   - open₁: split(Anchor(contract1.id())) → (left to child, right to
     //     parent's post_call_anchor). After child returns:
     //     last_anchor = right.
-    //   - input₂: replaces last_anchor = Anchor(cell2.id())
-    //   - open₂: split(Anchor(cell2.id())) → (left to child, right to
+    //   - input₂: replaces last_anchor = Anchor(contract2.id())
+    //   - open₂: split(Anchor(contract2.id())) → (left to child, right to
     //     parent's post_call_anchor). After return:
-    //     last_anchor = r2 = Anchor(cell2.id()).split().1.
+    //     last_anchor = r2 = Anchor(contract2.id()).split().1.
     //   - output₁: split(r2) → (out1.anchor = left, last_anchor = right).
     //   - output₂: split that → (out2.anchor = left, last_anchor = right).
-    let (_, r2) = Anchor(cell2_id).split();
+    let (_, r2) = Anchor(contract2_id).split();
     let (out1_expected, after_out1) = r2.split();
     let (out2_expected, after_out2) = after_out1.split();
     assert_eq!(out1.anchor.0, out1_expected.0);
@@ -1174,9 +1174,9 @@ fn external_tx_two_inputs_two_outputs_via_open() {
 
 /// `op_open` creates an isolated CallFrame with no actor identity;
 /// `op_selfid` inside the leaf errors `OpcodeRequiresActorContext`,
-/// which the step wrapper catches. The parent recovers the locked Cell
+/// which the step wrapper catches. The parent recovers the locked Contract
 /// followed by its explicit argument, `count=1, success=0`; the contextual
-/// Cell is not counted.
+/// Contract is not counted.
 #[test]
 fn op_open_selfid_errors_no_actor_context() {
     // `selfid` errors before reaching a return — that's fine, the
@@ -1188,7 +1188,7 @@ fn op_open_selfid_errors_no_actor_context() {
         .push_int(5u64) // payload
         .push_int(1u64) // count
         .push_point(*pred_point.as_bytes())
-        .cell();
+        .contract();
     p = push_taproot_proof_to_program(p, &cp);
     let script = p
         .push_int(1024u64)
@@ -1200,14 +1200,14 @@ fn op_open_selfid_errors_no_actor_context() {
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 4);
-    assert!(matches!(vm.current_call.stack[0], Value::Cell(_)));
+    assert!(matches!(vm.current_call.stack[0], Value::Contract(_)));
     assert_int(&vm.current_call.stack[1], Int253::from(9u64));
     assert_int(&vm.current_call.stack[2], Int253::ONE);
     assert_int(&vm.current_call.stack[3], Int253::ZERO);
 }
 
 /// `op_open` leaf returning the wrong arity errors `BadReturnArity`;
-/// caught by step while restoring the locked Cell to the parent.
+/// caught by step while restoring the locked Contract to the parent.
 #[test]
 fn op_open_return_arity_mismatch_errors() {
     // push:1, return — pops k=1 from stack, then stack.len()(0) < 1.
@@ -1217,14 +1217,14 @@ fn op_open_return_arity_mismatch_errors() {
     let mut p = ScriptBuilder::new()
         .push_int(0u64) // payload count = 0
         .push_point(*pred_point.as_bytes())
-        .cell();
+        .contract();
     p = push_taproot_proof_to_program(p, &cp);
     let script = p.push_int(1024u64).push_int(0u64).open().to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 3);
-    assert!(matches!(vm.current_call.stack[0], Value::Cell(_)));
+    assert!(matches!(vm.current_call.stack[0], Value::Contract(_)));
     assert_int(&vm.current_call.stack[1], Int253::ZERO);
     assert_int(&vm.current_call.stack[2], Int253::ZERO);
 }
@@ -1236,7 +1236,7 @@ fn open_rejects_negative_token_argument() {
     let mut p = ScriptBuilder::new()
         .push_int(0u64)
         .push_point(*tree.point.as_bytes())
-        .cell();
+        .contract();
     p = push_taproot_proof_to_program(p, &cp);
     let script = p
         .push_int(1024u64)
@@ -1255,7 +1255,7 @@ fn open_rejects_negative_token_argument() {
     ));
 }
 
-/// CS context propagates: a CellOpen frame with `external_context:
+/// CS context propagates: a ContractOpen frame with `external_context:
 /// false` (as if opened from inside an actor method) must reject
 /// `alloc` with `ExternalOnly`. Constructs the frame directly since
 /// the only path that produces `external_context: false` is opening
@@ -1265,7 +1265,7 @@ fn op_open_cs_blocked_when_external_context_false() {
     use crate::vm::{Anchor, CallFrame, CallKind, VM};
     let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500);
     // alloc is 0x62 — external-only CS op. push:0 + alloc + return.
-    let child_kind = CallKind::CellOpen {
+    let child_kind = CallKind::ContractOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: false,
         caller_id: None,

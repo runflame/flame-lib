@@ -1,5 +1,5 @@
 use crate::errors::VMError;
-use crate::Cell;
+use crate::Contract;
 use crate::Dict;
 use crate::Int253;
 use crate::Merlin;
@@ -46,7 +46,7 @@ impl Value {
             // Charge the same logical item on prover (assigned) and verifier
             // (unassigned); gas must never depend on secret witness presence.
             Value::WideToken(_) => 1,
-            Value::Cell(cell) => 1u64.saturating_add(cell.clone_gas()),
+            Value::Contract(contract) => 1u64.saturating_add(contract.clone_gas()),
             Value::Expression(expr) => expression_gas(expr),
             Value::Constraint(Constraint::Cleartext(_)) => 0,
             Value::Constraint(Constraint::Secret(constraint)) => {
@@ -64,8 +64,8 @@ impl Value {
     pub fn to_dict(self)        -> Result<Dict, VMError>       { match self { Value::Dict(x) => Ok(x),       _ => Err(VMError::TypeNotDict) } }
     /// Downcast to Point.
     pub fn to_point(self)       -> Result<Point, VMError>      { match self { Value::Point(x) => Ok(x),      _ => Err(VMError::TypeNotPoint) } }
-    /// Downcast to Cell.
-    pub fn to_cell(self)        -> Result<Cell, VMError>       { match self { Value::Cell(x) => Ok(*x),      _ => Err(VMError::TypeNotCell) } }
+    /// Downcast to Contract.
+    pub fn to_contract(self)        -> Result<Contract, VMError>       { match self { Value::Contract(x) => Ok(*x),      _ => Err(VMError::TypeNotContract) } }
     /// Downcast to Merlin transcript.
     pub fn to_merlin(self)      -> Result<Merlin, VMError>     { match self { Value::Merlin(x) => Ok(x),     _ => Err(VMError::TypeNotMerlin) } }
     /// Downcast to Variable.
@@ -270,7 +270,7 @@ pub enum Value {
     Token(Token),
     WideToken(WideToken),
     ClearToken(ClearToken),
-    Cell(Box<Cell>),
+    Contract(Box<Contract>),
     Merlin(Merlin),
     Variable(Variable),
     Expression(Expression),
@@ -281,7 +281,7 @@ pub enum Value {
 impl Value {
     /// Returns a fresh copy of this value if its type is **copyable** per
     /// spec.md §Stack discipline (plain-data types). Linear types
-    /// (tokens, cells, variables, expressions, constraints, transcripts,
+    /// (tokens, contracts, variables, expressions, constraints, transcripts,
     /// …) are never copyable and produce [`VMError::TypeNotCopyable`].
     pub fn try_clone(&self) -> Result<Value, VMError> {
         match self {
@@ -292,7 +292,7 @@ impl Value {
             Value::Token(_)
             | Value::ClearToken(_)
             | Value::WideToken(_)
-            | Value::Cell(_)
+            | Value::Contract(_)
             | Value::Merlin(_)
             | Value::Variable(_)
             | Value::Expression(_)
@@ -312,14 +312,14 @@ impl Value {
     }
 
     /// True iff this value can survive across VM execution — sealed into
-    /// a cell or actor state. Plain-data types are portable; `ClearToken`
+    /// a contract or actor state. Plain-data types are portable; `ClearToken`
     /// is portable iff its quantity is non-negative; encrypted in-range
     /// `Token` is portable; everything else (linear, intermediate,
     /// constraint-system-only types) is not.
     ///
-    /// Cells are themselves linear handles, not portable — a cell's
-    /// payload is portable, but a cell *value on the stack* may not be
-    /// placed into another cell's payload (sealing a cell-in-a-cell).
+    /// Contracts are themselves linear handles, not portable — a contract's
+    /// payload is portable, but a contract *value on the stack* may not be
+    /// placed into another contract's payload (sealing a contract-in-a-contract).
     pub fn is_portable(&self) -> bool {
         match self {
             Value::Int253(_) | Value::String(_) | Value::Point(_) => true,
@@ -347,7 +347,7 @@ impl Value {
     ///   carry CS / transcript bookkeeping, not asset value, so
     ///   abandoning them costs the script nothing.
     /// - **Asset-bearing values are not droppable.** `Token` /
-    ///   `ClearToken(qty ≠ 0)` / `WideToken` / `Cell` would silently
+    ///   `ClearToken(qty ≠ 0)` / `WideToken` / `Contract` would silently
     ///   destroy value or break linearity.
     pub fn is_droppable(&self) -> bool {
         match self {
@@ -365,7 +365,7 @@ impl Value {
             | Value::Merlin(_)
             | Value::MultiscalarMul(_) => true,
             // Asset-bearing values: dropping would lose value.
-            Value::Token(_) | Value::WideToken(_) | Value::Cell(_) => false,
+            Value::Token(_) | Value::WideToken(_) | Value::Contract(_) => false,
         }
     }
 
@@ -375,20 +375,20 @@ impl Value {
     /// - Same-variant for plain-data types (`Int253`, `String`, `Point`):
     ///   bitwise / by-value comparison.
     /// - Same-variant for `Dict`: recursive entry-wise comparison.
-    /// - Same-variant for linear types (tokens, cells, variables,
+    /// - Same-variant for linear types (tokens, contracts, variables,
     ///   expressions, constraints, transcripts): `Err(TypeNotComparable)`
     ///   — linear types have no stable identity for `eq`.
     pub fn try_eq(&self, other: &Value) -> Result<bool, VMError> {
         match (self, other) {
             (Value::Int253(a), Value::Int253(b)) => Ok(a == b),
             // Compare by canonical wire bytes so witness-bearing
-            // variants (Point / Scalar / Script / Cell) match the
+            // variants (Point / Scalar / Script / Contract) match the
             // verifier's view of the same string.
             (Value::String(a), Value::String(b)) => Ok(a.to_bytes_vec() == b.to_bytes_vec()),
             (Value::Point(a), Value::Point(b)) => Ok(a.to_bytes() == b.to_bytes()),
             // Cross-variant always unequal.
             (sa, sb) if core::mem::discriminant(sa) != core::mem::discriminant(sb) => Ok(false),
-            // Same-variant non-primitives (Dict, tokens, cells, linear types):
+            // Same-variant non-primitives (Dict, tokens, contracts, linear types):
             // dicts require recursion + non-trivial gas; linear types have
             // no defined equality. All hard-fail.
             _ => Err(VMError::TypeNotComparable),
@@ -408,7 +408,7 @@ impl Value {
             Value::Token(_) => 4,
             Value::WideToken(_) => 5,
             Value::ClearToken(_) => 6,
-            Value::Cell(_) => 7,
+            Value::Contract(_) => 7,
             Value::Merlin(_) => 8,
             Value::Variable(_) => 9,
             Value::Expression(_) => 10,

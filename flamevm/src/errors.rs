@@ -151,20 +151,20 @@ pub enum VMError {
     #[error("Item is not a Merlin transcript")]
     TypeNotMerlin,
 
-    /// This error occurs when an instruction requires a Cell.
-    #[error("Item is not a Cell")]
-    TypeNotCell,
+    /// This error occurs when an instruction requires a Contract.
+    #[error("Item is not a Contract")]
+    TypeNotContract,
 
-    /// This error occurs when a TaprootProof does not verify against the cell's predicate.
-    #[error("TaprootProof does not match the cell's predicate")]
+    /// This error occurs when a TaprootProof does not verify against the contract's predicate.
+    #[error("TaprootProof does not match the contract's predicate")]
     TaprootProofMismatch,
 
-    /// This error occurs when `cell` or `output` is invoked without a seeded anchor.
+    /// This error occurs when `contract` or `output` is invoked without a seeded anchor.
     #[error("No anchor available — input or seed required first")]
     AnchorMissing,
 
-    /// This error occurs when a non-portable item lands in a cell payload.
-    #[error("Non-portable item in cell payload")]
+    /// This error occurs when a non-portable item lands in a contract payload.
+    #[error("Non-portable item in contract payload")]
     NonPortableInOutput,
 
     /// `signcall` received the wrong byte length or a malformed signature
@@ -204,9 +204,9 @@ pub enum VMError {
     #[error("Opcode is external-context only")]
     ExternalOnly,
 
-    /// This error occurs when `input` bytes do not decode as a canonical wire-encoded Cell.
-    #[error("Malformed cell encoding")]
-    MalformedCellEncoding,
+    /// This error occurs when `input` bytes do not decode as a canonical wire-encoded Contract.
+    #[error("Malformed contract encoding")]
+    MalformedContractEncoding,
 
     /// This error occurs when an actor-state Value can't be encoded
     /// to its canonical wire form (a value variant without an
@@ -289,7 +289,7 @@ pub enum VMError {
     #[error("Opcode requires actor context")]
     OpcodeRequiresActorContext,
 
-    /// This error occurs when an opcode requires a predicate (CellOpen) context but the frame has none.
+    /// This error occurs when an opcode requires a predicate (ContractOpen) context but the frame has none.
     #[error("Opcode requires predicate context")]
     OpcodeRequiresPredicateContext,
 

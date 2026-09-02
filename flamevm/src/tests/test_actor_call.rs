@@ -912,7 +912,7 @@ fn save_emits_actorsave_with_full_state() {
     // op_save mutates the actor's persistent state and records a
     // structural effect: `TxEntry::ActorSave { actor, state }`.
     // The full state rides in the entry (symmetric with
-    // `Output(Cell)` carrying the full cell); the merkle leaf
+    // `Output(Contract)` carrying the full contract); the merkle leaf
     // hashes `state.root()`. A thin state machine consuming the
     // TxLog can apply these in order to mutate the registry
     // without re-running the script.

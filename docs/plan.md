@@ -10,15 +10,15 @@ when the specification, implementation, and focused regression tests agree.
      a failed operation must restore each entry-owned value to the caller, or
      propagate failure to a transaction boundary that restores it. A successful
      enclosing transaction must never silently discard a `Token`, nonzero
-     `ClearToken`, `WideToken`, `Cell`, or token-bearing `Dict`.
+     `ClearToken`, `WideToken`, `Contract`, or token-bearing `Dict`.
    - [x] Fix pre-entry `call` failure. Target lookup, call-depth checks, and
      child-activation failure now return the original arguments followed by
      `k 0`.
    - [x] Fix entered-call failure. [`VM::fail_current_call`](../flamevm/src/vm.rs)
      returns the entry escrow after rollback: actor arguments, or the original
-     locked Cell plus explicit `open`/`signcall` arguments. Cell payload remains
-     sealed inside the Cell and is never returned separately. The failure count
-     is the explicit argument count `k`; it excludes the contextual Cell.
+     locked Contract plus explicit `open`/`signcall` arguments. Contract payload remains
+     sealed inside the Contract and is never returned separately. The failure count
+     is the explicit argument count `k`; it excludes the contextual Contract.
    - [x] Apply the same rule to runtime errors, out-of-gas,
      `StackNotClean`, `BadReturnArity`, and explicit verification failure.
    - [x] Put every rollback checkpoint before its boundary side effects. In
@@ -30,7 +30,7 @@ when the specification, implementation, and focused regression tests agree.
      portable-only; non-portable liabilities may return upward but cannot be
      delegated to another callee.
    - [x] Cover `Token`, positive `ClearToken`, nested token-bearing `Dict`, and
-     contextual `Cell` restitution across entered failure, out-of-gas, dirty
+     contextual `Contract` restitution across entered failure, out-of-gas, dirty
      EOF, bad return arity, nested unwind, `open`, and `signcall`. Retain
      explicit upward returns for negative `ClearToken` and `WideToken`, prove a
      successful call discards its hidden escrow copy, and verify storage pool,
@@ -40,7 +40,7 @@ when the specification, implementation, and focused regression tests agree.
 2. [x] Make asynchronous message failure conserve payload assets.
 
    - [x] Implement the documented bounce: on failed delivery, seal the original
-     payload into exactly one cell under `refund_predicate`.
+     payload into exactly one contract under `refund_predicate`.
    - [x] Ensure a failed constructor delivery rolls back the provisional actor,
      storage purchases, burns, message consumption, and bounce creation in one
      atomic boundary.
@@ -73,26 +73,26 @@ when the specification, implementation, and focused regression tests agree.
      without an additional recursive portability scan. Historical taint is not
      serialized: debug round-trips preserve the represented members, not a
      sticky flag left by a member that was later removed.
-   - [x] Make Cell payloads immutable and reject non-portable values in the
+   - [x] Make Contract payloads immutable and reject non-portable values in the
      public constructor using the O(1) Dict flag.
-   - [x] Route `Cell::decode` through the same Cell-domain admission rule. A
+   - [x] Route `Contract::decode` through the same Contract-domain admission rule. A
      top-level payload scan is sufficient because each nested Dict lookup is
-     O(1); this is a Cell check, not an encoding check.
+     O(1); this is a Contract check, not an encoding check.
    - [x] Make Message payloads immutable and admit them only through a checked
      constructor.
    - [x] Apply the O(1) Dict check at synchronous actor calls and at VM and
      registry actor-state save/deploy boundaries.
-   - [x] Test Message/send, call, Cell decode, and actor-state admission with
+   - [x] Test Message/send, call, Contract decode, and actor-state admission with
      nested non-portable Dicts.
    - [x] Restrict public `Token` construction so every `Token` is portable by
      construction. Portability must not depend on whether a commitment happens
      to carry a prover-only opening.
    - [x] Audit public construction and decoding paths. Dict entries and
-     Cell/Message payloads are private; Cell/Message constructors and Cell
+     Contract/Message payloads are private; Contract/Message constructors and Contract
      decoding admit payloads; raw Token construction is crate-private and its
      public cleartext constructor enforces the quantity range. ClearToken,
      Address, and TxLog remain policy-neutral in-memory carriers; the receiving
-     Cell, Message, call, or actor-state boundary performs admission.
+     Contract, Message, call, or actor-state boundary performs admission.
 
 5. [x] Reconcile canonical wire and opcode contracts.
 
@@ -134,24 +134,24 @@ when the specification, implementation, and focused regression tests agree.
 
 7. [x] Settle actor and call-context semantics.
 
-   - [x] Keep `open` and `signcall` as isolated `CellOpen` predicate contexts.
+   - [x] Keep `open` and `signcall` as isolated `ContractOpen` predicate contexts.
      They inherit external/CS availability, but never inherit an actor identity
      or actor authority; actor-state, storage, code, issuance, and `selfid`
      operations remain unavailable.
    - [x] Store only the direct invoking actor's canonical 32-byte id in
-     `CellOpen` as `caller_id: Option<[u8; 32]>`, not a cloned `ActorID`.
+     `ContractOpen` as `caller_id: Option<[u8; 32]>`, not a cloned `ActorID`.
      `callerid` reports that id, or zero when the direct parent has no actor
-     context. A nested `CellOpen` therefore sees zero rather than transitively
+     context. A nested `ContractOpen` therefore sees zero rather than transitively
      inheriting an earlier actor's identity.
    - [x] Restrict synchronous `call` to frames with a current actor identity.
-     Reject it from `ExternalRoot` and `CellOpen` before consuming operands, and
+     Reject it from `ExternalRoot` and `ContractOpen` before consuming operands, and
      remove the fabricated zero-actor caller fallback.
-   - [x] Keep asynchronous `send` available from `CellOpen`, but always record
+   - [x] Keep asynchronous `send` available from `ContractOpen`, but always record
      `Message.caller = None`: read-only `callerid` attribution does not delegate
      the invoking actor's authority. Specify zero/`None` as "no authenticated
      actor principal", not necessarily "originated in an external tx".
    - [x] Align the instruction context table and handlers: `selfid` remains
-     actor-context-only, while `callerid` is also available in `CellOpen` with
+     actor-context-only, while `callerid` is also available in `ContractOpen` with
      the direct-caller semantics above.
    - [x] Remove the claim that `send` immediately fails for a checked-out actor.
    - [x] Restrict `open` and `signcall` arguments to portable values, matching
@@ -164,7 +164,7 @@ when the specification, implementation, and focused regression tests agree.
    - [x] Keep deploy-on-first-delivery bytecode-reachable: `send` accepts an
      exact encoded `ActorID::Constructor` and preserves its code in the Message.
    - [x] Build one context matrix test covering ExternalRoot, InternalRoot,
-     ActorCall, and external/internal CellOpen for every restricted opcode.
+     ActorCall, and external/internal ContractOpen for every restricted opcode.
 
 8. [x] Finish actor-storage lease coverage.
 
@@ -182,7 +182,7 @@ when the specification, implementation, and focused regression tests agree.
      list-style encoding still requires the exact nonnegative range `0..n-1`.
    - [x] Remove unsupported `WideToken`, `Object`, and `Merlin` entries from the
      encodable-types table. Generic value tags `251..=254` are unassigned;
-     `Cell` has a separate top-level encoding rather than a generic Value tag.
+     `Contract` has a separate top-level encoding rather than a generic Value tag.
    - [x] Clarify that MSM point decompression happens during `verify` even though
      batch acceptance is deferred.
    - [x] Remove the obsolete `method` field from exported
@@ -207,7 +207,7 @@ when the specification, implementation, and focused regression tests agree.
     - [x] Make replay the production application path. Execute actor code under
       an existing registry checkpoint, capture the resulting commitment and
       log, roll the direct mutations back, then consume and apply the log. The
-      replayed actor root, storage pool, cell root, and queued messages must
+      replayed actor root, storage pool, contract root, and queued messages must
       equal the execution result.
     - [x] Cover constructor deployment; token-bearing state; ordered
       `ActorSave` and `SetCode`; storage pool, lease, and expiry-index changes;

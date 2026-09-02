@@ -580,7 +580,7 @@ pub(crate) fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), ValueE
             Ok(write_int253(w, &t.flv)?)
         }
         Value::WideToken(_)
-        | Value::Cell(_)
+        | Value::Contract(_)
         | Value::Merlin(_)
         | Value::Variable(_)
         | Value::Expression(_)

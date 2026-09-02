@@ -13,14 +13,14 @@ pub const FLAME_FLAVOR: Int253 = Int253::ZERO;
 // ── Token ────────────────────────────────────────────────────────
 
 /// Encrypted asset value — Pedersen commitments to a non-negative
-/// quantity and a flavor scalar. Portable across cells and actor state.
+/// quantity and a flavor scalar. Portable across contracts and actor state.
 ///
 /// The two halves are independent [`Commitment`]s, each of which may
 /// be [`Commitment::Open`] (carrying the prover's witness — value and
 /// blinding factor) or [`Commitment::Closed`] (only the compressed
 /// Ristretto point). The encrypted [`Token`] is a **bearer** value:
 /// once on the stack, it can only leave through `output` (sealed into
-/// a cell), `retire`, or `mix`/`decrypt`.
+/// a contract), `retire`, or `mix`/`decrypt`.
 ///
 /// Non-copyable, non-droppable. The qty is range-proven non-negative
 /// at construction time by the CS opcodes that produce a Token (the
@@ -75,7 +75,7 @@ impl Token {
 ///
 /// `WideToken` is the intermediate type emitted by `borrow` (negative
 /// half), `fee`, and the intermediate steps of `mix`/`cloak`. It is
-/// **non-portable** (cannot be sealed into a cell) because its
+/// **non-portable** (cannot be sealed into a contract) because its
 /// quantity is not range-proven. The CS-touching opcodes that
 /// produce or consume it are `borrow` (encrypted branch),
 /// `mix`/`cloak`, and `fee`.
@@ -92,7 +92,7 @@ pub struct WideToken(pub(crate) spacesuit::AllocatedValue);
 ///
 /// **Portability rules** (enforced by `Value::is_portable`):
 /// - `qty ≥ 0` → portable: a non-negative cleartext token can be
-///   sealed into a cell or actor state.
+///   sealed into a contract or actor state.
 /// - `qty < 0` → non-portable: a negative cleartext token is a debt
 ///   token and cannot be sealed.
 ///

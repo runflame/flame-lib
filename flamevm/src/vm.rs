@@ -12,8 +12,8 @@ use readerwriter::{
 };
 
 use crate::actor::{empty_state, ActorID, ActorRegistry};
-use crate::cell::{Cell, CellID, Predicate, TaprootProof};
 use crate::constraints::Commitment;
+use crate::contract::{Contract, ContractID, Predicate, TaprootProof};
 use crate::errors::VMError;
 use crate::fees::CheckedFee;
 use crate::message::Message;
@@ -44,11 +44,11 @@ impl Anchor {
     /// Deterministically splits this anchor into two distinct
     /// children. Used by every consume site that needs a unique
     /// entity-anchor: the `left` half is embedded in the new entity
-    /// (cell / message / callee frame), the `right` half replaces
+    /// (contract / message / callee frame), the `right` half replaces
     /// the consumer's current anchor.
     ///
     /// Uniqueness inherits from the parent: if `self` came from a
-    /// spend-once source (an input cell's id) and from a chain of
+    /// spend-once source (an input contract's id) and from a chain of
     /// prior splits over that source, both children are unique
     /// within the network.
     pub fn split(&self) -> (Anchor, Anchor) {
@@ -81,7 +81,7 @@ impl Decodable for Anchor {
     }
 }
 
-// `Predicate` lives in `cell::predicate`; re-exported via `Predicate`.
+// `Predicate` lives in `contract::predicate`; re-exported via `Predicate`.
 
 /// External signature check deferred to transaction finalization. `TxBound`
 /// comes from external-only `signtx`; `Explicit` comes from external
@@ -91,7 +91,7 @@ impl Decodable for Anchor {
 pub enum DeferredSig {
     TxBound {
         verification_key: CompressedRistretto,
-        cell_id: CellID,
+        contract_id: ContractID,
     },
     Explicit {
         verification_key: CompressedRistretto,
@@ -356,11 +356,11 @@ pub enum CallKind {
     /// Synchronous actor-to-actor call inside an internal tx.
     ActorCall { actor: ActorID, caller: ActorID },
 
-    /// `open` / `signcall` of a cell predicate. `external_context`
+    /// `open` / `signcall` of a contract predicate. `external_context`
     /// snapshots the caller's `is_external()` at frame creation so
     /// `require_external` propagates correctly across the isolation
     /// boundary (ADR 0013).
-    CellOpen {
+    ContractOpen {
         predicate: Predicate,
         external_context: bool,
         /// Canonical id of the directly invoking actor, for `callerid`
@@ -375,17 +375,17 @@ impl CallKind {
     pub fn actor(&self) -> Option<&ActorID> {
         match self {
             Self::InternalRoot { actor, .. } | Self::ActorCall { actor, .. } => Some(actor),
-            Self::ExternalRoot | Self::CellOpen { .. } => None,
+            Self::ExternalRoot | Self::ContractOpen { .. } => None,
         }
     }
 
-    /// Returns only the caller's canonical id. `CellOpen` stores this
+    /// Returns only the caller's canonical id. `ContractOpen` stores this
     /// compact form for read-only attribution without inheriting the actor.
     pub fn caller_id(&self) -> Option<[u8; 32]> {
         match self {
             Self::InternalRoot { caller, .. } => caller.as_ref().map(ActorID::to_hash),
             Self::ActorCall { caller, .. } => Some(caller.to_hash()),
-            Self::CellOpen { caller_id, .. } => *caller_id,
+            Self::ContractOpen { caller_id, .. } => *caller_id,
             Self::ExternalRoot => None,
         }
     }
@@ -412,7 +412,7 @@ pub struct CallFrame {
     /// This frame's starting anchor (todo #4 — previously stored in
     /// every `CallKind` variant). Only the root internal frame uses it:
     /// `VM::new` seeds `last_anchor` from it. Child frames (`op_call` /
-    /// cell-open) set `last_anchor` directly on entry, so theirs is
+    /// contract-open) set `last_anchor` directly on entry, so theirs is
     /// informational. `None` for `ExternalRoot` (seeded by `op_input`).
     pub(crate) anchor: Option<Anchor>,
 
@@ -437,11 +437,11 @@ pub struct CallFrame {
     pub(crate) snap_total_fee: CheckedFee,
 
     /// Entry-owned values returned to the caller when the child fails.
-    /// Actor calls escrow their arguments; cell calls escrow the original
-    /// locked Cell followed by their explicit arguments.
+    /// Actor calls escrow their arguments; contract calls escrow the original
+    /// locked Contract followed by their explicit arguments.
     pub(crate) snap_failure_values: Vec<Value>,
-    /// Number of explicit call arguments. For cell calls this intentionally
-    /// excludes the separately restored locked Cell.
+    /// Number of explicit call arguments. For contract calls this intentionally
+    /// excludes the separately restored locked Contract.
     pub(crate) snap_failure_arg_count: usize,
 
     /// Snapshot of the delegate's MSM/signature batch state taken
@@ -477,7 +477,7 @@ impl CallFrame {
     }
 
     /// Sets this frame's starting anchor (todo #4). Chained at the
-    /// internal-root / call / cell-open construction sites.
+    /// internal-root / call / contract-open construction sites.
     pub(crate) fn with_anchor(mut self, anchor: Anchor) -> Self {
         self.anchor = Some(anchor);
         self
@@ -543,7 +543,7 @@ pub struct TxResult {
     pub deferred_sigs: Vec<DeferredSig>,
 }
 
-/// Manual Debug — the linear `Cell` in `txlog` blocks `#[derive]`.
+/// Manual Debug — the linear `Contract` in `txlog` blocks `#[derive]`.
 impl core::fmt::Debug for TxResult {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("TxResult")
@@ -567,7 +567,7 @@ pub(crate) struct VM {
     /// first `op_input` seeds it); `Some(M)` at the start of an
     /// internal tx (where `M` is the delivering Message's anchor —
     /// itself a split-child from the originating tx's `op_send`).
-    /// Consumed-and-replaced via split by `cell` / `output` / `send`;
+    /// Consumed-and-replaced via split by `contract` / `output` / `send`;
     /// `call` / `open` / `signcall` split it into disjoint callee and
     /// caller-continuation subtrees.
     pub(crate) last_anchor: Option<Anchor>,
@@ -708,7 +708,7 @@ impl VM {
         };
         // MessageID is the canonical hash of the whole send (anchor,
         // target, caller, payload, gas, refund
-        // predicate) — analogous to CellID for Output. Capture
+        // predicate) — analogous to ContractID for Output. Capture
         // before the move below.
         let send_id = *message.id().as_bytes();
         let anchor = message.anchor;
@@ -794,7 +794,7 @@ impl VM {
     }
 
     /// Splits `last_anchor`: returns the `left` half (to embed in
-    /// a fresh unique-anchored entity — cell, message), and writes
+    /// a fresh unique-anchored entity — contract, message), and writes
     /// the `right` half back. Hard-fails `AnchorMissing` if no
     /// anchor has been claimed yet.
     fn consume_anchor(&mut self) -> Result<Anchor, VMError> {
@@ -852,11 +852,11 @@ impl VM {
     }
 
     /// True iff CS-touching opcodes are permitted. `ExternalRoot` is
-    /// always external; `CellOpen` inherits the caller's snapshot.
+    /// always external; `ContractOpen` inherits the caller's snapshot.
     fn is_external(&self) -> bool {
         match self.current_call.kind {
             CallKind::ExternalRoot => true,
-            CallKind::CellOpen {
+            CallKind::ContractOpen {
                 external_context, ..
             } => external_context,
             _ => false,
@@ -1079,7 +1079,7 @@ impl VM {
             I::Type => self.op_type(),
 
             I::Input => self.op_input(),
-            I::Cell => self.op_cell(),
+            I::Contract => self.op_contract(),
             I::Output => self.op_output(),
             I::Open => self.op_open(),
             I::Send => self.op_send(),
@@ -1233,7 +1233,7 @@ impl VM {
 
     /// Failure shape shared by synchronous calls: restored entry values,
     /// the explicit argument count, then the zero status marker. A restored
-    /// Cell is contextual and is not included in `arg_count`.
+    /// Contract is contextual and is not included in `arg_count`.
     fn push_failed_values(&mut self, values: Vec<Value>, arg_count: usize) {
         self.current_call.stack.extend(values);
         self.current_call
@@ -2205,7 +2205,7 @@ impl VM {
     /// _qty:Int253 tag_ **issuepub** → _CT_
     ///
     /// Cleartext mint under the enclosing actor's identity. Requires
-    /// an internal actor frame; `ExternalRoot` and `CellOpen` error
+    /// an internal actor frame; `ExternalRoot` and `ContractOpen` error
     /// `OpcodeRequiresActorContext` (issuance domains are disjoint —
     /// see spec.md §issuepub). Non-`Int253` qty hard-fails
     /// `TypeNotInt253`; the confidential path lives in [`op_issuepriv`].
@@ -2228,7 +2228,7 @@ impl VM {
     /// _qty:Variable tag_ **issuepriv** → _T_
     ///
     /// Confidential mint under the enclosing predicate's identity.
-    /// Requires a `CallKind::CellOpen` frame (errors
+    /// Requires a `CallKind::ContractOpen` frame (errors
     /// `OpcodeRequiresPredicateContext` otherwise) AND external
     /// context (errors `ExternalOnly`; the CS lane is needed for the
     /// range proof and the qty commitment registration).
@@ -2236,7 +2236,7 @@ impl VM {
         // Snapshot the predicate before any pop, so a wrong frame
         // surfaces before we mutate the stack.
         let predicate = match &self.current_call.kind {
-            CallKind::CellOpen { predicate, .. } => predicate.clone(),
+            CallKind::ContractOpen { predicate, .. } => predicate.clone(),
             _ => return Err(VMError::OpcodeRequiresPredicateContext),
         };
         self.require_external()?;
@@ -2432,36 +2432,36 @@ impl VM {
         out
     }
 
-    /// _string_ **input** → _cell_
+    /// _string_ **input** → _contract_
     ///
-    /// External-only. The prover pushes a `StringWitness::Cell(c)` carrying
+    /// External-only. The prover pushes a `StringWitness::Contract(c)` carrying
     /// open commitments on Token payloads; the verifier pushes
-    /// `String::Opaque(cell_bytes)` and `to_cell()` decodes to closed
+    /// `String::Opaque(contract_bytes)` and `to_contract()` decodes to closed
     /// commitments. No separate witness operand — witnesses ride the
     /// stack with the value.
     fn op_input(&mut self) -> Result<(), VMError> {
         self.require_external()?;
         let encoded = self.pop_value()?.to_string()?;
         self.charge_alloc_bytes(encoded.len())?;
-        let cell = encoded.to_cell()?;
-        // Seed the per-tx anchor from the input cell's id — the cell
+        let contract = encoded.to_contract()?;
+        // Seed the per-tx anchor from the input contract's id — the contract
         // is a spend-once source on the wire, so its id is unique. Any
         // prior `last_anchor` (e.g. unused residue from a previous
         // input + outputs sequence) is replaced. See spec §Anchors.
-        self.last_anchor = Some(Anchor(cell.id()));
-        self.txlog.push(TxEntry::Input(cell.id()));
-        self.push_value(Value::Cell(Box::new(cell)));
+        self.last_anchor = Some(Anchor(contract.id()));
+        self.txlog.push(TxEntry::Input(contract.id()));
+        self.push_value(Value::Contract(Box::new(contract)));
         Ok(())
     }
 
-    /// _args… k pred_ **cell** → _cell_
-    fn op_cell(&mut self) -> Result<(), VMError> {
+    /// _args… k pred_ **contract** → _contract_
+    fn op_contract(&mut self) -> Result<(), VMError> {
         let pred = self.pop_value()?.to_point()?.to_predicate()?;
         let k = self.pop_byte_count(usize::MAX)?;
         let payload = self.pop_n_values(k)?;
         let anchor = self.consume_anchor()?;
-        let cell = Cell::new(pred, anchor, payload)?;
-        self.push_value(Value::Cell(Box::new(cell)));
+        let contract = Contract::new(pred, anchor, payload)?;
+        self.push_value(Value::Contract(Box::new(contract)));
         Ok(())
     }
 
@@ -2471,15 +2471,15 @@ impl VM {
         let k = self.pop_byte_count(usize::MAX)?;
         let payload = self.pop_n_values(k)?;
         let anchor = self.consume_anchor()?;
-        let cell = Cell::new(pred, anchor, payload)?;
-        self.txlog.push(TxEntry::Output(cell));
+        let contract = Contract::new(pred, anchor, payload)?;
+        self.txlog.push(TxEntry::Output(contract));
         Ok(())
     }
 
-    /// _cell ik nbrs pos script gas portable-args… k_ **open** → _results… k'_
+    /// _contract ik nbrs pos script gas portable-args… k_ **open** → _results… k'_
     ///
     /// Verifies the taproot-proofs, then enters the unlocked script in an
-    /// isolated `CellOpen` frame via [`enter_cell_open_frame`].
+    /// isolated `ContractOpen` frame via [`enter_contract_open_frame`].
     fn op_open(&mut self) -> Result<(), VMError> {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
@@ -2493,7 +2493,7 @@ impl VM {
         let position = self.pop_value()?.to_string()?;
         let neighbors = self.pop_value()?.to_dict()?;
         let internal_key = self.pop_value()?.to_point()?;
-        let cell = self.pop_value()?.to_cell()?;
+        let contract = self.pop_value()?.to_contract()?;
 
         let proof_bytes = neighbors
             .len()
@@ -2506,22 +2506,22 @@ impl VM {
         self.current_call.charge_gas(GAS_POINT_DECOMPRESS)?;
 
         let cp = Self::taproot_proof_from_stack_pieces(internal_key, &neighbors, &position, &prog)?;
-        let _ = cell.predicate.verify_taproot_proof(&cp)?;
+        let _ = contract.predicate.verify_taproot_proof(&cp)?;
         // `Script` keeps prover witnesses inline; `Opaque` streams bytes
         // (no parse) on the verifier. See ADR 0015.
         let code_bytes = prog.len();
         let code = prog.into_script()?;
         // Split parent's anchor for the callee + stash post-call.
         let child_anchor = self.split_anchor_for_call()?;
-        self.enter_cell_open_frame(cell, code, code_bytes, gas, args, child_anchor)?;
+        self.enter_contract_open_frame(contract, code, code_bytes, gas, args, child_anchor)?;
         Ok(())
     }
 
-    /// _cell script sig gas portable-args… m_ **signcall** → _results… k'_
+    /// _contract script sig gas portable-args… m_ **signcall** → _results… k'_
     ///
     /// Checks an Explicit signature over `script` immediately in internal
     /// execution, or defers it for external batch verification, then enters an
-    /// isolated `CellOpen` frame via [`enter_cell_open_frame`].
+    /// isolated `ContractOpen` frame via [`enter_contract_open_frame`].
     fn op_signcall(&mut self) -> Result<(), VMError> {
         let m = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(m)?;
@@ -2531,7 +2531,7 @@ impl VM {
         self.current_call.charge_gas(gas)?;
         let sig_bytes = self.pop_value()?.to_string()?.to_bytes();
         let prog_str = self.pop_value()?.to_string()?;
-        let cell = self.pop_value()?.to_cell()?;
+        let contract = self.pop_value()?.to_contract()?;
         if sig_bytes.len() != 64 {
             return Err(VMError::BadSignatureBytes);
         }
@@ -2546,7 +2546,7 @@ impl VM {
         let msg = Self::signcall_message(&prog_str.to_bytes_vec());
         let code_bytes = prog_str.len();
         let code = prog_str.into_script()?;
-        let verification_key = cell.predicate.verification_key();
+        let verification_key = contract.predicate.verification_key();
         let external = self.is_external();
         if !external {
             let signature =
@@ -2566,18 +2566,18 @@ impl VM {
                 signature: sig,
             });
         }
-        self.enter_cell_open_frame(cell, code, code_bytes, gas, args, child_anchor)?;
+        self.enter_contract_open_frame(contract, code, code_bytes, gas, args, child_anchor)?;
         Ok(())
     }
 
     /// Shared tail of `op_open` / `op_signcall`: build a new
-    /// `CellOpen` frame snapshotting the caller's CS context, pour
-    /// `cell.payload` then `args` onto the new stack, swap the
+    /// `ContractOpen` frame snapshotting the caller's CS context, pour
+    /// `contract.payload` then `args` onto the new stack, swap the
     /// parent out, and switch the active anchor to `child_anchor`
     /// (the `left` half of the parent's call-entry split).
-    fn enter_cell_open_frame(
+    fn enter_contract_open_frame(
         &mut self,
-        cell: Cell,
+        contract: Contract,
         code: Script,
         code_bytes: usize,
         gas: u64,
@@ -2591,22 +2591,22 @@ impl VM {
         self.charge_alloc_items(failure_count)?;
         let clone_gas = args
             .iter()
-            .fold(1u64.saturating_add(cell.clone_gas()), |gas, value| {
+            .fold(1u64.saturating_add(contract.clone_gas()), |gas, value| {
                 gas.saturating_add(value.clone_gas())
             });
         self.current_call.charge_gas(clone_gas)?;
         let mut failure_values = Vec::with_capacity(failure_count);
-        failure_values.push(Value::Cell(Box::new(cell.clone())));
+        failure_values.push(Value::Contract(Box::new(contract.clone())));
         failure_values.extend(args.iter().cloned());
         self.current_call.snap_failure_values = failure_values;
         self.current_call.snap_failure_arg_count = args.len();
         let external_context = self.is_external();
         let caller_id = self.current_call.kind.actor().map(ActorID::to_hash);
-        let payload_len = cell.payload().len();
+        let payload_len = contract.payload().len();
         let mut frame = CallFrame::from_code(
             code,
-            CallKind::CellOpen {
-                predicate: cell.predicate.clone(),
+            CallKind::ContractOpen {
+                predicate: contract.predicate.clone(),
                 external_context,
                 caller_id,
             },
@@ -2615,7 +2615,7 @@ impl VM {
         .with_anchor(child_anchor);
         frame.gas_used = alloc_byte_gas(code_bytes)?
             .saturating_add(alloc_item_gas(payload_len.saturating_add(args.len()))?);
-        for v in cell.into_payload() {
+        for v in contract.into_payload() {
             frame.stack.push(v);
         }
         for v in args {
@@ -2692,7 +2692,7 @@ impl VM {
         let caller = self.current_call.kind.actor().cloned();
         // Single source of truth: the full Message lives in the
         // TxLog as `TxEntry::Send(Message)` — symmetric with
-        // `TxEntry::Output(Cell)`. The block builder scans these
+        // `TxEntry::Output(Contract)`. The block builder scans these
         // entries to construct internal-tx deliveries; no separate
         // queue.
         let message = Message::new(target, caller, anchor, args, gas, refund_predicate)?;
@@ -2713,7 +2713,7 @@ impl VM {
     /// (ADR 0020). Calls emit no txlog entry; a callee state mutation is
     /// recorded later by `op_save`.
     fn op_call(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
-        // CellOpen caller attribution is not actor authority: only an actor
+        // ContractOpen caller attribution is not actor authority: only an actor
         // frame may originate a synchronous actor call.
         let caller = ActorID::Hash(self.require_actor()?.to_hash());
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
@@ -2830,7 +2830,7 @@ impl VM {
     /// Portability is the canonical storage gate — every inserted value
     /// must be portable (`Int253`, `String`, `Point`, `Dict` of
     /// portable, non-negative `ClearToken`, `Token`). Non-portable
-    /// values (`Cell`, `Merlin`, `Variable`, `Expression`,
+    /// values (`Contract`, `Merlin`, `Variable`, `Expression`,
     /// `Constraint`, `MultiscalarMul`, `WideToken`, negative
     /// `ClearToken`) hard-fail `NonPortableInState`.
     fn op_save(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
@@ -2939,22 +2939,22 @@ impl VM {
         Ok(())
     }
 
-    /// _cell_ **signtx** → _items… k_
+    /// _contract_ **signtx** → _items… k_
     ///
-    /// External-only. Defers a TxID-bound signature for the cell's predicate,
-    /// pours the cell's payload onto the stack, pushes `k`.
+    /// External-only. Defers a TxID-bound signature for the contract's predicate,
+    /// pours the contract's payload onto the stack, pushes `k`.
     fn op_signtx(&mut self) -> Result<(), VMError> {
         self.require_external()?;
-        let cell = self.pop_value()?.to_cell()?;
-        // Each authorized cell contributes one key/message term to the final
+        let contract = self.pop_value()?.to_contract()?;
+        // Each authorized contract contributes one key/message term to the final
         // aggregate-signature verification.
         self.current_call.charge_gas(GAS_SIGNATURE_VERIFY)?;
-        let k = cell.payload().len();
+        let k = contract.payload().len();
         self.deferred_sigs.push(DeferredSig::TxBound {
-            verification_key: cell.predicate.verification_key(),
-            cell_id: cell.id(),
+            verification_key: contract.predicate.verification_key(),
+            contract_id: contract.id(),
         });
-        for v in cell.into_payload() {
+        for v in contract.into_payload() {
             self.push_value(v);
         }
         self.push_value(Value::Int253(Int253::from(k as u64)));
@@ -2972,7 +2972,7 @@ impl VM {
     ///
     /// Pushes the tx's *current* anchor (the value the next consume
     /// site would split). Hard-fails `AnchorMissing` if no anchor
-    /// has been claimed yet — same rule as `cell` / `output` /
+    /// has been claimed yet — same rule as `contract` / `output` /
     /// `send`. Available in either context.
     fn op_anchor(&mut self) -> Result<(), VMError> {
         let a = self.last_anchor.ok_or(VMError::AnchorMissing)?;
@@ -2984,7 +2984,7 @@ impl VM {
     ///
     /// Pushes the direct caller actor id, or all-zero String when no
     /// authenticated actor directly invoked this frame. Available in actor
-    /// and CellOpen frames, but not ExternalRoot.
+    /// and ContractOpen frames, but not ExternalRoot.
     fn op_callerid(&mut self) -> Result<(), VMError> {
         if matches!(self.current_call.kind, CallKind::ExternalRoot) {
             return Err(VMError::OpcodeRequiresActorContext);

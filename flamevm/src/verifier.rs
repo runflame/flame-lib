@@ -116,10 +116,10 @@ impl Verifier {
             .filter_map(|s| match s {
                 DeferredSig::TxBound {
                     verification_key,
-                    cell_id,
+                    contract_id,
                 } => Some((
                     musig::VerificationKey::from_compressed(*verification_key),
-                    *cell_id,
+                    *contract_id,
                 )),
                 _ => None,
             })

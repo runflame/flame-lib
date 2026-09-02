@@ -21,6 +21,18 @@ fn h(version: u32, locktime: u32) -> TxHeader {
 #[test]
 fn golden_consensus_hashes() {
     let actor = ActorID::Hash([0x07; 32]);
+    let contract = Contract::new(
+        Predicate::opaque(CompressedRistretto([0x77; 32])),
+        Anchor([0x88; 32]),
+        vec![Value::Int253(Int253::from(9u64))],
+    )
+    .unwrap();
+    let contract_id = contract.id();
+    let contract_txid = TxID::from_log(&[
+        TxEntry::Header(h(1, 0)),
+        TxEntry::Input(contract_id),
+        TxEntry::Output(contract),
+    ]);
 
     let empty = format!("{:?}", TxID::from_log(&[TxEntry::Header(h(1, 0))]));
     let data = format!(
@@ -92,6 +104,17 @@ fn golden_consensus_hashes() {
     assert_eq!(state_root, "[55, 153, 101, 152, 10, 104, 94, 233, 140, 125, 135, 90, 162, 101, 75, 190, 192, 18, 163, 108, 189, 73, 155, 248, 201, 51, 241, 232, 8, 129, 177, 182]");
     assert_eq!(code_root, "[49, 139, 70, 84, 16, 230, 41, 133, 96, 138, 164, 96, 140, 192, 168, 177, 16, 219, 77, 211, 98, 38, 102, 149, 123, 241, 218, 249, 204, 253, 100, 198]");
     assert_eq!(ctor_id, "[78, 236, 146, 161, 207, 157, 64, 230, 4, 244, 221, 152, 140, 235, 119, 206, 6, 194, 76, 78, 145, 123, 221, 5, 115, 126, 193, 163, 197, 207, 76, 100]");
+    assert_eq!(
+        contract_id,
+        [
+            48, 36, 5, 87, 3, 49, 130, 195, 10, 138, 192, 200, 195, 145, 20, 11, 217, 231, 173,
+            126, 123, 82, 152, 86, 4, 116, 41, 47, 68, 255, 247, 80,
+        ]
+    );
+    assert_eq!(
+        format!("{contract_txid:?}"),
+        "TxID(Hash(773d3e48275ff6fe3fd2ea368763bfd3f4baba9c908c0f9b0f34f82d4d342d69))"
+    );
 
     // Structural: header-only ≠ single-effect; effect order is committed.
     assert_ne!(empty, data);
@@ -144,7 +167,7 @@ fn golden_txlog_wire_encoding() {
             code: vec![0x1d],
         },
         TxEntry::Output(
-            Cell::new(
+            Contract::new(
                 Predicate::opaque(CR([0x77; 32])),
                 Anchor([0x88; 32]),
                 vec![Value::Int253(Int253::from(9u64))],

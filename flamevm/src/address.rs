@@ -3,7 +3,7 @@
 use readerwriter::{Decodable, Encodable, ReadError, Reader, WriteError, Writer};
 
 use crate::actor::ActorID;
-use crate::cell::Predicate;
+use crate::contract::Predicate;
 use crate::crypto::Point;
 use crate::dict::Dict;
 use crate::encoding::{
@@ -17,9 +17,9 @@ use crate::value::Value;
 #[derive(Debug)]
 pub enum Address {
     /// Spend authority: the target is a [`Predicate`] gating a
-    /// cell. Used by `op_output` (and helpers) that pay to a
+    /// contract. Used by `op_output` (and helpers) that pay to a
     /// key/script address. The script consumer satisfies the
-    /// predicate via signature or reveal to unlock the cell later.
+    /// predicate via signature or reveal to unlock the contract later.
     Predicate(Predicate),
 
     /// Message routing target: deliver `args` to `dst` with the given gas

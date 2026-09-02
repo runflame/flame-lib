@@ -128,9 +128,9 @@ const OP_JUMPIF: u8 = 0xa3;
 const OP_RETURN: u8 = 0xa4;
 const OP_TYPE: u8 = 0xa5;
 
-// 0xcX — Cells & predicates
+// 0xcX — Contracts & predicates
 const OP_INPUT: u8 = 0xc0;
-const OP_CELL: u8 = 0xc1;
+const OP_CONTRACT: u8 = 0xc1;
 const OP_OUTPUT: u8 = 0xc2;
 const OP_OPEN: u8 = 0xc3;
 const OP_SIGNTX: u8 = 0xc4;
@@ -242,10 +242,10 @@ pub enum Instruction {
     JumpIf(u32),  // x jumpif:n → ø (jump iff x ≠ 0)
     Return,       // a(k-1) … a(0) k return → ø
     Type,         // x type → x code
-    Input,        // s input → cell
-    Cell,         // items… k pred cell → cell
+    Input,        // s input → contract
+    Contract,     // items… k pred contract → contract
     Output,       // items… k pred output → ø
-    Open,         // cell ik nbrs pos script gas portable-args… k open → results… k'
+    Open,         // contract ik nbrs pos script gas portable-args… k open → results… k'
     Send,         // portable-args… k refund gas addr send → ø (anonymous outside actor frames)
     Call,         // portable-args… k gas addr call → results… k' 1 | args… k 0 (actor-only)
     Load,         // ø load → value (actor-only)
@@ -253,15 +253,15 @@ pub enum Instruction {
     Setcode,      // code setcode → ø (actor-only)
     AddStorage,   // q addstorage → {debt 1 | 0} (actor-only)
     QuoteStorage, // q quotestorage → {fee 1 | 0} (actor-only)
-    Signtx,       // cell signtx → items… k (external-only)
-    Signcall,     // cell script sig gas portable-args… m signcall → results… k'
+    Signtx,       // contract signtx → items… k (external-only)
+    Signcall,     // contract script sig gas portable-args… m signcall → results… k'
     Timelock,     // ø timelock → n {0|1}
     Version,      // ø version → n
     Selfid,       // ø selfid → s (actor-only)
     Anchor,       // ø anchor → s
     Gas,          // ø gas → n
     Usage,        // ø usage → n (actor-only)
-    Callerid,     // ø callerid → s (called frame; CellOpen uses read-only id)
+    Callerid,     // ø callerid → s (called frame; ContractOpen uses read-only id)
     Gaslimit,     // ø gaslimit → n
     Capacity,     // h capacity → n (actor-only)
     Height,       // ø height → n
@@ -381,7 +381,7 @@ impl Encodable for Instruction {
             // Witness (if any) never crosses the wire — prover-side
             // only. Encoded form is the bare opcode byte.
             Instruction::Input => op(w, OP_INPUT),
-            Instruction::Cell => op(w, OP_CELL),
+            Instruction::Contract => op(w, OP_CONTRACT),
             Instruction::Output => op(w, OP_OUTPUT),
             Instruction::Open => op(w, OP_OPEN),
             Instruction::Send => op(w, OP_SEND),
@@ -550,7 +550,7 @@ impl Instruction {
             OP_RETURN => Ok(Instruction::Return),
             OP_TYPE => Ok(Instruction::Type),
             OP_INPUT => Ok(Instruction::Input),
-            OP_CELL => Ok(Instruction::Cell),
+            OP_CONTRACT => Ok(Instruction::Contract),
             OP_OUTPUT => Ok(Instruction::Output),
             OP_OPEN => Ok(Instruction::Open),
             OP_SEND => Ok(Instruction::Send),

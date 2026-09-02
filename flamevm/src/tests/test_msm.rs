@@ -204,15 +204,15 @@ fn msm_drop_succeeds() {
     assert!(vm.current_call.stack.is_empty());
 }
 
-/// MSM is non-portable: cannot be sealed into a cell payload.
+/// MSM is non-portable: cannot be sealed into a contract payload.
 #[test]
-fn msm_in_cell_payload_rejected() {
+fn msm_in_contract_payload_rejected() {
     let script = ScriptBuilder::new()
         .push_point([0x55; 32])
         .neg() // → MSM
         .push_int(1u64) // count = 1
         .push_point([0xaa; 32]) // predicate
-        .cell()
+        .contract()
         .to_bytecode();
     let mut vm = vm_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
@@ -404,10 +404,10 @@ fn verify_msm_debits_decompression_and_finalization_work() {
 
 // ── Per-frame batch isolation ────────────────────────────────────
 
-/// Builds an outer program that consumes a cell (to seed the anchor)
+/// Builds an outer program that consumes a contract (to seed the anchor)
 /// then opens it via the script-leaf path, with `inner` as the leaf
 /// program. Returns a ScriptBuilder ready for `Prover::prove`.
-fn open_with_inner(inner: ScriptBuilder, recover_failed_cell: bool) -> ScriptBuilder {
+fn open_with_inner(inner: ScriptBuilder, recover_failed_contract: bool) -> ScriptBuilder {
     let inner_bytes = inner.to_bytecode();
     let recovery = ScriptBuilder::new().push_int(0u64).return_().to_bytecode();
     let tree = PredicateTree::scripts_only(vec![inner_bytes.clone(), recovery], TEST_BLINDING_KEY)
@@ -415,12 +415,12 @@ fn open_with_inner(inner: ScriptBuilder, recover_failed_cell: bool) -> ScriptBui
     let cp = tree.taproot_proof_for(0).expect("cp");
     let recovery_cp = tree.taproot_proof_for(1).expect("recovery cp");
     let pred_point = tree.point;
-    let cell = Cell::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![])
+    let contract = Contract::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![])
         .expect("empty payload is portable");
-    let cell_bytes = encode_cell_to_bytes(&cell);
+    let contract_bytes = encode_contract_to_bytes(&contract);
 
     let mut outer = ScriptBuilder::new()
-        .push_str(String::from(cell_bytes))
+        .push_str(String::from(contract_bytes))
         .input()
         .push_point(*cp.internal_key.as_bytes());
     for (i, h) in cp.neighbors.iter().enumerate() {
@@ -434,7 +434,7 @@ fn open_with_inner(inner: ScriptBuilder, recover_failed_cell: bool) -> ScriptBui
         .push_int(1024u64)
         .push_int(0u64)
         .open();
-    if recover_failed_cell {
+    if recover_failed_contract {
         outer = push_taproot_proof_to_program(outer.drop_().drop_(), &recovery_cp)
             .push_int(1024u64)
             .push_int(0u64)
@@ -459,7 +459,7 @@ fn failed_call_msm_does_not_pollute_parent_batch() {
     let pc_gens = PedersenGens::default();
     let g_bytes = *curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED.as_bytes();
 
-    // Inner cell-open script: append a NON-identity MSM (1·G) to the
+    // Inner contract-open script: append a NON-identity MSM (1·G) to the
     // child frame's batch, then deliberately fail via `verify(0)` so
     // the whole frame is rolled back into a `0` marker on the parent.
     let inner = ScriptBuilder::new()
@@ -498,7 +498,7 @@ fn failed_call_msm_does_not_pollute_parent_batch() {
     .expect("verify must accept — failed call's MSM was discarded");
 }
 
-/// Inverse: when the cell-open succeeds cleanly, its non-identity MSM
+/// Inverse: when the contract-open succeeds cleanly, its non-identity MSM
 /// IS merged into the parent's batch and the verifier rejects.
 /// Confirms the per-frame design isn't accidentally swallowing every
 /// MSM, only those from failed frames.

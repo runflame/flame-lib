@@ -2,10 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use flamevm::{CellID, TxEntry, TxID, TxLog, VMError};
+use flamevm::{ContractID, TxEntry, TxID, TxLog, VMError};
 
 use crate::BlockHash;
-use crate::block::{BlockLimits, BlockTx, Blockchain, CellLeaf};
+use crate::block::{BlockLimits, BlockTx, Blockchain, ContractLeaf};
 use crate::utreexo::{self, Catchup, Forest, Proof, UtreexoError, WorkForest};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,30 +73,30 @@ pub struct Mempool {
     consensus: BlockLimits,
     version: u32,
     base_tip: BlockHash,
-    base_cells: Forest,
+    base_contracts: Forest,
     work: WorkForest,
     entries: Vec<MempoolEntry>,
     witness_ids: BTreeSet<[u8; 32]>,
     txids: BTreeSet<[u8; 32]>,
-    created_cells: BTreeSet<CellID>,
+    created_contracts: BTreeSet<ContractID>,
     witness_bytes: usize,
 }
 
 impl Mempool {
     pub fn new(chain: &Blockchain, policy: MempoolPolicy) -> Self {
-        let base_cells = chain.cell_forest().clone();
-        let work = base_cells.work_forest();
+        let base_contracts = chain.contract_forest().clone();
+        let work = base_contracts.work_forest();
         Self {
             policy,
             consensus: chain.limits(),
             version: chain.version(),
             base_tip: chain.tip(),
-            base_cells,
+            base_contracts,
             work,
             entries: Vec::new(),
             witness_ids: BTreeSet::new(),
             txids: BTreeSet::new(),
-            created_cells: BTreeSet::new(),
+            created_contracts: BTreeSet::new(),
             witness_bytes: 0,
         }
     }
@@ -167,9 +167,9 @@ impl Mempool {
             if inputs.len() != block_tx.proofs.len() {
                 return Err(MempoolError::ProofCount);
             }
-            let hasher = utreexo::utreexo_hasher::<CellLeaf>();
+            let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
             for (id, proof) in inputs.into_iter().zip(&mut block_tx.proofs) {
-                *proof = catchup.update_proof(&CellLeaf(id), proof.clone(), &hasher)?;
+                *proof = catchup.update_proof(&ContractLeaf(id), proof.clone(), &hasher)?;
             }
         }
 
@@ -177,7 +177,7 @@ impl Mempool {
             &mut self.work,
             &log,
             &block_tx.proofs,
-            &mut self.created_cells,
+            &mut self.created_contracts,
         )?;
         self.witness_bytes = self
             .witness_bytes
@@ -230,7 +230,7 @@ impl Mempool {
         work: &mut WorkForest,
         log: &TxLog,
         proofs: &[Proof],
-        created_cells: &mut BTreeSet<CellID>,
+        created_contracts: &mut BTreeSet<ContractID>,
     ) -> Result<(), MempoolError> {
         let expected = log
             .iter()
@@ -239,28 +239,28 @@ impl Mempool {
         if expected != proofs.len() {
             return Err(MempoolError::ProofCount);
         }
-        let hasher = utreexo::utreexo_hasher::<CellLeaf>();
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
         let mut proofs = proofs.iter();
-        let mut new_cells = BTreeSet::new();
+        let mut new_contracts = BTreeSet::new();
         work.batch(|work| {
             for entry in log.iter() {
                 match entry {
                     TxEntry::Input(id) => {
-                        work.delete(&CellLeaf(*id), proofs.next().unwrap(), &hasher)?;
+                        work.delete(&ContractLeaf(*id), proofs.next().unwrap(), &hasher)?;
                     }
-                    TxEntry::Output(cell) => {
-                        let id = cell.id();
-                        if created_cells.contains(&id) || !new_cells.insert(id) {
-                            return Err(MempoolError::DuplicateCell);
+                    TxEntry::Output(contract) => {
+                        let id = contract.id();
+                        if created_contracts.contains(&id) || !new_contracts.insert(id) {
+                            return Err(MempoolError::DuplicateContract);
                         }
-                        work.insert(&CellLeaf(id), &hasher);
+                        work.insert(&ContractLeaf(id), &hasher);
                     }
                     _ => {}
                 }
             }
             Ok::<_, MempoolError>(())
         })?;
-        created_cells.extend(new_cells);
+        created_contracts.extend(new_contracts);
         Ok(())
     }
 
@@ -277,7 +277,7 @@ impl Mempool {
         let old = std::mem::take(&mut self.entries);
         self.version = chain.version();
         self.base_tip = chain.tip();
-        self.base_cells = chain.cell_forest().clone();
+        self.base_contracts = chain.contract_forest().clone();
         self.reset_work();
 
         let total = old.len();
@@ -303,10 +303,10 @@ impl Mempool {
     }
 
     fn reset_work(&mut self) {
-        self.work = self.base_cells.work_forest();
+        self.work = self.base_contracts.work_forest();
         self.witness_ids.clear();
         self.txids.clear();
-        self.created_cells.clear();
+        self.created_contracts.clear();
         self.witness_bytes = 0;
     }
 }
@@ -323,8 +323,8 @@ pub enum MempoolError {
     InvalidEnvelope,
     #[error("missing or trailing Utreexo proof")]
     ProofCount,
-    #[error("duplicate cell id")]
-    DuplicateCell,
+    #[error("duplicate contract id")]
+    DuplicateContract,
     #[error(transparent)]
     Vm(#[from] VMError),
     #[error(transparent)]
@@ -334,7 +334,7 @@ pub enum MempoolError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flamevm::{Anchor, Cell, Int253, Limits, Predicate, ScriptBuilder, TxHeader};
+    use flamevm::{Anchor, Contract, Int253, Limits, Predicate, ScriptBuilder, TxHeader};
 
     fn external_tx(program: ScriptBuilder) -> BlockTx {
         let limits = Limits { gas: 100_000 };
@@ -360,19 +360,19 @@ mod tests {
         let base = Forest::new();
         let mut work = base.work_forest();
         let mut created = BTreeSet::new();
-        let cell = Cell::new(
+        let contract = Contract::new(
             Predicate::opaque(Predicate::unspendable_key()),
             Anchor([7; 32]),
             vec![],
         )
         .expect("empty payload is portable");
-        let id = cell.id();
+        let id = contract.id();
         let output = TxLog::from(vec![
             TxEntry::Header(TxHeader {
                 version: 1,
                 locktime: 0,
             }),
-            TxEntry::Output(cell),
+            TxEntry::Output(contract),
         ]);
         Mempool::apply_log(&mut work, &output, &[], &mut created).unwrap();
 

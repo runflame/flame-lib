@@ -7,7 +7,7 @@ state, consensus parameters, an authenticated core-block context, and a
 candidate Flame block, it either produces one new state plus complete undo data
 or rejects the block without changing state.
 
-It owns cells and their accumulator, actors, storage leases, block resource
+It owns contracts and their accumulator, actors, storage leases, block resource
 accounting, block application, local reorganization, and basic transaction
 admission. It does **not** choose a Bitcoin branch, talk to Bitcoin Core, select
 minters, run BFT, persist data, or provide networking. Those responsibilities
@@ -37,7 +37,7 @@ called out explicitly below.
 At a selected tip the persistent state contains:
 
 - tip height and block identifier;
-- the Utreexo forest committing to every live cell;
+- the Utreexo forest committing to every live contract;
 - the actor registry: actor code, state, and leases;
 - the available actor-storage pool and a lease-expiry index derived from the
   committed per-actor leases; and
@@ -51,9 +51,9 @@ proof, resource-limit breach, commitment mismatch, or VM failure required by
 the transaction rules rejects the candidate transition. Applying a block is
 atomic: no persistent mutation becomes visible until all checks pass.
 
-## Cells and Utreexo
+## Contracts and Utreexo
 
-Cells are single-use values. An external transaction proves each input's
+Contracts are single-use values. An external transaction proves each input's
 membership in the parent accumulator, deletes it once, and inserts its outputs.
 The Flame-specific Utreexo implementation represents the accumulator as a
 forest of perfect binary Merkle trees:
@@ -64,12 +64,12 @@ forest of perfect binary Merkle trees:
 - normalization produces the next canonical `Forest`; and
 - `Catchup` updates surviving proofs across that transition.
 
-Committed inputs prove membership in the declared parent root and no cell may
+Committed inputs prove membership in the declared parent root and no contract may
 be deleted twice. A `Transient` proof intentionally permits a later transaction
 in the same ordered block to spend an output created earlier in that block; the
 same rule lets FIFO mempool children depend on admitted parents. The work forest
 is normalized once after the ordered batch, and its resulting commitment must
-equal the block's committed cell root.
+equal the block's committed contract root.
 
 The canonical compact `Forest` encoding is a u64-LE occupied-level bitmap,
 followed by one 32-byte root for each set bit in increasing level order. A
@@ -82,8 +82,8 @@ exact (no trailing bytes), limits depth to 63, and requires
 not consensus encodings. Block witness hashing and size accounting reuse these
 canonical proof bytes rather than maintaining a parallel proof layout.
 
-This lets a validating node keep a small accumulator instead of every cell
-payload. It does not make cells literally free or solve data availability:
+This lets a validating node keep a small accumulator instead of every contract
+payload. It does not make contracts literally free or solve data availability:
 owners must retain payloads and proofs, proofs need updating, blocks still carry
 witness data, and archival history remains a separate cost.
 
@@ -125,7 +125,7 @@ The header commits, with domain-separated hashes, to:
 - protocol/network version, parent, and height;
 - the authenticated core-block context;
 - the exact ordered external-transaction witness;
-- the resulting cell-accumulator commitment;
+- the resulting contract-accumulator commitment;
 - the resulting actor/storage-state commitment.
 
 All integers in the canonical network envelope are little-endian. Its grammar
@@ -142,7 +142,7 @@ BlockTx    = ExternalTx || gas_limit:u64
 
 BlockHeader = version:u32 || height:u64 || core_block_hash:32 || parent:32
             || witness_root:32 || effects_root:32
-            || cell_root:32 || actor_root:32
+            || contract_root:32 || actor_root:32
             || available_storage_units:u64
 
 Block      = BlockHeader || transaction_count:u64 || BlockTx...
@@ -168,7 +168,7 @@ reorganization attachment:
 1. Check parent, height, version, context relation, static limits, and canonical
    encodings that are already defined.
 2. Stage lease expiry, recycling, actor marking, and issuance.
-3. Verify external transactions against the declared parent cell state. Reject
+3. Verify external transactions against the declared parent contract state. Reject
    missing or duplicate inputs and accumulate their resource use.
 4. Consume each derived external log through the ordered effect applier and
    enqueue its sends in effect order.
@@ -199,7 +199,7 @@ that work.
 No duplicate-message table is part of consensus. Every accepted `Send` gets its
 anchor by splitting the VM's current ratchet: the left child enters the Message
 and the right child continues execution. Ratchet roots come from a spent input
-CellID or the unique anchor of the delivering Message, and synchronous calls
+ContractID or the unique anchor of the delivering Message, and synchronous calls
 split disjoint child and caller-continuation subtrees. The queue is derived once
 from each executed `Send` effect and fully drained before commit. A
 reorganization may execute a message again only after rolling back its former
@@ -207,7 +207,7 @@ delivery or refund.
 
 Delivery and recovery share the block's outer atomic checkpoint. Actor changes
 from a failed delivery are rolled back before the original payload is sealed in
-one refund Cell under `refund_predicate`. If constructing or applying that Cell
+one refund Contract under `refund_predicate`. If constructing or applying that Contract
 fails, the whole candidate is rejected, including the Send that originated the
 message; a failed candidate never commits consumption without recovery.
 
@@ -222,7 +222,7 @@ initial state is the canonical empty state. A
 lease-expiry destruction is a system internal transaction with
 `ActorDestroy(actor)` instead of `Receive`; it recursively records token
 retirements and binds the expiry height. A failed delivery records `Receive` and
-exactly one refund `Output`; the Cell uses the left split of the message anchor,
+exactly one refund `Output`; the Contract uses the left split of the message anchor,
 the same unique slot the delivery's first successful output would have used.
 Its execution-record kind distinguishes failure from success.
 
@@ -264,7 +264,7 @@ bounded by a smaller enclosing value, including:
 
 - encoded block and external-transaction bytes;
 - external and internal gas;
-- cell inputs, outputs, and proof work;
+- contract inputs, outputs, and proof work;
 - messages, actor executions, and call depth;
 - cryptographic multiplication/MSM work; and
 - fixed storage issuance and pool-bounded purchases.
@@ -340,7 +340,7 @@ must obtain an older trusted snapshot/state sync instead.
 | --- | --- | --- |
 | Keep Bitcoin tracking outside `flamechain`. | Pure, repeatable state transitions and no RPC dependency in consensus code. | The caller must authenticate and commit context; a forged height corrupts lease timing. |
 | Derive internal transactions. | One admission path; actor effects cannot be forged. | Validators repeat serial work; receipts alone are not proofs. |
-| Use Flame Utreexo for cells. | Small common live-cell state and user-carried proofs. | Proof transport/catchup and owner availability become operational requirements. |
+| Use Flame Utreexo for contracts. | Small common live-contract state and user-carried proofs. | Proof transport/catchup and owner availability become operational requirements. |
 | Keep actors in bounded leased storage. | Prices scarce common state and caps node burden. | Lease metadata, ordered pricing, expiry cliffs, and irreversible destruction complicate applications. |
 | Use endpoint reserve pricing. | One checked rational formula; reserve pressure is immediate. | Purchase splitting follows a much cheaper harmonic path; ordering creates MEV. |
 | Stage a whole block atomically. | Invalid tails cannot leave partial state. | Requires transient working state; naive cloning may be expensive. |

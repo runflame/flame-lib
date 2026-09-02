@@ -4,7 +4,7 @@ use merlin::Transcript;
 use readerwriter::{Encodable, WriteError, Writer};
 
 use crate::actor::ActorID;
-use crate::cell::Predicate;
+use crate::contract::Predicate;
 use crate::encoding::write_admitted_value;
 use crate::errors::VMError;
 use crate::value::Value;
@@ -26,7 +26,7 @@ impl MessageID {
 /// One queued outbound message. Built by `op_send`, embedded directly
 /// in `TxEntry::Send(Message)`, drained by the consensus layer after
 /// external-tx execution. `refund_predicate` is the sender-chosen unlock
-/// predicate for the Cell emitted directly by consensus when delivery fails.
+/// predicate for the Contract emitted directly by consensus when delivery fails.
 #[derive(Clone, Debug)]
 pub struct Message {
     /// Destination actor (either `Hash` for an already-deployed actor,
@@ -37,7 +37,7 @@ pub struct Message {
 
     /// Originating actor's id when the sending frame has actor authority.
     /// `None` means no authenticated actor principal: this includes
-    /// ExternalRoot and CellOpen sends. Canonicalized during encoding so
+    /// ExternalRoot and ContractOpen sends. Canonicalized during encoding so
     /// equivalent constructor-form caller ids commit identically.
     pub caller: Option<ActorID>,
 
@@ -57,7 +57,7 @@ pub struct Message {
     pub gas: u64,
 
     /// Sender-chosen bounce predicate. If the delivered internal tx
-    /// fails, consensus seals `payload` into a fresh Cell under this
+    /// fails, consensus seals `payload` into a fresh Contract under this
     /// predicate and emits it as an Output effect.
     pub refund_predicate: Predicate,
 }
