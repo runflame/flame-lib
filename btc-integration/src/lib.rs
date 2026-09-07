@@ -1,27 +1,34 @@
-mod factory;
-pub mod mint_proofs;
-pub mod rpc;
+#![doc = include_str!("../README.md")]
+
+mod bitcoin_connection;
+pub mod btc;
+pub mod protocol;
 
 pub use prelude::*;
 
 pub mod prelude {
-    pub use crate::factory::{BtcIntegrationConfig, create_mint_proof_components};
-    pub use crate::mint_proofs::MintingProofData;
-    pub use crate::mint_proofs::indexer::indexer::{
-        MintProofIndexer, MintingProofUpdate, NewMintingProofs, ShutdownError, StartupError,
+    pub use crate::bitcoin_connection::{
+        BitcoinConfig, BitcoinConnection, BitcoinConnectionError, TestAcquisitionConfig,
     };
-    pub use crate::mint_proofs::mint_proof_sender::{MintProofSendError, MintProofSender};
-    pub use crate::mint_proofs::minting_proof_storage::{
-        MintingProof, MintingProofsByBitcoinBlock,
+    pub use crate::btc::bitcoin_facade::BitcoinFacade;
+    pub use crate::btc::rpc::{
+        BtcBlockTip, BtcFundedTransaction, BtcFundingInput, BtcTransactionWithPrevouts,
     };
-    pub use crate::rpc::BtcBlockTip;
-    use crate::{mint_proofs, rpc};
+    pub use crate::btc::transaction_builder::BitcoinTransactionBuilder;
+    pub use crate::protocol::{
+        Acquisition, AcquisitionData, AuthenticatedMintingVote, HistoryChange, HistoryError,
+        HistoryUpdate, IndexedBlock, MinterIdentity, MinterIdentityError, MinterP2wsh,
+        MintingSendError, MintingVoteAuth, MintingVoteData, MintingVoteOutput,
+        MintingVoteProcessingError, MintingVoteValidationError, MintingVoteValidator,
+        ProtocolIndexer, RequiredInput, SecretStorage, Sender, ShutdownError,
+        SignTransactionRequest, SignerContractViolation, StartupError, TestSender, TestSigner,
+        TestSignerError, TransactionSigner, UncheckedMintingVote, VoteSender, VoteSigner,
+        VoteSignerError, validate_transaction_votes,
+    };
     pub use corepc_client::client_sync::Auth as BitcoinRpcAuth;
-    pub use flamechain::{BlockHash, FlameNetwork};
+    pub use flamechain::BlockHash;
 
-    pub type MintProofSenderV31 = MintProofSender<rpc::Core31RpcApi>;
-    pub type MintProofIndexerV31 = MintProofIndexer<
-        rpc::Core31RpcApi,
-        mint_proofs::minting_proof_storage::InMemoryMintingProofStorage,
-    >;
+    use crate::btc::rpc;
+
+    pub type ProtocolIndexerV31 = ProtocolIndexer<rpc::Core31RpcApi>;
 }
