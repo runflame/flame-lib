@@ -1,0 +1,10 @@
+[package]
+name = "cells"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Content-addressed cells, bags, snakes, and tries for Flame"
+
+[dependencies]
+sha2 = "0.10"
+thiserror = "2"
