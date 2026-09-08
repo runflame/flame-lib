@@ -178,7 +178,7 @@ when the specification, implementation, and focused regression tests agree.
      the pure-computation values and zero token are droppable, while Dict
      droppability is sticky until the Dict is fully drained; an empty Dict is
      always droppable. Align `drop` and its tests.
-   - [x] Define Dict keys as signed `Int253` values in total numeric order;
+   - [x] Define Dict keys as `Scalar` residues in unsigned numeric order;
      list-style encoding still requires the exact nonnegative range `0..n-1`.
    - [x] Remove unsupported `WideToken`, `Object`, and `Merlin` entries from the
      encodable-types table. Generic value tags `251..=254` are unassigned;

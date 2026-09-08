@@ -3,13 +3,13 @@
 
 use bulletproofs::{r1cs, r1cs::ConstraintSystem, PedersenGens};
 use curve25519_dalek::ristretto::CompressedRistretto;
-use curve25519_dalek::scalar::Scalar;
+use curve25519_dalek::scalar::Scalar as DalekScalar;
 use std::iter::FromIterator;
 use std::ops::{Add, Neg};
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 
 use crate::errors::VMError;
-use crate::int253::Int253;
+use crate::scalar::Scalar;
 
 /// Variable represents a high-level R1CS variable specified by its
 /// Pedersen commitment.
@@ -23,10 +23,10 @@ pub struct Variable {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expression {
     /// Represents a constant. Operations on constants produce constants.
-    Constant(Int253),
+    Constant(Scalar),
 
     /// Linear combination of R1CS variables and constants.
-    LinearCombination(Vec<(r1cs::Variable, Scalar)>, Option<Int253>),
+    LinearCombination(Vec<(r1cs::Variable, DalekScalar)>, Option<Scalar>),
 }
 
 /// Constraint is a boolean function of expressions and other constraints.
@@ -73,8 +73,8 @@ pub enum Commitment {
 /// Prover's representation of the commitment secret: witness and blinding factor.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommitmentWitness {
-    value: Int253,
-    blinding: Scalar,
+    value: Scalar,
+    blinding: DalekScalar,
 }
 
 impl Constraint {
@@ -193,12 +193,12 @@ impl SecretConstraint {
     fn flatten<CS: r1cs::RandomizedConstraintSystem>(
         self,
         cs: &mut CS,
-    ) -> Result<(r1cs::LinearCombination, Option<Scalar>), r1cs::R1CSError> {
+    ) -> Result<(r1cs::LinearCombination, Option<DalekScalar>), r1cs::R1CSError> {
         match self {
             SecretConstraint::Eq(expr1, expr2) => {
                 let assignment = expr1
                     .eval()
-                    .and_then(|x| expr2.eval().map(|y| (x - y).to_scalar_mod_order()));
+                    .and_then(|x| expr2.eval().map(|y| (x - y).to_dalek()));
                 Ok(((*expr1).to_r1cs_lc() - (*expr2).to_r1cs_lc(), assignment))
             }
             SecretConstraint::And(c1, c2) => {
@@ -221,9 +221,13 @@ impl SecretConstraint {
 
                 let (xy_assg, xw_assg, y_assg) = match x_assg {
                     Some(x) => {
-                        let is_zero = x.ct_eq(&Scalar::ZERO);
-                        let y = Scalar::conditional_select(&Scalar::ZERO, &Scalar::ONE, is_zero);
-                        let w = Scalar::conditional_select(&x, &Scalar::ONE, is_zero);
+                        let is_zero = x.ct_eq(&DalekScalar::ZERO);
+                        let y = DalekScalar::conditional_select(
+                            &DalekScalar::ZERO,
+                            &DalekScalar::ONE,
+                            is_zero,
+                        );
+                        let w = DalekScalar::conditional_select(&x, &DalekScalar::ONE, is_zero);
                         let w = w.invert();
                         (Some((x, y)), Some((x, w)), Some(y))
                     }
@@ -240,7 +244,7 @@ impl SecretConstraint {
                 // (3) `x*y == 0` which implies that y == 0 if x != 0.
                 cs.constrain(o1.into());
                 // (4) `x*w == 1 - y` which implies that y == 1 if x == 0.
-                cs.constrain(o2 - Scalar::ONE + r1);
+                cs.constrain(o2 - DalekScalar::ONE + r1);
 
                 // Note: w (r2) is left unconstrained — it is a free variable.
 
@@ -269,23 +273,23 @@ impl Commitment {
     }
 
     /// Creates an open commitment with a zero blinding factor.
-    pub fn unblinded<T: Into<Int253>>(x: T) -> Self {
+    pub fn unblinded<T: Into<Scalar>>(x: T) -> Self {
         Commitment::Open(Box::new(CommitmentWitness {
-            blinding: Scalar::ZERO,
+            blinding: DalekScalar::ZERO,
             value: x.into(),
         }))
     }
 
     /// Creates an open commitment with a random blinding factor.
-    pub fn blinded<T: Into<Int253>>(x: T) -> Self {
+    pub fn blinded<T: Into<Scalar>>(x: T) -> Self {
         Commitment::Open(Box::new(CommitmentWitness {
-            blinding: Scalar::random(&mut rand::thread_rng()),
+            blinding: DalekScalar::random(&mut rand::thread_rng()),
             value: x.into(),
         }))
     }
 
     /// Creates an open commitment with a specified blinding factor.
-    pub fn blinded_with_factor<T: Into<Int253>>(x: T, blinding: Scalar) -> Self {
+    pub fn blinded_with_factor<T: Into<Scalar>>(x: T, blinding: DalekScalar) -> Self {
         Commitment::Open(Box::new(CommitmentWitness {
             blinding,
             value: x.into(),
@@ -293,7 +297,7 @@ impl Commitment {
     }
 
     /// Returns the committed value and its blinding factor, if known.
-    pub fn witness(&self) -> Option<(Int253, Scalar)> {
+    pub fn witness(&self) -> Option<(Scalar, DalekScalar)> {
         match self {
             Commitment::Closed(_) => None,
             Commitment::Open(w) => Some((w.value, w.blinding)),
@@ -301,7 +305,7 @@ impl Commitment {
     }
 
     /// Returns the committed value, without the blinding factor.
-    pub fn assignment(&self) -> Option<Int253> {
+    pub fn assignment(&self) -> Option<Scalar> {
         match self {
             Commitment::Closed(_) => None,
             Commitment::Open(w) => Some(w.value),
@@ -318,7 +322,7 @@ impl CommitmentWitness {
 
 impl Expression {
     /// Creates a constant expression for a given integer or scalar.
-    pub fn constant<S: Into<Int253>>(a: S) -> Self {
+    pub fn constant<S: Into<Scalar>>(a: S) -> Self {
         Expression::Constant(a.into())
     }
 
@@ -335,7 +339,7 @@ impl Expression {
                 Expression::LinearCombination(mut right_terms, right_assignment),
             ) => {
                 for (_, n) in right_terms.iter_mut() {
-                    *n *= l.to_scalar_mod_order();
+                    *n *= l.to_dalek();
                 }
                 Expression::LinearCombination(right_terms, right_assignment.map(|r| r * l))
             }
@@ -344,7 +348,7 @@ impl Expression {
                 Expression::Constant(r),
             ) => {
                 for (_, n) in left_terms.iter_mut() {
-                    *n *= r.to_scalar_mod_order();
+                    *n *= r.to_dalek();
                 }
                 Expression::LinearCombination(left_terms, left_assignment.map(|l| l * r))
             }
@@ -360,20 +364,23 @@ impl Expression {
                     (Some(l), Some(r)) => Some(l * r),
                     (_, _) => None,
                 };
-                Expression::LinearCombination(vec![(output_var, Scalar::ONE)], output_assignment)
+                Expression::LinearCombination(
+                    vec![(output_var, DalekScalar::ONE)],
+                    output_assignment,
+                )
             }
         }
     }
 
     pub(crate) fn to_r1cs_lc(&self) -> r1cs::LinearCombination {
         match self {
-            Expression::Constant(a) => a.to_scalar_mod_order().into(),
+            Expression::Constant(a) => a.to_dalek().into(),
             Expression::LinearCombination(terms, _) => r1cs::LinearCombination::from_iter(terms),
         }
     }
 
     /// `None` if there is no witness data.
-    fn eval(&self) -> Option<Int253> {
+    fn eval(&self) -> Option<Scalar> {
         match self {
             Expression::Constant(a) => Some(*a),
             Expression::LinearCombination(_, a) => *a,
@@ -462,111 +469,111 @@ mod tests {
     fn expression_arithmetic() {
         // const + const => const
         assert_eq!(
-            Expression::Constant(Int253::from(1u64)) + Expression::Constant(Int253::from(2u64)),
-            Expression::Constant(Int253::from(3u64))
+            Expression::Constant(Scalar::from(1u64)) + Expression::Constant(Scalar::from(2u64)),
+            Expression::Constant(Scalar::from(3u64))
         );
         // const + lincomb => prepend to lincomb
         assert_eq!(
-            Expression::Constant(Int253::from(1u64))
+            Expression::Constant(Scalar::from(1u64))
                 + Expression::LinearCombination(
-                    vec![(r1cs::Variable::One(), Scalar::from(2u64))],
-                    Some(Int253::from(2u64))
+                    vec![(r1cs::Variable::One(), DalekScalar::from(2u64))],
+                    Some(Scalar::from(2u64))
                 ),
             Expression::LinearCombination(
                 vec![
-                    (r1cs::Variable::One(), Scalar::from(1u64)),
-                    (r1cs::Variable::One(), Scalar::from(2u64))
+                    (r1cs::Variable::One(), DalekScalar::from(1u64)),
+                    (r1cs::Variable::One(), DalekScalar::from(2u64))
                 ],
-                Some(Int253::from(3u64))
+                Some(Scalar::from(3u64))
             )
         );
         // lincomb + const => append to lincomb
         assert_eq!(
             Expression::LinearCombination(
-                vec![(r1cs::Variable::One(), Scalar::from(1u64))],
-                Some(Int253::from(1u64))
-            ) + Expression::Constant(Int253::from(2u64)),
+                vec![(r1cs::Variable::One(), DalekScalar::from(1u64))],
+                Some(Scalar::from(1u64))
+            ) + Expression::Constant(Scalar::from(2u64)),
             Expression::LinearCombination(
                 vec![
-                    (r1cs::Variable::One(), Scalar::from(1u64)),
-                    (r1cs::Variable::One(), Scalar::from(2u64))
+                    (r1cs::Variable::One(), DalekScalar::from(1u64)),
+                    (r1cs::Variable::One(), DalekScalar::from(2u64))
                 ],
-                Some(Int253::from(3u64))
+                Some(Scalar::from(3u64))
             )
         );
         // lincomb + lincomb => concat
         assert_eq!(
             Expression::LinearCombination(
-                vec![(r1cs::Variable::Committed(1), Scalar::from(11u64))],
-                Some(Int253::from(100u64))
+                vec![(r1cs::Variable::Committed(1), DalekScalar::from(11u64))],
+                Some(Scalar::from(100u64))
             ) + Expression::LinearCombination(
-                vec![(r1cs::Variable::Committed(2), Scalar::from(22u64))],
-                Some(Int253::from(42u64))
+                vec![(r1cs::Variable::Committed(2), DalekScalar::from(22u64))],
+                Some(Scalar::from(42u64))
             ),
             Expression::LinearCombination(
                 vec![
-                    (r1cs::Variable::Committed(1), Scalar::from(11u64)),
-                    (r1cs::Variable::Committed(2), Scalar::from(22u64))
+                    (r1cs::Variable::Committed(1), DalekScalar::from(11u64)),
+                    (r1cs::Variable::Committed(2), DalekScalar::from(22u64))
                 ],
-                Some(Int253::from(142u64))
+                Some(Scalar::from(142u64))
             )
         );
         // -expr => negate weights
         assert_eq!(
-            -Expression::Constant(Int253::from(1u64)),
-            Expression::Constant(-Int253::from(1u64))
+            -Expression::Constant(Scalar::from(1u64)),
+            Expression::Constant(-Scalar::from(1u64))
         );
         assert_eq!(
             -Expression::LinearCombination(
-                vec![(r1cs::Variable::One(), Scalar::from(1u64))],
-                Some(Int253::from(1u64))
+                vec![(r1cs::Variable::One(), DalekScalar::from(1u64))],
+                Some(Scalar::from(1u64))
             ),
             Expression::LinearCombination(
-                vec![(r1cs::Variable::One(), -Scalar::from(1u64))],
-                Some(-Int253::from(1u64))
+                vec![(r1cs::Variable::One(), -DalekScalar::from(1u64))],
+                Some(-Scalar::from(1u64))
             )
         );
 
         let mut cs = MockMultiplierCS { num_multipliers: 0 };
 
-        let e1 = Expression::Constant(Int253::from(10u64));
-        let e2 = Expression::Constant(Int253::from(20u64));
+        let e1 = Expression::Constant(Scalar::from(10u64));
+        let e2 = Expression::Constant(Scalar::from(20u64));
         let e3 = Expression::LinearCombination(
-            vec![(r1cs::Variable::Committed(0), Scalar::from(3u64))],
-            Some(Int253::from(3u64)),
+            vec![(r1cs::Variable::Committed(0), DalekScalar::from(3u64))],
+            Some(Scalar::from(3u64)),
         );
         let e4 = Expression::LinearCombination(
-            vec![(r1cs::Variable::Committed(1), Scalar::from(4u64))],
-            Some(Int253::from(4u64)),
+            vec![(r1cs::Variable::Committed(1), DalekScalar::from(4u64))],
+            Some(Scalar::from(4u64)),
         );
 
         // const * const => mult consts
         assert_eq!(
             e1.clone().multiply(e2.clone(), &mut cs),
-            Expression::Constant(Int253::from(200u64))
+            Expression::Constant(Scalar::from(200u64))
         );
         // const * expr => mult weights
         assert_eq!(
             e1.clone().multiply(e3.clone(), &mut cs),
             Expression::LinearCombination(
-                vec![(r1cs::Variable::Committed(0), Scalar::from(30u64))],
-                Some(Int253::from(30u64))
+                vec![(r1cs::Variable::Committed(0), DalekScalar::from(30u64))],
+                Some(Scalar::from(30u64))
             )
         );
         // expr * const => mult weights
         assert_eq!(
             e3.clone().multiply(e1.clone(), &mut cs),
             Expression::LinearCombination(
-                vec![(r1cs::Variable::Committed(0), Scalar::from(30u64))],
-                Some(Int253::from(30u64))
+                vec![(r1cs::Variable::Committed(0), DalekScalar::from(30u64))],
+                Some(Scalar::from(30u64))
             )
         );
         // expr * expr => allocate new multiplier
         assert_eq!(
             e3.clone().multiply(e4.clone(), &mut cs),
             Expression::LinearCombination(
-                vec![(r1cs::Variable::MultiplierOutput(0), Scalar::from(1u64))],
-                Some(Int253::from(12u64))
+                vec![(r1cs::Variable::MultiplierOutput(0), DalekScalar::from(1u64))],
+                Some(Scalar::from(12u64))
             )
         );
     }
@@ -576,24 +583,24 @@ mod tests {
         // eq(const, const) => cleartext(true)
         assert_eq!(
             Constraint::eq(
-                Expression::Constant(Int253::from(1u64)),
-                Expression::Constant(Int253::from(1u64))
+                Expression::Constant(Scalar::from(1u64)),
+                Expression::Constant(Scalar::from(1u64))
             ),
             Constraint::Cleartext(true)
         );
         // eq(const1, const2) => cleartext(false)
         assert_eq!(
             Constraint::eq(
-                Expression::Constant(Int253::from(1u64)),
-                Expression::Constant(Int253::from(2u64))
+                Expression::Constant(Scalar::from(1u64)),
+                Expression::Constant(Scalar::from(2u64))
             ),
             Constraint::Cleartext(false)
         );
         // eq(const, nonconst) => ::Eq
-        let e1 = Expression::Constant(Int253::from(1u64));
+        let e1 = Expression::Constant(Scalar::from(1u64));
         let e2 = Expression::LinearCombination(
-            vec![(r1cs::Variable::One(), Scalar::from(2u64))],
-            Some(Int253::from(2u64)),
+            vec![(r1cs::Variable::One(), DalekScalar::from(2u64))],
+            Some(Scalar::from(2u64)),
         );
         assert_eq!(
             Constraint::eq(e1.clone(), e2.clone()),
@@ -692,14 +699,14 @@ mod tests {
 
         fn allocate(
             &mut self,
-            _assignment: Option<Scalar>,
+            _assignment: Option<DalekScalar>,
         ) -> Result<r1cs::Variable, r1cs::R1CSError> {
             Ok(self.allocate_multiplier(None)?.0)
         }
 
         fn allocate_multiplier(
             &mut self,
-            _assignments: Option<(Scalar, Scalar)>,
+            _assignments: Option<(DalekScalar, DalekScalar)>,
         ) -> Result<(r1cs::Variable, r1cs::Variable, r1cs::Variable), r1cs::R1CSError> {
             let var = self.num_multipliers;
             self.num_multipliers += 1;

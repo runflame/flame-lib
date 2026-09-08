@@ -22,8 +22,8 @@ fn read_bits_n_zero_succeeds_and_yields_zero() {
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 3);
     assert_str(&vm.current_call.stack[0], &[0xaa, 0xbb]);
-    assert_int(&vm.current_call.stack[1], Int253::ZERO);
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[1], Scalar::ZERO);
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
@@ -38,8 +38,8 @@ fn read_bits_partial_byte_masks_high_bits() {
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[0x00]);
-    assert_int(&vm.current_call.stack[1], Int253::from(31u64));
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(31u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
@@ -55,7 +55,7 @@ fn read_bits_too_short_preserves_string() {
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
     assert_str(&vm.current_call.stack[0], &[0xaa]);
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
 }
 
 #[test]
@@ -74,7 +74,7 @@ fn read_bits_n_257_hard_fails() {
 }
 
 #[test]
-fn read_bits_negative_count_hard_fails() {
+fn read_bits_near_order_count_hard_fails() {
     let mut vm = vm_with_script(
         ScriptBuilder::new()
             .push_str(s(&[]))
@@ -88,18 +88,15 @@ fn read_bits_negative_count_hard_fails() {
     ));
 }
 
-/// Canonical curve order ℓ (Ristretto subgroup order) — first byte
-/// non-canonical when interpreted as a scalar magnitude.
+/// Curve order ℓ itself is outside the canonical scalar interval [0, ℓ).
 const ELL_LE: [u8; 32] = [
     0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
 ];
 
 #[test]
-fn read_bits_magnitude_at_ell_soft_fails() {
-    // Canonical scalar magnitude exactly ℓ (the order) is *not*
-    // canonical — `from_canonical_bytes` rejects. With n=256 and
-    // sign bit = 0, bytes are the encoding of ℓ.
+fn read_bits_at_ell_soft_fails() {
+    // A scalar residue must be strictly less than ℓ.
     let mut vm = vm_with_script(
         ScriptBuilder::new()
             .push_str(s(&ELL_LE))
@@ -111,11 +108,11 @@ fn read_bits_magnitude_at_ell_soft_fails() {
     // Soft-fail: original 32-byte string restored, marker = 0.
     assert_eq!(vm.current_call.stack.len(), 2);
     assert_str(&vm.current_call.stack[0], &ELL_LE);
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
 }
 
 #[test]
-fn read_bits_magnitude_above_ell_soft_fails() {
+fn read_bits_above_ell_soft_fails() {
     // ℓ + 1: still non-canonical, must soft-fail.
     let mut bytes = ELL_LE;
     bytes[0] = bytes[0].wrapping_add(1);
@@ -128,12 +125,12 @@ fn read_bits_magnitude_above_ell_soft_fails() {
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &bytes);
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
 }
 
 #[test]
-fn read_bits_negative_zero_soft_fails() {
-    // n=256, magnitude = 0, sign bit = 1 → negative zero. Reject.
+fn read_bits_2pow255_soft_fails() {
+    // Reading all 256 bits must reject 2^255, which exceeds ℓ.
     let mut bytes = [0u8; 32];
     bytes[31] = 0x80;
     let mut vm = vm_with_script(
@@ -145,11 +142,11 @@ fn read_bits_negative_zero_soft_fails() {
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &bytes);
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
 }
 
 #[test]
-fn read_bits_roundtrip_nonneg_at_various_n() {
+fn read_bits_roundtrip_small_residues_at_various_n() {
     let cases: &[(usize, u64)] = &[
         (1, 1),
         (8, 0xab),
@@ -160,7 +157,7 @@ fn read_bits_roundtrip_nonneg_at_various_n() {
         (256, 0x7fff_ffff_ffff_ffff),
     ];
     for (n, v) in cases.iter().copied() {
-        let value = Int253::from(v);
+        let value = Scalar::from(v);
         let bytes = writebits_bytes(&value, n);
         let mut vm = vm_with_script(
             ScriptBuilder::new()
@@ -171,30 +168,32 @@ fn read_bits_roundtrip_nonneg_at_various_n() {
         );
         run_to_end(&mut vm).unwrap_or_else(|e| panic!("n={} v={} err={:?}", n, v, e));
         assert_int(&vm.current_call.stack[1], value);
-        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+        assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
         assert_str(&vm.current_call.stack[0], &[]);
     }
 }
 
 #[test]
-fn read_bits_roundtrip_negative_at_n_256() {
-    let value = Int253::from_parts(true, Scalar::from(12345u64));
+fn read_bits_roundtrip_near_order_at_n_253_and_256() {
+    let value = Scalar::from(-12345i64);
     let bytes = value.to_bytes();
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&bytes))
-            .push_int(256u64)
-            .read_bits()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[1], value);
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    for n in [253u64, 256] {
+        let mut vm = vm_with_script(
+            ScriptBuilder::new()
+                .push_str(s(&bytes))
+                .push_int(n)
+                .read_bits()
+                .to_bytecode(),
+        );
+        run_to_end(&mut vm).unwrap();
+        assert_int(&vm.current_call.stack[1], value);
+        assert_int(&vm.current_call.stack[2], Scalar::ONE);
+    }
 }
 
 #[test]
-fn read_int_positive_roundtrip() {
-    let value = Int253::from(1u64);
+fn read_int_one_roundtrip() {
+    let value = Scalar::from(1u64);
     let mut vm = vm_with_script(
         ScriptBuilder::new()
             .push_str(s(&value.to_bytes()))
@@ -203,12 +202,12 @@ fn read_int_positive_roundtrip() {
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[1], value);
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
-fn read_int_negative_roundtrip() {
-    let value = Int253::from_parts(true, Scalar::from(1u64));
+fn read_int_near_order_roundtrip() {
+    let value = Scalar::from(-12345i64);
     let mut vm = vm_with_script(
         ScriptBuilder::new()
             .push_str(s(&value.to_bytes()))
@@ -221,7 +220,7 @@ fn read_int_negative_roundtrip() {
 
 #[test]
 fn read_int_zero_roundtrip() {
-    let value = Int253::ZERO;
+    let value = Scalar::ZERO;
     let mut vm = vm_with_script(
         ScriptBuilder::new()
             .push_str(s(&value.to_bytes()))
@@ -233,8 +232,8 @@ fn read_int_zero_roundtrip() {
 }
 
 #[test]
-fn read_int_large_magnitude_roundtrip() {
-    // ℓ - 1 (max canonical magnitude), positive.
+fn read_int_max_canonical_residue_roundtrip() {
+    // ℓ − 1 is the largest canonical residue.
     let mut ell_minus_1 = ELL_LE;
     ell_minus_1[0] = 0xec;
     let mut vm = vm_with_script(
@@ -245,10 +244,10 @@ fn read_int_large_magnitude_roundtrip() {
     );
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[1] {
-        Value::Int253(i) => assert_eq!(i.to_bytes(), ell_minus_1),
-        other => panic!("expected Int253, got {}", value_kind(other)),
+        Value::Scalar(i) => assert_eq!(i.to_bytes(), ell_minus_1),
+        other => panic!("expected Scalar, got {}", value_kind(other)),
     }
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
@@ -262,13 +261,12 @@ fn read_int_too_short_preserves_string() {
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
     assert_str(&vm.current_call.stack[0], &[0xaa; 31]);
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
 }
 
 #[test]
-fn read_int_negative_zero_soft_fails() {
-    let mut bytes = [0u8; 32];
-    bytes[31] = 0x80;
+fn read_int_at_ell_soft_fails() {
+    let bytes = ELL_LE;
     let mut vm = vm_with_script(
         ScriptBuilder::new()
             .push_str(s(&bytes))
@@ -277,7 +275,7 @@ fn read_int_negative_zero_soft_fails() {
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &bytes);
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
 }
 
 #[test]
@@ -292,7 +290,7 @@ fn read_str_success() {
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[3, 4, 5]);
     assert_str(&vm.current_call.stack[1], &[1, 2]);
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
@@ -306,7 +304,7 @@ fn read_str_too_short_preserves() {
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[1]);
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
 }
 
 #[test]
@@ -325,7 +323,7 @@ fn read_point_success() {
         Value::Point(p) => assert_eq!(p.to_bytes(), [0x55u8; 32]),
         other => panic!("expected Point, got {}", value_kind(other)),
     }
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
@@ -337,7 +335,7 @@ fn read_point_too_short() {
             .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
 }
 
 #[test]
@@ -402,7 +400,7 @@ fn write_bits_n_257_hard_fails() {
 }
 
 #[test]
-fn write_then_read_bits_roundtrip_nonneg() {
+fn write_then_read_bits_roundtrip_small_residues() {
     let cases: &[(usize, u64)] = &[
         (8, 0xab),
         (64, 0x0123_4567_89ab_cdef),
@@ -410,7 +408,7 @@ fn write_then_read_bits_roundtrip_nonneg() {
     ];
     for (n, v) in cases.iter().copied() {
         // writebits requires n to be a multiple of 8.
-        let value = Int253::from(v);
+        let value = Scalar::from(v);
         let mut vm = vm_with_script(
             ScriptBuilder::new()
                 .push_str(s(&[]))
@@ -424,62 +422,58 @@ fn write_then_read_bits_roundtrip_nonneg() {
         run_to_end(&mut vm).unwrap_or_else(|e| panic!("n={} v={} err={:?}", n, v, e));
         assert_str(&vm.current_call.stack[0], &[]);
         assert_int(&vm.current_call.stack[1], value);
-        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+        assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
     }
 }
 
 #[test]
-fn write_then_read_bits_roundtrip_negative_n_256() {
-    // For n=256, sign bit at position 255 is preserved.
-    let value = Int253::from_parts(true, Scalar::from(12345u64));
-    let bytes = value.to_bytes();
+fn write_then_read_bits_roundtrip_near_order_n_256() {
+    let value = Scalar::from(-12345i64);
     let mut vm = vm_with_script(
         ScriptBuilder::new()
             .push_str(s(&[]))
-            .push_str(s(&bytes))
-            .append()
+            .push_int(value)
+            .push_int(256u64)
+            .write_bits()
             .push_int(256u64)
             .read_bits()
             .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_int(&vm.current_call.stack[1], value);
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
-fn write_then_read_int_roundtrip_signs_and_extremes() {
+fn write_then_read_int_roundtrip_residue_extremes() {
     let mut ell_minus_1 = ELL_LE;
     ell_minus_1[0] = 0xec;
-    let mut neg_ell_minus_1 = ell_minus_1;
-    neg_ell_minus_1[31] |= 0x80;
-    let values: Vec<Int253> = vec![
-        Int253::from(1u64),
-        Int253::from_parts(true, Scalar::from(1u64)),
-        Int253::from_bytes(ell_minus_1).unwrap(),
-        Int253::from_bytes(neg_ell_minus_1).unwrap(),
-        Int253::ZERO,
-        Int253::from(0xdead_beef_cafe_babe_u64),
+    let values: Vec<Scalar> = vec![
+        Scalar::from(1u64),
+        Scalar::from(-12345i64),
+        Scalar::from_bytes(ell_minus_1).unwrap(),
+        Scalar::from(u128::MAX) + Scalar::ONE,
+        -(Scalar::from(u128::MAX) + Scalar::ONE),
+        Scalar::ZERO,
+        Scalar::from(0xdead_beef_cafe_babe_u64),
     ];
     for v in values {
-        let bytes = v.to_bytes();
-        // pushstr(empty), pushstr(bytes), append, readint
         let mut vm = vm_with_script(
             ScriptBuilder::new()
                 .push_str(s(&[]))
-                .push_str(s(&bytes))
-                .append()
+                .push_int(v)
+                .write_int()
                 .read_int()
                 .to_bytecode(),
         );
         run_to_end(&mut vm).unwrap_or_else(|e| panic!("value={:?} err={:?}", v, e));
         match &vm.current_call.stack[1] {
-            Value::Int253(i) => {
+            Value::Scalar(i) => {
                 assert_eq!(i.to_bytes(), v.to_bytes(), "roundtrip differed for {:?}", v)
             }
-            other => panic!("expected Int253, got {}", value_kind(other)),
+            other => panic!("expected Scalar, got {}", value_kind(other)),
         }
-        assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+        assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
     }
 }
 

@@ -9,7 +9,7 @@ const NODE_HEADER: usize = 3; // child mask + u16 label length
 
 /// Largest fixed key supported by the recursive mutation implementation.
 ///
-/// ponytail: keep recursion bounded to the current Int253 use; switch mutation
+/// ponytail: keep recursion bounded to the current Scalar use; switch mutation
 /// to iterative path rebuilding before increasing this limit.
 pub const MAX_TRIE_KEY_BYTES: usize = 32;
 

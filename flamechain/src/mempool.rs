@@ -334,7 +334,7 @@ pub enum MempoolError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flamevm::{Anchor, Contract, Int253, Limits, Predicate, ScriptBuilder, TxHeader};
+    use flamevm::{Anchor, Contract, Limits, Predicate, Scalar, ScriptBuilder, TxHeader};
 
     fn external_tx(program: ScriptBuilder) -> BlockTx {
         let limits = Limits { gas: 100_000 };
@@ -407,8 +407,8 @@ mod tests {
         let mut pool = Mempool::new(&chain, Default::default());
         let tx = external_tx(
             ScriptBuilder::new()
-                .alloc(Some(Int253::ONE))
-                .alloc(Some(Int253::ONE))
+                .alloc(Some(Scalar::ONE))
+                .alloc(Some(Scalar::ONE))
                 .drop_()
                 .drop_(),
         );

@@ -158,8 +158,8 @@ A request is unavailable when:
 - the byte amount, pool update, or expiry height does not fit its consensus
   `u64` representation;
 - an intermediate calculation overflows; or
-- the resulting positive fee cannot be represented as an `Int253` and as the
-  magnitude of a `ClearToken` quantity.
+- the resulting positive fee cannot be represented as a `Scalar` with a
+  non-negative centered `ClearToken` quantity.
 
 The final unit is therefore never purchasable: its quoted price is
 mathematically unbounded.
@@ -178,7 +178,7 @@ parameters:
 The canonical storage-effect wire vector is pinned alongside the other TxLog
 vectors in FlameVM's golden tests. It covers the `StoragePurchase` and
 `ActorDestroy` tags, canonical actor id, little-endian byte and expiry fields,
-and compact `Int253` fee encoding.
+and compact `Scalar` fee encoding.
 
 Actor commitments are canonical independently of persistence encoding.
 `code_root` is a Merlin transcript under `flamevm.actor.code.root` containing
@@ -188,7 +188,7 @@ actor leaf commits, in order, to actor id; live marker; code and state roots;
 u64-LE code and state byte counts; u64-LE lease count; then each lease's
 u64-LE expiry and unit count in expiry order. The actor registry root is the
 Merkle root under `flamechain.actors` over actor-id order, including lease-only
-tombstones. The golden fixture `(actor=07×32, code=1d, state=Int253(42), one
+tombstones. The golden fixture `(actor=07×32, code=1d, state=Scalar(42), one
 1024-byte lease at height 0)` has root
 `2694dc0a474475efe48096f89f41ad71bbadd7694021fc6ede5b3397d967f572`.
 
@@ -218,8 +218,9 @@ current_height + LEASE_DURATION_CORE_BLOCKS
 It emits a storage-purchase effect and returns
 `ClearToken(-fee_sparks, FLAME_FLAVOR)`. The transaction must balance that debt
 with actual Flame. A successful storage-purchase effect burns the balanced
-amount irrevocably; minters do not collect it. `retire` rejects negative clear
-tokens, so the debt cannot be erased instead of balanced.
+amount irrevocably; minters do not collect it. `retire` rejects clear tokens
+whose quantities have a negative centered interpretation, so the debt cannot
+be erased instead of balanced.
 
 `quotestorage` is advisory, not a reservation. Any intervening successful
 purchase changes the reserve and therefore the result of a later `addstorage`.
@@ -242,7 +243,7 @@ q addstorage       -> { flame_debt 1 | 0 }
 `height` returns the current core-block height during an internal transaction
 and zero throughout an external transaction. `usage` returns the current
 actor's charged usage. `capacity(h)` returns its capacity at current or future
-height `h`. Negative or non-`u64` heights hard-fail `InvalidBitrange`, and a
+height `h`. Scalar residues outside the `u64` height range hard-fail `InvalidBitrange`, and a
 height below the current block hard-fails `StorageHeightInPast`. `usage` and
 `capacity` require actor context and a registry.
 

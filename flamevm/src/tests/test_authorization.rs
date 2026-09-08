@@ -56,7 +56,7 @@ fn signtx_pours_payload_and_records_txbound_sig() {
     run_external_to_end(&mut vm).unwrap();
     // Stack now has [5, 7, count=2].
     assert_eq!(vm.current_call.stack.len(), 3);
-    assert_int(&vm.current_call.stack[2], Int253::from(2u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(2u64));
     // Exactly one TxBound deferred sig recorded. No message, no sig
     // bytes — those come from the tx envelope at finalize.
     assert_eq!(vm.deferred_sigs.len(), 1);
@@ -127,8 +127,8 @@ fn signcall_records_explicit_sig_and_runs_program() {
     run_external_to_end(&mut vm).unwrap();
     // Parent stack: [count=0, success=1] from the child's clean return.
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
-    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(1u64));
     assert_eq!(vm.deferred_sigs.len(), 1);
     match &vm.deferred_sigs[0] {
         DeferredSig::Explicit {
@@ -156,7 +156,7 @@ fn failed_signcall_restores_contract_and_argument_and_signature_checkpoint() {
     )
     .expect("empty payload is portable");
     let contract_id = contract.id();
-    let token = Token::cleartext(Int253::from(43u64), FLAME_FLAVOR).unwrap();
+    let token = Token::cleartext(Scalar::from(43u64), FLAME_FLAVOR).unwrap();
 
     let mut vm = vm_external_with_script(ScriptBuilder::new().signcall().to_bytecode());
     vm.last_anchor = Some(Anchor([0x42; 32]));
@@ -164,9 +164,9 @@ fn failed_signcall_restores_contract_and_argument_and_signature_checkpoint() {
         Value::Contract(Box::new(contract)),
         Value::String(String::from(program)),
         Value::String(String::from(signature.to_vec())),
-        Value::Int253(Int253::from(10_000u64)),
+        Value::Scalar(Scalar::from(10_000u64)),
         Value::Token(token.clone()),
-        Value::Int253(Int253::ONE),
+        Value::Scalar(Scalar::ONE),
     ];
 
     run_external_to_end(&mut vm).unwrap();
@@ -181,8 +181,8 @@ fn failed_signcall_restores_contract_and_argument_and_signature_checkpoint() {
         &vm.current_call.stack[1],
         Value::Token(restored) if restored.qty() == token.qty() && restored.flv() == token.flv()
     ));
-    assert_int(&vm.current_call.stack[2], Int253::ONE);
-    assert_int(&vm.current_call.stack[3], Int253::ZERO);
+    assert_int(&vm.current_call.stack[2], Scalar::ONE);
+    assert_int(&vm.current_call.stack[3], Scalar::ZERO);
 }
 
 #[test]
@@ -342,8 +342,8 @@ fn signcall_explicit_sig_batch_verifies_correctly() {
     // (Full prove+verify-via-script path is covered by
     // `test_proof_pipeline`; this test isolates the batch check.)
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
-    use curve25519_dalek::scalar::Scalar;
-    let sk = Scalar::from(42u64);
+    use curve25519_dalek::scalar::Scalar as DalekScalar;
+    let sk = DalekScalar::from(42u64);
     let vk_point = (RISTRETTO_BASEPOINT_TABLE * &sk).compress();
     // Build the message exactly as `op_signcall`'s
     // `signcall_message(program)` helper does.
@@ -371,8 +371,8 @@ fn signcall_tampered_sig_batch_rejects() {
     // Verify that a tampered sig fails the batch check (the same
     // path that Verifier::verify uses for Explicit sigs).
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
-    use curve25519_dalek::scalar::Scalar;
-    let sk = Scalar::from(42u64);
+    use curve25519_dalek::scalar::Scalar as DalekScalar;
+    let sk = DalekScalar::from(42u64);
     let vk_point = (RISTRETTO_BASEPOINT_TABLE * &sk).compress();
     let inner_prog = vec![0x1c];
     let mut prog_t = merlin::Transcript::new(b"flamevm.signcall");
@@ -392,7 +392,7 @@ fn signcall_tampered_sig_batch_rejects() {
             // If from_bytes rejects (non-canonical scalar), build by hand.
             Ok::<_, ()>(musig::Signature {
                 R: sig.R,
-                s: sig.s + Scalar::ONE,
+                s: sig.s + DalekScalar::ONE,
             })
         })
         .unwrap();
@@ -506,7 +506,7 @@ fn phase20_two_txbound_verifies_with_multisig() {
     let contract1 = Contract::new(
         Predicate::opaque(vk1),
         Anchor([0xa1; 32]),
-        vec![Value::Int253(Int253::from(0u64))],
+        vec![Value::Scalar(Scalar::from(0u64))],
     )
     .expect("payload is portable");
     let contract1_id = contract1.id();
@@ -515,7 +515,7 @@ fn phase20_two_txbound_verifies_with_multisig() {
     let contract2 = Contract::new(
         Predicate::opaque(vk2),
         Anchor([0xa2; 32]),
-        vec![Value::Int253(Int253::from(0u64))],
+        vec![Value::Scalar(Scalar::from(0u64))],
     )
     .expect("payload is portable");
     let contract2_id = contract2.id();
@@ -600,10 +600,10 @@ fn phase20_spurious_signature_when_no_txbound() {
     // Trivial program: alloc + alloc + add + alloc + eq + verify
     // — no input, no signtx, no TxBound deferred sigs.
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(10u64)))
+        .alloc(Some(Scalar::from(10u64)))
         .eq()
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove ok");
@@ -616,7 +616,7 @@ fn phase20_spurious_signature_when_no_txbound() {
     // TxBound items.
     let sig = musig::Signature {
         R: curve25519_dalek::ristretto::CompressedRistretto([0u8; 32]),
-        s: Scalar::from(0u64),
+        s: DalekScalar::from(0u64),
     };
     let pc_gens_v = PedersenGens::default();
     let err = Verifier::verify(
@@ -641,7 +641,7 @@ fn phase20_tampered_signature_rejected() {
     let pc_gens = PedersenGens::default();
     let (vk, _sk_real) = signing_keypair(101);
     // Sign with a *different* secret — vk doesn't correspond.
-    let sk_wrong = Scalar::from(999u64);
+    let sk_wrong = DalekScalar::from(999u64);
     let (script, contract_id) = make_signtx_script_with_contract(vk);
     let program = ScriptBuilder::parse(&script).expect("decode");
     let prover_result =
@@ -676,10 +676,10 @@ fn phase20_tampered_signature_rejected() {
 fn phase20_no_txbound_no_signature_roundtrip() {
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(10u64)))
+        .alloc(Some(Scalar::from(10u64)))
         .eq()
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove ok");
@@ -762,7 +762,7 @@ fn signcall_selfid_errors_no_actor_context() {
     run_external_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 3);
     assert!(matches!(vm.current_call.stack[0], Value::Contract(_)));
-    assert_int(&vm.current_call.stack[1], Int253::ZERO);
-    assert_int(&vm.current_call.stack[2], Int253::ZERO);
+    assert_int(&vm.current_call.stack[1], Scalar::ZERO);
+    assert_int(&vm.current_call.stack[2], Scalar::ZERO);
     assert!(vm.deferred_sigs.is_empty());
 }

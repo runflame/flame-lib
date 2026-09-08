@@ -3,7 +3,7 @@ name = "cells"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "Content-addressed cells, bags, snakes, and tries for Flame"
+description = "Content-addressed cells, bags, tries, and byte-string encoding for Flame"
 
 [dependencies]
 sha2 = "0.10"

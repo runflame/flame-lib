@@ -1,4 +1,4 @@
-use crate::{Cell, CellError, CellRef};
+use crate::{Cell, CellError, CellRef, CellResolver, MAX_CELL_PAYLOAD, resolve_cell};
 
 /// A consuming payload/reference cursor over one [`Cell`].
 #[derive(Clone, Debug)]
@@ -59,6 +59,54 @@ impl<'a> CellSlice<'a> {
             .ok_or(CellError::InsufficientBytes)?;
         self.byte_offset = end;
         Ok(bytes)
+    }
+
+    /// Reads a byte string encoded by [`crate::CellBuilder::store_snake`].
+    ///
+    /// Checks the declared byte length against `limit` before allocating or
+    /// resolving anything. Overflow consumes only the next unread parent ref;
+    /// dedicated continuation Cells must have canonical lengths and ref counts.
+    /// The cursor stays on the parent, preserving subsequent fields and refs.
+    /// On error the cursor is unchanged, but resolver charges are not refunded.
+    pub fn load_snake<R: CellResolver + ?Sized>(
+        &mut self,
+        cells: &mut R,
+        limit: usize,
+    ) -> Result<Vec<u8>, CellError> {
+        self.try_load(|slice| {
+            let length =
+                usize::try_from(slice.load_u32()?).map_err(|_| CellError::LimitExceeded)?;
+            if length > limit {
+                return Err(CellError::LimitExceeded);
+            }
+
+            let inline = length.min(slice.remaining_bytes());
+            if inline < length && slice.cell.payload().len() != MAX_CELL_PAYLOAD {
+                return Err(CellError::InvalidFormat);
+            }
+            // Grow only from validated data, not the untrusted declared length.
+            let mut bytes = slice.load_bytes(inline)?.to_vec();
+            if bytes.len() == length {
+                return Ok(bytes);
+            }
+
+            let mut reference = slice.load_ref()?;
+            loop {
+                let cell = resolve_cell(cells, &reference)?;
+                let remaining = length - bytes.len();
+                let continues = remaining > MAX_CELL_PAYLOAD;
+                if cell.payload().len() != remaining.min(MAX_CELL_PAYLOAD)
+                    || cell.refs().len() != usize::from(continues)
+                {
+                    return Err(CellError::InvalidFormat);
+                }
+                bytes.extend_from_slice(cell.payload());
+                if !continues {
+                    return Ok(bytes);
+                }
+                reference = cell.refs()[0].clone();
+            }
+        })
     }
 
     pub fn load_ref(&mut self) -> Result<CellRef, CellError> {

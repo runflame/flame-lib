@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::{ActorID, ActorRegistry, Int253};
+use crate::{ActorID, ActorRegistry, Scalar};
 
 /// Builds an InternalRoot VM with explicit identity fields.
 fn vm_internal_with(

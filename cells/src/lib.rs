@@ -6,6 +6,7 @@ mod cell;
 mod codec;
 mod error;
 mod slice;
+#[cfg(test)]
 mod snake;
 mod trie;
 
@@ -17,5 +18,4 @@ pub use cell::{
 pub use codec::{CellDecode, CellEncode};
 pub use error::CellError;
 pub use slice::CellSlice;
-pub use snake::{Snake, SnakeReader, SnakeWriter};
 pub use trie::{MAX_TRIE_KEY_BYTES, Trie};

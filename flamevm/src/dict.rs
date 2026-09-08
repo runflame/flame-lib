@@ -2,13 +2,13 @@ use std::collections::BTreeMap;
 use std::ops::Bound::{Excluded, Unbounded};
 
 use crate::errors::VMError;
-use crate::Int253;
+use crate::Scalar;
 use crate::Value;
 
-/// Ordered map from `Int253` keys to `Value`s.
+/// Ordered map from `Scalar` keys to `Value`s.
 ///
 /// Backed by a `BTreeMap`, so `insert` / `get` / `remove` are O(log n)
-/// per call. Iteration yields entries in ascending key order, which the
+/// per call. Iteration yields entries in unsigned canonical scalar order, which the
 /// wire encoder relies on for canonical output.
 ///
 /// Dicts are **never VM-copyable** (avoids variable gas for
@@ -25,7 +25,7 @@ use crate::Value;
 ///   that value is later removed.
 #[derive(Clone, Debug)]
 pub struct Dict {
-    entries: BTreeMap<Int253, Value>,
+    entries: BTreeMap<Scalar, Value>,
     droppable: bool,
     portable: bool,
 }
@@ -52,19 +52,19 @@ impl Dict {
     }
 
     /// Iterates over entries in ascending key order.
-    pub fn entries(&self) -> impl Iterator<Item = (&Int253, &Value)> {
+    pub fn entries(&self) -> impl Iterator<Item = (&Scalar, &Value)> {
         self.entries.iter()
     }
 
     /// Looks up a value by key. O(log n).
-    pub fn get(&self, key: &Int253) -> Option<&Value> {
+    pub fn get(&self, key: &Scalar) -> Option<&Value> {
         self.entries.get(key)
     }
 
     /// Inserts a key-value pair. O(log n). If the key already exists,
     /// replaces the value and returns the prior one. Updates both sticky
     /// capability flags from the new value.
-    pub fn insert(&mut self, key: Int253, value: Value) -> Option<Value> {
+    pub fn insert(&mut self, key: Scalar, value: Value) -> Option<Value> {
         self.absorb_flags(&value);
         self.entries.insert(key, value)
     }
@@ -74,7 +74,7 @@ impl Dict {
     /// whether to discard or surface it. A rejected insertion does not
     /// update either sticky capability flag.
     #[allow(clippy::result_large_err)]
-    pub fn insert_strict(&mut self, key: Int253, value: Value) -> Result<(), Value> {
+    pub fn insert_strict(&mut self, key: Scalar, value: Value) -> Result<(), Value> {
         if self.entries.contains_key(&key) {
             return Err(value);
         }
@@ -84,23 +84,23 @@ impl Dict {
 
     /// Removes a key and returns its value if present. O(log n).
     /// Does **not** unset the sticky flags — see the struct doc-comment.
-    pub fn remove(&mut self, key: &Int253) -> Option<Value> {
+    pub fn remove(&mut self, key: &Scalar) -> Option<Value> {
         self.entries.remove(key)
     }
 
     /// Smallest key in the dict, or `None` if empty. O(log n).
-    pub fn first_key(&self) -> Option<Int253> {
+    pub fn first_key(&self) -> Option<Scalar> {
         self.entries.keys().next().copied()
     }
 
     /// Largest key in the dict, or `None` if empty. O(log n).
-    pub fn last_key(&self) -> Option<Int253> {
+    pub fn last_key(&self) -> Option<Scalar> {
         self.entries.keys().next_back().copied()
     }
 
     /// Smallest key strictly greater than `k`, or `None` if no such key
     /// exists. O(log n).
-    pub fn next_key_after(&self, k: &Int253) -> Option<Int253> {
+    pub fn next_key_after(&self, k: &Scalar) -> Option<Scalar> {
         self.entries
             .range((Excluded(*k), Unbounded))
             .next()
@@ -152,7 +152,7 @@ impl Dict {
     pub fn from_values(values: Vec<Value>) -> Self {
         let mut d = Dict::new();
         for (i, v) in values.into_iter().enumerate() {
-            d.insert(Int253::from(i as u64), v);
+            d.insert(Scalar::from(i as u64), v);
         }
         d
     }
@@ -160,7 +160,7 @@ impl Dict {
     /// Builds a dict from entries that the caller guarantees are strictly
     /// ascending by key. Used by the wire decoder, which performs the
     /// ordering check inline as it reads.
-    pub(crate) fn from_entries_unchecked(entries: Vec<(Int253, Value)>) -> Self {
+    pub(crate) fn from_entries_unchecked(entries: Vec<(Scalar, Value)>) -> Self {
         let mut d = Dict::new();
         for (k, v) in entries {
             let _ = d.insert(k, v);
@@ -186,7 +186,7 @@ mod tests {
     use crate::{Merlin, String};
 
     fn v(n: u64) -> Value {
-        Value::Int253(Int253::from(n))
+        Value::Scalar(Scalar::from(n))
     }
 
     #[test]
@@ -195,34 +195,34 @@ mod tests {
         assert_eq!(d.len(), 0);
         assert!(d.is_empty());
         assert!(d.is_portable());
-        assert!(d.get(&Int253::from(0u64)).is_none());
+        assert!(d.get(&Scalar::from(0u64)).is_none());
     }
 
     #[test]
     fn insert_basic() {
         let mut d = Dict::new();
-        assert!(d.insert(Int253::from(5u64), v(50)).is_none());
-        assert!(d.insert(Int253::from(1u64), v(10)).is_none());
-        assert!(d.insert(Int253::from(3u64), v(30)).is_none());
+        assert!(d.insert(Scalar::from(5u64), v(50)).is_none());
+        assert!(d.insert(Scalar::from(1u64), v(10)).is_none());
+        assert!(d.insert(Scalar::from(3u64), v(30)).is_none());
         let keys: Vec<_> = d.entries().map(|(k, _)| *k).collect();
         assert_eq!(
             keys,
-            vec![Int253::from(1u64), Int253::from(3u64), Int253::from(5u64)]
+            vec![Scalar::from(1u64), Scalar::from(3u64), Scalar::from(5u64)]
         );
     }
 
     #[test]
     fn insert_existing_replaces_and_returns_old() {
         let mut d = Dict::new();
-        assert!(d.insert(Int253::from(2u64), v(100)).is_none());
-        let prior = d.insert(Int253::from(2u64), v(200));
+        assert!(d.insert(Scalar::from(2u64), v(100)).is_none());
+        let prior = d.insert(Scalar::from(2u64), v(200));
         match prior {
-            Some(Value::Int253(i)) => assert_eq!(i, Int253::from(100u64)),
-            _ => panic!("expected old Int253"),
+            Some(Value::Scalar(i)) => assert_eq!(i, Scalar::from(100u64)),
+            _ => panic!("expected old Scalar"),
         }
-        match d.get(&Int253::from(2u64)) {
-            Some(Value::Int253(i)) => assert_eq!(*i, Int253::from(200u64)),
-            _ => panic!("expected Int253"),
+        match d.get(&Scalar::from(2u64)) {
+            Some(Value::Scalar(i)) => assert_eq!(*i, Scalar::from(200u64)),
+            _ => panic!("expected Scalar"),
         }
         assert_eq!(d.len(), 1);
     }
@@ -230,13 +230,13 @@ mod tests {
     #[test]
     fn get_present_and_absent() {
         let mut d = Dict::new();
-        d.insert(Int253::from(1u64), v(10));
+        d.insert(Scalar::from(1u64), v(10));
         d.insert(
-            Int253::from(99u64),
+            Scalar::from(99u64),
             Value::String(String::from(b"hi".to_vec())),
         );
-        assert!(d.get(&Int253::from(50u64)).is_none());
-        match d.get(&Int253::from(99u64)) {
+        assert!(d.get(&Scalar::from(50u64)).is_none());
+        match d.get(&Scalar::from(99u64)) {
             Some(Value::String(s)) => assert_eq!(s.as_opaque().unwrap(), b"hi"),
             _ => panic!("expected String"),
         }
@@ -245,30 +245,30 @@ mod tests {
     #[test]
     fn remove_present_and_absent() {
         let mut d = Dict::new();
-        d.insert(Int253::from(1u64), v(10));
-        d.insert(Int253::from(2u64), v(20));
-        let removed = d.remove(&Int253::from(1u64));
-        assert!(matches!(removed, Some(Value::Int253(_))));
+        d.insert(Scalar::from(1u64), v(10));
+        d.insert(Scalar::from(2u64), v(20));
+        let removed = d.remove(&Scalar::from(1u64));
+        assert!(matches!(removed, Some(Value::Scalar(_))));
         assert_eq!(d.len(), 1);
-        assert!(d.remove(&Int253::from(1u64)).is_none());
-        assert!(d.remove(&Int253::from(42u64)).is_none());
+        assert!(d.remove(&Scalar::from(1u64)).is_none());
+        assert!(d.remove(&Scalar::from(42u64)).is_none());
     }
 
     #[test]
-    fn signed_keys_ordered_negatives_first() {
+    fn scalar_keys_use_canonical_unsigned_order() {
         let mut d = Dict::new();
-        d.insert(Int253::from(2i64), v(2));
-        d.insert(Int253::from(-3i64), v(30));
-        d.insert(Int253::from(0i64), v(0));
-        d.insert(Int253::from(-1i64), v(10));
+        d.insert(Scalar::from(2i64), v(2));
+        d.insert(Scalar::from(-3i64), v(30));
+        d.insert(Scalar::from(0i64), v(0));
+        d.insert(Scalar::from(-1i64), v(10));
         let keys: Vec<_> = d.entries().map(|(k, _)| *k).collect();
         assert_eq!(
             keys,
             vec![
-                Int253::from(-3i64),
-                Int253::from(-1i64),
-                Int253::from(0i64),
-                Int253::from(2i64),
+                Scalar::from(0i64),
+                Scalar::from(2i64),
+                Scalar::from(-3i64),
+                Scalar::from(-1i64),
             ]
         );
     }
@@ -281,28 +281,28 @@ mod tests {
         let keys: Vec<_> = d.entries().map(|(k, _)| *k).collect();
         assert_eq!(
             keys,
-            vec![Int253::from(0u64), Int253::from(1u64), Int253::from(2u64)]
+            vec![Scalar::from(0u64), Scalar::from(1u64), Scalar::from(2u64)]
         );
     }
 
     #[test]
     fn portability_is_sticky() {
         let mut d = Dict::new();
-        d.insert(Int253::ZERO, Value::Merlin(Merlin::new(b"test")));
+        d.insert(Scalar::ZERO, Value::Merlin(Merlin::new(b"test")));
         assert!(!d.is_portable());
 
-        d.insert(Int253::ZERO, v(1));
+        d.insert(Scalar::ZERO, v(1));
         assert!(!d.is_portable());
-        d.remove(&Int253::ZERO);
+        d.remove(&Scalar::ZERO);
         assert!(!d.is_portable());
     }
 
     #[test]
     fn rejected_insert_does_not_clear_portability() {
         let mut d = Dict::new();
-        d.insert(Int253::ZERO, v(1));
+        d.insert(Scalar::ZERO, v(1));
         assert!(d
-            .insert_strict(Int253::ZERO, Value::Merlin(Merlin::new(b"test")))
+            .insert_strict(Scalar::ZERO, Value::Merlin(Merlin::new(b"test")))
             .is_err());
         assert!(d.is_portable());
     }
@@ -314,7 +314,7 @@ mod tests {
         assert!(!parent.is_portable());
 
         let explicit = Dict::from_entries_unchecked(vec![(
-            Int253::from(7u64),
+            Scalar::from(7u64),
             Value::Merlin(Merlin::new(b"explicit")),
         )]);
         assert!(!explicit.is_portable());

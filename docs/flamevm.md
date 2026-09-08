@@ -124,7 +124,7 @@ Calls themselves are intra-transaction control flow, not effects. Anything a cal
 
 Canonical internal log shapes are enforced by the state machine. Success is `Header, Receive, [ActorDeploy], effects...`, where deployment is permitted only immediately after `Receive` and any `ActorDestroy` entries form a suffix. Failed delivery is exactly `Header, Receive, Output(refund)`. Lease-expiry destruction is exactly `Header, Data(height), Retire..., ActorDestroy`. External logs start with one `Header` and cannot contain internal-only actor effects.
 
-**TxLog transport.** The TxLog (`Vec<TxEntry>`) is **re-derived by re-executing** the bytecode under the proof + signature binding — it is never trusted from the wire. `ExternalTx::verify` re-runs the script and rebuilds the log from scratch, so full-node consensus needs no TxLog decoding and a forged TxLog cannot be injected. For archival and light-client transport the crate provides a canonical **encode-only** serialization (`Encodable` for `TxEntry`/`TxLog`): a u64-LE entry count, then each entry's stable tag and fields. Existing tags are never renumbered: `0 Header, 1 Data, 2 Input, 3 Receive, 4 Output, 5 IssuePub, 6 IssuePriv, 7 Retire, 8 Fee, 9 ActorSave, 10 SetCode, 11 Send, 12 StoragePurchase, 13 ActorDestroy, 14 ActorDeploy`. Fields reuse the canonical `Contract`, `Message`, `ActorID`, `Value`, and `Int253` encodings; integers are little-endian and byte blobs are u64-LE length-prefixed. `ActorDeploy` encodes canonical actor id and constructor code; `StoragePurchase` encodes actor, bytes, expiry height, and fee sparks. No consensus decoder accepts a TxLog: a future archival decoder must remain outside the application path.
+**TxLog transport.** The TxLog (`Vec<TxEntry>`) is **re-derived by re-executing** the bytecode under the proof + signature binding — it is never trusted from the wire. `ExternalTx::verify` re-runs the script and rebuilds the log from scratch, so full-node consensus needs no TxLog decoding and a forged TxLog cannot be injected. For archival and light-client transport the crate provides a canonical **encode-only** serialization (`Encodable` for `TxEntry`/`TxLog`): a u64-LE entry count, then each entry's stable tag and fields. Existing tags are never renumbered: `0 Header, 1 Data, 2 Input, 3 Receive, 4 Output, 5 IssuePub, 6 IssuePriv, 7 Retire, 8 Fee, 9 ActorSave, 10 SetCode, 11 Send, 12 StoragePurchase, 13 ActorDestroy, 14 ActorDeploy`. Fields reuse the canonical `Contract`, `Message`, `ActorID`, `Value`, and `Scalar` encodings; integers are little-endian and byte blobs are u64-LE length-prefixed. `ActorDeploy` encodes canonical actor id and constructor code; `StoragePurchase` encodes actor, bytes, expiry height, and fee sparks. No consensus decoder accepts a TxLog: a future archival decoder must remain outside the application path.
 
 Internal transactions do not pay transaction-prioritization fees. Actors may
 nevertheless burn Flame for storage through `addstorage`. Internal transactions
@@ -196,7 +196,7 @@ Storage-purchase pricing and issuance are specified in
 
 Ownership: every type on the stack is always owned. FlameVM does not allow reference-counting, borrowing, read-only access or implicit copies.
 
-Plain data types: integers, byte strings, Ristretto points. These can be copied and ported.
+Plain data types: scalars, byte strings, Ristretto points. These can be copied and ported.
 
 Structured data types: dicts that are used as lists, dictionaries and enum variants. Dicts are **never copyable** and cache sticky portability and droppability capabilities (see §Dict).
 
@@ -215,10 +215,10 @@ droppable, but non-copyable pure-computation values may be droppable too.
 
 | Type | Copyable | Droppable | Portable |
 | --- | --- | --- | --- |
-| Int253, String, Point | yes | yes | yes |
+| Scalar, String, Point | yes | yes | yes |
 | Dict | no | empty or sticky flag | sticky flag |
 | Token | no | no | yes |
-| ClearToken | no | quantity is zero | quantity is non-negative |
+| ClearToken | no | quantity is zero | centered quantity is non-negative |
 | WideToken, Contract | no | no | no |
 | Merlin, Variable, Expression, Constraint, MultiscalarMul | no | yes | no |
 
@@ -254,14 +254,14 @@ Implemented generic `Value` encodings:
 
 | Type | Tag(s) | Description |
 | --- | --- | --- |
-| Int253 | 0..=67 | Signed sign-magnitude integer; magnitude is a canonical Ristretto scalar (< ℓ ≈ 2²⁵²) plus an explicit sign bit. The name reflects the effective conceptual width: ⌈log₂ ℓ⌉ = 253 bits of magnitude. |
+| Scalar | 0..=66 | Canonical scalar modulo the Ristretto255 group order ℓ; represented by the unique residue in `[0, ℓ)`. |
 | String | 68..=127 | Variable-length byte string. |
-| Dict | 128..=247 | Map from Int253 keys to values. List-style encoding (sequential keys 0..n-1) uses 128..=187; explicit-key form uses 188..=247. Its sticky `portable` flag starts true and is cleared by insertion of a non-portable value. |
+| Dict | 128..=247 | Map from Scalar keys to values. List-style encoding (sequential keys 0..n-1) uses 128..=187; explicit-key form uses 188..=247. Its sticky `portable` flag starts true and is cleared by insertion of a non-portable value. |
 | Point | 248 | Element of the Ristretto255 group. |
 | Token | 249 | Linear type (qty, flavor) representing an asset value, possibly encrypted. |
-| ClearToken | 250 | Linear type (qty, flavor) with cleartext values. Portable when non-negative. Both signs have the same representation; a negative `ClearToken` is a non-portable intermediate rejected at domain admission. |
+| ClearToken | 250 | Linear type (qty, flavor) with cleartext scalars. Portable when the quantity's centered interpretation is non-negative; a centered-negative quantity is a non-portable intermediate rejected at domain admission. |
 
-Tags `251..=254` are unassigned and rejected. Tag `255` is reserved as an
+Tag `67` is reserved and rejected. Tags `251..=254` are unassigned and rejected. Tag `255` is reserved as an
 extension prefix but is also rejected until an extension format is activated.
 
 Stack-only types (non-portable and without an implemented `Value` encoding):
@@ -297,16 +297,16 @@ outside this codec's input domain rather than rejected for being non-portable.
 Tag namespace (one byte, 256 values total):
 
 ```
-0..=58     Int253 positive immediate (value = tag)
-59         Int253 +U8     (1-byte payload b; value = 59 + b;  range 59..=314)
-60         Int253 +U32    (4-byte payload w; value = 315 + w; range 315..≈4.3e9)
-61         Int253 +U64    (8-byte payload w; value = 4_294_967_611 + w)
-62         Int253 +FULL   (32-byte canonical scalar; value > U64 range)
-63         Int253 -1
-64         Int253 -U8     (value = -(2 + b);   range -2..=-257)
-65         Int253 -U32    (value = -(258 + w))
-66         Int253 -U64    (value = -(4_294_967_554 + w))
-67         Int253 -FULL   (32-byte sign-magnitude; magnitude > U64 range)
+0..=58     Scalar immediate (value = tag)
+59         Scalar +U8     (1-byte payload b; value = 59 + b;  range 59..=314)
+60         Scalar +U32    (4-byte payload w; value = 315 + w; range 315..≈4.3e9)
+61         Scalar +U64    (8-byte payload w; value = 4_294_967_611 + w)
+62         Scalar FULL    (32-byte canonical scalar; no compact form applies)
+63         Scalar ℓ-1
+64         Scalar -U8     (value = ℓ - (2 + b))
+65         Scalar -U32    (value = ℓ - (258 + w))
+66         Scalar -U64    (value = ℓ - (4_294_967_554 + w))
+67         reserved (rejected)
 68..=126   String immediate length (length = tag - 68; range 0..=58)
 127        String VAR     (sub-varint v; length = 59 + v)
 128..=186  List-style Dict immediate count (count = tag - 128; range 0..=58)
@@ -315,7 +315,7 @@ Tag namespace (one byte, 256 values total):
 247        Dict explicit-keys VAR (sub-varint v; count = 59 + v)
 248        Point      (32-byte compressed Ristretto)
 249        Token      (32-byte qty commitment point + 32-byte flv commitment point)
-250        ClearToken (cleartext qty Int253 + flv Int253)
+250        ClearToken (cleartext qty Scalar + flv Scalar)
 251..=254  unassigned (rejected)
 255        reserved extension prefix (rejected until defined)
 ```
@@ -333,7 +333,7 @@ sub-tag 3  8 LE bytes   value = 4_295_033_088 + w
 
 Canonicality checks performed at decode time:
 
-1. `INT_PFULL` / `INT_NFULL`: the 32-byte payload encodes the value as-is. The decoder rejects values that could have been encoded in a narrower width class.
+1. `INT_FULL`: the 32-byte payload is the canonical residue, strictly less than ℓ. The decoder rejects values that fit either a compact low-residue class or a compact near-order class.
 2. `DICT_*` payload whose keys are `0..n-1` is rejected — the list-style encoding is shorter.
 
 #### Canonical encoding vectors
@@ -364,7 +364,7 @@ Container prefix boundary (payload omitted):
 | Explicit Dict | 58 | `f6` |
 | Explicit Dict | 59 | `f70000` |
 
-`Int253` width boundaries:
+`Scalar` width boundaries (`-x` denotes `ℓ-x`, not a separately stored sign):
 
 | Value | Hex |
 | ---: | --- |
@@ -384,13 +384,13 @@ Container prefix boundary (payload omitted):
 | -4,294,967,553 | `41ffffffff` |
 | -4,294,967,554 | `420000000000000000` |
 | `-(4,294,967,554 + 2^64 - 1)` | `42ffffffffffffffff` |
-| `-(4,294,967,554 + 2^64)` | `430201000001000000010000000000000000000000000000000000000000000080` |
+| `-(4,294,967,554 + 2^64)` | `3eebd2f55c19631258d59cf7a2def9de1400000000000000000000000000000010` |
 
 One vector for every currently supported value tag:
 
 | Value | Hex |
 | --- | --- |
-| `Int253(7)` | `07` |
+| `Scalar(7)` | `07` |
 | `String(aabb)` | `46aabb` |
 | list Dict `{0: 1, 1: 2}` | `820102` |
 | explicit Dict `{2: 3}` | `bd0203` |
@@ -421,17 +421,31 @@ Canonical `pushint` opcode width boundaries:
 | `-(2^64 - 1)` | `15ffffffffffffffff` |
 | `-2^64` | `1700000000000000000100000000000000` |
 | `-(2^128 - 1)` | `17ffffffffffffffffffffffffffffffff` |
-| `-2^128` | `180000000000000000000000000000000001000000000000000000000000000080` |
+| `-2^128` | `18edd3f55c1a631258d69cf7a2def9de14ffffffffffffffffffffffffffffff0f` |
 
-### Int253
+### Scalar values
 
-Flame integers are signed sign-magnitude scalars: the magnitude is a canonical Ristretto255 scalar (strictly less than ℓ ≈ 2²⁵²), and the high bit of the 32-byte in-memory representation is the sign. The conceptual width is 253 bits of magnitude plus a sign.
+Flame scalars are elements of the field modulo the Ristretto255 group order
+`ℓ = 2^252 + 27742317777372353535851937790883648493`. Their canonical
+representation is the unsigned residue in `[0, ℓ)`, stored as 32 little-endian
+bytes. There is no stored sign. Addition, multiplication, and negation are
+ordinary field operations modulo ℓ; equality compares canonical residues.
 
-In memory, integers are fixed 32-byte arrays with bit 255 (the high bit of byte 31) as the sign and the lower 255 bits as the canonical scalar magnitude. Negative zero is never representable.
+`abs` and `divmod` interpret a residue `r` through its centered lift:
+`r` when `r ≤ H`, otherwise `r-ℓ`, where `H = (ℓ-1)/2`. This gives the
+integer interval `[-H, H]`. For example, the scalar `ℓ-1` has centered value
+`-1`. This interpretation does not change the stored value or impose checked
+integer semantics on field arithmetic. Financial code must establish its
+own bounds to prevent unintended modular wraparound.
 
-Integers are used in logical operations: non-zero is “true”, zero is “false”. Logical results are always 0 or +1.
+Scalars are used in logical operations: non-zero is “true”, zero is “false”.
+Logical results are always 0 or 1. Dict keys are ordered by unsigned canonical
+residue, so `ℓ-1` follows all smaller residues rather than preceding zero.
 
-Dicts use Int253 keys; numeric ordering of keys is total and unambiguous.
+Canonical full-width scalar bytes and Dict key ordering are consensus-visible.
+The scalar representation and reserved value tag `67` are not wire-compatible
+with earlier encodings that admitted a separate sign. Existing state and
+bytecode must be regenerated or explicitly migrated before using this format.
 
 ### String
 
@@ -444,7 +458,7 @@ Each string acts as a builder and a reader.
 **Prover-side witness variants.** `String` has two in-memory shapes: `String::Opaque(Vec<u8>)` and `String::Witness(Box<StringWitness>)`. Boxing the uncommon witness shape keeps every `String` the size of a `Vec`. The witness encodes to the same canonical bytes the verifier sees while preserving typed data through `dup` / `open` / `signcall` / `call` / payload-pour boundaries:
 
 - `StringWitness::Point(Point)` — point-shaped witness; the inner [`Point`](#point) is `Opaque`, `Commitment(Open(value, blinding))` (used before `commit`, `scalar`, `expr`), or `Predicate(p)` (used before `signtx`, `signcall`, `contract`, `output`).
-- `StringWitness::Scalar(int)` — used before `scalar`.
+- `StringWitness::Scalar(scalar)` — used before `scalar`.
 - `StringWitness::Script(instructions)` — used before `open` / `signcall` / `call`.
 - `StringWitness::Contract(c)` — used before `input`, carrying open commitments on Token payloads.
 
@@ -483,12 +497,12 @@ Lazy multi-scalar-multiplication: a vector of `(scalar_i, point_i)` pairs that t
 | `Point + Point` | MSM with two unit-scalar terms |
 | `Point + MSM` / `MSM + Point` | MSM with the point appended (coefficient 1) |
 | `MSM + MSM` | concatenated term lists |
-| `Int253 * Point` / `Point * Int253` | MSM with one term `(int_as_scalar, point)` |
-| `Int253 * MSM` / `MSM * Int253` | MSM with all coefficients scaled |
+| `Scalar * Point` / `Point * Scalar` | MSM with one term `(scalar, point)` |
+| `Scalar * MSM` / `MSM * Scalar` | MSM with all coefficients scaled |
 | `-Point` | MSM with one term `(-1, point)` |
 | `-MSM` | MSM with all coefficients negated |
 
-Quadratic group-element products (`Point * Point`, `MSM * Point`, `MSM * MSM`) hard-fail `TypeNotInt253` — no Sigma-protocol semantics.
+Quadratic group-element products (`Point * Point`, `MSM * Point`, `MSM * MSM`) hard-fail `TypeNotScalar` — no Sigma-protocol semantics.
 
 **Random factor.** The `BatchVerifier` multiplies each appended statement (MSM, single-sig, multi-sig) by a fresh random scalar before summing, so a failing MSM cannot be cancelled out by other batch members (probability `< 2^-252` per statement). See `starsig::BatchVerification` for the exact construction.
 
@@ -496,9 +510,10 @@ Quadratic group-element products (`Point * Point`, `MSM * Point`, `MSM * MSM`) h
 
 Dict is a versatile data structure for representing lists, dictionaries and even sum-type (aka “enum”) values. One-key struct is used to encode a single variant of a sum-type.
 
-Keys are signed `Int253` values. Canonical iteration and explicit-key encoding
-use their total numeric order: negative keys first, then zero and positive
-keys. List-style encoding remains limited to the exact keys `0..n-1`.
+Keys are `Scalar` values. Canonical iteration and explicit-key encoding use
+unsigned numeric order of residues in `[0, ℓ)`. A near-order key such as `ℓ-1`
+sorts after small keys. List-style encoding remains limited to the exact keys
+`0..n-1`.
 
 **Dicts are never copyable**: `dup`/`getdup` of a Dict value always fails `TypeNotCopyable`. Each Dict carries independent sticky `portable` and `droppable` flags. A newly constructed empty Dict starts with both flags true. Every successful insertion applies `dict.portable &= value.is_portable()` and `dict.droppable &= value.is_droppable()`. Removal and replacement never restore a cleared flag; a rejected strict insertion does not change either flag. Emptiness overrides only droppability: after every member is extracted, the empty Dict can be dropped while the extracted bearer values remain owned by the script. Portability remains sticky because it governs domain admission rather than disposal.
 
@@ -534,6 +549,16 @@ The native Flame flavor is `FLAME_FLAVOR = 0`. One Flame is exactly
 `100_000_000` sparks; all native-token quantities on the stack and wire are
 integral sparks.
 
+For clear token quantities, “negative” and “non-negative” refer to the scalar's
+centered interpretation. This is a token-domain rule: a centered-negative
+`ClearToken` represents debt and remains non-portable until balanced. Flavor
+scalars use their full canonical residue range and have no sign restriction.
+
+Clear token merging preserves integer quantities: the sum of the centered
+quantities must remain in `[-H, H]`. A merge that exceeds this interval
+soft-fails without consuming either token. This token-domain check does not
+change ordinary `Scalar` addition, which remains modular.
+
 WideToken: encrypted token without a range proof on quantity (could be negative). Non-portable: cannot be stored.
 
 Token: encrypted token with a proven non-negative quantity. `Token` is portable
@@ -549,7 +574,7 @@ An actor is **`(code, state)`**:
 
 - **code** — a single bytecode blob, set at deploy and replaced by [`setcode`](#setcode). Dispatch is selector-agnostic: the registry returns the blob (`load_code`); by convention the blob dispatches on its **top-of-stack argument**. The VM imposes **no method layout** and reserves nothing.
 
-- **state** — **any portable `Value`** (Int253, String, Point, Token, Dict, …), with no mandated shape and no methods-in-state. [`load`](#load) checks it out, [`save`](#save) moves it back; the author structures it however they like.
+- **state** — **any portable `Value`** (Scalar, String, Point, Token, Dict, …), with no mandated shape and no methods-in-state. [`load`](#load) checks it out, [`save`](#save) moves it back; the author structures it however they like.
 
 Each actor is identified by a unique Actor ID derived from its constructor
 script. `Hash(h)` and `Constructor(bytes)` route to the same registry key when
@@ -606,7 +631,7 @@ Address = enum {
    1: Message = struct {
       dst#0: ActorID,
       args: struct{0:...,1:...},   // selector (if any) rides as the top arg — the design
-      gas: Int253,
+      gas: Scalar,
    }
 }
 ```
@@ -664,9 +689,9 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 **Context column.** The **Ctx** column in the instruction table marks opcodes that fail outside their supported context:
 - **ext.** — external execution, including an external `ContractOpen`. Hard-fails
   `ExternalOnly` from internal context. Covers `input`, the constraint-system
-  opcodes (`scalar`, `commit`, `alloc`, `expr`, `range`), and the CS-consuming
+  opcodes (`scalar`, `commit`, `alloc`, `expr`), and the CS-consuming
   opcodes (`mix`, `fee`). Branch-polymorphic opcodes (`borrow`, `eq`, `add`,
-  `and`, `or`) keep a blank marker; their CS-branch restriction is in the
+  `and`, `or`, `range`) keep a blank marker; their CS-branch restriction is in the
   per-opcode prose. `decrypt` also has a blank marker: it batches externally and
   checks immediately internally.
 - **actor** — requires a current actor identity. Available only in
@@ -681,20 +706,20 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | Hex | Name | Ctx | Stack | Description |
 | --- | --- | --- | --- | --- |
 |     | **Stack**  | | | |
-| 0k | [push:k](#pushk-and-friends) | | ø → int | Push a small literal int 0–15 inline. |
-| 10–18 | [pushint8/16/64/128 \[s\], pushint](#pushk-and-friends) | | ø → int | Push an int with a width-class payload (signed, canonical). |
+| 0k | [push:k](#pushk-and-friends) | | ø → scalar | Push a small literal scalar 0–15 inline. |
+| 10–18 | [pushint8/16/64/128 \[s\], pushint](#pushk-and-friends) | | ø → scalar | Push a scalar with a canonical width-class payload. |
 | 19 | [pushstr](#pushstr) | | ø → str | Push a literal byte string with a length prefix. |
 | 1a | [pushpoint](#pushpoint) | | ø → point | Push a literal 32-byte Ristretto point. |
 | 1b | [pushtoken](#pushtoken) | | flv → token | Mint a zero-qty `ClearToken` of the given flavor (placeholder). |
 | 1c | [drop](#drop) | | x → ø | Discard a droppable value off the top of the stack. |
 | 1d | [nop](#nop) | | ø → ø | Do nothing — useful as a padding / alignment hook. |
-| 1e | [dup](#dup) | | x\_k … x\_0 k → x\_k … x\_0 x\_k | Copy the value at depth `k` onto the top (`k` popped as int). |
-| 1f | [roll](#roll) | | x\_k … x\_0 k → x\_{k-1} … x\_0 x\_k | Move the value at depth `k` to the top (`k` popped as int). |
+| 1e | [dup](#dup) | | x\_k … x\_0 k → x\_k … x\_0 x\_k | Copy the value at depth `k` onto the top (`k` popped as scalar). |
+| 1f | [roll](#roll) | | x\_k … x\_0 k → x\_{k-1} … x\_0 x\_k | Move the value at depth `k` to the top (`k` popped as scalar). |
 | 2k | [dup:k](#dupk) | | x\_k … x\_0 → x\_k … x\_0 x\_k | One-byte `dup` with `k` ∈ 0..=15 baked into the opcode. |
 | 3k | [roll:k](#rollk) | | x\_k … x\_0 → x\_{k-1} … x\_0 x\_k | One-byte `roll` with `k` ∈ 0..=15 baked into the opcode. |
 |    |  **String**  | | | |
-| 40 | [readbits](#readbits) | | s n → s' x 1 \| s 0 | Pull `n` bits off the head of a string as an int (soft-fail if short). |
-| 41 | [readint](#readint) | | s → s' x 1 \| s 0 | Pull a canonical 32-byte int off the head of a string. |
+| 40 | [readbits](#readbits) | | s n → s' x 1 \| s 0 | Pull `n` bits off the head of a string as a scalar (soft-fail if short). |
+| 41 | [readint](#readint) | | s → s' x 1 \| s 0 | Pull a canonical 32-byte scalar off the head of a string. |
 | 42 | [readstr](#readstr) | | s n → s' s'' 1 \| s 0 | Pull `n` bytes off the head of a string as a substring. |
 | 43 | [readpoint](#readpoint) | | s → s' p 1 \| s 0 | Pull a 32-byte Ristretto point off the head of a string. |
 | 44 | [writebits](#writebits) | | s x n → s' | Append the low `n` bits of `x` to a string. |
@@ -708,23 +733,23 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 4c | [shiftleft](#shiftleft) | | a n → b c | Shift a string left by `n` bits; `c` carries the displaced high bits. |
 | 4d | [shiftright](#shiftright) | | a n → b c | Shift a string right by `n` bits; `c` carries the displaced low bits. |
 |    | **Math & logic**  | | | |
-| 50 | [abs](#abs) | | x → \|x\| s | Push magnitude and sign-bit of an int (`s` ∈ {0,1}). |
+| 50 | [abs](#abs) | | x → \|x\| s | Push the centered magnitude and derived sign (`s` ∈ {0,1}). |
 | 51 | [eq](#eq) | | a b → a b {0\|1} or constraint | Equality test — cleartext peek, or lifted Constraint in the CS. |
-| 52 | [neg](#neg) | | x → −x | Flip sign of int / Expression / MSM (Point lifts to MSM). |
-| 53 | [add](#add) | | x y → z | Add ints (or Expressions); Point/MSM operands lift to MSM. |
-| 54 | [mul](#mul) | | x y → z | Multiply ints (or CS gate); Int·Point or Int·MSM lift to MSM. |
-| 55 | [divmod](#divmod) | | x z → d r | Truncated division — push quotient and remainder. |
-| 56 | [mod252](#mod252) | | s → int | Reduce a ≤64-byte LE string modulo ℓ and push as non-negative int. |
-| 57 | [not](#not) | | x → y | Logical NOT for ints; structural negation for Constraints. |
-| 58 | [and](#and) | | a b → c | Logical AND for ints; lifts to Constraint conjunction in CS. |
-| 59 | [or](#or) | | a b → c | Logical OR for ints; lifts to Constraint disjunction in CS. |
+| 52 | [neg](#neg) | | x → −x | Modular negation of Scalar / Expression / MSM (Point lifts to MSM). |
+| 53 | [add](#add) | | x y → z | Add scalars (or Expressions); Point/MSM operands lift to MSM. |
+| 54 | [mul](#mul) | | x y → z | Multiply scalars (or CS gate); Scalar·Point or Scalar·MSM lift to MSM. |
+| 55 | [divmod](#divmod) | | x z → d r | Centered integer division toward zero — push quotient and remainder. |
+| 56 | [mod252](#mod252) | | s → scalar | Reduce a ≤64-byte LE string modulo ℓ. |
+| 57 | [not](#not) | | x → y | Logical NOT for scalars; structural negation for Constraints. |
+| 58 | [and](#and) | | a b → c | Logical AND for scalars; lifts to Constraint conjunction in CS. |
+| 59 | [or](#or) | | a b → c | Logical OR for scalars; lifts to Constraint disjunction in CS. |
 | 5a | [size](#size) | | x → x n | Push length of a String / entry count of a Dict (peek). |
 |    | **Constraints**  | | | |
 | 60 | [scalar](#scalar) | ext. | s → expr | Lift a 32-byte scalar string to a constant Expression. |
 | 61 | [commit](#commit) | ext. | s → var | Wrap a 32-byte Pedersen-commitment point as a CS Variable. |
 | 62 | [alloc](#alloc) | ext. | ø → expr | Allocate a fresh R1CS variable and push it as a one-term Expression. |
 | 63 | [expr](#expr) | ext. | var → expr | Bind a Variable into the CS and push it as a one-term Expression. |
-| 64 | [range](#range) | ext. | expr n → expr | Range-prove an Expression to `n` ∈ 1..=64 bits. |
+| 64 | [range](#range) | | x n → x | Check a Scalar in either context; range-prove an Expression externally. `n` ∈ 1..=64. |
 |    | **Dict**  | | | |
 | 70 | [dict](#dict) | | …kv… n → dict | Build a Dict from `n` `(value, key)` pairs already on the stack. |
 | 71 | [put](#put) | | dict k v → dict' | Insert `v` at fresh key `k`. |
@@ -747,21 +772,21 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 |    | **Tokens** | | | |
 | 90 | [amount](#amount) | | t → t qty flv | Peek the quantity and flavor of a token without consuming it. |
 | 91 | [issuepriv](#issuepriv) | pred.ext. | qty tag → T | Mint a confidential token under the current predicate's identity + `tag`. |
-| 92 | [issueprivflv](#issueprivflv) | | pred tag → int | Consumer-side helper: recompute `flavor_from_predicate(pred, tag)`. |
+| 92 | [issueprivflv](#issueprivflv) | | pred tag → scalar | Consumer-side helper: recompute `flavor_from_predicate(pred, tag)`. |
 | 93 | [issuepub](#issuepub) | actor | qty tag → CT | Mint a cleartext token under the current actor's identity + `tag`. |
-| 94 | [issuepubflv](#issuepubflv) | | cid tag → int | Consumer-side helper: recompute `flavor_from_actor(cid, tag)`. |
+| 94 | [issuepubflv](#issuepubflv) | | cid tag → scalar | Consumer-side helper: recompute `flavor_from_actor(cid, tag)`. |
 | 95 | [retire](#retire) | | t → ø | Burn a token (emits a retire entry to the txlog). |
 | 96 | [borrow](#borrow) | | qty flv → −T +T | Borrow balanced ±token pair; debt must be balanced before tx end. |
-| 97 | [merge](#merge) | | a b → {c 1 \| a b 0} | Combine two same-flavor cleartokens; soft-fail on flavor mismatch. |
+| 97 | [merge](#merge) | | a b → {c 1 \| a b 0} | Combine two same-flavor cleartokens; soft-fail on flavor mismatch or centered quantity overflow. |
 | 98 | [split](#split) | | a q → a' b | Split quantity `q` off a cleartoken. |
 | 99 | [mix](#mix) | ext. | tokens… cmts… m n → tokens | Cloak: prove `m` input tokens balance `n` output commitments per flavor. |
 | 9a | [decrypt](#decrypt) | | T f f' q q' → CT | Open an encrypted Token to a ClearToken using cleartext openings. |
 | 9b | [fee](#fee) | ext. | qty → −WT | Pay tx fee in the native Flame flavor; push the balancing WideToken debt to net out via `mix`. |
 |    | **Control flow** | | | |
-| a0 | [verify](#verify) | | x → ø | Assert: hard-fail if int is zero, enforce a Constraint, or batch an MSM. |
+| a0 | [verify](#verify) | | x → ø | Assert: hard-fail if scalar is zero, enforce a Constraint, or batch an MSM. |
 | a1 | [label](#label) | | ø → ø | Mark a jump target (operand: label number); labels number 0,1,2… in order. |
 | a2 | [jump](#jump) | | ø → ø | Unconditional jump to a label (operand: label number). |
-| a3 | [jumpif](#jumpif) | | x → ø | Pop an int; jump to a label iff non-zero (operand: label number). |
+| a3 | [jumpif](#jumpif) | | x → ø | Pop a scalar; jump to a label iff non-zero (operand: label number). |
 | a4 | [return](#return) | | a\_{k-1} … a\_0 k → ø | Exit current call frame, returning `k` items to the parent. |
 | a5 | [type](#type) | | x → x code | Push the type code of the top value (peek). |
 |    | **Contracts & predicates** | | | |
@@ -830,6 +855,7 @@ Canonical failure-shape vectors (stack order is bottom-to-top):
 | `first` / `last`: `{ }` | `{ }, 0` | nothing else |
 | `next`: `{1: 7}, 1` | `{1: 7}, 0` | search key |
 | `merge`: `CT(1,7), CT(2,8)` | `CT(1,7), CT(2,8), 0` | neither token |
+| `merge`: `CT(H,7), CT(1,7)` | `CT(H,7), CT(1,7), 0` | neither token (`H = (ℓ-1)/2`) |
 | unavailable `addstorage` / `quotestorage`: `q` | `0` | request `q` |
 | failed entered `call`: `A, B` with `k=2` | `A, B, 2, 0` | address and gas; arguments are restored and count is re-emitted |
 | failed entered `open`: `Contract, A, B` with `k=2` | `Contract, A, B, 2, 0` | proof/script/gas operands; Contract and arguments are restored, count excludes Contract |
@@ -843,18 +869,20 @@ arguments follow the exact shapes above.
 
 ### push:k and friends
 
-ø → _int_
+ø → _scalar_
 
-Pushes an [`Int253`](#int253). The encoder picks the narrowest of these forms:
+Pushes an [`Scalar`](#scalar-values). The encoder picks the narrowest of these forms:
 
 - `0x00..=0x0f` — immediate `push:k`, value `k ∈ 0..=15`, no payload.
-- `0x10`/`0x11` — `pushint8` positive/negative, 1-byte LE payload (magnitude 0..=255).
-- `0x12`/`0x13` — `pushint16` positive/negative, 2-byte LE payload.
-- `0x14`/`0x15` — `pushint64` positive/negative, 8-byte LE payload.
-- `0x16`/`0x17` — `pushint128` positive/negative, 16-byte LE payload.
-- `0x18` — `pushint` full form, 32-byte sign-magnitude payload.
+- `0x10`/`0x11` — `pushint8`, 1-byte LE payload `m`, producing `m` / `-m mod ℓ`.
+- `0x12`/`0x13` — `pushint16`, 2-byte LE payload `m`, producing `m` / `-m mod ℓ`.
+- `0x14`/`0x15` — `pushint64`, 8-byte LE payload `m`, producing `m` / `-m mod ℓ`.
+- `0x16`/`0x17` — `pushint128`, 16-byte LE payload `m`, producing `m` / `-m mod ℓ`.
+- `0x18` — `pushint` full form, the 32-byte canonical residue.
 
-Width classes carve disjoint, offset-based value ranges so the encoding is canonical. The decoder rejects values that fit a narrower class. Negative zero is never representable.
+The decoder rejects values that fit a narrower class, including full-width
+values with a compact modular-negation form. Zero has only the immediate
+encoding; the negating compact forms do not admit a second encoding for it.
 
 ### pushstr
 
@@ -872,7 +900,7 @@ Reads 32 more bytes and pushes them as a [Point](#point). Bytes are not decompre
 
 _flv_ → _token_
 
-Pops an `Int253` flavor; pushes a zero-quantity `ClearToken { qty: 0, flv }`. Convenience for downstream `merge`/`mix` shapes that need a typed placeholder.
+Pops a `Scalar` flavor; pushes a zero-quantity `ClearToken { qty: 0, flv }`. Convenience for downstream `merge`/`mix` shapes that need a typed placeholder.
 
 ### drop
 
@@ -892,7 +920,7 @@ No effect.
 
 _x\_k … x\_0 k_ → _x\_k … x\_0 x\_k_
 
-Pops `k` as `Int253`, copies the value at depth `k` (zero-indexed from the top) onto the stack. Source must be a [copyable](#types) type — hard-fails `TypeNotCopyable` otherwise. Hard-fails `IndexOutOfRange` when `k < 0` or exceeds the stack depth.
+Pops `k` as `Scalar`, copies the value at depth `k` (zero-indexed from the top) onto the stack. Source must be a [copyable](#types) type — hard-fails `TypeNotCopyable` otherwise. Hard-fails `IndexOutOfRange` when the canonical residue is outside the stack's index range.
 
 Prefer the immediate [`dup:k`](#dupk) form for `k ∈ 0..=15` (one byte instead of two).
 
@@ -900,7 +928,7 @@ Prefer the immediate [`dup:k`](#dupk) form for `k ∈ 0..=15` (one byte instead 
 
 _x\_k … x\_0 k_ → _x\_{k-1} … x\_0 x\_k_
 
-Pops `k` as `Int253`, moves the value at depth `k` to the top of the stack. Any type works (no copy required). Hard-fails `IndexOutOfRange` when `k < 0` or exceeds the stack depth.
+Pops `k` as `Scalar`, moves the value at depth `k` to the top of the stack. Any type works (no copy required). Hard-fails `IndexOutOfRange` when the canonical residue is outside the stack's index range.
 
 Prefer the immediate [`roll:k`](#rollk) form for `k ∈ 0..=15`.
 
@@ -918,21 +946,24 @@ Immediate-encoded `roll` with `k ∈ 0..=15` taken from the low nibble of the op
 
 ## String instructions
 
-**Failure principle.** Constraints derived from *external data* — string length, canonical magnitude, negative zero — are **soft fails**. Constraints on *author-controlled* immediates (e.g. `n > 256`) are **hard fails**.
+**Failure principle.** Constraints derived from *external data* — string length and canonical scalar residue — are **soft fails**. Constraints on *author-controlled* immediates (e.g. `n > 256`) are **hard fails**.
 
 ### readbits
 
 _s n_ → _s' x 1_ | _s 0_
 
-Reads `n ≤ 256` bits **LSB-first within each byte** into bits `0..n-1` of a fresh `Int253`. The sign bit at position 255 is set only when `n = 256` and the input bit 255 is `1`; for `n < 256` the result is non-negative.
+Reads `n ≤ 256` bits **LSB-first within each byte** into bits `0..n-1` of a fresh
+`Scalar`, with all higher bits zero. The resulting unsigned residue must be
+strictly less than ℓ; no input bit is interpreted as a sign.
 
-Soft-fails on insufficient bytes, magnitude ≥ ℓ (reachable only when `n ≥ 253`), or negative zero (only when `n = 256`). A negative or greater-than-256 count hard-fails `IndexOutOfRange`.
+Soft-fails on insufficient bytes or a residue ≥ ℓ (reachable only when
+`n ≥ 253`). A count outside `[0, 256]` hard-fails `IndexOutOfRange`.
 
 ### readint
 
 _s_ → _s' x 1_ | _s 0_
 
-Equivalent to `readbits(s, 256)`. Reads the canonical 32-byte `Int253` (bit 255 = sign). Soft-fail conditions match `readbits`.
+Equivalent to `readbits(s, 256)`. Reads the canonical 32-byte little-endian `Scalar` residue. Soft-fail conditions match `readbits`.
 
 ### readstr
 
@@ -950,13 +981,13 @@ Reads 32 bytes as a [Point](#point). Soft-fail on insufficient bytes.
 
 _s x n_ → _s'_
 
-Appends the low `n` bits of `x`'s canonical 32-byte representation as bytes (LSB-first). `n` must be a multiple of 8 and `≤ 256`. A negative or greater-than-256 count hard-fails `IndexOutOfRange`; a non-byte-aligned count hard-fails `BitCountOutOfRange`. The sign bit (bit 255) is written iff `n = 256`.
+Appends the low `n` bits of `x`'s canonical 32-byte residue as bytes (LSB-first). `n` must be a multiple of 8 and `≤ 256`. A count outside `[0, 256]` hard-fails `IndexOutOfRange`; a non-byte-aligned count hard-fails `BitCountOutOfRange`.
 
 ### writeint
 
 _s x_ → _s'_
 
-Equivalent to `writebits(s, x, 256)`. Appends the canonical 32-byte sign-magnitude form.
+Equivalent to `writebits(s, x, 256)`. Appends the canonical 32-byte little-endian residue.
 
 ### append
 
@@ -998,7 +1029,7 @@ Bitwise XOR of two strings. Same length rule and failure mode as [`bitor`](#bito
 
 _a n_ → _b c_
 
-Shifts bits of `a` left by `n ≤ 256`. `b` has the same length as `a`; `c` carries the displaced bits as a zero-padded-left string of `ceil(n/8)` bytes. A negative or greater-than-256 count hard-fails `IndexOutOfRange`. Byte 0 is most significant.
+Shifts bits of `a` left by `n ≤ 256`. `b` has the same length as `a`; `c` carries the displaced bits as a zero-padded-left string of `ceil(n/8)` bytes. A count outside `[0, 256]` hard-fails `IndexOutOfRange`. Byte 0 is most significant.
 
 ### shiftright
 
@@ -1012,7 +1043,10 @@ Mirror of `shiftleft`; displaced low-end bits land in `c` zero-padded on the rig
 
 _x_ → _|x| s_
 
-Pops `Int253` `x`; pushes the absolute value followed by the sign (`0` for non-negative, `1` for negative).
+Pops `Scalar` `x`; interprets it through the [centered lift](#scalar-values)
+and pushes its magnitude followed by the derived sign (`0` for a non-negative
+centered value, `1` for a negative one). Thus `abs(0) = (0, 0)`,
+`abs(H) = (H, 0)`, and `abs(ℓ-1) = (1, 1)`. The magnitude is at most `H`.
 
 ### eq
 
@@ -1020,58 +1054,64 @@ _a b_ **eq** → _a b {0|1}_ (cleartext) | → _constraint_ (CS branch)
 
 Two stack diagrams depending on operand types and context:
 
-1. **Cleartext branch.** When neither operand is a CS type (`Variable` / `Expression`), or in internal context, peeks at the top two values and pushes `1` if equal or `0` otherwise. Operands stay on the stack. Equality is type-aware via `Value::try_eq`: `Int253` / `String` / `Point` compare by value; **same-variant `Dict` and all linear types (`Token`, `ClearToken`, `Contract`, …) hard-fail `TypeNotComparable`** (linear values have no equality; Dicts would cost unbounded recursion).
-2. **Lifted branch.** When at least one operand is `Expression` or `Variable` *and* the context is external, both operands are popped, lifted to `Expression` (Int253 → `Expression::Constant`), and the result is `Constraint::eq(a, b)`.
+1. **Cleartext branch.** When neither operand is a CS type (`Variable` / `Expression`), or in internal context, peeks at the top two values and pushes `1` if equal or `0` otherwise. Operands stay on the stack. Equality is type-aware via `Value::try_eq`: `Scalar` / `String` / `Point` compare by value; **same-variant `Dict` and all linear types (`Token`, `ClearToken`, `Contract`, …) hard-fail `TypeNotComparable`** (linear values have no equality; Dicts would cost unbounded recursion).
+2. **Lifted branch.** When at least one operand is `Expression` or `Variable` *and* the context is external, both operands are popped, lifted to `Expression` (Scalar → `Expression::Constant`), and the result is `Constraint::eq(a, b)`.
 
 ### neg
 
 _x_ → _−x_
 
-`Int253` flips its sign bit (zero stays positive). `Expression` negates the linear combination. `Point` / `MultiscalarMul` lift to MSM (see [MultiscalarMul](#multiscalarmul)) with negated coefficients. Other types hard-fail `TypeNotInt253`.
+`Scalar` is negated modulo ℓ (`0` stays `0`, and nonzero `x` becomes `ℓ-x`). `Expression` negates the linear combination. `Point` / `MultiscalarMul` lift to MSM (see [MultiscalarMul](#multiscalarmul)) with negated coefficients. Other types hard-fail `TypeNotScalar`.
 
 ### add
 
 _x y_ → _z_
 
 Dispatch by operand types:
-- `Int253 + Int253` → signed-modular addition mod ℓ.
+- `Scalar + Scalar` → addition mod ℓ.
 - `Point + Point` / `Point + MSM` / `MSM + Point` / `MSM + MSM` → [MultiscalarMul](#multiscalarmul) with concatenated terms (works in either context).
-- Mixed Int/Expression in external context → lifts to `Expression` LC sum.
+- Mixed Scalar/Expression in external context → lifts to `Expression` LC sum.
 
 ### mul
 
 _x y_ → _z_
 
 Dispatch by operand types:
-- `Int253 * Int253` → signed-modular multiplication mod ℓ.
-- `Int253 * Point` / `Point * Int253` → [MultiscalarMul](#multiscalarmul) with one `(scalar, point)` term.
-- `Int253 * MSM` / `MSM * Int253` → MSM with scaled coefficients.
-- Mixed Int/Expression in external context → may add a CS multiplier gate (or constant-fold when one side is `Expression::Constant`).
-- `Point * Point`, `MSM * Point`, `MSM * MSM` → hard-fail `TypeNotInt253` (quadratic in group elements, no Sigma-protocol semantics).
+- `Scalar * Scalar` → multiplication mod ℓ.
+- `Scalar * Point` / `Point * Scalar` → [MultiscalarMul](#multiscalarmul) with one `(scalar, point)` term.
+- `Scalar * MSM` / `MSM * Scalar` → MSM with scaled coefficients.
+- Mixed Scalar/Expression in external context → may add a CS multiplier gate (or constant-fold when one side is `Expression::Constant`).
+- `Point * Point`, `MSM * Point`, `MSM * MSM` → hard-fail `TypeNotScalar` (quadratic in group elements, no Sigma-protocol semantics).
 
 ### divmod
 
 _x z_ → _d r_
 
-Truncated division: `sign(d) = sign(x) XOR sign(z)`, `sign(r) = sign(x)`. Hard-fails `DivByZero` on a zero divisor. Both operands must be `Int253`.
+Both operands must be raw `Scalar` values. Let `X` and `Z` be their
+[centered lifts](#scalar-values). Computes integer quotient `D` truncated toward
+zero and remainder `R`, so `X = D·Z + R`, `|R| < |Z|`, and nonzero `R` has
+the same sign as `X`. Returns `D mod ℓ` and `R mod ℓ` as scalars. For example,
+`divmod(ℓ-7, 3) = (ℓ-2, ℓ-1)`. Hard-fails `DivByZero` on a zero divisor.
+This is integer division, not multiplication by a field inverse; no R1CS
+division gadget is allocated. Available in external and internal contexts.
 
 ### mod252
 
-_s_ → _int_
+_s_ → _scalar_
 
-Reads up to 64 bytes of `s` as a little-endian unsigned integer, reduces modulo ℓ, pushes the result as a non-negative `Int253`. Hard-fails `StringTooLongForModReduction` when `s.len() > 64`.
+Reads up to 64 bytes of `s` as a little-endian unsigned integer, reduces modulo ℓ, and pushes the canonical `Scalar` residue. Hard-fails `StringTooLongForModReduction` when `s.len() > 64`.
 
 ### not
 
 _x_ → _y_
 
-`Int253`: `0 → 1`, non-zero → `0`. `Constraint`: structural negation via `Constraint::not(c)`.
+`Scalar`: `0 → 1`, non-zero → `0`. `Constraint`: structural negation via `Constraint::not(c)`.
 
 ### and
 
 _a b_ → _c_
 
-Cleartext logical AND when both operands are `Int253`. When at least one operand is a `Constraint` (external context only), both lift to `Constraint` (Int253 → `Cleartext(v != 0)`) and the result is `Constraint::and(a, b)`.
+Cleartext logical AND when both operands are `Scalar`. When at least one operand is a `Constraint` (external context only), both lift to `Constraint` (Scalar → `Cleartext(v != 0)`) and the result is `Constraint::and(a, b)`.
 
 ### or
 
@@ -1079,10 +1119,13 @@ _a b_ → _c_
 
 Mirror of [`and`](#and) for disjunction.
 
-## Constraint system instructions  *(external-only)*
+## Constraint system instructions
+
+These instructions require external context except `range` on a raw `Scalar`,
+which performs an ordinary range check in either context.
 
 **Rollback on call failure.** Every CS-touching opcode (`scalar`,
-`commit`, `alloc`, `expr`, `range`, `eq` via `verify`, `mix`,
+`commit`, `alloc`, `expr`, `range` on a linear combination, `eq` via `verify`, `mix`,
 `fee`) appends to the delegate's R1CS. On `call` /
 `open` / `signcall` entry the VM checkpoints the R1CS via
 `bulletproofs::r1cs::CheckpointableConstraintSystem::checkpoint`;
@@ -1099,7 +1142,7 @@ the rollback model described above.
 
 _s_ → _expr_
 
-Pops a 32-byte String, downcasts to `Int253` via `String::to_scalar`, pushes `Expression::Constant(int)`. Witness-bearing `StringWitness::Scalar(i)` extracts the witness directly; `String::Opaque(bytes)` parses canonical sign-magnitude bytes.
+Pops a 32-byte String, downcasts to `Scalar` via `String::to_scalar`, pushes `Expression::Constant(scalar)`. Witness-bearing `StringWitness::Scalar(i)` extracts the witness directly; `String::Opaque(bytes)` parses a canonical little-endian residue strictly less than ℓ.
 
 ### commit
 
@@ -1111,7 +1154,7 @@ Pops a 32-byte String, downcasts to a [Commitment](#types), wraps in `Variable {
 
 ø → _expr_
 
-Allocates a low-level R1CS variable. The prover-side `Instruction::Alloc(Some(int))` carries the cleartext witness; the verifier sees `Alloc(None)` and the variable is left unassigned, constrained later by `eq`/`verify`. Pushes a one-term `Expression::LinearCombination([(var, 1)], witness?)`.
+Allocates a low-level R1CS variable. The prover-side `Instruction::Alloc(Some(scalar))` carries the cleartext witness; the verifier sees `Alloc(None)` and the variable is left unassigned, constrained later by `eq`/`verify`. Pushes a one-term `Expression::LinearCombination([(var, 1)], witness?)`.
 
 ### expr
 
@@ -1121,9 +1164,19 @@ Pops a `Variable`, commits it via the delegate's `commit_variable`, pushes a one
 
 ### range
 
-_expr n_ → _expr_
+_x n_ → _x_
 
-Pops bit count `n: Int253` (must be in `[1, 64]`) and an `Expression`. For `Expression::Constant`, asserts the constant fits in `[0, 2ⁿ)` (cleartext check). For `Expression::LinearCombination`, adds a Bulletproofs range-proof gadget. The Expression is pushed back unchanged. Hard-fails `BitCountOutOfRange`, `InvalidBitrange`, or `R1CSError`.
+Pops bit count `n: Scalar` (must be in `[1, 64]`) and either a raw `Scalar`
+or an `Expression`. A raw scalar is checked immediately against `[0, 2ⁿ)` in
+both external and internal contexts. It remains a raw scalar on the stack;
+the check does not lift it into the constraint system.
+
+Expressions remain external-only, including `Expression::Constant`.
+For a constant, checks its canonical residue against `[0, 2ⁿ)`.
+For `Expression::LinearCombination`, adds the existing Bulletproofs
+range-proof gadget. The original value is pushed back unchanged.
+Hard-fails `BitCountOutOfRange`, `InvalidBitrange`, or `R1CSError`;
+an Expression in internal context hard-fails `ExternalOnly`.
 
 ### size
 
@@ -1133,13 +1186,13 @@ Peeks at the top value and pushes its length: byte count for `String`, entry cou
 
 ## Dict instructions
 
-[Dict](#dict) keys are always `Int253`; values may be any [Value](#types). Insertion updates the Dict's sticky capability flags; portability is enforced only when the Dict crosses a storage or transfer boundary.
+[Dict](#dict) keys are always `Scalar`; values may be any [Value](#types). Insertion updates the Dict's sticky capability flags; portability is enforced only when the Dict crosses a storage or transfer boundary.
 
 ### dict
 
 _… val\_{n-1} key\_{n-1} … val\_0 key\_0 n_ → _dict_
 
-Pops `n` (Int253), then `n` `(value, key)` pairs (key on top of each pair). Builds a Dict. Hard-fails `DictKeyOccupied` on duplicate keys.
+Pops `n` (Scalar), then `n` `(value, key)` pairs (key on top of each pair). Builds a Dict. Hard-fails `DictKeyOccupied` on duplicate keys.
 
 ### put
 
@@ -1176,7 +1229,7 @@ Copies the value at `k` without modifying the dict. Pushes `0` if absent. Hard-f
 _dict_ → _dict {k 1 | 0}_  (first / last)  
 _dict k_ → _dict {k' 1 | 0}_  (next)
 
-Iteration helpers. Push the first/last key of the dict, or the key after `k`, or `0` if the dict is empty / `k` is the last entry. Keys are visited in canonical `Int253` order.
+Iteration helpers. Push the first/last key of the dict, or the key after `k`, or `0` if the dict is empty / `k` is the last entry. Keys are visited in canonical `Scalar` order.
 
 ## Cryptography instructions
 
@@ -1238,7 +1291,7 @@ See [Token / ClearToken / WideToken](#tokens) for type semantics.
 
 _t_ → _t qty flv_
 
-Peeks the top token-shaped value and pushes `(qty, flv)` above it. `ClearToken`: both as `Int253` (cleartext). `Token`: both as `Point` (the compressed commitment points; works without a live CS). `WideToken`: hard-fails `TypeNotToken` — its quantity isn't yet range-proven.
+Peeks the top token-shaped value and pushes `(qty, flv)` above it. `ClearToken`: both as `Scalar` (cleartext). `Token`: both as `Point` (the compressed commitment points; works without a live CS). `WideToken`: hard-fails `TypeNotToken` — its quantity isn't yet range-proven.
 
 ### issuepriv
 
@@ -1248,15 +1301,15 @@ Pops `tag` (String) and `qty` (`Variable` — a Pedersen commitment lifted via [
 
 The current_predicate is the predicate stored on the enclosing `CallKind::ContractOpen` frame — created by [`open`](#open) or [`signcall`](#signcall) against an empty contract whose predicate is the desired issuer. Hard-fails `OpcodeRequiresPredicateContext` from `ExternalRoot` (no enclosing predicate) and from any `ActorCall` frame (issuance binds to a predicate, not an actor; the two issuance domains are kept disjoint by construction). Hard-fails `ExternalOnly` in internal context (the CS lane is required for the range proof and the qty commitment).
 
-`Int253` or `Point` operands hard-fail `TypeNotVariable` — lift to a `Variable` via [`commit`](#commit) first.
+`Scalar` or `Point` operands hard-fail `TypeNotVariable` — lift to a `Variable` via [`commit`](#commit) first.
 
 **Non-fungible tokens.** Mix the contract's [`anchor`](#anchor) into `tag` (e.g. `anchor … keccak256` against domain bytes) to derive a fresh flavor per issuance — the result is a non-fungible Token, since no other issuance will share the flavor. Use [`issueprivflv`](#issueprivflv) on the consumer side to recompute the same flavor scalar for verification.
 
 ### issueprivflv
 
-_pred tag_ → _int_
+_pred tag_ → _scalar_
 
-Pops `tag` (String) and `pred` (String, exactly 32 bytes — a compressed Ristretto predicate point). Pushes `flavor_from_predicate(pred, tag)` as `Int253`. Pure helper: no CS, no txlog entry, no predicate-context requirement. Domain separator is `flamevm.issuepriv.flavor` (consensus-fixed). Hard-fails `IndexOutOfRange` if `pred` is not exactly 32 bytes.
+Pops `tag` (String) and `pred` (String, exactly 32 bytes — a compressed Ristretto predicate point). Pushes `flavor_from_predicate(pred, tag)` as `Scalar`. Pure helper: no CS, no txlog entry, no predicate-context requirement. Domain separator is `flamevm.issuepriv.flavor` (consensus-fixed). Hard-fails `IndexOutOfRange` if `pred` is not exactly 32 bytes.
 
 The confidential token's flv commitment is unblinded, so its point uniquely determines this scalar — meaning a consumer who knows the issuing predicate's point and the tag can recompute the flavor and check that an incoming Token belongs to the expected issuance domain.
 
@@ -1264,22 +1317,22 @@ The confidential token's flv commitment is unblinded, so its point uniquely dete
 
 _qty tag_ → _CT_
 
-Pops `tag` (String) and `qty` (`Int253` — cleartext). Builds `ClearToken(qty, flavor_from_actor(current_actor, tag))` and emits `TxEntry::IssuePub(qty, flv)` carrying the cleartext `(qty, flv)` pair directly as `Int253`s — publicly auditable on the wire without commitment indirection. Pushes the `ClearToken`.
+Pops `tag` (String) and `qty` (`Scalar` — cleartext). Builds `ClearToken(qty, flavor_from_actor(current_actor, tag))` and emits `TxEntry::IssuePub(qty, flv)` carrying the cleartext `(qty, flv)` pair directly as `Scalar`s — publicly auditable on the wire without commitment indirection. Pushes the `ClearToken`.
 
 The current actor is stored on either `CallKind::InternalRoot` or
 `CallKind::ActorCall`. Both may issue. The opcode hard-fails
 `OpcodeRequiresActorContext` from `ExternalRoot` and `ContractOpen` (issuance binds
 to an actor, not a predicate). It runs without CS in internal execution.
 
-`Variable` or `Point` operands hard-fail `TypeNotInt253` — `issuepub` is the cleartext path; for confidential qty, use [`issuepriv`](#issuepriv) from a `ContractOpen` frame.
+`Variable` or `Point` operands hard-fail `TypeNotScalar` — `issuepub` is the cleartext path; for confidential qty, use [`issuepriv`](#issuepriv) from a `ContractOpen` frame.
 
 **Non-fungible tokens.** Mix the call's [`anchor`](#anchor) into `tag` to derive a fresh flavor per call — yields a unique non-fungible token. Use [`issuepubflv`](#issuepubflv) on the consumer side to recompute the same flavor scalar for verification.
 
 ### issuepubflv
 
-_cid tag_ → _int_
+_cid tag_ → _scalar_
 
-Pops `tag` (String) and `cid` (String, exactly 32 bytes — an actor id). Pushes `flavor_from_actor(cid, tag)` as `Int253`. Pure helper: no CS, no txlog entry, no actor-context requirement. Domain separator is `flamevm.issuepub.flavor` (consensus-fixed). Hard-fails `IndexOutOfRange` if `cid` is not exactly 32 bytes.
+Pops `tag` (String) and `cid` (String, exactly 32 bytes — an actor id). Pushes `flavor_from_actor(cid, tag)` as `Scalar`. Pure helper: no CS, no txlog entry, no actor-context requirement. Domain separator is `flamevm.issuepub.flavor` (consensus-fixed). Hard-fails `IndexOutOfRange` if `cid` is not exactly 32 bytes.
 
 ### retire
 
@@ -1295,7 +1348,7 @@ hard-fail `TypeNotToken`.
 
 _qty flv_ → _−T +T_
 
-Cleartext branch (both `Int253`): pushes `(ClearToken(-qty, flv), ClearToken(qty, flv))`. The negative half is non-portable until balanced.
+Cleartext branch (both `Scalar`): pushes `(ClearToken(-qty, flv), ClearToken(qty, flv))`. The negative half is non-portable until balanced.
 
 Encrypted branch (both `Variable`, external context): commits both to the CS, range-proves the positive `qty` 64-bit, allocates `-qty`, constrains the sum to zero, pushes `(WideToken(-qty, flv), Token(qty, flv))`.
 
@@ -1305,19 +1358,24 @@ Raw `Point` operand hard-fails `TokenRequiresCS` — lift to `Variable` via [`co
 
 _a b_ → _{c 1 | a b 0}_
 
-`ClearTokens` only. On flavor match, pushes `(ClearToken(a.qty+b.qty, flv), 1)`. On flavor mismatch, restores `(a, b, 0)` (soft-fail). Non-`ClearToken` operands hard-fail `TypeNotClearToken`.
+`ClearTokens` only. On flavor match, adds the centered integer quantities.
+If their sum lies in `[-H, H]`, pushes `(ClearToken(a.qty+b.qty, flv), 1)`.
+Flavor mismatch or centered quantity overflow restores both original tokens
+as `(a, b, 0)` (soft-fail). Overflow occurs exactly when both centered inputs
+have the same sign but their modular sum has the opposite sign.
+Non-`ClearToken` operands hard-fail `TypeNotClearToken`.
 
 ### split
 
 _a q_ → _a' b_
 
-`ClearTokens` only. Returns `(ClearToken(a.qty − q, flv), ClearToken(q, flv))`. Hard-fails `TokenSplitOutOfRange` when `q < 0`, `a.qty < 0`, or `q > a.qty`.
+`ClearTokens` only. Returns `(ClearToken(a.qty − q, flv), ClearToken(q, flv))`. Hard-fails `TokenSplitOutOfRange` when either `q` or `a.qty` is centered-negative, or when their canonical residues satisfy `q > a.qty`.
 
 ### mix
 
 _tokens… commitments… m n_ → _tokens_
 
-Pops `n` (output count) and `m` (input count) as `Int253`; then `n` output Pedersen commitment pairs (qty/flv Strings); then `m` input token-shaped values (any of `Token`, `WideToken`, `ClearToken`). Invokes the [spacesuit cloak gadget](../spacesuit/spec.md) to constrain that inputs balance outputs per flavor and to 64-bit range-prove each output. Pushes `n` output `Token`s.
+Pops `n` (output count) and `m` (input count) as `Scalar`; then `n` output Pedersen commitment pairs (qty/flv Strings); then `m` input token-shaped values (any of `Token`, `WideToken`, `ClearToken`). Invokes the [spacesuit cloak gadget](../spacesuit/spec.md) to constrain that inputs balance outputs per flavor and to 64-bit range-prove each output. Pushes `n` output `Token`s.
 
 Hard-fails `MixDegenerate` if `m == 0` or `n == 0`.
 
@@ -1345,18 +1403,18 @@ executes by becoming a CallFrame — there is no inline `run`; see
 
 _x_ → ø
 
-- `Int253`: hard-fails `VerifyFailed` if zero; otherwise consumes the value.
+- `Scalar`: hard-fails `VerifyFailed` if zero; otherwise consumes the value.
 - `Constraint`: enforces the constraint via the delegate's CS (external context only).
 - `MultiscalarMul`: appends `sum(s_i · P_i) == identity` to the delegate's `BatchVerifier` alongside any Schnorr/Musig sigs (external context only). Returns success immediately; the batched check runs at finalize and on failure surfaces as `BatchSignatureVerificationFailed`. See [MultiscalarMul](#multiscalarmul).
-- Other types hard-fail `TypeNotInt253`.
+- Other types hard-fail `TypeNotScalar`.
 
 ### fee
 
 _qty_ → _−WT_
 
-Pops `qty: Int253` in sparks (non-negative, `≤ MAX_FEE = 2²⁴`). Fees always use the canonical native flavor `FLAME_FLAVOR = Int253::ZERO`. The `2²⁴`-spark cap is chosen so fee-rate arithmetic stays within `u64`: even a `2⁴⁰`-byte (~1 TB) transaction leaves 24 bits of headroom. Emits `TxEntry::Fee(qty as u64)` and bumps the per-tx [`CheckedFee`](#fees) accumulator (also capped at `MAX_FEE`). Allocates a fresh `WideToken` debt with `q = −qty`, `f = FLAME_FLAVOR` (both cleartext-constrained) and pushes it. The script must balance the debt against native Flame tokens, typically via [`mix`](#mix).
+Pops `qty: Scalar` in sparks (non-negative, `≤ MAX_FEE = 2²⁴`). Fees always use the canonical native flavor `FLAME_FLAVOR = Scalar::ZERO`. The `2²⁴`-spark cap is chosen so fee-rate arithmetic stays within `u64`: even a `2⁴⁰`-byte (~1 TB) transaction leaves 24 bits of headroom. Emits `TxEntry::Fee(qty as u64)` and bumps the per-tx [`CheckedFee`](#fees) accumulator (also capped at `MAX_FEE`). Allocates a fresh `WideToken` debt with `q = −qty`, `f = FLAME_FLAVOR` (both cleartext-constrained) and pushes it. The script must balance the debt against native Flame tokens, typically via [`mix`](#mix).
 
-Hard-fails: `FeeQtyNegative`, `FeeTooHigh` (per-arg or aggregate overflow), `TypeNotInt253`, `ExternalOnly`. The blinded-fee branch is reserved for a future phase.
+Hard-fails: `FeeQtyNegative`, `FeeTooHigh` (per-arg or aggregate overflow), `TypeNotScalar`, `ExternalOnly`. The blinded-fee branch is reserved for a future phase.
 
 ### label
 
@@ -1392,9 +1450,9 @@ skipping hard-fails `LabelNotFound`.
 
 _x_ → ø — operand: label number (sub-varint)
 
-Pops `x: Int253`. If non-zero, behaves as [`jump`](#jump) to label `N`; if
-zero, falls through to the next instruction. Hard-fails `TypeNotInt253` if
-the top value is not an int.
+Pops `x: Scalar`. If non-zero, behaves as [`jump`](#jump) to label `N`; if
+zero, falls through to the next instruction. Hard-fails `TypeNotScalar` if
+the top value is not a scalar.
 
 ### return
 
@@ -1402,7 +1460,7 @@ _a_{k-1} … a_0 k_ → ø
 
 Atomic cross-frame return:
 
-1. Pops `k` (Int253, non-negative).
+1. Pops `k` (Scalar, whose canonical residue must fit the argument-count limit).
 2. Asserts an enclosing call frame exists (otherwise `ReturnAtRoot`).
 3. Asserts the callee stack has exactly `k` items left (otherwise `BadReturnArity` or `StackNotClean`).
 4. Pops the call frame.
@@ -1421,11 +1479,11 @@ At the outermost call frame, `return` always errors regardless of `k`; a script 
 
 _x_ → _x typecode_
 
-Pushes the type code of the top value as `Int253`, leaving the value on the stack. Type codes are a stable sequential enumeration of the value types — **independent of the wire-encoding tags** in [Types](#types), which keep their own compact scheme (so the `type` opcode also covers non-serializable stack-only types):
+Pushes the type code of the top value as `Scalar`, leaving the value on the stack. Type codes are a stable sequential enumeration of the value types — **independent of the wire-encoding tags** in [Types](#types), which keep their own compact scheme (so the `type` opcode also covers non-serializable stack-only types):
 
 | Code | Type | Code | Type |
 | --- | --- | --- | --- |
-| 0 | Int253 | 7 | Contract |
+| 0 | Scalar | 7 | Contract |
 | 1 | String | 8 | Merlin |
 | 2 | Dict | 9 | Variable |
 | 3 | Point | 10 | Expression |
@@ -1474,9 +1532,9 @@ _{results… k' 1 | contract args… k 0}_
 
 Verifies the Taproot proof against the contract's predicate:
 
-1. Pops `k` (Int253) and `args` (k portable values). A non-portable argument
+1. Pops `k` (Scalar) and `args` (k portable values). A non-portable argument
    hard-fails `NonPortableInCall` before child entry.
-2. Pops `gas` as a non-negative `Int253` gas allotment.
+2. Pops `gas` as a `Scalar` whose canonical residue must fit a `u64` gas allotment.
 3. Pops `script` (String) — the revealed leaf bytes (or witness-bearing `StringWitness::Script` on the prover).
 4. Pops `position` (String, bit-packed path), `neighbors` (list-Dict of 32-byte Strings, leaf-to-root), `internal_key` (Point).
 5. Pops `contract`.
@@ -1518,9 +1576,9 @@ Asynchronous message-send. Pops operands top-first:
 
 1. `addr` (String) — a bare 32-byte hash or an exact encoded `ActorID`:
    `0x00 || hash[32]` or `0x01 || code_len:u64-le || constructor_code`.
-2. `gas` (`Int253`) — gas allotment.
+2. `gas` (`Scalar`) — gas allotment.
 3. `refund` (32-byte String) — bounce predicate point.
-4. `k` (`Int253`) — args count.
+4. `k` (`Scalar`) — args count.
 5. `args…` — k portable values, delivery payload. A caller may include Flame
    here for the destination actor to spend with `addstorage`.
 
@@ -1559,7 +1617,7 @@ The merkle leaf for `TxEntry::Send` commits to this single 32-byte MessageID, ju
 Available in both contexts. Hard-fails `MalformedAddress` when `addr` is neither
 a bare hash nor one complete canonical `ActorID`, or when `refund` has the wrong
 size; `NonPortableInSend` on non-portable args; and `InvalidBitrange` on a
-negative or overflowing gas allotment. It hard-fails `OutOfGas` when the active
+gas allotment outside the `u64` range. It hard-fails `OutOfGas` when the active
 frame cannot prepay the requested grant.
 
 On internal-tx failure during delivery, consensus seals the message payload into a fresh contract under `refund_predicate` and emits it as an Output effect — see the design.
@@ -1635,9 +1693,9 @@ _value_ → ø
 
 Pops the state `Value`, **validates portability**, measures the prospective actor usage according to [Actor storage](storage.md), and **moves it back** into the current actor — which must be **checked out** by a prior `load`, else `SaveWithoutLoad` (saving to a non-checked-out actor would clobber, and silently drop the tokens of, live state). `save` hard-fails `StorageCapacityExceeded` if prospective usage exceeds capacity at the current core-block height. Emits `TxEntry::ActorSave { actor, state }` carrying the **full** post-save state — symmetric with `Output(Contract)` which carries the full Contract. The merkle leaf for this entry hashes `(actor.to_hash(), state_root(&state))`, so the TxID commits to the canonical state root while consumers reading the txlog directly get the bytes (no separate state-witness channel needed).
 
-**State is any portable Value.** The author structures state however they like (a Dict, an Int, a Token, …).
+**State is any portable Value.** The author structures state however they like (a Dict, a Scalar, a Token, …).
 
-**Portability is the canonical storage gate.** Portable values: `Int253`, `String`, `Point`, `Dict` of portable, non-negative `ClearToken`, `Token`. Non-portable values (`Contract`, `Merlin`, `Variable`, `Expression`, `Constraint`, `MultiscalarMul`, `WideToken`, negative `ClearToken`) hard-fail `NonPortableInState`.
+**Portability is the canonical storage gate.** Portable values: `Scalar`, `String`, `Point`, `Dict` of portable, non-negative `ClearToken`, `Token`. Non-portable values (`Contract`, `Merlin`, `Variable`, `Expression`, `Constraint`, `MultiscalarMul`, `WideToken`, negative `ClearToken`) hard-fail `NonPortableInState`.
 
 The registry repeats this check on direct save and deploy entry points, so the
 actor-state invariant does not depend on `op_save` being the caller. As at the
@@ -1671,7 +1729,7 @@ Hard-fails: `SaveWithoutLoad` (actor not checked out), `NonPortableInState`, `St
 
 _q_ → _debt 1 | 0_
 
-Pops `q` as a positive `Int253` byte count. The request must be at least
+Pops `q` as a `Scalar` whose canonical residue is a positive byte count. The request must be at least
 `MIN_LEASE_BYTES`, must be a multiple of `STORAGE_UNIT_BYTES`, and must leave at
 least `MIN_REMAINING_POOL_BYTES` in the global pool. The constants, quote
 formula, block ordering, and lease rules are defined in
@@ -1691,7 +1749,7 @@ finalization. The storage-purchase effect burns that amount rather than paying a
 minter. A later failure rolls back the pool, lease, effect, and burn.
 
 An unavailable or unrepresentable request consumes `q`, pushes `0`, and changes
-nothing. Type and context violations hard-fail: `TypeNotInt253`,
+nothing. Type and context violations hard-fail: `TypeNotScalar`,
 `OpcodeRequiresActorContext`, or `RegistryUnavailable`.
 
 ### quotestorage
@@ -1730,7 +1788,7 @@ _{results… k' 1 | contract args… m 0}_
 
 Same call-frame mechanics as [`open`](#open) — taproot reveal is replaced by signature verification:
 
-1. Pops `m` (Int253), `args` (m portable values), and `gas`. A non-portable
+1. Pops `m` (Scalar), `args` (m portable values), and `gas`. A non-portable
    argument hard-fails `NonPortableInCall` before child entry.
 2. Pops `sig` (String, exactly 64 bytes — Schnorr signature).
 3. Pops `script` (String) and `contract`.
@@ -1755,13 +1813,13 @@ signature failure occurs before child entry and hard-fails the current frame.
 
 ø → _n {0|1}_
 
-Pushes the transaction's `locktime` (as `Int253`) and a unit flag: `0` for block height, `1` for Unix timestamp. The split follows Bitcoin's BIP-65 convention — `flag = 1` iff `locktime ≥ 500_000_000` (`LOCKTIME_TIMESTAMP_THRESHOLD`). Values below the threshold are block heights; values at or above are Unix timestamps (the threshold corresponds to ~1985-11-05, before any practical timestamp range). Available in either context.
+Pushes the transaction's `locktime` (as `Scalar`) and a unit flag: `0` for block height, `1` for Unix timestamp. The split follows Bitcoin's BIP-65 convention — `flag = 1` iff `locktime ≥ 500_000_000` (`LOCKTIME_TIMESTAMP_THRESHOLD`). Values below the threshold are block heights; values at or above are Unix timestamps (the threshold corresponds to ~1985-11-05, before any practical timestamp range). Available in either context.
 
 ### version
 
 ø → _n_
 
-Pushes `TxHeader::version` as a non-negative `Int253`. Available in either context.
+Pushes `TxHeader::version` as a `Scalar`. Available in either context.
 
 ### selfid
 
@@ -1877,8 +1935,8 @@ capacity(h) = STORAGE_UNIT_BYTES
             * sum(lease.units where lease.expiry_height > h)
 ```
 
-The query is read-only and does not expose the lease list. A negative or
-non-`u64` height hard-fails `InvalidBitrange`; a height below the current
+The query is read-only and does not expose the lease list. A canonical residue
+outside the `u64` height range hard-fails `InvalidBitrange`; a height below the current
 core-block height hard-fails `StorageHeightInPast`. Outside actor execution it
 hard-fails `OpcodeRequiresActorContext` (or `RegistryUnavailable` when no actor
 registry was supplied).

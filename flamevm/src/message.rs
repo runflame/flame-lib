@@ -160,7 +160,7 @@ mod tests {
 
     use curve25519_dalek::ristretto::CompressedRistretto;
 
-    use crate::{ClearToken, Dict, Int253, FLAME_FLAVOR};
+    use crate::{ClearToken, Dict, Scalar, FLAME_FLAVOR};
 
     fn dummy_predicate() -> Predicate {
         Predicate::opaque(CompressedRistretto([0u8; 32]))
@@ -207,11 +207,11 @@ mod tests {
     fn new_rejects_nested_nonportable_payload() {
         let mut inner = Dict::new();
         inner.insert(
-            Int253::ZERO,
-            Value::ClearToken(ClearToken::new(Int253::from(-1i64), FLAME_FLAVOR)),
+            Scalar::ZERO,
+            Value::ClearToken(ClearToken::new(Scalar::from(-1i64), FLAME_FLAVOR)),
         );
         let mut outer = Dict::new();
-        outer.insert(Int253::ZERO, Value::Dict(inner));
+        outer.insert(Scalar::ZERO, Value::Dict(inner));
 
         assert!(matches!(
             Message::new(

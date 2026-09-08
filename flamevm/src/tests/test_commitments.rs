@@ -9,14 +9,14 @@ fn op_scalar_pushes_constant_expression() {
     // Pre-load a 32-byte String on the stack, dispatch `scalar`,
     // confirm the result is Expression::Constant.
     let mut vm = vm_external_with_script(ScriptBuilder::new().scalar().to_bytecode());
-    let s = String::scalar(Int253::from(99u64));
+    let s = String::scalar(Scalar::from(99u64));
     vm.push_value(Value::String(s));
     let mut delegate = StubDelegate::new();
     vm.step_external(&mut delegate).expect("scalar ok");
     assert_eq!(vm.current_call.stack.len(), 1);
     match &vm.current_call.stack[0] {
         Value::Expression(Expression::Constant(i)) => {
-            assert_eq!(*i, Int253::from(99u64));
+            assert_eq!(*i, Scalar::from(99u64));
         }
         _ => panic!("expected Expression::Constant"),
     }
@@ -28,14 +28,14 @@ fn op_commit_pushes_variable() {
     // `commit`, confirm the result is a Variable with the open
     // commitment preserved.
     let mut vm = vm_external_with_script(ScriptBuilder::new().commit().to_bytecode());
-    let c = Commitment::unblinded(Int253::from(42u64));
+    let c = Commitment::unblinded(Scalar::from(42u64));
     vm.push_value(Value::String(String::commitment(c.clone())));
     let mut delegate = StubDelegate::new();
     vm.step_external(&mut delegate).expect("commit ok");
     assert_eq!(vm.current_call.stack.len(), 1);
     match &vm.current_call.stack[0] {
         Value::Variable(v) => {
-            assert_eq!(v.commitment.assignment(), Some(Int253::from(42u64)));
+            assert_eq!(v.commitment.assignment(), Some(Scalar::from(42u64)));
         }
         _ => panic!("expected Variable"),
     }
@@ -48,7 +48,7 @@ fn prove_then_verify_with_commit_expr_eq() {
     // Both the commit-side and alloc-side Expressions point to
     // value 42 → eq holds → verify succeeds.
     let pc_gens = PedersenGens::default();
-    let witness_int = Int253::from(42u64);
+    let witness_int = Scalar::from(42u64);
     // Use a blinding factor that we'll need to encode into the
     // ScriptBuilder as a witness-bearing String.
     let blinding = curve25519_dalek::scalar::Scalar::from(7u64);
@@ -90,10 +90,10 @@ fn op_decrypt_succeeds_on_matching_witness() {
     // The two Pedersen-opening checks are deferred into the
     // batch verifier; consume the batch at the end to confirm
     // it accepts.
-    let q = Int253::from(100u64);
-    let f = Int253::from(7u64);
-    let q_blind = Int253::from(11u64);
-    let f_blind = Int253::from(13u64);
+    let q = Scalar::from(100u64);
+    let f = Scalar::from(7u64);
+    let q_blind = Scalar::from(11u64);
+    let f_blind = Scalar::from(13u64);
     let qty_commit =
         Commitment::blinded_with_factor(q, curve25519_dalek::scalar::Scalar::from(11u64));
     let flv_commit =
@@ -102,10 +102,10 @@ fn op_decrypt_succeeds_on_matching_witness() {
 
     let mut vm = vm_external_with_script(ScriptBuilder::new().decrypt().to_bytecode());
     vm.push_value(Value::Token(token));
-    vm.push_value(Value::Int253(f));
-    vm.push_value(Value::Int253(f_blind));
-    vm.push_value(Value::Int253(q));
-    vm.push_value(Value::Int253(q_blind));
+    vm.push_value(Value::Scalar(f));
+    vm.push_value(Value::Scalar(f_blind));
+    vm.push_value(Value::Scalar(q));
+    vm.push_value(Value::Scalar(q_blind));
     let mut delegate = StubDelegate::new();
     vm.step_external(&mut delegate).expect("decrypt ok");
 
@@ -135,8 +135,8 @@ fn op_decrypt_rejects_wrong_witness() {
     // the batch is drained — same lane as Schnorr / MuSig / MSM
     // verification failures, mapped to
     // `BatchSignatureVerificationFailed` by `Verifier::verify`.
-    let q = Int253::from(100u64);
-    let f = Int253::from(7u64);
+    let q = Scalar::from(100u64);
+    let f = Scalar::from(7u64);
     let qty_commit =
         Commitment::blinded_with_factor(q, curve25519_dalek::scalar::Scalar::from(11u64));
     let flv_commit =
@@ -144,10 +144,10 @@ fn op_decrypt_rejects_wrong_witness() {
     let token = Token::new(qty_commit, flv_commit);
     let mut vm = vm_external_with_script(vec![0x9a]);
     vm.push_value(Value::Token(token));
-    vm.push_value(Value::Int253(f));
-    vm.push_value(Value::Int253(Int253::from(99u64))); // wrong f_blind
-    vm.push_value(Value::Int253(q));
-    vm.push_value(Value::Int253(Int253::from(11u64)));
+    vm.push_value(Value::Scalar(f));
+    vm.push_value(Value::Scalar(Scalar::from(99u64))); // wrong f_blind
+    vm.push_value(Value::Scalar(q));
+    vm.push_value(Value::Scalar(Scalar::from(11u64)));
     let mut delegate = StubDelegate::new();
     vm.step_external(&mut delegate)
         .expect("op_decrypt defers the check, so the step itself succeeds");
@@ -183,21 +183,21 @@ fn commit_in_internal_context_errors_external_only() {
 
 #[test]
 fn decrypt_checks_matching_opening_immediately_in_internal_context() {
-    let q = Int253::from(100u64);
-    let f = Int253::from(7u64);
-    let q_blind = Int253::from(11u64);
-    let f_blind = Int253::from(13u64);
+    let q = Scalar::from(100u64);
+    let f = Scalar::from(7u64);
+    let q_blind = Scalar::from(11u64);
+    let f_blind = Scalar::from(13u64);
     let token = Token::new(
-        Commitment::blinded_with_factor(q, Scalar::from(11u64)),
-        Commitment::blinded_with_factor(f, Scalar::from(13u64)),
+        Commitment::blinded_with_factor(q, DalekScalar::from(11u64)),
+        Commitment::blinded_with_factor(f, DalekScalar::from(13u64)),
     );
     let mut vm = vm_with_script(ScriptBuilder::new().decrypt().to_bytecode());
     for value in [
         Value::Token(token),
-        Value::Int253(f),
-        Value::Int253(f_blind),
-        Value::Int253(q),
-        Value::Int253(q_blind),
+        Value::Scalar(f),
+        Value::Scalar(f_blind),
+        Value::Scalar(q),
+        Value::Scalar(q_blind),
     ] {
         vm.push_value(value);
     }
@@ -212,19 +212,19 @@ fn decrypt_checks_matching_opening_immediately_in_internal_context() {
 
 #[test]
 fn decrypt_rejects_wrong_opening_immediately_in_internal_context() {
-    let q = Int253::from(100u64);
-    let f = Int253::from(7u64);
+    let q = Scalar::from(100u64);
+    let f = Scalar::from(7u64);
     let token = Token::new(
-        Commitment::blinded_with_factor(q, Scalar::from(11u64)),
-        Commitment::blinded_with_factor(f, Scalar::from(13u64)),
+        Commitment::blinded_with_factor(q, DalekScalar::from(11u64)),
+        Commitment::blinded_with_factor(f, DalekScalar::from(13u64)),
     );
     let mut vm = vm_with_script(ScriptBuilder::new().decrypt().to_bytecode());
     for value in [
         Value::Token(token),
-        Value::Int253(f),
-        Value::Int253(Int253::from(99u64)),
-        Value::Int253(q),
-        Value::Int253(Int253::from(11u64)),
+        Value::Scalar(f),
+        Value::Scalar(Scalar::from(99u64)),
+        Value::Scalar(q),
+        Value::Scalar(Scalar::from(11u64)),
     ] {
         vm.push_value(value);
     }

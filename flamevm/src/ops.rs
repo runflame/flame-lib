@@ -1,13 +1,12 @@
 //! Definition of all instructions in FlameVM,
 //! their codes and decoding/encoding utility functions.
 
-use curve25519_dalek::scalar::Scalar;
 use readerwriter::{Encodable, Reader, WriteError, Writer};
 
 use crate::crypto::Point;
 use crate::encoding::{read_subvarint, write_subvarint};
 use crate::errors::VMError;
-use crate::int253::Int253;
+use crate::scalar::Scalar;
 use crate::string::String;
 use core::convert::TryFrom;
 
@@ -167,7 +166,7 @@ const OP_HEIGHT: u8 = 0xf2;
 /// variant's inline comment shows its stack diagram.
 #[derive(Clone, Debug)]
 pub enum Instruction {
-    PushInt(Int253),       // ø push → int
+    PushInt(Scalar),       // ø push → int
     PushStr(String),       // ø pushstr → str
     PushPoint(Point),      // ø pushpoint → point (witness-bearing on prover)
     PushToken,             // flv pushtoken → token
@@ -205,9 +204,9 @@ pub enum Instruction {
     Size,                  // x size → x n
     Scalar,                // s scalar → expr
     Commit,                // s commit → var
-    Alloc(Option<Int253>), // ø alloc → expr
+    Alloc(Option<Scalar>), // ø alloc → expr
     Expr,                  // var expr → expr
-    Range,                 // expr n range → expr
+    Range,                 // x n range → x (scalar anywhere; expression external-only)
     Dict,                  // val key … val key n dict → dict
     Put,                   // dict k v put → dict'
     Replace,               // dict k v replace → dict' {prev 1 | 0}
@@ -227,7 +226,7 @@ pub enum Instruction {
     Amount,                // t amount → t qty flv
     IssuePriv,             // qty:Variable tag issuepriv    → T  (predicate context)
     IssuePrivFlv, // pred tag    issueprivflv      → int (consumer-side flv helper for issuepriv)
-    IssuePub,     // qty:Int253 tag issuepub → CT (InternalRoot / ActorCall)
+    IssuePub,     // qty:Scalar tag issuepub → CT (InternalRoot / ActorCall)
     IssuePubFlv,  // cid tag     issuepubflv       → int (consumer-side flv helper for issuepub)
     Retire,       // t retire → ø
     Borrow,       // qty flv borrow → -T +T
@@ -432,9 +431,8 @@ impl Instruction {
     /// from `reader`. Errors:
     ///
     /// - `VMError::UnexpectedEndOfScript` — reader ran out of bytes.
-    /// - `VMError::InvalidInt253Encoding` — a `pushint` payload's
-    ///   magnitude isn't a canonical Ristretto scalar, or a `pushint`
-    ///   full encoded negative zero.
+    /// - `VMError::InvalidScalarEncoding` — a `pushint` payload is not
+    ///   a canonical scalar or does not use its minimal width.
     ///
     /// Unknown opcode bytes return `Instruction::Ext(b)` rather than
     /// erroring, so future protocol versions can introduce new opcodes
@@ -445,7 +443,7 @@ impl Instruction {
             .map_err(|_| VMError::UnexpectedEndOfScript)?;
         match byte {
             // push:k
-            0x00..=OP_PUSH_SMALL_MAX => Ok(Instruction::PushInt(Int253::from(byte as u64))),
+            0x00..=OP_PUSH_SMALL_MAX => Ok(Instruction::PushInt(Scalar::from(byte as u64))),
             // pushint{8,16,64,128} pos/neg
             OP_PUSHINT8_POS => parse_pushint_n(reader, 1, false),
             OP_PUSHINT8_NEG => parse_pushint_n(reader, 1, true),
@@ -579,7 +577,7 @@ impl Instruction {
     /// Returns this instruction's contribution to the prover's witness
     /// queue — `Some(w)` for variants that own a witness slot, `None`
     /// otherwise. Walked by `ScriptBuilder::to_witnesses`.
-    pub fn witness(&self) -> Option<Option<Int253>> {
+    pub fn witness(&self) -> Option<Option<Scalar>> {
         match self {
             Instruction::Alloc(w) => Some(*w),
             _ => None,
@@ -605,27 +603,21 @@ fn parse_label_op(
 /// Encodes `i` using the narrowest opcode pair that fits. The
 /// resulting byte sequence matches what the VM's byte-dispatch handler
 /// expects to parse.
-fn encode_push_int(i: &Int253, w: &mut impl Writer) -> Result<(), WriteError> {
+fn encode_push_int(i: &Scalar, w: &mut impl Writer) -> Result<(), WriteError> {
     let bytes = i.to_bytes();
-    let neg = i.is_negative();
-    let mag_scalar = i.abs_scalar();
-    let mag_bytes = mag_scalar.to_bytes();
+    let negated = -*i;
+    let neg = *i != Scalar::ZERO && negated.to_u128().is_some();
+    let compact = if neg { negated } else { *i };
 
-    // Try push:k (only for 0..=15 and non-negative).
-    if !neg && mag_bytes[8..].iter().all(|&b| b == 0) {
-        let mut lo = [0u8; 8];
-        lo.copy_from_slice(&mag_bytes[..8]);
-        let v = u64::from_le_bytes(lo);
+    // Try push:k for canonical residues 0..=15.
+    if let Some(v) = i.to_u64() {
         if v <= OP_PUSH_SMALL_MAX as u64 {
             return w.write_u8(b"pushsmall", v as u8);
         }
     }
 
-    // Try pushint8 / 16 / 64 / 128 if magnitude fits.
-    if mag_bytes[16..].iter().all(|&b| b == 0) {
-        let mut buf = [0u8; 16];
-        buf.copy_from_slice(&mag_bytes[..16]);
-        let v = u128::from_le_bytes(buf);
+    // Compact opcodes encode a small residue or its modular negation.
+    if let Some(v) = compact.to_u128() {
         if v <= u8::MAX as u128 {
             w.write_u8(
                 b"pushint.tag",
@@ -671,21 +663,17 @@ fn encode_push_int(i: &Int253, w: &mut impl Writer) -> Result<(), WriteError> {
         return w.write(b"pushint128", &v.to_le_bytes());
     }
 
-    // Else: pushint full (32-byte sign-magnitude form).
+    // Else: pushint full (32-byte canonical little-endian scalar).
     w.write_u8(b"pushint.tag", OP_PUSHINT_FULL)?;
     w.write(b"pushint.full", &bytes)
 }
 
-/// Reads `width_bytes` little-endian bytes from `reader` as the
-/// magnitude of a pushint{N} instruction; combines with `negative` to
-/// produce an `Int253`. Returns `VMError::InvalidInt253Encoding` if
-/// the scalar bytes don't form a canonical scalar (only possible at
-/// width=16 with a magnitude exceeding ℓ — impossible in practice for
-/// any non-malicious encoder but worth guarding).
+/// Reads a compact pushint payload, optionally negating it modulo ℓ.
+/// Every payload fits below ℓ; non-minimal widths are rejected.
 fn parse_pushint_n(
     reader: &mut impl Reader,
     width_bytes: usize,
-    negative: bool,
+    negate: bool,
 ) -> Result<Instruction, VMError> {
     debug_assert!(width_bytes <= 16);
     let mut buf = [0u8; 16];
@@ -694,23 +682,20 @@ fn parse_pushint_n(
         .map_err(|_| VMError::UnexpectedEndOfScript)?;
     let mag = u128::from_le_bytes(buf);
     // Canonical minimal width: reject a value representable by a narrower
-    // class (push:k for non-neg 0..15, push:0 for zero, the next-smaller
+    // class (push:k for residues 0..15, push:0 for zero, the next-smaller
     // pushint for wider forms). The encoder always picks the narrowest.
     let minimal = match width_bytes {
-        1 => mag != 0 && (negative || mag > OP_PUSH_SMALL_MAX as u128),
+        1 => mag != 0 && (negate || mag > OP_PUSH_SMALL_MAX as u128),
         2 => mag > u8::MAX as u128,
         8 => mag > u16::MAX as u128,
         16 => mag > u64::MAX as u128,
         _ => true,
     };
     if !minimal {
-        return Err(VMError::InvalidInt253Encoding);
+        return Err(VMError::InvalidScalarEncoding);
     }
-    let mut scalar_bytes = [0u8; 32];
-    scalar_bytes[..16].copy_from_slice(&mag.to_le_bytes());
-    let scalar = Option::<Scalar>::from(Scalar::from_canonical_bytes(scalar_bytes))
-        .ok_or(VMError::InvalidInt253Encoding)?;
-    Ok(Instruction::PushInt(Int253::from_parts(negative, scalar)))
+    let scalar = Scalar::from(mag);
+    Ok(Instruction::PushInt(if negate { -scalar } else { scalar }))
 }
 
 fn parse_pushint_full(reader: &mut impl Reader) -> Result<Instruction, VMError> {
@@ -718,11 +703,11 @@ fn parse_pushint_full(reader: &mut impl Reader) -> Result<Instruction, VMError> 
     reader
         .read(&mut buf)
         .map_err(|_| VMError::UnexpectedEndOfScript)?;
-    let int = Int253::from_bytes(buf).ok_or(VMError::InvalidInt253Encoding)?;
-    // Canonical: the 32-byte full form is only for magnitudes exceeding
-    // 128 bits; anything that fits pushint128 (or narrower) must use it.
-    if int.abs_scalar().to_bytes()[16..].iter().all(|&b| b == 0) {
-        return Err(VMError::InvalidInt253Encoding);
+    let int = Scalar::from_bytes(buf).ok_or(VMError::InvalidScalarEncoding)?;
+    // Full form is only for residues whose value and modular negation both
+    // exceed 128 bits; either compact endpoint must use its narrower opcode.
+    if int.to_u128().is_some() || (-int).to_u128().is_some() {
+        return Err(VMError::InvalidScalarEncoding);
     }
     Ok(Instruction::PushInt(int))
 }
@@ -740,35 +725,35 @@ mod tests {
 
     #[test]
     fn golden_pushint_width_boundaries() {
-        let u64_next = Int253::from(u64::MAX as u128 + 1);
-        let u128_top = Int253::from(u128::MAX);
-        let u128_next = Int253::from(u128::MAX) + Int253::ONE;
+        let u64_next = Scalar::from(u64::MAX as u128 + 1);
+        let u128_top = Scalar::from(u128::MAX);
+        let u128_next = Scalar::from(u128::MAX) + Scalar::ONE;
         for (value, expected) in [
-            (Int253::ZERO, "00"),
-            (Int253::from(15u64), "0f"),
-            (Int253::from(16u64), "1010"),
-            (Int253::from(255u64), "10ff"),
-            (Int253::from(256u64), "120001"),
-            (Int253::from(65_535u64), "12ffff"),
-            (Int253::from(65_536u64), "140000010000000000"),
-            (Int253::from(u64::MAX), "14ffffffffffffffff"),
+            (Scalar::ZERO, "00"),
+            (Scalar::from(15u64), "0f"),
+            (Scalar::from(16u64), "1010"),
+            (Scalar::from(255u64), "10ff"),
+            (Scalar::from(256u64), "120001"),
+            (Scalar::from(65_535u64), "12ffff"),
+            (Scalar::from(65_536u64), "140000010000000000"),
+            (Scalar::from(u64::MAX), "14ffffffffffffffff"),
             (u64_next, "1600000000000000000100000000000000"),
             (u128_top, "16ffffffffffffffffffffffffffffffff"),
             (
                 u128_next,
                 "180000000000000000000000000000000001000000000000000000000000000000",
             ),
-            (Int253::from(-1i64), "1101"),
-            (Int253::from(-255i64), "11ff"),
-            (-Int253::from(256u64), "130001"),
-            (-Int253::from(65_535u64), "13ffff"),
-            (-Int253::from(65_536u64), "150000010000000000"),
-            (-Int253::from(u64::MAX), "15ffffffffffffffff"),
+            (Scalar::from(-1i64), "1101"),
+            (Scalar::from(-255i64), "11ff"),
+            (-Scalar::from(256u64), "130001"),
+            (-Scalar::from(65_535u64), "13ffff"),
+            (-Scalar::from(65_536u64), "150000010000000000"),
+            (-Scalar::from(u64::MAX), "15ffffffffffffffff"),
             (-u64_next, "1700000000000000000100000000000000"),
             (-u128_top, "17ffffffffffffffffffffffffffffffff"),
             (
                 -u128_next,
-                "180000000000000000000000000000000001000000000000000000000000000080",
+                "18edd3f55c1a631258d69cf7a2def9de14ffffffffffffffffffffffffffffff0f",
             ),
         ] {
             let encoded = Instruction::PushInt(value).encode_to_vec();
@@ -783,8 +768,46 @@ mod tests {
     }
 
     #[test]
+    fn pushint_full_rejects_noncanonical_or_compact_residues() {
+        let modulus = bytes("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010");
+        let compact = [
+            Scalar::ZERO,
+            Scalar::from(u128::MAX),
+            -Scalar::from(u128::MAX),
+        ];
+        for payload in compact
+            .iter()
+            .map(|value| value.to_bytes().to_vec())
+            .chain([modulus, vec![0xff; 32]])
+        {
+            let mut encoded = vec![OP_PUSHINT_FULL];
+            encoded.extend_from_slice(&payload);
+            assert!(matches!(
+                Instruction::parse(&mut encoded.as_slice()),
+                Err(VMError::InvalidScalarEncoding)
+            ));
+        }
+    }
+
+    #[test]
+    fn pushint_compact_requires_minimal_width() {
+        for encoded in [
+            vec![OP_PUSHINT8_POS, 0],
+            vec![OP_PUSHINT8_POS, 15],
+            vec![OP_PUSHINT8_NEG, 0],
+            vec![OP_PUSHINT16_POS, 255, 0],
+            vec![OP_PUSHINT16_NEG, 255, 0],
+        ] {
+            assert!(matches!(
+                Instruction::parse(&mut encoded.as_slice()),
+                Err(VMError::InvalidScalarEncoding)
+            ));
+        }
+    }
+
+    #[test]
     fn alloc_witness_is_discarded_in_bytecode() {
-        let buf = Instruction::Alloc(Some(Int253::from(42u64))).encode_to_vec();
+        let buf = Instruction::Alloc(Some(Scalar::from(42u64))).encode_to_vec();
         assert_eq!(buf, vec![OP_ALLOC]);
 
         let mut r: &[u8] = &buf;

@@ -4,7 +4,7 @@
 
 use super::test_helpers::*;
 
-use crate::{empty_state, ActorID, Dict, Int253, StoragePurchase};
+use crate::{empty_state, ActorID, Dict, Scalar, StoragePurchase};
 
 /// Builds an empty state with a single `recv` method that runs the
 /// caller-supplied bytes. Returns (state, id).
@@ -74,7 +74,7 @@ fn facade_internal_execute_tx_roundtrip() {
 fn constructor_buys_storage_and_is_reused() {
     let mut reg = MemRegistry::new();
     reg.set_storage_quote(Some(StoragePurchase {
-        fee_sparks: Int253::from(77u64),
+        fee_sparks: Scalar::from(77u64),
         expiry_height: 52_500,
     }));
     let code = ScriptBuilder::new()
@@ -93,7 +93,7 @@ fn constructor_buys_storage_and_is_reused() {
             None,
             Anchor([0x07; 32]),
             vec![Value::ClearToken(ClearToken::new(
-                Int253::from(77u64),
+                Scalar::from(77u64),
                 FLAME_FLAVOR,
             ))],
             10_000,
@@ -274,11 +274,11 @@ fn save_rejects_nested_nonportable_state() {
 
     let mut inner = Dict::new();
     inner.insert(
-        Int253::ZERO,
-        Value::ClearToken(ClearToken::new(Int253::from(-1i64), FLAME_FLAVOR)),
+        Scalar::ZERO,
+        Value::ClearToken(ClearToken::new(Scalar::from(-1i64), FLAME_FLAVOR)),
     );
     let mut outer = Dict::new();
-    outer.insert(Int253::ZERO, Value::Dict(inner));
+    outer.insert(Scalar::ZERO, Value::Dict(inner));
 
     let mut vm = vm_for(id.clone(), ScriptBuilder::new().save().to_bytecode());
     vm.current_call.stack.push(Value::Dict(outer));
@@ -330,8 +330,8 @@ fn token_survives_load_save_roundtrip_exactly_once() {
     let mut reg = MemRegistry::new();
     let mut d = Dict::new();
     d.insert(
-        Int253::from(0u64),
-        Value::ClearToken(ClearToken::new(Int253::from(5u64), Int253::from(9u64))),
+        Scalar::from(0u64),
+        Value::ClearToken(ClearToken::new(Scalar::from(5u64), Scalar::from(9u64))),
     );
     let state = Value::Dict(d);
     let recv = ScriptBuilder::new().load().save().to_bytecode();
@@ -354,10 +354,10 @@ fn token_survives_load_save_roundtrip_exactly_once() {
     match reg.actor(&id).unwrap().state.as_ref().unwrap() {
         Value::Dict(d) => {
             assert_eq!(d.len(), 1, "no extra entry");
-            match d.get(&Int253::from(0u64)) {
+            match d.get(&Scalar::from(0u64)) {
                 Some(Value::ClearToken(t)) => {
-                    assert_eq!(t.qty, Int253::from(5u64));
-                    assert_eq!(t.flv, Int253::from(9u64));
+                    assert_eq!(t.qty, Scalar::from(5u64));
+                    assert_eq!(t.flv, Scalar::from(9u64));
                 }
                 other => panic!("token vanished or mutated: {:?}", other),
             }
@@ -388,8 +388,8 @@ fn dismantle_token_bearing_state_requires_retire() {
     // Token-bearing state: any Value — here a Dict holding a live ClearToken.
     let mut state_dict = Dict::new();
     state_dict.insert(
-        Int253::from(0u64),
-        Value::ClearToken(ClearToken::new(Int253::from(5u64), Int253::from(9u64))),
+        Scalar::from(0u64),
+        Value::ClearToken(ClearToken::new(Scalar::from(5u64), Scalar::from(9u64))),
     );
     let state = Value::Dict(state_dict);
     let id = ActorID::Hash([0x09; 32]);

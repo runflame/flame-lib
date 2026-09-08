@@ -95,9 +95,9 @@ fn contract_opcode_rejects_non_portable_payload() {
 #[test]
 fn contract_constructor_rejects_nested_non_portable_payload() {
     let mut inner = Dict::new();
-    inner.insert(Int253::ZERO, Value::Merlin(Merlin::new(b"test")));
+    inner.insert(Scalar::ZERO, Value::Merlin(Merlin::new(b"test")));
     let mut outer = Dict::new();
-    outer.insert(Int253::ZERO, Value::Dict(inner));
+    outer.insert(Scalar::ZERO, Value::Dict(inner));
     assert!(!outer.is_portable());
 
     assert!(matches!(
@@ -197,8 +197,8 @@ fn open_with_valid_taproot_proof_runs_program() {
     run_to_end(&mut vm).unwrap();
     // Parent stack: [count=0, success=1].
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
-    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(1u64));
 }
 
 #[test]
@@ -259,10 +259,10 @@ fn open_preserves_alloc_witnesses_via_script_string() {
     // `push:0, return` so the isolated ContractOpen frame exits cleanly
     // after `verify` drains the constraint (ADR 0013).
     let inner = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(10u64)))
+        .alloc(Some(Scalar::from(10u64)))
         .eq()
         .verify()
         .push_int(0u64)
@@ -368,15 +368,15 @@ fn open_passes_args_after_payload() {
     run_to_end(&mut vm).unwrap();
     // Parent stack: [count=0, success=1].
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
-    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(1u64));
 }
 
 #[test]
 fn failed_open_restores_contract_and_explicit_bearers() {
     let inner = ScriptBuilder::new().push_int(0u64).verify().to_bytecode();
     let (tree, proof) = build_predicate_with_program(&inner, 12);
-    let payload_token = Token::cleartext(Int253::from(31u64), FLAME_FLAVOR).unwrap();
+    let payload_token = Token::cleartext(Scalar::from(31u64), FLAME_FLAVOR).unwrap();
     let contract = Contract::new(
         Predicate::opaque(tree.point),
         Anchor([0x31; 32]),
@@ -385,16 +385,16 @@ fn failed_open_restores_contract_and_explicit_bearers() {
     .expect("token payload is portable");
     let contract_id = contract.id();
 
-    let clear = ClearToken::new(Int253::from(37u64), FLAME_FLAVOR);
-    let dict_token = Token::cleartext(Int253::from(41u64), FLAME_FLAVOR).unwrap();
+    let clear = ClearToken::new(Scalar::from(37u64), FLAME_FLAVOR);
+    let dict_token = Token::cleartext(Scalar::from(41u64), FLAME_FLAVOR).unwrap();
     let mut dict = Dict::new();
-    dict.insert(Int253::ZERO, Value::Token(dict_token.clone()));
+    dict.insert(Scalar::ZERO, Value::Token(dict_token.clone()));
     let expected_dict_root = state_root(&Value::Dict(dict.clone()));
 
     let mut neighbors = Dict::new();
     for (i, neighbor) in proof.neighbors.iter().enumerate() {
         neighbors.insert(
-            Int253::from(i as u64),
+            Scalar::from(i as u64),
             Value::String(String::from(neighbor.to_vec())),
         );
     }
@@ -406,10 +406,10 @@ fn failed_open_restores_contract_and_explicit_bearers() {
         Value::Dict(neighbors),
         Value::String(String::from(proof.position)),
         Value::String(String::from(proof.program)),
-        Value::Int253(Int253::from(10_000u64)),
+        Value::Scalar(Scalar::from(10_000u64)),
         Value::ClearToken(clear.clone()),
         Value::Dict(dict),
-        Value::Int253(Int253::from(2u64)),
+        Value::Scalar(Scalar::from(2u64)),
     ];
 
     run_to_end(&mut vm).unwrap();
@@ -432,17 +432,17 @@ fn failed_open_restores_contract_and_explicit_bearers() {
         panic!("expected restored Dict");
     };
     assert!(matches!(
-        restored_dict.get(&Int253::ZERO),
+        restored_dict.get(&Scalar::ZERO),
         Some(Value::Token(token)) if token.qty() == dict_token.qty() && token.flv() == dict_token.flv()
     ));
-    assert_int(&vm.current_call.stack[3], Int253::from(2u64));
-    assert_int(&vm.current_call.stack[4], Int253::ZERO);
+    assert_int(&vm.current_call.stack[3], Scalar::from(2u64));
+    assert_int(&vm.current_call.stack[4], Scalar::ZERO);
 }
 
 #[test]
 fn predicate_tree_new_validates_inputs() {
     // Empty programs → EmptyPredicateTree.
-    let secret = Scalar::from(1u64);
+    let secret = DalekScalar::from(1u64);
     let ik = (RISTRETTO_BASEPOINT_TABLE * &secret).compress();
     assert!(matches!(
         PredicateTree::new(Some(ik), Vec::new(), TEST_BLINDING_KEY).unwrap_err(),
@@ -495,8 +495,8 @@ fn scripts_only_predicate_opens_via_program_path() {
     run_to_end(&mut vm).unwrap();
     // Parent stack: [count=0, success=1].
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
-    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(1u64));
 }
 
 #[test]
@@ -539,8 +539,8 @@ fn multi_leaf_predicate_each_program_unlocks_via_its_path() {
             "program index {} expected [count, marker] on stack",
             i
         );
-        assert_int(&vm.current_call.stack[0], Int253::from(0u64));
-        assert_int(&vm.current_call.stack[1], Int253::from(1u64));
+        assert_int(&vm.current_call.stack[0], Scalar::from(0u64));
+        assert_int(&vm.current_call.stack[1], Scalar::from(1u64));
     }
 }
 
@@ -583,7 +583,7 @@ fn multi_leaf_predicate_wrong_leaf_path_hard_fails() {
 
 #[test]
 fn taproot_proof_for_out_of_range_index_errors() {
-    let secret = Scalar::from(1u64);
+    let secret = DalekScalar::from(1u64);
     let ik = (RISTRETTO_BASEPOINT_TABLE * &secret).compress();
     let tree =
         PredicateTree::new(Some(ik), vec![vec![0x1d], vec![0x1c]], TEST_BLINDING_KEY).unwrap();
@@ -713,11 +713,11 @@ fn contract_decode_rejects_wrong_anchor_length() {
 fn contract_decode_rejects_nested_nonportable_payload_at_contract_boundary() {
     let mut inner = Dict::new();
     inner.insert(
-        Int253::ZERO,
-        Value::ClearToken(ClearToken::new(Int253::from(-1i64), FLAME_FLAVOR)),
+        Scalar::ZERO,
+        Value::ClearToken(ClearToken::new(Scalar::from(-1i64), FLAME_FLAVOR)),
     );
     let mut outer = Dict::new();
-    outer.insert(Int253::ZERO, Value::Dict(inner));
+    outer.insert(Scalar::ZERO, Value::Dict(inner));
 
     let mut bytes = Vec::new();
     write_list_prefix(&mut bytes, 3).unwrap();
@@ -777,9 +777,9 @@ fn input_pushes_contract_seeds_anchor_and_emits_txlog() {
 
 #[test]
 fn input_requires_string_on_top() {
-    // Non-String top → TypeNotString. (Use an Int253.)
+    // Non-String top → TypeNotString. (Use an Scalar.)
     let mut vm = vm_external_with_script(Vec::new());
-    vm.push_value(Value::Int253(Int253::from(7u64)));
+    vm.push_value(Value::Scalar(Scalar::from(7u64)));
     let err = vm.op_input().unwrap_err();
     assert!(matches!(err, VMError::TypeNotString));
 }
@@ -853,8 +853,8 @@ fn input_then_output_anchor_chain() {
 
     // Step 2: build an output through the real op_output handler.
     // Stack pre-output: [payload(5), count(1), predicate(Point)].
-    vm.push_value(Value::Int253(Int253::from(5u64)));
-    vm.push_value(Value::Int253(Int253::from(1u64)));
+    vm.push_value(Value::Scalar(Scalar::from(5u64)));
+    vm.push_value(Value::Scalar(Scalar::from(1u64)));
     vm.push_value(Value::Point(Point::from_bytes([0xbb; 32])));
     vm.op_output().expect("output ok");
 
@@ -932,13 +932,13 @@ fn external_tx_one_input_one_output_via_signtx() {
     // Stack diagram (top of stack on the right):
     //   pushstr <bytes>       []                  → [String]
     //   input                 [String]            → [Contract]
-    //   signtx                [Contract]              → [Int253(7), String, Int253(2)]
+    //   signtx                [Contract]              → [Scalar(7), String, Scalar(2)]
     //                          (payload + count poured; TxBound recorded)
     //   drop                  [..7, "hello", 2]   → [..7, "hello"]
     //   drop                  [..7, "hello"]      → [..7]
     //   drop                  [..7]               → []
-    //   push:42               []                  → [Int253(42)]
-    //   push:1                [Int253(42)]        → [Int253(42), Int253(1)]
+    //   push:42               []                  → [Scalar(42)]
+    //   push:1                [Scalar(42)]        → [Scalar(42), Scalar(1)]
     //   pushpoint <P_out>     [..1]               → [..1, Point]
     //   output                [..Point]           → []  (Output effect emitted)
     let out_pred_bytes = [0xbb; 32];
@@ -977,11 +977,11 @@ fn external_tx_one_input_one_output_via_signtx() {
     }
     let output_contract_anchor = match &vm.txlog[2] {
         TxEntry::Output(c) => {
-            // Output payload was [Int253(42)].
+            // Output payload was [Scalar(42)].
             assert_eq!(c.payload().len(), 1);
             match &c.payload()[0] {
-                Value::Int253(i) => assert_eq!(*i, Int253::from(42u64)),
-                _ => panic!("output payload[0] must be Int253(42)"),
+                Value::Scalar(i) => assert_eq!(*i, Scalar::from(42u64)),
+                _ => panic!("output payload[0] must be Scalar(42)"),
             }
             // Output predicate is the point we pushed.
             assert_eq!(c.predicate.to_point().as_bytes(), &out_pred_bytes);
@@ -1039,7 +1039,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     let contract1 = Contract::new(
         Predicate::opaque(tree1.point),
         Anchor([0xa1; 32]),
-        vec![Value::Int253(Int253::from(11u64))],
+        vec![Value::Scalar(Scalar::from(11u64))],
     )
     .expect("payload is portable");
     let contract1_id = contract1.id();
@@ -1049,7 +1049,7 @@ fn external_tx_two_inputs_two_outputs_via_open() {
     let contract2 = Contract::new(
         Predicate::opaque(tree2.point),
         Anchor([0xa2; 32]),
-        vec![Value::Int253(Int253::from(22u64))],
+        vec![Value::Scalar(Scalar::from(22u64))],
     )
     .expect("payload is portable");
     let contract2_id = contract2.id();
@@ -1128,18 +1128,18 @@ fn external_tx_two_inputs_two_outputs_via_open() {
         _ => panic!("txlog[3..5] must be Output entries"),
     };
 
-    // Output 1's payload is [Int253(9)], predicate matches what we
+    // Output 1's payload is [Scalar(9)], predicate matches what we
     // pushed.
     assert_eq!(out1.payload().len(), 1);
     match &out1.payload()[0] {
-        Value::Int253(i) => assert_eq!(*i, Int253::from(9u64)),
-        _ => panic!("out1.payload[0] must be Int253(9)"),
+        Value::Scalar(i) => assert_eq!(*i, Scalar::from(9u64)),
+        _ => panic!("out1.payload[0] must be Scalar(9)"),
     }
     assert_eq!(out1.predicate.to_point().as_bytes(), &out1_pred_bytes);
     assert_eq!(out2.payload().len(), 1);
     match &out2.payload()[0] {
-        Value::Int253(i) => assert_eq!(*i, Int253::from(10u64)),
-        _ => panic!("out2.payload[0] must be Int253(10)"),
+        Value::Scalar(i) => assert_eq!(*i, Scalar::from(10u64)),
+        _ => panic!("out2.payload[0] must be Scalar(10)"),
     }
     assert_eq!(out2.predicate.to_point().as_bytes(), &out2_pred_bytes);
 
@@ -1201,9 +1201,9 @@ fn op_open_selfid_errors_no_actor_context() {
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 4);
     assert!(matches!(vm.current_call.stack[0], Value::Contract(_)));
-    assert_int(&vm.current_call.stack[1], Int253::from(9u64));
-    assert_int(&vm.current_call.stack[2], Int253::ONE);
-    assert_int(&vm.current_call.stack[3], Int253::ZERO);
+    assert_int(&vm.current_call.stack[1], Scalar::from(9u64));
+    assert_int(&vm.current_call.stack[2], Scalar::ONE);
+    assert_int(&vm.current_call.stack[3], Scalar::ZERO);
 }
 
 /// `op_open` leaf returning the wrong arity errors `BadReturnArity`;
@@ -1225,8 +1225,8 @@ fn op_open_return_arity_mismatch_errors() {
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 3);
     assert!(matches!(vm.current_call.stack[0], Value::Contract(_)));
-    assert_int(&vm.current_call.stack[1], Int253::ZERO);
-    assert_int(&vm.current_call.stack[2], Int253::ZERO);
+    assert_int(&vm.current_call.stack[1], Scalar::ZERO);
+    assert_int(&vm.current_call.stack[2], Scalar::ZERO);
 }
 
 #[test]
@@ -1280,6 +1280,6 @@ fn op_open_cs_blocked_when_external_context_false() {
         .expect("step ok — error swallowed into marker");
     assert!(vm.call_stack.is_empty());
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[0], Int253::ZERO);
-    assert_int(&vm.current_call.stack[1], Int253::ZERO);
+    assert_int(&vm.current_call.stack[0], Scalar::ZERO);
+    assert_int(&vm.current_call.stack[1], Scalar::ZERO);
 }

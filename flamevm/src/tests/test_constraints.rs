@@ -25,7 +25,7 @@ fn eq_external_strings_peek_compare_not_cs_lift() {
         .expect("eq must not error in external context");
     // Non-consuming cleartext eq leaves [a, b, 1].
     assert_eq!(vm.current_call.stack.len(), 3);
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
@@ -33,13 +33,13 @@ fn range_proof_accepts_in_range_value() {
     // alloc(42) push:64 range — 42 fits in 64 bits.
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(42u64)))
+        .alloc(Some(Scalar::from(42u64)))
         .push_int(64u64)
         .range()
         // Constrain that the same alloc equals 42 to close the proof
         // with a non-trivial constraint (so verification has
         // something to check beyond the range gadget).
-        .alloc(Some(Int253::from(42u64)))
+        .alloc(Some(Scalar::from(42u64)))
         .eq()
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
@@ -66,10 +66,10 @@ fn range_proof_rejects_out_of_range_value() {
     // verifier rejects the proof.
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(512u64)))
+        .alloc(Some(Scalar::from(512u64)))
         .push_int(8u64)
         .range()
-        .alloc(Some(Int253::from(512u64)))
+        .alloc(Some(Scalar::from(512u64)))
         .eq()
         .verify();
     let result = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000);
@@ -107,10 +107,10 @@ fn range_bit_count_zero_rejected() {
     // opcode level.
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(0u64)))
+        .alloc(Some(Scalar::from(0u64)))
         .push_int(0u64)
         .range()
-        .alloc(Some(Int253::from(0u64)))
+        .alloc(Some(Scalar::from(0u64)))
         .eq()
         .verify();
     let err = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).unwrap_err();
@@ -122,10 +122,10 @@ fn range_bit_count_above_64_rejected() {
     // push:65 — bit count exceeds BitRange::max() (64).
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(1u64)))
+        .alloc(Some(Scalar::from(1u64)))
         .push_int(65u64)
         .range()
-        .alloc(Some(Int253::from(1u64)))
+        .alloc(Some(Scalar::from(1u64)))
         .eq()
         .verify();
     let err = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).unwrap_err();
@@ -139,12 +139,12 @@ fn constraint_and_overload_combines_two_constraints() {
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
         // Constraint 1: alloc(7) == alloc(7) — pushes Constraint
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(7u64)))
         .eq()
         // Constraint 2: alloc(3) == alloc(3) — pushes Constraint
-        .alloc(Some(Int253::from(3u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(3u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .eq()
         // AND the two Constraints
         .and()
@@ -172,11 +172,11 @@ fn constraint_or_overload_combines_two_constraints() {
     //   → first is false, second is true; OR yields true. Verify ok.
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(8u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(8u64)))
         .eq()
-        .alloc(Some(Int253::from(3u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(3u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .eq()
         .or()
         .verify();
@@ -202,8 +202,8 @@ fn constraint_not_overload_negates_constraint() {
     // NOT (alloc(7) == alloc(8))  → NOT false → true.
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(8u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(8u64)))
         .eq()
         .not()
         .verify();
@@ -230,11 +230,11 @@ fn constraint_and_with_false_branch_rejected() {
     //   → first true, second false; AND is false. Verifier rejects.
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(7u64)))
         .eq()
-        .alloc(Some(Int253::from(3u64)))
-        .alloc(Some(Int253::from(99u64)))
+        .alloc(Some(Scalar::from(3u64)))
+        .alloc(Some(Scalar::from(99u64)))
         .eq()
         .and()
         .verify();
@@ -258,20 +258,12 @@ fn constraint_and_with_false_branch_rejected() {
 }
 
 #[test]
-fn range_in_internal_context_errors_external_only() {
-    // Internal context dispatches `range` to ExternalOnly.
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_int(1u64)
-            .push_int(64u64)
-            .range()
-            .to_bytecode(),
-    );
-    // Push an Expression manually so dispatch_internal hits range.
-    // Actually we can't construct an Expression in internal context
-    // (alloc is ExternalOnly too). The simpler test: just step until
-    // the `range` opcode is dispatched — it should error ExternalOnly
-    // before consuming any stack operands.
+fn range_expression_in_internal_context_errors_external_only() {
+    // Even a public Expression constant remains external-only. Raw scalars
+    // are admitted separately, without exposing internal execution to R1CS.
+    let mut vm = vm_with_script(ScriptBuilder::new().range().to_bytecode());
+    vm.push_value(Value::Expression(Expression::Constant(Scalar::ONE)));
+    vm.push_value(Value::Scalar(Scalar::from(64u64)));
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::ExternalOnly));
 }
@@ -335,10 +327,10 @@ fn failed_call_unsat_cs_does_not_pollute_parent_proof() {
     // then deliberately fails via `verify(0)` so the whole frame
     // is rolled back into a `0` marker on the parent.
     let inner = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(99u64)))
+        .alloc(Some(Scalar::from(99u64)))
         .eq()
         .verify() // unsat constraint into CS
         .push_int(0u64)
@@ -347,10 +339,10 @@ fn failed_call_unsat_cs_does_not_pollute_parent_proof() {
         .return_();
     let outer = open_with_inner(inner, true)
         // Parent's own constraint: 7 + 3 == 10 — satisfiable.
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(10u64)))
+        .alloc(Some(Scalar::from(10u64)))
         .eq()
         .verify();
     let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000).expect("prove ok");
@@ -383,10 +375,10 @@ fn clean_call_cs_alloc_propagates_to_parent_proof() {
     let pc_gens = PedersenGens::default();
     // Child: adds an UNSATISFIABLE constraint and returns cleanly.
     let inner = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(99u64)))
+        .alloc(Some(Scalar::from(99u64)))
         .eq()
         .verify()
         .push_int(0u64)
@@ -466,10 +458,10 @@ fn failed_call_rolls_back_every_state_lane() {
         .mul()
         .verify() // appends 1·G to batch
         // ── lane 5: R1CS (unsatisfiable 7+3==99) ────────────────
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(99u64)))
+        .alloc(Some(Scalar::from(99u64)))
         .eq()
         .verify()
         // ── deliberately fail ───────────────────────────────────
@@ -480,10 +472,10 @@ fn failed_call_rolls_back_every_state_lane() {
 
     let outer = open_with_inner(inner, true)
         // Parent's own satisfiable constraint: 7 + 3 == 10.
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(10u64)))
+        .alloc(Some(Scalar::from(10u64)))
         .eq()
         .verify();
 

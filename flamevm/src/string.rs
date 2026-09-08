@@ -3,7 +3,7 @@
 use crate::constraints::Commitment;
 use crate::crypto::Point;
 use crate::errors::VMError;
-use crate::int253::Int253;
+use crate::scalar::Scalar;
 use readerwriter::{Encodable, SizeWriter};
 
 use crate::contract::{Contract, Predicate};
@@ -29,8 +29,8 @@ pub enum StringWitness {
     /// the canonical 32-byte compressed point regardless of variant;
     /// see [`Point`].
     Point(Point),
-    /// Scalar witness (cleartext `Int253`); encodes to 32 bytes.
-    Scalar(Int253),
+    /// Scalar witness; encodes to 32 canonical bytes.
+    Scalar(Scalar),
     /// Prover-side sub-script: a decoded instruction stream with
     /// witness slots intact. Encodes to the compiled bytecode.
     /// Consumed by `op_open` / `op_signcall` via
@@ -97,7 +97,7 @@ impl String {
     }
 
     /// Constructs a witness-bearing Scalar-String.
-    pub fn scalar<T: Into<Int253>>(s: T) -> String {
+    pub fn scalar<T: Into<Scalar>>(s: T) -> String {
         String::Witness(Box::new(StringWitness::Scalar(s.into())))
     }
 
@@ -192,18 +192,18 @@ impl String {
         }
     }
 
-    /// Downcasts to an `Int253`. For `Opaque`, parses the bytes as a
-    /// canonical 32-byte sign-magnitude `Int253`. For
+    /// Downcasts to a `Scalar`. For `Opaque`, parses a canonical
+    /// 32-byte little-endian residue strictly below the group order. For
     /// `StringWitness::Scalar(i)`, returns the witness directly.
-    pub fn to_scalar(self) -> Result<Int253, VMError> {
+    pub fn to_scalar(self) -> Result<Scalar, VMError> {
         match self {
             String::Witness(w) => match *w {
                 StringWitness::Scalar(i) => Ok(i),
-                _ => Err(VMError::InvalidInt253Encoding),
+                _ => Err(VMError::InvalidScalarEncoding),
             },
             String::Opaque(data) => {
-                let bytes = array32(&data).ok_or(VMError::InvalidInt253Encoding)?;
-                Int253::from_bytes(bytes).ok_or(VMError::InvalidInt253Encoding)
+                let bytes = array32(&data).ok_or(VMError::InvalidScalarEncoding)?;
+                Scalar::from_bytes(bytes).ok_or(VMError::InvalidScalarEncoding)
             }
         }
     }

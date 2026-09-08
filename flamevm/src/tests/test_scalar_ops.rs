@@ -1,4 +1,4 @@
-//! Tests for int253 ops.
+//! Tests for scalar ops.
 //!
 //! Opcode results are checked *inside the VM* via the self-checking
 //! harness (`assert_stack` / `assert_top` append `eq; verify`), so no
@@ -26,6 +26,39 @@ fn abs_of_positive_pushes_sign_zero() {
 #[test]
 fn abs_of_zero_is_sign_zero() {
     assert_stack_ints(b().push_int(0u64).abs(), &[0, 0]);
+}
+
+#[test]
+fn centered_abs_and_divmod_at_scalar_boundaries() {
+    let half = Scalar::from(-DalekScalar::ONE * DalekScalar::from(2u64).invert());
+    let upper_half = half + Scalar::ONE;
+    assert_stack(b().push_int(half).abs(), &[Scalar::ZERO, half]);
+    assert_stack(b().push_int(upper_half).abs(), &[Scalar::ONE, half]);
+    assert_stack(
+        b().push_int(upper_half).push_int(-1i64).divmod(),
+        &[Scalar::ZERO, half],
+    );
+    assert_stack(
+        b().push_int(-1i64).push_int(2u64).divmod(),
+        &[-Scalar::ONE, Scalar::ZERO],
+    );
+}
+
+#[test]
+fn field_arithmetic_matches_modular_identities() {
+    let minus_one = Scalar::from(-DalekScalar::ONE);
+    assert_stack(
+        b().push_int(minus_one)
+            .push_int(1u64)
+            .add()
+            .push_int(-1i64)
+            .add(),
+        &[minus_one],
+    );
+    assert_stack(
+        b().push_int(minus_one).push_int(minus_one).mul(),
+        &[Scalar::ONE],
+    );
 }
 
 #[test]
@@ -73,12 +106,12 @@ fn eq_two_dicts_is_not_comparable() {
 }
 
 #[test]
-fn neg_flips_sign() {
+fn neg_returns_additive_inverse() {
     assert_stack_ints(b().push_int(5u64).neg(), &[-5]);
 }
 
 #[test]
-fn neg_of_zero_stays_positive() {
+fn neg_of_zero_is_zero() {
     assert_stack_ints(b().push_int(0u64).neg(), &[0]);
 }
 
@@ -98,15 +131,15 @@ fn mul_basic() {
 }
 
 #[test]
-fn mul_sign_xor() {
+fn mul_distributes_over_negation() {
     assert_stack_ints(b().push_int(-6i64).push_int(7u64).mul(), &[-42]);
 }
 
 #[test]
 fn add_requires_int_operands() {
-    // pushpoint, push:1, add — left operand not Int253.
+    // pushpoint, push:1, add — left operand not Scalar.
     let s = b().push_point([0u8; 32]).push_int(1u64).add();
-    assert!(matches!(run_err(s), VMError::TypeNotInt253));
+    assert!(matches!(run_err(s), VMError::TypeNotScalar));
 }
 
 #[test]
@@ -135,10 +168,10 @@ fn divmod_full_width_magnitude_succeeds() {
     // `MagnitudeTooLarge` failure on operands beyond u64::MAX.
     let mut huge = [0u8; 32];
     huge[16] = 1; // 2^128
-    let huge_int = Int253::from_bytes(huge).unwrap();
+    let huge_int = Scalar::from_bytes(huge).unwrap();
     assert_stack(
         b().push_int(huge_int).push_int(1u64).divmod(),
-        &[Int253::ZERO, huge_int],
+        &[Scalar::ZERO, huge_int],
     );
 }
 
@@ -159,7 +192,7 @@ fn mod252_short_string_is_le_value() {
 #[test]
 fn mod252_64_bytes_reduces() {
     // 64 bytes of 0xff — should equal 2^512 - 1 reduced mod ℓ.
-    let expected = Int253::from(Scalar::from_bytes_mod_order_wide(&[0xff; 64]));
+    let expected = Scalar::from(DalekScalar::from_bytes_mod_order_wide(&[0xff; 64]));
     assert_stack(
         b().push_str(String::from(vec![0xffu8; 64])).mod252(),
         &[expected],

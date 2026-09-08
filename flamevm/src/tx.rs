@@ -10,14 +10,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::{code_root, state_root, ActorID, ActorRegistry};
 use crate::contract::{Contract, ContractID};
-use crate::encoding::{write_admitted_value, write_int253};
+use crate::encoding::{write_admitted_value, write_scalar};
 use crate::errors::VMError;
 use crate::message::Message;
 use crate::prover::Prover;
 use crate::script::ScriptBuilder;
 use crate::verifier::Verifier;
 use crate::vm::{BlockContext, DeferredSig, VM};
-use crate::{Int253, Value};
+use crate::{Scalar, Value};
 
 /// Header metadata for the transaction
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -428,10 +428,10 @@ pub enum TxEntry {
     Output(Contract),
 
     /// Cleartext issuance (emitted by `op_issuepub`). Carries the
-    /// cleartext `(qty, flv)` pair as `Int253`s — public on the wire,
+    /// cleartext `(qty, flv)` pair as `Scalar`s — public on the wire,
     /// directly auditable. Flavor is `flavor_from_actor(actor, tag)`
     /// for the actor that ran `issuepub`.
-    IssuePub(Int253, Int253),
+    IssuePub(Scalar, Scalar),
 
     /// Confidential issuance (emitted by `op_issuepriv`). Carries
     /// `(qty_point, flv_point)` — the live Pedersen commitment to the
@@ -495,7 +495,7 @@ pub enum TxEntry {
         actor: ActorID,
         bytes: u64,
         expiry_height: u64,
-        fee_sparks: Int253,
+        fee_sparks: Scalar,
     },
 
     /// Deterministic removal of an actor, either by explicit state
@@ -575,8 +575,8 @@ mod envelope_tests {
     fn multiplication_metrics_include_randomized_constraints() {
         let limits = Limits { gas: 100_000 };
         let unsigned = ScriptBuilder::new()
-            .alloc(Some(Int253::ONE))
-            .alloc(Some(Int253::from(2u64)))
+            .alloc(Some(Scalar::ONE))
+            .alloc(Some(Scalar::from(2u64)))
             .eq()
             .not()
             .verify()
@@ -714,7 +714,7 @@ impl TxEntry {
 
 /// Canonical wire serialization of one effect: a tag byte followed by
 /// the variant's fields, each in its existing canonical form (reusing
-/// `Contract`/`Message`/`ActorID` encoders and `write_value`/`write_int253`
+/// `Contract`/`Message`/`ActorID` encoders and `write_value`/`write_scalar`
 /// — never a parallel re-implementation, per spec §TxLog transport).
 /// All integers little-endian (ADR 0006); byte blobs are u64-LE
 /// length-prefixed (matching `Message` payload / `ActorID` ctor style).
@@ -751,8 +751,8 @@ impl Encodable for TxEntry {
             }
             TxEntry::IssuePub(qty, flv) => {
                 w.write_u8(b"txentry.tag", Self::TAG_ISSUE_PUB)?;
-                write_int253(w, qty)?;
-                write_int253(w, flv)
+                write_scalar(w, qty)?;
+                write_scalar(w, flv)
             }
             TxEntry::IssuePriv(qty_pt, flv_pt) => {
                 w.write_u8(b"txentry.tag", Self::TAG_ISSUE_PRIV)?;
@@ -793,7 +793,7 @@ impl Encodable for TxEntry {
                 actor.to_canonical().encode(w)?;
                 w.write_u64(b"storage.bytes", *bytes)?;
                 w.write_u64(b"storage.expiry", *expiry_height)?;
-                write_int253(w, fee_sparks)
+                write_scalar(w, fee_sparks)
             }
             TxEntry::ActorDestroy { actor } => {
                 w.write_u8(b"txentry.tag", Self::TAG_ACTOR_DESTROY)?;

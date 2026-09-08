@@ -24,7 +24,7 @@ fn golden_consensus_hashes() {
     let contract = Contract::new(
         Predicate::opaque(CompressedRistretto([0x77; 32])),
         Anchor([0x88; 32]),
-        vec![Value::Int253(Int253::from(9u64))],
+        vec![Value::Scalar(Scalar::from(9u64))],
     )
     .unwrap();
     let contract_id = contract.id();
@@ -49,7 +49,7 @@ fn golden_consensus_hashes() {
             TxEntry::Header(h(1, 0)),
             TxEntry::ActorSave {
                 actor: actor.clone(),
-                state: Value::Int253(Int253::from(42u64))
+                state: Value::Scalar(Scalar::from(42u64))
             },
         ])
     );
@@ -73,7 +73,7 @@ fn golden_consensus_hashes() {
             },
         ])
     );
-    let state_root = format!("{:?}", state_root(&Value::Int253(Int253::from(42u64))));
+    let state_root = format!("{:?}", state_root(&Value::Scalar(Scalar::from(42u64))));
     let code_root = format!("{:?}", code_root(&[0x1d]));
     let ctor_id = format!("{:?}", ActorID::Constructor(vec![1, 2, 3]).to_hash());
 
@@ -154,13 +154,13 @@ fn golden_txlog_wire_encoding() {
             actor: actor.clone(),
             code: vec![0x1d],
         },
-        TxEntry::IssuePub(Int253::from(5u64), Int253::from(-3i64)),
+        TxEntry::IssuePub(Scalar::from(5u64), Scalar::from(-3i64)),
         TxEntry::IssuePriv(CR([0x33; 32]), CR([0x44; 32])),
         TxEntry::Retire(CR([0x55; 32]), CR([0x66; 32])),
         TxEntry::Fee(1_000),
         TxEntry::ActorSave {
             actor: actor.clone(),
-            state: Value::Int253(Int253::from(42u64)),
+            state: Value::Scalar(Scalar::from(42u64)),
         },
         TxEntry::SetCode {
             actor: actor.clone(),
@@ -170,7 +170,7 @@ fn golden_txlog_wire_encoding() {
             Contract::new(
                 Predicate::opaque(CR([0x77; 32])),
                 Anchor([0x88; 32]),
-                vec![Value::Int253(Int253::from(9u64))],
+                vec![Value::Scalar(Scalar::from(9u64))],
             )
             .expect("payload is portable"),
         ),
@@ -201,7 +201,7 @@ fn golden_storage_effect_wire_encoding() {
             actor: actor.clone(),
             bytes: 1_024,
             expiry_height: 52_500,
-            fee_sparks: Int253::from(1_000_007_630u64),
+            fee_sparks: Scalar::from(1_000_007_630u64),
         },
         TxEntry::ActorDestroy { actor },
     ]);

@@ -12,17 +12,17 @@ fn pushint_non_minimal_width_rejected() {
     // pushint8 pos 5 → should be push:5
     assert!(matches!(
         ScriptBuilder::parse(&[0x10, 0x05]).unwrap_err(),
-        VMError::InvalidInt253Encoding
+        VMError::InvalidScalarEncoding
     ));
     // pushint8 pos 0 → should be push:0
     assert!(matches!(
         ScriptBuilder::parse(&[0x10, 0x00]).unwrap_err(),
-        VMError::InvalidInt253Encoding
+        VMError::InvalidScalarEncoding
     ));
     // pushint16 pos 5 → fits push:k
     assert!(matches!(
         ScriptBuilder::parse(&[0x12, 0x05, 0x00]).unwrap_err(),
-        VMError::InvalidInt253Encoding
+        VMError::InvalidScalarEncoding
     ));
     // Minimal forms accepted: pushint8 neg 5 (no narrower negative), push:5.
     assert!(ScriptBuilder::parse(&[0x11, 0x05]).is_ok());
@@ -42,16 +42,14 @@ fn pushstr_overlong_length_is_bounded_not_oom() {
 }
 
 #[test]
-fn pushint_full_rejects_negative_zero() {
-    // sign bit set, magnitude zero: -0, not representable. Parse-time
-    // failure now (ScriptBuilder::parse happens at VM entry, not lazily
-    // during dispatch).
+fn pushint_full_rejects_noncanonical_high_bit() {
+    // 2^255 exceeds the scalar modulus and is rejected at parse time.
     let mut bytes = [0u8; 32];
     bytes[31] = 0x80;
     let mut script = vec![0x18];
     script.extend_from_slice(&bytes);
     let err = ScriptBuilder::parse(&script).unwrap_err();
-    assert!(matches!(err, VMError::InvalidInt253Encoding));
+    assert!(matches!(err, VMError::InvalidScalarEncoding));
 }
 
 #[test]
@@ -83,7 +81,7 @@ fn pushtoken_zero_qty_with_flavor() {
     match &vm.current_call.stack[0] {
         Value::ClearToken(t) => {
             assert!(t.is_zero_qty());
-            assert_eq!(t.flv(), Int253::from(7u64));
+            assert_eq!(t.flv(), Scalar::from(7u64));
         }
         other => panic!("expected ClearToken, got {}", value_kind(other)),
     }
@@ -91,7 +89,7 @@ fn pushtoken_zero_qty_with_flavor() {
 
 #[test]
 fn pushtoken_requires_int_flavor() {
-    // pushstr "x", pushtoken — top is String, not Int253.
+    // pushstr "x", pushtoken — top is String, not Scalar.
     let mut vm = vm_with_script(
         ScriptBuilder::new()
             .push_str(String::from(b"x".to_vec()))
@@ -100,7 +98,7 @@ fn pushtoken_requires_int_flavor() {
     );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
-        VMError::TypeNotInt253
+        VMError::TypeNotScalar
     ));
 }
 
@@ -108,7 +106,7 @@ fn pushtoken_requires_int_flavor() {
 fn pushtoken_full_flavor_via_pushint_full() {
     // push a non-small flavor (encoder picks the right pushint variant),
     // then pushtoken.
-    let flv = Int253::from(0x1234567890abcdefu64);
+    let flv = Scalar::from(0x1234567890abcdefu64);
     let mut vm = vm_with_script(ScriptBuilder::new().push_int(flv).pushtoken().to_bytecode());
     run_to_end(&mut vm).unwrap();
     match &vm.current_call.stack[0] {
@@ -141,8 +139,8 @@ fn dup_immediate_zero_copies_top() {
     let mut vm = vm_with_script(ScriptBuilder::new().push_int(7u64).dup_k(0).to_bytecode());
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[0], Int253::from(7u64));
-    assert_int(&vm.current_call.stack[1], Int253::from(7u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(7u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(7u64));
 }
 
 #[test]
@@ -158,7 +156,7 @@ fn dup_immediate_k_picks_kth_from_top() {
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 4);
-    assert_int(&vm.current_call.stack[3], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[3], Scalar::from(1u64));
 }
 
 #[test]
@@ -174,7 +172,7 @@ fn dup_dynamic_pops_index() {
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 3);
-    assert_int(&vm.current_call.stack[2], Int253::from(8u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(8u64));
 }
 
 #[test]
@@ -216,9 +214,9 @@ fn roll_immediate_moves_kth_to_top() {
     );
     run_to_end(&mut vm).unwrap();
     let stack = &vm.current_call.stack;
-    assert_int(&stack[0], Int253::from(2u64));
-    assert_int(&stack[1], Int253::from(3u64));
-    assert_int(&stack[2], Int253::from(1u64));
+    assert_int(&stack[0], Scalar::from(2u64));
+    assert_int(&stack[1], Scalar::from(3u64));
+    assert_int(&stack[2], Scalar::from(1u64));
 }
 
 #[test]
@@ -226,7 +224,7 @@ fn roll_zero_is_noop() {
     let mut vm = vm_with_script(ScriptBuilder::new().push_int(7u64).roll_k(0).to_bytecode());
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(7u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(7u64));
 }
 
 #[test]
@@ -242,8 +240,8 @@ fn roll_dynamic_pops_index() {
     );
     run_to_end(&mut vm).unwrap();
     let stack = &vm.current_call.stack;
-    assert_int(&stack[0], Int253::from(2u64));
-    assert_int(&stack[1], Int253::from(1u64));
+    assert_int(&stack[0], Scalar::from(2u64));
+    assert_int(&stack[1], Scalar::from(1u64));
 }
 
 #[test]

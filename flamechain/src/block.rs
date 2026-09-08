@@ -759,7 +759,7 @@ impl Blockchain {
                     token.flv().to_point(),
                 ))
             }
-            Value::Int253(_) | Value::String(_) | Value::Point(_) | Value::ClearToken(_) => {}
+            Value::Scalar(_) | Value::String(_) | Value::Point(_) | Value::ClearToken(_) => {}
             _ => return Err(VMError::NonPortableInState.into()),
         }
         Ok(())
@@ -1124,7 +1124,7 @@ pub enum ChainError {
 mod tests {
     use super::*;
     use flamevm::{
-        Anchor, ClearToken, Dict, FLAME_FLAVOR, Int253, Predicate, ScriptBuilder, Token,
+        Anchor, ClearToken, Dict, FLAME_FLAVOR, Predicate, Scalar, ScriptBuilder, Token,
         empty_state, state_root,
     };
 
@@ -1241,9 +1241,9 @@ mod tests {
 
         let constrained = || {
             ScriptBuilder::new()
-                .alloc(Some(Int253::ONE))
+                .alloc(Some(Scalar::ONE))
                 .drop_()
-                .alloc(Some(Int253::ONE))
+                .alloc(Some(Scalar::ONE))
                 .drop_()
         };
         let single = external_tx(constrained(), 0);
@@ -1406,7 +1406,7 @@ mod tests {
     fn failed_delivery_matrix_returns_one_exact_bounce() {
         let payload = || {
             vec![Value::ClearToken(ClearToken::new(
-                Int253::from(7u64),
+                Scalar::from(7u64),
                 FLAME_FLAVOR,
             ))]
         };
@@ -1542,9 +1542,9 @@ mod tests {
     fn actor_effect_replay_matches_direct_execution() {
         let mut state = Dict::new();
         state.insert(
-            Int253::ZERO,
+            Scalar::ZERO,
             Value::Token(
-                Token::cleartext(Int253::from(11u64), FLAME_FLAVOR)
+                Token::cleartext(Scalar::from(11u64), FLAME_FLAVOR)
                     .expect("quantity is in range"),
             ),
         );
@@ -1771,11 +1771,11 @@ mod tests {
         );
         assert_eq!(
             state_root(&chain.actors.load_state(&parent).unwrap()),
-            state_root(&Value::Int253(Int253::ONE))
+            state_root(&Value::Scalar(Scalar::ONE))
         );
         assert_eq!(
             state_root(&chain.actors.load_state(&child).unwrap()),
-            state_root(&Value::Int253(Int253::from(2u64)))
+            state_root(&Value::Scalar(Scalar::from(2u64)))
         );
     }
 
@@ -1833,7 +1833,7 @@ mod tests {
         let output = Contract::new(
             refund_predicate(),
             Anchor([91; 32]),
-            vec![Value::Int253(Int253::ONE)],
+            vec![Value::Scalar(Scalar::ONE)],
         )
         .unwrap();
         let output_id = output.id();
@@ -1874,15 +1874,15 @@ mod tests {
     fn portable_bearers_are_delivered_or_recovered_without_duplication() {
         let mut dict = Dict::new();
         dict.insert(
-            Int253::ZERO,
+            Scalar::ZERO,
             Value::Token(
-                Token::cleartext(Int253::from(11u64), FLAME_FLAVOR).expect("quantity is in range"),
+                Token::cleartext(Scalar::from(11u64), FLAME_FLAVOR).expect("quantity is in range"),
             ),
         );
         let values = vec![
-            Value::ClearToken(ClearToken::new(Int253::from(7u64), FLAME_FLAVOR)),
+            Value::ClearToken(ClearToken::new(Scalar::from(7u64), FLAME_FLAVOR)),
             Value::Token(
-                Token::cleartext(Int253::from(9u64), FLAME_FLAVOR)
+                Token::cleartext(Scalar::from(9u64), FLAME_FLAVOR)
                     .expect("quantity is in range"),
             ),
             Value::Dict(dict),
@@ -1968,7 +1968,7 @@ mod tests {
     #[test]
     fn expiry_destruction_retires_tokens_and_binds_height() {
         let actor = ActorID::Hash([9; 32]);
-        let qty = Int253::from(7u64);
+        let qty = Scalar::from(7u64);
         let qty_point = Commitment::unblinded(qty).to_point();
         let flavor_point = Commitment::unblinded(FLAME_FLAVOR).to_point();
         let destroyed = || DestroyedActor {

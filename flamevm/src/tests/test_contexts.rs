@@ -123,7 +123,6 @@ fn restricted_opcode_context_matrix() {
         ("commit", Instruction::Commit),
         ("alloc", Instruction::Alloc(None)),
         ("expr", Instruction::Expr),
-        ("range", Instruction::Range),
         ("input", Instruction::Input),
         ("signtx", Instruction::Signtx),
         ("mix", Instruction::Mix),
@@ -147,6 +146,72 @@ fn restricted_opcode_context_matrix() {
         ("capacity", Instruction::Capacity),
     ] {
         assert_gate(name, instruction, Gate::Actor);
+    }
+}
+
+#[test]
+fn raw_scalar_range_checks_in_every_context_and_preserves_type() {
+    let cases = [
+        (Scalar::ZERO, 1u64, None),
+        (Scalar::ONE, 1, None),
+        (Scalar::from(255u64), 8, None),
+        (Scalar::from(u64::MAX), 64, None),
+        (Scalar::from(256u64), 8, Some(VMError::InvalidBitrange)),
+        (
+            Scalar::from(1u128 << 64),
+            64,
+            Some(VMError::InvalidBitrange),
+        ),
+        (-Scalar::ONE, 64, Some(VMError::InvalidBitrange)),
+        (Scalar::ZERO, 0, Some(VMError::BitCountOutOfRange)),
+        (Scalar::ZERO, 65, Some(VMError::BitCountOutOfRange)),
+    ];
+    for context in CONTEXTS {
+        for (value, bits, expected_error) in &cases {
+            let frame = CallFrame::new(vec![Instruction::Range], kind(context), 1_000_000);
+            let mut vm = VM::new(dummy_header(), frame);
+            vm.push_value(Value::Scalar(*value));
+            vm.push_value(Value::Scalar(Scalar::from(*bits)));
+            let result = if is_external(context) {
+                vm.step_external(&mut make_stub_delegate())
+            } else {
+                vm.step_internal_with_registry(&mut MemRegistry::new())
+            };
+            match expected_error {
+                Some(error) => assert_eq!(
+                    core::mem::discriminant(&result.unwrap_err()),
+                    core::mem::discriminant(error),
+                    "range({value:?}, {bits}) in {context:?}",
+                ),
+                None => {
+                    result.unwrap();
+                    assert_eq!(vm.current_call.stack.len(), 1);
+                    assert_int(&vm.current_call.stack[0], *value);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn range_expression_context_matrix() {
+    for context in CONTEXTS {
+        let frame = CallFrame::new(vec![Instruction::Range], kind(context), 1_000_000);
+        let mut vm = VM::new(dummy_header(), frame);
+        vm.push_value(Value::Expression(Expression::Constant(Scalar::ONE)));
+        vm.push_value(Value::Scalar(Scalar::from(64u64)));
+        if is_external(context) {
+            vm.step_external(&mut make_stub_delegate()).unwrap();
+            assert!(matches!(
+                vm.current_call.stack.as_slice(),
+                [Value::Expression(Expression::Constant(value))] if *value == Scalar::ONE
+            ));
+        } else {
+            let error = vm
+                .step_internal_with_registry(&mut MemRegistry::new())
+                .unwrap_err();
+            assert!(matches!(error, VMError::ExternalOnly));
+        }
     }
 }
 
@@ -245,9 +310,9 @@ fn contractopen_call_rejects_before_consuming_operands() {
     );
     let mut vm = VM::new(dummy_header(), frame);
     vm.current_call.stack = vec![
-        Value::Int253(Int253::from(7u64)),
-        Value::Int253(Int253::ONE),
-        Value::Int253(Int253::from(100u64)),
+        Value::Scalar(Scalar::from(7u64)),
+        Value::Scalar(Scalar::ONE),
+        Value::Scalar(Scalar::from(100u64)),
         Value::String(String::from(vec![0x44; 32])),
     ];
 
@@ -256,7 +321,7 @@ fn contractopen_call_rejects_before_consuming_operands() {
         Err(VMError::OpcodeRequiresActorContext)
     ));
     assert_eq!(vm.current_call.stack.len(), 4);
-    assert_int(&vm.current_call.stack[0], Int253::from(7u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(7u64));
 }
 
 #[test]

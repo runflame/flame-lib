@@ -14,8 +14,8 @@ fn encrypted_borrow_produces_widetoken_and_token_pair() {
     // them sitting on the stack. So we inspect the borrow result
     // by hand-driving the VM and stopping after the borrow.
     let pc_gens = PedersenGens::default();
-    let qty_int = Int253::from(42u64);
-    let flv_int = Int253::from(7u64);
+    let qty_int = Scalar::from(42u64);
+    let flv_int = Scalar::from(7u64);
     let qty_blind = curve25519_dalek::scalar::Scalar::from(11u64);
     let flv_blind = curve25519_dalek::scalar::Scalar::from(13u64);
     let qty_commit = Commitment::blinded_with_factor(qty_int, qty_blind);
@@ -44,8 +44,8 @@ fn encrypted_borrow_produces_widetoken_and_token_pair() {
     match (&vm.current_call.stack[0], &vm.current_call.stack[1]) {
         (Value::WideToken(_), Value::Token(t)) => {
             // +T side has the original qty commitment witness preserved.
-            assert_eq!(t.qty.assignment(), Some(Int253::from(42u64)));
-            assert_eq!(t.flv.assignment(), Some(Int253::from(7u64)));
+            assert_eq!(t.qty.assignment(), Some(Scalar::from(42u64)));
+            assert_eq!(t.flv.assignment(), Some(Scalar::from(7u64)));
         }
         _ => panic!("expected [WideToken, Token]"),
     }
@@ -71,8 +71,8 @@ fn mix_with_single_in_single_out_balances() {
     // opcode. Use the test helper to push a Token onto the stack
     // and then run mix(1, 1).
     let pc_gens = PedersenGens::default();
-    let qty_int = Int253::from(10u64);
-    let flv_int = Int253::from(7u64);
+    let qty_int = Scalar::from(10u64);
+    let flv_int = Scalar::from(7u64);
     let qty_blind = curve25519_dalek::scalar::Scalar::from(11u64);
     let flv_blind = curve25519_dalek::scalar::Scalar::from(13u64);
     let qty_commit = Commitment::blinded_with_factor(qty_int, qty_blind);
@@ -141,8 +141,8 @@ fn op_mix_m_zero_rejects() {
     // further pops, surfacing `MixDegenerate`.
     let mut vm = vm_external_with_script(vec![]);
     // Push m=0, n=1.
-    vm.push_value(Value::Int253(Int253::from(0u64))); // m
-    vm.push_value(Value::Int253(Int253::from(1u64))); // n
+    vm.push_value(Value::Scalar(Scalar::from(0u64))); // m
+    vm.push_value(Value::Scalar(Scalar::from(1u64))); // n
     let mut delegate = StubDelegate::new();
     let err = vm.op_mix(&mut delegate).unwrap_err();
     assert!(matches!(err, VMError::MixDegenerate));
@@ -151,8 +151,8 @@ fn op_mix_m_zero_rejects() {
 #[test]
 fn op_mix_n_zero_rejects() {
     let mut vm = vm_external_with_script(vec![]);
-    vm.push_value(Value::Int253(Int253::from(1u64))); // m
-    vm.push_value(Value::Int253(Int253::from(0u64))); // n
+    vm.push_value(Value::Scalar(Scalar::from(1u64))); // m
+    vm.push_value(Value::Scalar(Scalar::from(0u64))); // n
     let mut delegate = StubDelegate::new();
     let err = vm.op_mix(&mut delegate).unwrap_err();
     assert!(matches!(err, VMError::MixDegenerate));

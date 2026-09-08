@@ -8,7 +8,7 @@
 
 // Tests are a descendant of `vm`, so `super::super::*` also
 // pulls in everything vm.rs imports privately
-// (CompressedRistretto, Scalar, Transcript, Contract, Commitment,
+// (CompressedRistretto, DalekScalar, Transcript, Contract, Commitment,
 // etc.). Don't re-import any of those below or you'll get
 // "defined multiple times".
 pub use super::super::*;
@@ -153,16 +153,16 @@ pub(crate) fn run_to_end(vm: &mut VM) -> Result<(), VMError> {
     Ok(())
 }
 
-pub(crate) fn assert_int(v: &Value, expected: Int253) {
+pub(crate) fn assert_int(v: &Value, expected: Scalar) {
     match v {
-        Value::Int253(i) => assert_eq!(*i, expected, "expected {:?}, got {:?}", expected, i),
-        other => panic!("expected Int253, got {:?}", value_kind(other)),
+        Value::Scalar(i) => assert_eq!(*i, expected, "expected {:?}, got {:?}", expected, i),
+        other => panic!("expected Scalar, got {:?}", value_kind(other)),
     }
 }
 
 pub(crate) fn value_kind(v: &Value) -> &'static str {
     match v {
-        Value::Int253(_) => "Int253",
+        Value::Scalar(_) => "Scalar",
         Value::String(_) => "String",
         Value::Dict(_) => "Dict",
         Value::Point(_) => "Point",
@@ -198,8 +198,8 @@ pub(crate) fn run_until_tx_done(vm: &mut VM) -> Result<(), VMError> {
 /// (`eq` is non-consuming, so its two int operands are dropped after the
 /// boolean is `verify`'d). The tx must finish cleanly, so this also
 /// asserts there is no extra residue. Use when every stack slot is an
-/// `Int253`. A mismatch fails `verify`.
-pub(crate) fn assert_stack(mut builder: ScriptBuilder, expected_top_first: &[Int253]) {
+/// `Scalar`. A mismatch fails `verify`.
+pub(crate) fn assert_stack(mut builder: ScriptBuilder, expected_top_first: &[Scalar]) {
     for &v in expected_top_first {
         builder = builder.push_int(v).eq().verify().drop_().drop_();
     }
@@ -209,9 +209,9 @@ pub(crate) fn assert_stack(mut builder: ScriptBuilder, expected_top_first: &[Int
 
 /// `i64` convenience over [`assert_stack`].
 pub(crate) fn assert_stack_ints(builder: ScriptBuilder, expected_top_first: &[i64]) {
-    let v: Vec<Int253> = expected_top_first
+    let v: Vec<Scalar> = expected_top_first
         .iter()
-        .map(|&x| Int253::from(x))
+        .map(|&x| Scalar::from(x))
         .collect();
     assert_stack(builder, &v);
 }
@@ -220,7 +220,7 @@ pub(crate) fn assert_stack_ints(builder: ScriptBuilder, expected_top_first: &[i6
 /// `expected`, via `push:expected; eq; verify`. Tolerant of residue
 /// below the top (e.g. an opcode's non-int operands), so use it when the
 /// full stack isn't all ints. A mismatch fails `verify`.
-pub(crate) fn assert_top(builder: ScriptBuilder, expected: impl Into<Int253>) {
+pub(crate) fn assert_top(builder: ScriptBuilder, expected: impl Into<Scalar>) {
     let mut vm = vm_with_script(builder.push_int(expected).eq().verify().to_bytecode());
     run_to_end(&mut vm).expect("top-of-stack self-check (eq; verify) passed");
 }
@@ -272,7 +272,7 @@ pub(crate) fn msg_with_sel(actor: ActorID, sel: u64) -> Message {
         actor,
         None,
         Anchor([0u8; 32]),
-        vec![Value::Int253(Int253::from(sel))],
+        vec![Value::Scalar(Scalar::from(sel))],
         1_000_000,
         Predicate::opaque(Predicate::unspendable_key()),
     )
@@ -382,9 +382,9 @@ pub(crate) fn assert_str(v: &Value, expected: &[u8]) {
     }
 }
 
-/// Helper: encodes `value` (non-negative `Int253`) as a low-`n_bits`
+/// Helper: encodes `value` (non-negative `Scalar`) as a low-`n_bits`
 /// LSB-first byte sequence (writebits-compatible).
-pub(crate) fn writebits_bytes(value: &Int253, n_bits: usize) -> Vec<u8> {
+pub(crate) fn writebits_bytes(value: &Scalar, n_bits: usize) -> Vec<u8> {
     assert!(n_bits <= 256);
     let int_bytes = value.to_bytes();
     let n_bytes = n_bits.div_ceil(8);
@@ -397,10 +397,10 @@ pub(crate) fn writebits_bytes(value: &Int253, n_bits: usize) -> Vec<u8> {
     out
 }
 
-pub(crate) fn assert_dict_keys(v: &Value, expected: &[Int253]) {
+pub(crate) fn assert_dict_keys(v: &Value, expected: &[Scalar]) {
     match v {
         Value::Dict(d) => {
-            let keys: Vec<Int253> = d.entries().map(|(k, _)| *k).collect();
+            let keys: Vec<Scalar> = d.entries().map(|(k, _)| *k).collect();
             assert_eq!(keys, expected);
         }
         other => panic!("expected Dict, got {}", value_kind(other)),
@@ -424,7 +424,7 @@ pub(crate) fn build_predicate_with_program(
     program: &[u8],
     internal_secret: u64,
 ) -> (PredicateTree, TaprootProof) {
-    let secret = Scalar::from(internal_secret);
+    let secret = DalekScalar::from(internal_secret);
     let x_point = RISTRETTO_BASEPOINT_TABLE * &secret;
     let internal_key = x_point.compress();
     let tree = PredicateTree::new(
@@ -444,7 +444,7 @@ pub(crate) fn build_multi_leaf_predicate(
     program_index: usize,
     internal_secret: u64,
 ) -> (PredicateTree, TaprootProof) {
-    let secret = Scalar::from(internal_secret);
+    let secret = DalekScalar::from(internal_secret);
     let x_point = RISTRETTO_BASEPOINT_TABLE * &secret;
     let internal_key = x_point.compress();
     let tree = PredicateTree::new(Some(internal_key), programs, TEST_BLINDING_KEY).unwrap();
@@ -456,7 +456,7 @@ pub use crate::token::flavor_from_actor as test_flavor_from_actor;
 
 /// Convenience: builds a Token via the cleartext constructor for tests.
 pub(crate) fn make_cleartext_token(qty: u64, flv: u64) -> Token {
-    Token::cleartext(Int253::from(qty), Int253::from(flv)).expect("u64 quantity is in range")
+    Token::cleartext(Scalar::from(qty), Scalar::from(flv)).expect("u64 quantity is in range")
 }
 
 /// Builds a VM running `script` under InternalRoot with a specific
@@ -524,7 +524,7 @@ pub(crate) fn fixture_contract() -> Contract {
     let predicate = Predicate::opaque(CompressedRistretto([0xaa; 32]));
     let anchor = Anchor([0x42; 32]);
     let payload = vec![
-        Value::Int253(Int253::from(7u64)),
+        Value::Scalar(Scalar::from(7u64)),
         Value::String(String::from(b"hello".to_vec())),
     ];
     Contract::new(predicate, anchor, payload).expect("fixture payload is portable")
@@ -631,9 +631,9 @@ pub(crate) fn run_external_steps<'g>(
 /// Helper: turn a scalar secret into a `(CompressedRistretto, sk)`
 /// pair. The CompressedRistretto is the verification key; the
 /// scalar is the signing key.
-pub(crate) fn signing_keypair(secret: u64) -> (CompressedRistretto, Scalar) {
+pub(crate) fn signing_keypair(secret: u64) -> (CompressedRistretto, DalekScalar) {
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
-    let sk = Scalar::from(secret);
+    let sk = DalekScalar::from(secret);
     let vk = (RISTRETTO_BASEPOINT_TABLE * &sk).compress();
     (vk, sk)
 }
@@ -645,16 +645,16 @@ pub(crate) fn make_signtx_script_with_contract(vk: CompressedRistretto) -> (Vec<
     let contract = Contract::new(
         Predicate::opaque(vk),
         Anchor([0x42; 32]),
-        vec![Value::Int253(Int253::from(0u64))], // single Int253 payload
+        vec![Value::Scalar(Scalar::from(0u64))], // single Scalar payload
     )
     .expect("payload is portable");
     let contract_id = contract.id();
     let script = ScriptBuilder::new()
         .push_str(String::from(encode_contract_to_bytes(&contract)))
         .input()
-        .signtx() // pushes 1 Int253 (payload) + count 1
+        .signtx() // pushes 1 Scalar (payload) + count 1
         .drop_() // drop count
-        .drop_() // drop payload Int253
+        .drop_() // drop payload Scalar
         .to_bytecode();
     (script, contract_id)
 }
@@ -669,8 +669,8 @@ pub(crate) fn make_open_token(
     qty_blind: u64,
     flv_blind: u64,
 ) -> Token {
-    let q = Commitment::blinded_with_factor(Int253::from(qty_value), Scalar::from(qty_blind));
-    let f = Commitment::blinded_with_factor(Int253::from(flv_value), Scalar::from(flv_blind));
+    let q = Commitment::blinded_with_factor(Scalar::from(qty_value), DalekScalar::from(qty_blind));
+    let f = Commitment::blinded_with_factor(Scalar::from(flv_value), DalekScalar::from(flv_blind));
     Token::new(q, f)
 }
 
@@ -845,15 +845,19 @@ pub(crate) fn build_confidential_nm_program(
 
 /// Build the Open `(qty, flv)` commitments for an input spec.
 pub(crate) fn open_commitments(inp: &NMInputSpec) -> (Commitment, Commitment) {
-    let q = Commitment::blinded_with_factor(Int253::from(inp.qty), Scalar::from(inp.qty_blind));
-    let f = Commitment::blinded_with_factor(Int253::from(inp.flv), Scalar::from(inp.flv_blind));
+    let q =
+        Commitment::blinded_with_factor(Scalar::from(inp.qty), DalekScalar::from(inp.qty_blind));
+    let f =
+        Commitment::blinded_with_factor(Scalar::from(inp.flv), DalekScalar::from(inp.flv_blind));
     (q, f)
 }
 
 /// Build the Open `(qty, flv)` commitments for an output spec.
 pub(crate) fn open_commitments_for_output(out: &NMOutputSpec) -> (Commitment, Commitment) {
-    let q = Commitment::blinded_with_factor(Int253::from(out.qty), Scalar::from(out.qty_blind));
-    let f = Commitment::blinded_with_factor(Int253::from(out.flv), Scalar::from(out.flv_blind));
+    let q =
+        Commitment::blinded_with_factor(Scalar::from(out.qty), DalekScalar::from(out.qty_blind));
+    let f =
+        Commitment::blinded_with_factor(Scalar::from(out.flv), DalekScalar::from(out.flv_blind));
     (q, f)
 }
 

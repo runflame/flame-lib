@@ -24,7 +24,7 @@ fn verify_zero_fails() {
 
 #[test]
 fn verify_requires_int() {
-    // pushpoint, verify — top is Point not Int253.
+    // pushpoint, verify — top is Point not Scalar.
     let script = ScriptBuilder::new()
         .push_point([0u8; 32])
         .verify()
@@ -32,7 +32,7 @@ fn verify_requires_int() {
     let mut vm = vm_with_script(script);
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
-        VMError::TypeNotInt253
+        VMError::TypeNotScalar
     ));
 }
 
@@ -66,7 +66,7 @@ fn jumpif_not_taken_falls_through() {
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(5u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(5u64));
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn build_if_runs_then_when_true() {
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(9u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(9u64));
 }
 
 #[test]
@@ -162,7 +162,7 @@ fn build_if_else_picks_else_when_false() {
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(8u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(8u64));
 }
 
 #[test]
@@ -175,7 +175,7 @@ fn build_if_else_picks_then_when_true() {
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(9u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(9u64));
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn build_loop_break_runs_once() {
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(7u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(7u64));
 }
 
 #[test]
@@ -424,8 +424,8 @@ fn return_with_dirty_leftover_errors() {
             .expect("step ok — error swallowed into marker");
     }
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[0], Int253::ZERO);
-    assert_int(&vm.current_call.stack[1], Int253::ZERO);
+    assert_int(&vm.current_call.stack[0], Scalar::ZERO);
+    assert_int(&vm.current_call.stack[1], Scalar::ZERO);
 }
 
 #[test]
@@ -440,8 +440,8 @@ fn return_too_few_items_errors() {
             .expect("step ok — error swallowed into marker");
     }
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[0], Int253::ZERO);
-    assert_int(&vm.current_call.stack[1], Int253::ZERO);
+    assert_int(&vm.current_call.stack[0], Scalar::ZERO);
+    assert_int(&vm.current_call.stack[1], Scalar::ZERO);
 }
 
 #[test]
@@ -476,9 +476,9 @@ fn return_transfers_values_to_parent() {
 
     // Parent received the 7 then the count (1) then the success marker (1).
     assert_eq!(vm.current_call.stack.len(), 3);
-    assert_int(&vm.current_call.stack[0], Int253::from(7u64));
-    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(7u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(1u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
@@ -501,11 +501,11 @@ fn return_allows_negative_cleartokens_upward() {
     assert!(matches!(
         &vm.current_call.stack[0],
         Value::ClearToken(token)
-            if token.qty() == Int253::from(-7i64) && token.flv() == FLAME_FLAVOR
+            if token.qty() == Scalar::from(-7i64) && token.flv() == FLAME_FLAVOR
     ));
     assert!(matches!(&vm.current_call.stack[1], Value::ClearToken(_)));
-    assert_int(&vm.current_call.stack[2], Int253::from(2u64));
-    assert_int(&vm.current_call.stack[3], Int253::ONE);
+    assert_int(&vm.current_call.stack[2], Scalar::from(2u64));
+    assert_int(&vm.current_call.stack[3], Scalar::ONE);
 }
 
 #[test]
@@ -527,21 +527,21 @@ fn return_allows_widetokens_upward() {
 
     assert_eq!(vm.current_call.stack.len(), 3);
     assert!(matches!(&vm.current_call.stack[0], Value::WideToken(_)));
-    assert_int(&vm.current_call.stack[1], Int253::ONE);
-    assert_int(&vm.current_call.stack[2], Int253::ONE);
+    assert_int(&vm.current_call.stack[1], Scalar::ONE);
+    assert_int(&vm.current_call.stack[2], Scalar::ONE);
 }
 
 // ── type ────────────────────────────────────────────────────
 
 #[test]
-fn type_pushes_int253_code() {
-    // push:5, type — top is type code (0 for Int253), then 5.
+fn type_pushes_scalar_code() {
+    // push:5, type — top is type code (0 for Scalar), then 5.
     let mut vm = vm_with_script(ScriptBuilder::new().push_int(5u64).type_().to_bytecode());
     vm.step_internal().unwrap(); // push:5
     vm.step_internal().unwrap(); // type
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
-    assert_int(&vm.current_call.stack[0], Int253::from(5u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(5u64));
 }
 
 #[test]
@@ -550,7 +550,7 @@ fn type_pushes_string_code() {
     script.push(0xa5); // type
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(1u64));
 }
 
 #[test]

@@ -6,8 +6,8 @@ use readerwriter::Encodable;
 
 use crate::crypto::Point;
 use crate::errors::VMError;
-use crate::int253::Int253;
 use crate::ops::Instruction;
+use crate::scalar::Scalar;
 use crate::string::String;
 
 /// A program is a list of [`Instruction`]s. Build with the fluent
@@ -105,7 +105,7 @@ impl ScriptBuilder {
     /// Builds the witness queue in opcode order. Each witness-bearing
     /// instruction (currently only `Alloc`) contributes exactly one
     /// queue entry; other instructions contribute none.
-    pub fn to_witnesses(&self) -> VecDeque<Option<Int253>> {
+    pub fn to_witnesses(&self) -> VecDeque<Option<Scalar>> {
         self.instructions
             .iter()
             .filter_map(|i| i.witness())
@@ -116,7 +116,7 @@ impl ScriptBuilder {
 
     /// `push:k` / `pushint{8,16,64,128}` / `pushint` — encoder picks
     /// the narrowest opcode width.
-    pub fn push_int<T: Into<Int253>>(mut self, v: T) -> Self {
+    pub fn push_int<T: Into<Scalar>>(mut self, v: T) -> Self {
         self.instructions.push(Instruction::PushInt(v.into()));
         self
     }
@@ -259,7 +259,7 @@ impl ScriptBuilder {
         self
     }
 
-    // ── Int253 arithmetic ───────────────────────────────
+    // ── Scalar arithmetic ───────────────────────────────
 
     pub fn abs(mut self) -> Self {
         self.instructions.push(Instruction::Abs);
@@ -313,7 +313,7 @@ impl ScriptBuilder {
     /// `alloc` (0x5c) — allocates a low-level R1CS variable. `witness`
     /// = `Some(int)` on the prover side (fills the cleartext value
     /// the constraint system uses), `None` on the verifier side.
-    pub fn alloc(mut self, witness: Option<Int253>) -> Self {
+    pub fn alloc(mut self, witness: Option<Scalar>) -> Self {
         self.instructions.push(Instruction::Alloc(witness));
         self
     }
@@ -324,16 +324,16 @@ impl ScriptBuilder {
         self
     }
 
-    /// `range` (0x5e) — `expr n → expr`. Adds an n-bit range proof
-    /// (n ∈ [1, 64]; popped as `Int253` from the stack). The
-    /// Expression is consumed and pushed back unchanged.
+    /// `range` (0x64) — `x n → x`. Checks `0 ≤ x < 2^n`, with `n` in
+    /// `[1, 64]`. Raw scalars work in every context; R1CS expressions
+    /// are supported only in external execution. Preserves the value's type.
     pub fn range(mut self) -> Self {
         self.instructions.push(Instruction::Range);
         self
     }
 
     /// `scalar` (0x5a) — `string → expr`. Lifts a 32-byte String
-    /// (parsed as `Int253`) into a constant Expression.
+    /// (parsed as `Scalar`) into a constant Expression.
     pub fn scalar(mut self) -> Self {
         self.instructions.push(Instruction::Scalar);
         self
@@ -510,7 +510,7 @@ impl ScriptBuilder {
         self
     }
 
-    /// `jumpif:n` (0xa3) — pop an Int253; jump to label `n` iff non-zero.
+    /// `jumpif:n` (0xa3) — pop an Scalar; jump to label `n` iff non-zero.
     pub fn jumpif(mut self, n: u32) -> Self {
         self.instructions.push(Instruction::JumpIf(n));
         self
@@ -579,7 +579,7 @@ impl ScriptBuilder {
     }
 
     /// `if (cond) { then }` — `cond` is whatever the preceding builder
-    /// calls left on the stack (Int253; non-zero = true).
+    /// calls left on the stack (Scalar; non-zero = true).
     pub fn build_if(self, then: impl FnOnce(Self) -> Self) -> Self {
         self.build_if_else(then, |p| p)
     }

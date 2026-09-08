@@ -2,7 +2,7 @@
 
 use super::test_helpers::*;
 use crate::vm::LOCKTIME_TIMESTAMP_THRESHOLD;
-use crate::{empty_state, ActorID, ActorRegistry, Int253, StoragePurchase};
+use crate::{empty_state, ActorID, ActorRegistry, Scalar, StoragePurchase};
 
 fn external_vm(header: TxHeader, script: Vec<u8>, gas: u64) -> VM {
     VM::new(
@@ -27,8 +27,8 @@ fn timelock_reports_bip65_kind() {
             1_000_000,
         );
         run_to_end(&mut vm).unwrap();
-        assert_int(&vm.current_call.stack[0], Int253::from(locktime as u64));
-        assert_int(&vm.current_call.stack[1], Int253::from(expected_flag));
+        assert_int(&vm.current_call.stack[0], Scalar::from(locktime as u64));
+        assert_int(&vm.current_call.stack[1], Scalar::from(expected_flag));
     }
 }
 
@@ -44,8 +44,8 @@ fn version_and_gas_limit_report_frame_values() {
         99_999,
     );
     run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[0], Int253::from(42u64));
-    assert_int(&vm.current_call.stack[1], Int253::from(99_999u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(42u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(99_999u64));
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn gas_reports_remaining_budget_after_its_own_cost() {
         12_345,
     );
     run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[0], Int253::from(12_344u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(12_344u64));
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn usage_and_capacity_read_actor_storage() {
         CallFrame::new(
             vec![
                 Instruction::Usage,
-                Instruction::PushInt(Int253::from(100u64)),
+                Instruction::PushInt(Scalar::from(100u64)),
                 Instruction::Capacity,
             ],
             kind,
@@ -91,8 +91,8 @@ fn usage_and_capacity_read_actor_storage() {
     for _ in 0..3 {
         vm.step_internal_with_registry(&mut reg).unwrap();
     }
-    assert_int(&vm.current_call.stack[0], Int253::from(expected_usage));
-    assert_int(&vm.current_call.stack[1], Int253::from(12_345u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(expected_usage));
+    assert_int(&vm.current_call.stack[1], Scalar::from(12_345u64));
 }
 
 #[test]
@@ -115,7 +115,7 @@ fn storage_introspection_requires_registry() {
 fn height_is_zero_for_external_transaction() {
     let mut vm = vm_with_script(ScriptBuilder::new().height().to_bytecode());
     run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[0], Int253::ZERO);
+    assert_int(&vm.current_call.stack[0], Scalar::ZERO);
 }
 
 #[test]
@@ -130,7 +130,7 @@ fn storage_quote_and_purchase_use_host_result() {
     )
     .unwrap();
     reg.set_storage_quote(Some(StoragePurchase {
-        fee_sparks: Int253::from(77u64),
+        fee_sparks: Scalar::from(77u64),
         expiry_height: 52_500,
     }));
 
@@ -155,8 +155,8 @@ fn storage_quote_and_purchase_use_host_result() {
     );
     quote_vm.step_internal_with_registry(&mut reg).unwrap();
     quote_vm.step_internal_with_registry(&mut reg).unwrap();
-    assert_int(&quote_vm.current_call.stack[0], Int253::from(77u64));
-    assert_int(&quote_vm.current_call.stack[1], Int253::ONE);
+    assert_int(&quote_vm.current_call.stack[0], Scalar::from(77u64));
+    assert_int(&quote_vm.current_call.stack[1], Scalar::ONE);
 
     let mut buy_vm = VM::new(
         dummy_header(),
@@ -174,12 +174,12 @@ fn storage_quote_and_purchase_use_host_result() {
     buy_vm.step_internal_with_registry(&mut reg).unwrap();
     match &buy_vm.current_call.stack[0] {
         Value::ClearToken(token) => {
-            assert_eq!(token.qty(), Int253::from(-77i64));
+            assert_eq!(token.qty(), Scalar::from(-77i64));
             assert_eq!(token.flv(), FLAME_FLAVOR);
         }
         value => panic!("expected storage debt, got {:?}", value),
     }
-    assert_int(&buy_vm.current_call.stack[1], Int253::ONE);
+    assert_int(&buy_vm.current_call.stack[1], Scalar::ONE);
     assert_eq!(reg.actor_capacity(&id, 0).unwrap(), 3_072);
     assert!(buy_vm.txlog.iter().any(|entry| matches!(
         entry,
@@ -188,6 +188,6 @@ fn storage_quote_and_purchase_use_host_result() {
             bytes: 1_024,
             expiry_height: 52_500,
             fee_sparks,
-        } if actor == &id && *fee_sparks == Int253::from(77u64)
+        } if actor == &id && *fee_sparks == Scalar::from(77u64)
     )));
 }

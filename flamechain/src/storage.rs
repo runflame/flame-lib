@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use flamevm::{
-    ActorID, ActorRegistry, Int253, StoragePurchase, VMError, Value, code_root,
+    ActorID, ActorRegistry, Scalar, StoragePurchase, VMError, Value, code_root,
     code_state_bytes, empty_state, state_root,
 };
 use merkle::{Hash, MerkleItem, MerkleTree};
@@ -428,7 +428,7 @@ impl ActorStore {
             return Err(VMError::StorageArithmeticOverflow);
         }
         Ok(Some(StoragePurchase {
-            fee_sparks: Int253::from(fee),
+            fee_sparks: Scalar::from(fee),
             expiry_height,
         }))
     }
@@ -756,7 +756,7 @@ impl ActorRegistry for ActorStore {
 mod tests {
     use super::*;
     use flamevm::{
-        ActorRegistry, ClearToken, Dict, FLAME_FLAVOR, Int253, Value,
+        ActorRegistry, ClearToken, Dict, FLAME_FLAVOR, Scalar, Value,
         empty_state,
     };
 
@@ -768,7 +768,7 @@ mod tests {
     fn canonical_actor_root_vector() {
         let mut store = ActorStore::new(StorageParams::default()).unwrap();
         store
-            .deploy(actor(), vec![0x1d], Value::Int253(Int253::from(42u64)))
+            .deploy(actor(), vec![0x1d], Value::Scalar(Scalar::from(42u64)))
             .unwrap();
         store.purchase_storage(&actor(), 1_024, 0).unwrap().unwrap();
         assert_eq!(
@@ -793,11 +793,11 @@ mod tests {
     fn nested_nonportable_state() -> Value {
         let mut inner = Dict::new();
         inner.insert(
-            Int253::ZERO,
-            Value::ClearToken(ClearToken::new(Int253::from(-1i64), FLAME_FLAVOR)),
+            Scalar::ZERO,
+            Value::ClearToken(ClearToken::new(Scalar::from(-1i64), FLAME_FLAVOR)),
         );
         let mut outer = Dict::new();
-        outer.insert(Int253::ZERO, Value::Dict(inner));
+        outer.insert(Scalar::ZERO, Value::Dict(inner));
         Value::Dict(outer)
     }
 
@@ -826,7 +826,7 @@ mod tests {
             .quote_storage(&actor(), 1_024, 10)
             .unwrap()
             .unwrap();
-        assert_eq!(quote.fee_sparks, Int253::from(1_000_007_630u64));
+        assert_eq!(quote.fee_sparks, Scalar::from(1_000_007_630u64));
         assert_eq!(quote.expiry_height, 52_510);
         let params = StorageParams::default();
         let largest = (params.initial_pool_units - params.minimum_remaining_units)
@@ -838,7 +838,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .fee_sparks,
-            Int253::from(17_179_738_112_000_000_000u64)
+            Scalar::from(17_179_738_112_000_000_000u64)
         );
         assert_eq!(
             store
@@ -862,7 +862,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .fee_sparks,
-            Int253::from(270u64)
+            Scalar::from(270u64)
         );
         assert_eq!(
             store.quote_storage(&actor(), 10 * params.unit_bytes, 0).unwrap(),
@@ -885,7 +885,7 @@ mod tests {
     #[test]
     fn leases_coalesce_expire_and_destroy_at_exact_heights() {
         let params = small_params();
-        let state = Value::ClearToken(ClearToken::new(Int253::from(7u64), FLAME_FLAVOR));
+        let state = Value::ClearToken(ClearToken::new(Scalar::from(7u64), FLAME_FLAVOR));
         let state_hash = state_root(&state);
         let mut store = ActorStore::new(params).unwrap();
         store.deploy(actor(), vec![0], state).unwrap();
@@ -901,11 +901,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             (first.fee_sparks, first.expiry_height),
-            (Int253::from(4u64), 2)
+            (Scalar::from(4u64), 2)
         );
         assert_eq!(
             (second.fee_sparks, second.expiry_height),
-            (Int253::from(9u64), 2)
+            (Scalar::from(9u64), 2)
         );
         assert_eq!(
             store.actors[&actor().to_hash()].leases,
@@ -921,7 +921,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             (third.fee_sparks, third.expiry_height),
-            (Int253::from(5u64), 3)
+            (Scalar::from(5u64), 3)
         );
         assert_eq!(
             store.actors[&actor().to_hash()].leases,

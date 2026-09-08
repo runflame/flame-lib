@@ -2,7 +2,7 @@
 
 use super::test_helpers::*;
 use crate::tx::{TxEntry, TxID};
-use crate::{ActorID, Int253};
+use crate::{ActorID, Scalar};
 use readerwriter::Encodable;
 
 fn send_script(target: &ActorID, refund: [u8; 32], selector: u64, gas: u64) -> Vec<u8> {
@@ -43,7 +43,7 @@ fn send_commits_message_fields() {
     assert_eq!(message.anchor, Anchor([0u8; 32]).split().0);
     assert!(matches!(
         message.payload(),
-        [Value::Int253(value)] if *value == Int253::from(3u64)
+        [Value::Scalar(value)] if *value == Scalar::from(3u64)
     ));
 }
 
@@ -72,7 +72,7 @@ fn send_payload_changes_transaction_id() {
     let first = deliver(&mut reg, msg_to(first));
     let second = deliver(&mut reg, msg_to(second));
     let payload_int = |log: &[TxEntry]| match sends(log)[0].payload() {
-        [Value::Int253(value)] => *value,
+        [Value::Scalar(value)] => *value,
         other => panic!("unexpected payload: {:?}", other),
     };
     assert_ne!(payload_int(&first), payload_int(&second));
@@ -104,16 +104,16 @@ fn send_rejects_nested_nonportable_payload() {
     let mut vm = vm_internal_with_actor(ScriptBuilder::new().send().to_bytecode(), actor);
     let mut inner = Dict::new();
     inner.insert(
-        Int253::ZERO,
-        Value::ClearToken(ClearToken::new(Int253::from(-1i64), FLAME_FLAVOR)),
+        Scalar::ZERO,
+        Value::ClearToken(ClearToken::new(Scalar::from(-1i64), FLAME_FLAVOR)),
     );
     let mut outer = Dict::new();
-    outer.insert(Int253::ZERO, Value::Dict(inner));
+    outer.insert(Scalar::ZERO, Value::Dict(inner));
     vm.current_call.stack = vec![
         Value::Dict(outer),
-        Value::Int253(Int253::ONE),
+        Value::Scalar(Scalar::ONE),
         Value::String(String::from(vec![0u8; 32])),
-        Value::Int253(Int253::ONE),
+        Value::Scalar(Scalar::ONE),
         Value::String(String::from(vec![0u8; 32])),
     ];
     assert!(matches!(

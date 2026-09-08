@@ -9,9 +9,9 @@ fn instruction_alloc_witness_roundtrip() {
     // Alloc(Some(7)) encodes to exactly one byte; its witness is
     // tracked separately via the queue.
     let p = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Scalar::from(7u64)))
         .alloc(None)
-        .alloc(Some(Int253::from(3u64)));
+        .alloc(Some(Scalar::from(3u64)));
     let bytecode = p.to_bytecode();
     assert_eq!(bytecode, vec![0x62, 0x62, 0x62]);
     let witnesses: Vec<_> = p.to_witnesses().into();
@@ -25,10 +25,10 @@ fn instruction_alloc_witness_roundtrip() {
 fn program_builder_emits_expected_bytecode() {
     // alloc(7) alloc(3) add alloc(10) eq verify
     let p = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(10u64)))
+        .alloc(Some(Scalar::from(10u64)))
         .eq()
         .verify();
     assert_eq!(
@@ -94,10 +94,10 @@ fn alloc_prepays_one_r1cs_item() {
 fn prove_then_verify_alloc_arithmetic_equality() {
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(10u64)))
+        .alloc(Some(Scalar::from(10u64)))
         .eq()
         .verify();
 
@@ -124,10 +124,10 @@ fn prove_then_verify_alloc_arithmetic_equality() {
 fn prove_succeeds_but_verify_fails_on_tampered_proof() {
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(10u64)))
+        .alloc(Some(Scalar::from(10u64)))
         .eq()
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
@@ -163,10 +163,10 @@ fn prove_fails_for_unsatisfiable_equality() {
     // *something*); the verifier MUST reject.
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(99u64)))
+        .alloc(Some(Scalar::from(99u64)))
         .eq()
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
@@ -194,7 +194,7 @@ fn alloc_pushes_expression_with_witness() {
     // Build a single-alloc program and stop after the alloc to
     // inspect the produced Expression.
     let pc_gens = PedersenGens::default();
-    let program = ScriptBuilder::new().alloc(Some(Int253::from(42u64)));
+    let program = ScriptBuilder::new().alloc(Some(Scalar::from(42u64)));
     let mut prover = Prover::new(&pc_gens);
     // We bypass the public `Prover::prove` so we can inspect VM
     // state mid-flight. Build a Run::Queue from the ScriptBuilder so the
@@ -211,7 +211,7 @@ fn alloc_pushes_expression_with_witness() {
     match &vm.current_call.stack[0] {
         Value::Expression(Expression::LinearCombination(terms, witness)) => {
             assert_eq!(terms.len(), 1);
-            assert_eq!(*witness, Some(Int253::from(42u64)));
+            assert_eq!(*witness, Some(Scalar::from(42u64)));
         }
         _ => panic!("expected Expression with witness"),
     }
@@ -222,10 +222,10 @@ fn prove_then_verify_alloc_multiplication() {
     // alloc(4) alloc(5) mul alloc(20) eq verify
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(4u64)))
-        .alloc(Some(Int253::from(5u64)))
+        .alloc(Some(Scalar::from(4u64)))
+        .alloc(Some(Scalar::from(5u64)))
         .mul()
-        .alloc(Some(Int253::from(20u64)))
+        .alloc(Some(Scalar::from(20u64)))
         .eq()
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
@@ -251,9 +251,9 @@ fn prove_then_verify_alloc_with_negation() {
     // alloc(5) neg alloc(-5) eq verify  →  -5 == -5
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(5u64)))
+        .alloc(Some(Scalar::from(5u64)))
         .neg()
-        .alloc(Some(Int253::from(-5i64)))
+        .alloc(Some(Scalar::from(-5i64)))
         .eq()
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
@@ -287,8 +287,8 @@ fn alloc_without_witness_works_in_verifier_path() {
     // opcode without erroring on the witness-missing path.
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(0u64)))
-        .alloc(Some(Int253::from(0u64)))
+        .alloc(Some(Scalar::from(0u64)))
+        .alloc(Some(Scalar::from(0u64)))
         .eq()
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
@@ -317,13 +317,13 @@ fn shared_bp_gens_is_singleton() {
     // (i.e., the singleton is reachable from both instances).
     let pc_gens = PedersenGens::default();
     let program1 = ScriptBuilder::new()
-        .alloc(Some(Int253::from(1u64)))
-        .alloc(Some(Int253::from(1u64)))
+        .alloc(Some(Scalar::from(1u64)))
+        .alloc(Some(Scalar::from(1u64)))
         .eq()
         .verify();
     let program2 = ScriptBuilder::new()
-        .alloc(Some(Int253::from(2u64)))
-        .alloc(Some(Int253::from(2u64)))
+        .alloc(Some(Scalar::from(2u64)))
+        .alloc(Some(Scalar::from(2u64)))
         .eq()
         .verify();
     Prover::prove(&pc_gens, program1, dummy_header(), 1_000_000)
@@ -341,10 +341,10 @@ fn phase18_txid_deterministic_for_equal_inputs() {
     let header = dummy_header();
     let mk_program = || {
         ScriptBuilder::new()
-            .alloc(Some(Int253::from(7u64)))
-            .alloc(Some(Int253::from(3u64)))
+            .alloc(Some(Scalar::from(7u64)))
+            .alloc(Some(Scalar::from(3u64)))
             .add()
-            .alloc(Some(Int253::from(10u64)))
+            .alloc(Some(Scalar::from(10u64)))
             .eq()
             .verify()
     };
@@ -367,10 +367,10 @@ fn phase18_txid_changes_when_header_changes() {
     let pc_gens = PedersenGens::default();
     let mk_program = || {
         ScriptBuilder::new()
-            .alloc(Some(Int253::from(7u64)))
-            .alloc(Some(Int253::from(3u64)))
+            .alloc(Some(Scalar::from(7u64)))
+            .alloc(Some(Scalar::from(3u64)))
             .add()
-            .alloc(Some(Int253::from(10u64)))
+            .alloc(Some(Scalar::from(10u64)))
             .eq()
             .verify()
     };
@@ -409,10 +409,10 @@ fn phase18_prove_verify_roundtrip_binds_txid() {
     let pc_gens = PedersenGens::default();
     let header = dummy_header();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(10u64)))
+        .alloc(Some(Scalar::from(10u64)))
         .eq()
         .verify();
     let prover_result = Prover::prove(&pc_gens, program, header, 1_000_000).expect("prove ok");
@@ -446,10 +446,10 @@ fn phase18_verifier_rejects_proof_under_different_header() {
         locktime: 99, // different!
     };
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(10u64)))
+        .alloc(Some(Scalar::from(10u64)))
         .eq()
         .verify();
     let _pp = Prover::prove(&pc_gens, program, prove_header, 1_000_000).expect("prove ok");
@@ -482,8 +482,8 @@ fn phase21_txresult_populated_for_trivial_program() {
         locktime: 13,
     };
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(5u64)))
-        .alloc(Some(Int253::from(5u64)))
+        .alloc(Some(Scalar::from(5u64)))
+        .alloc(Some(Scalar::from(5u64)))
         .eq()
         .verify();
     let prover_result = Prover::prove(&pc_gens, program, header, 1_000_000).expect("prove ok");

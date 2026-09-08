@@ -163,7 +163,7 @@ A portable Dict admitted to compressed storage uses keyed leaves uniformly:
 
 ```text
 DictEntry {
-    key: Int253,
+    key: Scalar,
     value: Value,
 }
 
@@ -191,7 +191,7 @@ Utreexo component    = ordered perfect tree of ContractLeaf // conceptual adapte
 
 | Use | Ordered Tree item | Wrapper behavior |
 | --- | --- | --- |
-| Stored Dict | `(Int253, portable Value)`, ascending and unique by key | A resident `BTreeMap` supplies order; flat list/map encoding is derived and is not Tree state. |
+| Stored Dict | `(Scalar, portable Value)`, ascending and unique by key | A resident `BTreeMap` supplies order; flat list/map encoding is derived and is not Tree state. |
 | Taproot predicate | `PredicateLeaf`, in current program/blinding vector order | The Tree root feeds the internal-key tweak; each program/blinding pair retains its randomized orientation. |
 | Utreexo | `ContractLeaf` committing a `ContractID`, in current forest-state order | The forest keeps its perfect-tree roots; append, deletion, normalization, and proof catchup remain Utreexo policy. |
 
@@ -308,7 +308,7 @@ flag is still true can enter the stored/compressed domain and acquire a Tree
 envelope. This avoids inventing canonical commitments for VM-only Merlin,
 constraint, MSM, Contract, WideToken, and other nonportable values.
 
-A stored Dict logically contains ordered `(Int253, Value)` leaves. A fully
+A stored Dict logically contains ordered `(Scalar, Value)` leaves. A fully
 resident stored Dict derives a complete `BTreeMap` index; a partially witnessed
 one may hold only the opened portion, and must never answer absence from that
 cache. Exact keys `0..len-1` only enable the shorter list-style flat encoding;

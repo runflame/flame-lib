@@ -81,7 +81,7 @@ fn dirty_stack_at_call_exit_is_an_error() {
     // Strict cross-call semantics: a script that leaves anything on the
     // callee's stack must use `return` to ship those values explicitly.
     // Reaching end-of-script with a non-empty stack is a script bug.
-    use crate::Int253;
+    use crate::Scalar;
     let reg = StubRegistry { script: vec![] };
     let block = BlockContext { height: 0 };
     // Re-create what `execute_internal` would, but pre-load the stack.
@@ -95,7 +95,7 @@ fn dirty_stack_at_call_exit_is_an_error() {
     );
     vm.current_call
         .stack
-        .push(Value::Int253(Int253::from(7u64)));
+        .push(Value::Scalar(Scalar::from(7u64)));
     // First step: empty script → finish_call → dirty stack.
     let err = vm.step_internal().unwrap_err();
     assert!(matches!(err, VMError::StackNotClean));
@@ -106,8 +106,8 @@ fn dirty_stack_at_call_exit_is_an_error() {
 
 #[test]
 fn dispatch_falls_through_to_int_path_when_no_constraint_on_top() {
-    // Pure Int253 path for `and` — must NOT route to Constraint
-    // overload when both operands are Int253. push:1 push:1 and
+    // Pure Scalar path for `and` — must NOT route to Constraint
+    // overload when both operands are Scalar. push:1 push:1 and
     // → push:1.
     let mut vm = vm_with_script(
         ScriptBuilder::new()
@@ -118,5 +118,5 @@ fn dispatch_falls_through_to_int_path_when_no_constraint_on_top() {
     );
     run_to_end(&mut vm).expect("int and ok");
     assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(1u64));
 }

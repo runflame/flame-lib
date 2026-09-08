@@ -5,7 +5,7 @@ use bulletproofs::r1cs::R1CSProof;
 use core::convert::TryFrom;
 use core::mem;
 use curve25519_dalek::ristretto::CompressedRistretto;
-use curve25519_dalek::scalar::Scalar;
+use curve25519_dalek::scalar::Scalar as DalekScalar;
 use merlin::Transcript;
 use readerwriter::{
     Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer,
@@ -24,7 +24,7 @@ use crate::token::{flavor_from_actor, flavor_from_predicate, FLAME_FLAVOR};
 use crate::tx::TxHeader;
 use crate::tx::{TxEntry, TxID};
 use crate::{
-    ClearToken, Constraint, Dict, Expression, Int253, Merlin, Point, String, Token, Value,
+    ClearToken, Constraint, Dict, Expression, Merlin, Point, Scalar, String, Token, Value,
     Variable, WideToken,
 };
 
@@ -985,7 +985,7 @@ impl VM {
         use Instruction as I;
         match instr {
             I::PushInt(i) => {
-                self.push_value(Value::Int253(i));
+                self.push_value(Value::Scalar(i));
                 Ok(())
             }
             I::PushStr(s) => {
@@ -1095,7 +1095,7 @@ impl VM {
             I::Timelock => self.op_timelock(),
             // version → tx header version (spec §version).
             I::Version => {
-                self.push_value(Value::Int253(Int253::from(self.header.version as u64)));
+                self.push_value(Value::Scalar(Scalar::from(self.header.version as u64)));
                 Ok(())
             }
             I::Selfid => self.op_selfid(),
@@ -1105,12 +1105,12 @@ impl VM {
             I::Callerid => self.op_callerid(),
             // gaslimit → immutable frame budget.
             I::Gaslimit => {
-                self.push_value(Value::Int253(Int253::from(self.current_call.gas_limit)));
+                self.push_value(Value::Scalar(Scalar::from(self.current_call.gas_limit)));
                 Ok(())
             }
             I::Capacity => self.op_capacity(registry),
             I::Height => {
-                self.push_value(Value::Int253(Int253::from(self.block_height)));
+                self.push_value(Value::Scalar(Scalar::from(self.block_height)));
                 Ok(())
             }
 
@@ -1154,8 +1154,8 @@ impl VM {
             // Success marker with k=0: stack += [count=0, success=1].
             self.current_call
                 .stack
-                .push(Value::Int253(Int253::from(0u64)));
-            self.current_call.stack.push(Value::Int253(Int253::ONE));
+                .push(Value::Scalar(Scalar::from(0u64)));
+            self.current_call.stack.push(Value::Scalar(Scalar::ONE));
             return Ok(true);
         }
         // Outermost call returned: entire tx complete.
@@ -1238,8 +1238,8 @@ impl VM {
         self.current_call.stack.extend(values);
         self.current_call
             .stack
-            .push(Value::Int253(Int253::from(arg_count as u64)));
-        self.current_call.stack.push(Value::Int253(Int253::ZERO));
+            .push(Value::Scalar(Scalar::from(arg_count as u64)));
+        self.current_call.stack.push(Value::Scalar(Scalar::ZERO));
     }
 
     fn charge_clone_values(&mut self, values: &[Value]) -> Result<(), VMError> {
@@ -1265,8 +1265,8 @@ impl VM {
         self.current_call.stack.pop().ok_or(VMError::StackUnderflow)
     }
 
-    /// Converts a stack-popped `Int253` index into a `usize`.
-    fn int253_to_stack_index(&self, i: Int253) -> Result<usize, VMError> {
+    /// Converts a stack-popped `Scalar` index into a `usize`.
+    fn scalar_to_stack_index(&self, i: Scalar) -> Result<usize, VMError> {
         let v = i.to_u64().ok_or(VMError::IndexOutOfRange)?;
         let idx = usize::try_from(v).map_err(|_| VMError::IndexOutOfRange)?;
         if idx >= self.current_call.stack.len() {
@@ -1275,13 +1275,13 @@ impl VM {
         Ok(idx)
     }
 
-    /// `pushtoken` — `flv → token`. Pops an `Int253` flavor from
+    /// `pushtoken` — `flv → token`. Pops a `Scalar` flavor from
     /// the stack and pushes a zero-qty `ClearToken { qty: 0, flv }`. This
     /// is the canonical "empty bearer of a flavor" used as a starting
     /// point for issuance / borrow flows.
     fn op_pushtoken(&mut self) -> Result<(), VMError> {
-        let flv = self.pop_value()?.to_int253()?;
-        self.push_value(Value::ClearToken(ClearToken::new(Int253::ZERO, flv)));
+        let flv = self.pop_value()?.to_scalar()?;
+        self.push_value(Value::ClearToken(ClearToken::new(Scalar::ZERO, flv)));
         Ok(())
     }
 
@@ -1300,8 +1300,8 @@ impl VM {
     /// `dup` — pops `k`, then copies the now-`k`-th item from top
     /// onto the top.
     fn op_dup(&mut self) -> Result<(), VMError> {
-        let k = self.pop_value()?.to_int253()?;
-        self.op_dup_k(self.int253_to_stack_index(k)?)
+        let k = self.pop_value()?.to_scalar()?;
+        self.op_dup_k(self.scalar_to_stack_index(k)?)
     }
 
     /// `dup:k` — copies `stack[top - k]` onto the top.
@@ -1325,8 +1325,8 @@ impl VM {
     /// `roll` — pops `k`, then moves the `k`-th item from top to
     /// the top.
     fn op_roll(&mut self) -> Result<(), VMError> {
-        let k = self.pop_value()?.to_int253()?;
-        self.op_roll_k(self.int253_to_stack_index(k)?)
+        let k = self.pop_value()?.to_scalar()?;
+        self.op_roll_k(self.scalar_to_stack_index(k)?)
     }
 
     /// `roll:k` — removes `stack[top - k]` and pushes it
@@ -1417,7 +1417,7 @@ impl VM {
         self.charge_alloc_items(n)?;
         let mut dict = Dict::new();
         for _ in 0..n {
-            let key = self.pop_value()?.to_int253()?;
+            let key = self.pop_value()?.to_scalar()?;
             let value = self.pop_value()?;
             if dict.insert_strict(key, value).is_err() {
                 return Err(VMError::DictKeyOccupied);
@@ -1431,7 +1431,7 @@ impl VM {
     /// occupied key.
     fn op_put(&mut self) -> Result<(), VMError> {
         let v = self.pop_value()?;
-        let k = self.pop_value()?.to_int253()?;
+        let k = self.pop_value()?.to_scalar()?;
         let mut dict = self.pop_value()?.to_dict()?;
         self.charge_alloc_items(1)?;
         if dict.insert_strict(k, v).is_err() {
@@ -1446,7 +1446,7 @@ impl VM {
     /// Stack order matches `put`: `v` on top, `k` below.
     fn op_replace(&mut self) -> Result<(), VMError> {
         let v = self.pop_value()?;
-        let k = self.pop_value()?.to_int253()?;
+        let k = self.pop_value()?.to_scalar()?;
         let mut dict = self.pop_value()?.to_dict()?;
         self.charge_alloc_items(1)?;
         let prev = dict.insert(k, v);
@@ -1454,10 +1454,10 @@ impl VM {
         match prev {
             Some(prev_v) => {
                 self.push_value(prev_v);
-                self.push_value(Value::Int253(Int253::from(1u64)));
+                self.push_value(Value::Scalar(Scalar::from(1u64)));
             }
             None => {
-                self.push_value(Value::Int253(Int253::ZERO));
+                self.push_value(Value::Scalar(Scalar::ZERO));
             }
         }
         Ok(())
@@ -1466,11 +1466,11 @@ impl VM {
     /// `get` — `dict k → dict' k v`. Removes and returns the
     /// value at `k`. Fails if the key is missing.
     fn op_get(&mut self) -> Result<(), VMError> {
-        let k = self.pop_value()?.to_int253()?;
+        let k = self.pop_value()?.to_scalar()?;
         let mut dict = self.pop_value()?.to_dict()?;
         let v = dict.remove(&k).ok_or(VMError::DictKeyNotFound)?;
         self.push_value(Value::Dict(dict));
-        self.push_value(Value::Int253(k));
+        self.push_value(Value::Scalar(k));
         self.push_value(v);
         Ok(())
     }
@@ -1478,7 +1478,7 @@ impl VM {
     /// `getopt` — `dict k → dict' {v 1 | 0}`. Like `get`, but
     /// soft-fails (pushes `0`) when the key is missing.
     fn op_getopt(&mut self) -> Result<(), VMError> {
-        let k = self.pop_value()?.to_int253()?;
+        let k = self.pop_value()?.to_scalar()?;
         let mut dict = self.pop_value()?.to_dict()?;
         let v = dict.remove(&k);
         self.push_value(Value::Dict(dict));
@@ -1490,7 +1490,7 @@ impl VM {
     /// without consuming it. Soft-fails with `0` on missing key; hard
     /// errors if the value exists but isn't copyable.
     fn op_getdup(&mut self) -> Result<(), VMError> {
-        let k = self.pop_value()?.to_int253()?;
+        let k = self.pop_value()?.to_scalar()?;
         let dict = self.pop_value()?.to_dict()?;
         let copied = match dict.get(&k) {
             Some(v) => {
@@ -1513,9 +1513,9 @@ impl VM {
         match v {
             Some(v) => {
                 self.push_value(v);
-                self.push_value(Value::Int253(Int253::from(1u64)));
+                self.push_value(Value::Scalar(Scalar::from(1u64)));
             }
-            None => self.push_value(Value::Int253(Int253::ZERO)),
+            None => self.push_value(Value::Scalar(Scalar::ZERO)),
         }
     }
 
@@ -1525,7 +1525,7 @@ impl VM {
         let dict = self.pop_value()?.to_dict()?;
         let k = dict.first_key();
         self.push_value(Value::Dict(dict));
-        self.push_optional_value(k.map(Value::Int253));
+        self.push_optional_value(k.map(Value::Scalar));
         Ok(())
     }
 
@@ -1534,25 +1534,25 @@ impl VM {
         let dict = self.pop_value()?.to_dict()?;
         let k = dict.last_key();
         self.push_value(Value::Dict(dict));
-        self.push_optional_value(k.map(Value::Int253));
+        self.push_optional_value(k.map(Value::Scalar));
         Ok(())
     }
 
     /// `next` — `dict k → dict {k' 1 | 0}`. Smallest key strictly
     /// greater than `k`, or `0` if no such key exists.
     fn op_next(&mut self) -> Result<(), VMError> {
-        let k = self.pop_value()?.to_int253()?;
+        let k = self.pop_value()?.to_scalar()?;
         let dict = self.pop_value()?.to_dict()?;
         let next_k = dict.next_key_after(&k);
         self.push_value(Value::Dict(dict));
-        self.push_optional_value(next_k.map(Value::Int253));
+        self.push_optional_value(next_k.map(Value::Scalar));
         Ok(())
     }
 
     /// Helper: converts a stack-popped count into a `usize` ≤ `max`.
     /// Returns `IndexOutOfRange` on overflow or above `max`.
     fn pop_byte_count(&mut self, max: usize) -> Result<usize, VMError> {
-        let n_int = self.pop_value()?.to_int253()?;
+        let n_int = self.pop_value()?.to_scalar()?;
         let n_u64 = n_int.to_u64().ok_or(VMError::IndexOutOfRange)?;
         let n = usize::try_from(n_u64).map_err(|_| VMError::IndexOutOfRange)?;
         if n > max {
@@ -1561,19 +1561,19 @@ impl VM {
         Ok(n)
     }
 
-    /// Pushes a failure marker (`Int253(0)`) — used by `read*` opcodes
+    /// Pushes a failure marker (`Scalar(0)`) — used by `read*` opcodes
     /// when the source string is too short to satisfy the request. The
     /// original string is restored under the marker.
     fn push_read_failure(&mut self, original: String) {
         self.push_value(Value::String(original));
-        self.push_value(Value::Int253(Int253::ZERO));
+        self.push_value(Value::Scalar(Scalar::ZERO));
     }
 
     /// _s n_ **readbits** → _s' x 1_ | _s 0_
     ///
-    /// Reads `n ≤ 256` bits LSB-first into a fresh `Int253`. A negative or
-    /// greater-than-256 count hard-fails `IndexOutOfRange`; short input,
-    /// non-canonical magnitude, or negative zero soft-fails.
+    /// Reads `n ≤ 256` bits LSB-first into a fresh `Scalar`. A count outside
+    /// `[0, 256]` hard-fails `IndexOutOfRange`; short input or a value at
+    /// least the scalar modulus soft-fails.
     fn op_read_bits(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(256)?;
         let s = self.pop_value()?.to_string()?;
@@ -1594,9 +1594,8 @@ impl VM {
                 int_bytes[n_bytes - 1] &= (1u8 << tail_bits) - 1;
             }
         }
-        // `Int253::from_bytes` enforces both canonicality (magnitude < ℓ)
-        // and the negative-zero invariant. Either violation soft-fails.
-        let value = match Int253::from_bytes(int_bytes) {
+        // `Scalar::from_bytes` rejects non-canonical residues (values ≥ ℓ).
+        let value = match Scalar::from_bytes(int_bytes) {
             Some(v) => v,
             None => {
                 self.push_read_failure(String::from(bytes)); // bytes untouched
@@ -1604,15 +1603,15 @@ impl VM {
             }
         };
         self.push_value(Value::String(String::from(bytes[n_bytes..].to_vec())));
-        self.push_value(Value::Int253(value));
-        self.push_value(Value::Int253(Int253::from(1u64)));
+        self.push_value(Value::Scalar(value));
+        self.push_value(Value::Scalar(Scalar::from(1u64)));
         Ok(())
     }
 
     /// `readint` — `s → s' x 1 | s 0`. Reads the canonical
-    /// 32-byte `Int253` (bit 255 = sign, bits 0..254 = magnitude) from
+    /// 32-byte little-endian `Scalar` from
     /// the front of `s`. Equivalent to `readbits(s, 256)`. Soft-fails
-    /// on insufficient bytes, magnitude ≥ ℓ, or negative zero.
+    /// on insufficient bytes or a residue ≥ ℓ.
     fn op_read_int(&mut self) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
         if s.len() < 32 {
@@ -1623,7 +1622,7 @@ impl VM {
         let bytes = s.to_bytes();
         let mut int_bytes = [0u8; 32];
         int_bytes.copy_from_slice(&bytes[..32]);
-        let value = match Int253::from_bytes(int_bytes) {
+        let value = match Scalar::from_bytes(int_bytes) {
             Some(v) => v,
             None => {
                 self.push_read_failure(String::from(bytes));
@@ -1631,8 +1630,8 @@ impl VM {
             }
         };
         self.push_value(Value::String(String::from(bytes[32..].to_vec())));
-        self.push_value(Value::Int253(value));
-        self.push_value(Value::Int253(Int253::from(1u64)));
+        self.push_value(Value::Scalar(value));
+        self.push_value(Value::Scalar(Scalar::from(1u64)));
         Ok(())
     }
 
@@ -1649,7 +1648,7 @@ impl VM {
         let (remainder, consumed) = s.split_at(n).expect("length checked");
         self.push_value(Value::String(remainder));
         self.push_value(Value::String(consumed));
-        self.push_value(Value::Int253(Int253::from(1u64)));
+        self.push_value(Value::Scalar(Scalar::from(1u64)));
         Ok(())
     }
 
@@ -1669,26 +1668,26 @@ impl VM {
         let point = Point::from_bytes(arr);
         self.push_value(Value::String(String::from(bytes[32..].to_vec())));
         self.push_value(Value::Point(point));
-        self.push_value(Value::Int253(Int253::from(1u64)));
+        self.push_value(Value::Scalar(Scalar::from(1u64)));
         Ok(())
     }
 
     /// _s x n_ **writebits** → _s'_
     ///
     /// Appends the low `n` bits of `x` (LSB-first) to `s`. `n` must be
-    /// a multiple of 8 and ≤ 256. Sign bit included iff `n = 256`.
+    /// a multiple of 8 and ≤ 256. Bytes come from the canonical scalar encoding.
     fn op_write_bits(&mut self) -> Result<(), VMError> {
-        // Invalid signed/range counts fail through `pop_byte_count`; byte
+        // Out-of-range counts fail through `pop_byte_count`; byte
         // misalignment has the more specific error below.
         let n = self.pop_byte_count(256)?;
         if n % 8 != 0 {
             return Err(VMError::BitCountOutOfRange);
         }
         let n_bytes = n / 8;
-        let x = self.pop_value()?.to_int253()?;
+        let x = self.pop_value()?.to_scalar()?;
         let s = self.pop_value()?.to_string()?;
         self.charge_alloc_bytes(s.len().checked_add(n_bytes).ok_or(VMError::OutOfGas)?)?;
-        // Raw 32-byte sign-magnitude form; low `n` bits = first `n_bytes`.
+        // Canonical 32-byte scalar; low `n` bits = first `n_bytes`.
         let raw = x.to_bytes();
         let appended = s.append_bytes(&raw[..n_bytes]);
         self.push_value(Value::String(appended));
@@ -1696,11 +1695,10 @@ impl VM {
     }
 
     /// `writeint` — `s x → s'`. Appends the canonical 32-byte
-    /// `Int253` representation of `x` to `s` (bit 255 carries the sign;
-    /// bits 0..254 carry the magnitude). Equivalent to
-    /// `writebits(s, x, 256)`.
+    /// little-endian `Scalar` representation of `x` to `s`.
+    /// Equivalent to `writebits(s, x, 256)`.
     fn op_write_int(&mut self) -> Result<(), VMError> {
-        let x = self.pop_value()?.to_int253()?;
+        let x = self.pop_value()?.to_scalar()?;
         let s = self.pop_value()?.to_string()?;
         self.charge_alloc_bytes(s.len().checked_add(32).ok_or(VMError::OutOfGas)?)?;
         let appended = s.append_bytes(&x.to_bytes());
@@ -1819,15 +1817,14 @@ impl VM {
         Ok(())
     }
 
-    /// `abs` — pops an `Int253`, pushes its magnitude (positive
-    /// `Int253`), then pushes the original sign as `Int253` (`0` for
-    /// non-negative, `1` for negative). Top of stack ends up holding
-    /// the sign bit.
+    /// `abs` — interprets a scalar in the centered interval `[-H, H]`,
+    /// where `H = (ℓ - 1) / 2`, and pushes its magnitude followed by
+    /// `0` for a non-negative value or `1` for a negative value.
     fn op_abs(&mut self) -> Result<(), VMError> {
-        let v = self.pop_value()?.to_int253()?;
-        let sign_bit = if v.is_negative() { 1u64 } else { 0u64 };
-        self.push_value(Value::Int253(v.abs()));
-        self.push_value(Value::Int253(Int253::from(sign_bit)));
+        let v = self.pop_value()?.to_scalar()?;
+        let sign = u64::from(v.is_centered_negative());
+        self.push_value(Value::Scalar(v.centered_abs()));
+        self.push_value(Value::Scalar(Scalar::from(sign)));
         Ok(())
     }
 
@@ -1838,7 +1835,7 @@ impl VM {
             return Err(VMError::StackUnderflow);
         }
         // CS-lift only when an operand is actually a CS type (Variable /
-        // Expression). A "non-Int253" test would wrongly route String /
+        // Expression). A "non-Scalar" test would wrongly route String /
         // Point comparisons (e.g. the `anchor … eq verify` binding idiom)
         // into `to_expression()` and hard-fail in external context.
         let cs_involved = matches!(
@@ -1856,12 +1853,12 @@ impl VM {
         } else {
             let eq = self.current_call.stack[n - 1].try_eq(&self.current_call.stack[n - 2])?;
             let bit = if eq { 1u64 } else { 0u64 };
-            self.push_value(Value::Int253(Int253::from(bit)));
+            self.push_value(Value::Scalar(Scalar::from(bit)));
         }
         Ok(())
     }
 
-    /// _x_ **neg** → _-x_  (Int253 cleartext or Expression LC negate)
+    /// _x_ **neg** → _-x_  (Scalar cleartext or Expression LC negate)
     fn op_neg<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
         self.charge_top_value_growth(1)?;
         let v = self.pop_value()?.neg()?;
@@ -1882,27 +1879,27 @@ impl VM {
     /// _x y_ **mul** → _z_  (cleartext modulo ℓ, MSM scalar-point lift,
     /// or CS multiplier)
     fn op_mul<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
-        use crate::msm::{int_to_scalar, MultiscalarMul};
+        use crate::msm::MultiscalarMul;
         self.charge_top_value_growth(2)?;
         let b = self.pop_value()?;
         let a = self.pop_value()?;
         match (a, b) {
-            (Value::Int253(x), Value::Int253(y)) => {
-                self.push_value(Value::Int253(x * y));
+            (Value::Scalar(x), Value::Scalar(y)) => {
+                self.push_value(Value::Scalar(x * y));
                 Ok(())
             }
             // scalar * point / point * scalar → MSM with one term.
-            (Value::Int253(s), Value::Point(p)) | (Value::Point(p), Value::Int253(s)) => {
+            (Value::Scalar(s), Value::Point(p)) | (Value::Point(p), Value::Scalar(s)) => {
                 self.push_value(Value::MultiscalarMul(MultiscalarMul::term(
-                    int_to_scalar(s),
+                    s.to_dalek(),
                     p.to_compressed(),
                 )));
                 Ok(())
             }
             // scalar * MSM / MSM * scalar → scale coefficients.
-            (Value::Int253(s), Value::MultiscalarMul(m))
-            | (Value::MultiscalarMul(m), Value::Int253(s)) => {
-                self.push_value(Value::MultiscalarMul(m.scaled(int_to_scalar(s))));
+            (Value::Scalar(s), Value::MultiscalarMul(m))
+            | (Value::MultiscalarMul(m), Value::Scalar(s)) => {
+                self.push_value(Value::MultiscalarMul(m.scaled(s.to_dalek())));
                 Ok(())
             }
             // Quadratic group-element products are not defined in
@@ -1910,7 +1907,7 @@ impl VM {
             (Value::Point(_), Value::Point(_))
             | (Value::Point(_), Value::MultiscalarMul(_))
             | (Value::MultiscalarMul(_), Value::Point(_))
-            | (Value::MultiscalarMul(_), Value::MultiscalarMul(_)) => Err(VMError::TypeNotInt253),
+            | (Value::MultiscalarMul(_), Value::MultiscalarMul(_)) => Err(VMError::TypeNotScalar),
             (a, b) if self.is_external() => {
                 let aexpr = a.to_expression()?;
                 let bexpr = b.to_expression()?;
@@ -1923,24 +1920,25 @@ impl VM {
                 self.push_value(Value::Expression(product));
                 Ok(())
             }
-            _ => Err(VMError::TypeNotInt253),
+            _ => Err(VMError::TypeNotScalar),
         }
     }
 
-    /// `divmod` — `x z → d r`. Truncated division: `sign(d) =
-    /// sign(x) XOR sign(z)`, `sign(r) = sign(x)`. Errors on zero divisor.
+    /// `divmod` — `x z → d r`. Centered integer division, truncating
+    /// toward zero: `x = d*z + r` over integers, `|r| < |z|`, and a
+    /// nonzero remainder has the dividend's sign. Errors on zero divisor.
     fn op_divmod(&mut self) -> Result<(), VMError> {
-        let z = self.pop_value()?.to_int253()?;
-        let x = self.pop_value()?.to_int253()?;
+        let z = self.pop_value()?.to_scalar()?;
+        let x = self.pop_value()?.to_scalar()?;
         let (d, r) = x.div_rem(z).ok_or(VMError::DivByZero)?;
-        self.push_value(Value::Int253(d));
-        self.push_value(Value::Int253(r));
+        self.push_value(Value::Scalar(d));
+        self.push_value(Value::Scalar(r));
         Ok(())
     }
 
     /// `mod252` — pops a `String` of 0..=64 bytes, interprets it
     /// as a little-endian unsigned integer, reduces it modulo ℓ, and
-    /// pushes the result as a non-negative `Int253`.
+    /// pushes the canonical `Scalar` residue.
     fn op_mod252(&mut self) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
         let bytes = s.to_bytes();
@@ -1949,12 +1947,12 @@ impl VM {
         }
         let mut buf = [0u8; 64];
         buf[..bytes.len()].copy_from_slice(&bytes);
-        let scalar = Scalar::from_bytes_mod_order_wide(&buf);
-        self.push_value(Value::Int253(Int253::from(scalar)));
+        let scalar = DalekScalar::from_bytes_mod_order_wide(&buf);
+        self.push_value(Value::Scalar(Scalar::from(scalar)));
         Ok(())
     }
 
-    /// _x_ **not** → _y_  (Int253 logical, or Constraint negation)
+    /// _x_ **not** → _y_  (Scalar logical, or Constraint negation)
     fn op_not<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
         self.charge_top_value_growth(1)?;
         let v = self.pop_value()?.not()?;
@@ -1962,7 +1960,7 @@ impl VM {
         Ok(())
     }
 
-    /// _a b_ **and** → _c_  (Int253 logical, or Constraint conjunction)
+    /// _a b_ **and** → _c_  (Scalar logical, or Constraint conjunction)
     fn op_and<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
         self.charge_top_value_growth(2)?;
         let b = self.pop_value()?;
@@ -1972,7 +1970,7 @@ impl VM {
         Ok(())
     }
 
-    /// _a b_ **or** → _c_  (Int253 logical, or Constraint disjunction)
+    /// _a b_ **or** → _c_  (Scalar logical, or Constraint disjunction)
     fn op_or<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
         self.charge_top_value_growth(2)?;
         let b = self.pop_value()?;
@@ -1983,7 +1981,7 @@ impl VM {
     }
 
     /// `size` — peeks the top value and pushes its length as an
-    /// `Int253` (String byte count, Dict entry count). Other types
+    /// `Scalar` (String byte count, Dict entry count). Other types
     /// error with `TypeHasNoLength`.
     fn op_size(&mut self) -> Result<(), VMError> {
         let top = self
@@ -1996,13 +1994,13 @@ impl VM {
             Value::Dict(d) => d.len(),
             _ => return Err(VMError::TypeHasNoLength),
         };
-        self.push_value(Value::Int253(Int253::from(len as u64)));
+        self.push_value(Value::Scalar(Scalar::from(len as u64)));
         Ok(())
     }
 
     /// `verify` — pop one and assert truthiness.
     ///
-    /// - `Int253`: errors `VerifyFailed` if zero, else pops.
+    /// - `Scalar`: errors `VerifyFailed` if zero, else pops.
     /// - `Constraint`: hands the constraint to the CS so the proof
     ///   commits to its truth. Requires external context.
     /// - `MultiscalarMul`: appends `sum(s_i · P_i) == identity` to
@@ -2011,7 +2009,7 @@ impl VM {
     fn op_verify<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         self.charge_top_value_growth(1)?;
         match self.pop_value()? {
-            Value::Int253(v) => {
+            Value::Scalar(v) => {
                 if v.is_zero() {
                     return Err(VMError::VerifyFailed);
                 }
@@ -2059,7 +2057,7 @@ impl VM {
             }
             other => {
                 self.push_value(other);
-                Err(VMError::TypeNotInt253)
+                Err(VMError::TypeNotScalar)
             }
         }
     }
@@ -2075,9 +2073,9 @@ impl VM {
         self.current_call.jump_to_label(n as usize)
     }
 
-    /// _x_ **jumpif:n** → ø — pop an Int253; jump to label `n` iff `x ≠ 0`.
+    /// _x_ **jumpif:n** → ø — pop an Scalar; jump to label `n` iff `x ≠ 0`.
     fn op_jumpif(&mut self, n: u32) -> Result<(), VMError> {
-        let x = self.pop_value()?.to_int253()?;
+        let x = self.pop_value()?.to_scalar()?;
         if x.is_zero() {
             Ok(())
         } else {
@@ -2092,7 +2090,7 @@ impl VM {
     /// Stack on parent after the call: `… values… k 1` (top = 1).
     /// Errors `ReturnAtRoot` at the outermost frame.
     fn op_return(&mut self) -> Result<(), VMError> {
-        let k_int = self.pop_value()?.to_int253()?;
+        let k_int = self.pop_value()?.to_scalar()?;
         let k_u64 = k_int.to_u64().ok_or(VMError::BadReturnArity)?;
         let k = usize::try_from(k_u64).map_err(|_| VMError::BadReturnArity)?;
 
@@ -2123,13 +2121,13 @@ impl VM {
         self.current_call.stack.extend(return_values);
         self.current_call
             .stack
-            .push(Value::Int253(Int253::from(k as u64)));
-        self.current_call.stack.push(Value::Int253(Int253::ONE));
+            .push(Value::Scalar(Scalar::from(k as u64)));
+        self.current_call.stack.push(Value::Scalar(Scalar::ONE));
         Ok(())
     }
 
     /// `type` — peeks the top value and pushes its type code as an
-    /// `Int253`. The original value remains on the stack underneath.
+    /// `Scalar`. The original value remains on the stack underneath.
     fn op_type(&mut self) -> Result<(), VMError> {
         let code = self
             .current_call
@@ -2137,7 +2135,7 @@ impl VM {
             .last()
             .ok_or(VMError::StackUnderflow)?
             .type_code();
-        self.push_value(Value::Int253(Int253::from(code as u64)));
+        self.push_value(Value::Scalar(Scalar::from(code as u64)));
         Ok(())
     }
 
@@ -2183,8 +2181,8 @@ impl VM {
                 let qty = t.qty();
                 let flv = t.flv();
                 self.push_value(Value::ClearToken(t));
-                self.push_value(Value::Int253(qty));
-                self.push_value(Value::Int253(flv));
+                self.push_value(Value::Scalar(qty));
+                self.push_value(Value::Scalar(flv));
                 Ok(())
             }
             Value::Token(t) => {
@@ -2202,22 +2200,22 @@ impl VM {
         }
     }
 
-    /// _qty:Int253 tag_ **issuepub** → _CT_
+    /// _qty:Scalar tag_ **issuepub** → _CT_
     ///
     /// Cleartext mint under the enclosing actor's identity. Requires
     /// an internal actor frame; `ExternalRoot` and `ContractOpen` error
     /// `OpcodeRequiresActorContext` (issuance domains are disjoint —
-    /// see spec.md §issuepub). Non-`Int253` qty hard-fails
-    /// `TypeNotInt253`; the confidential path lives in [`op_issuepriv`].
+    /// see spec.md §issuepub). Non-`Scalar` qty hard-fails
+    /// `TypeNotScalar`; the confidential path lives in [`op_issuepriv`].
     fn op_issuepub(&mut self) -> Result<(), VMError> {
         let actor = self.require_actor()?.clone();
         let tag = self.pop_value()?.to_string()?;
         let qty = match self.pop_value()? {
-            Value::Int253(i) => i,
-            _ => return Err(VMError::TypeNotInt253),
+            Value::Scalar(i) => i,
+            _ => return Err(VMError::TypeNotScalar),
         };
         let flv = flavor_from_actor(&actor, &tag);
-        // Cleartext qty + flv go straight into the txlog as `Int253`s —
+        // Cleartext qty + flv go straight into the txlog as `Scalar`s —
         // no commitment indirection. The `IssuePub` entry is publicly
         // auditable directly on the wire.
         self.txlog.push(TxEntry::IssuePub(qty, flv));
@@ -2253,7 +2251,7 @@ impl VM {
         // 64-bit range proof on the qty commitment — `borrow`/`mix`
         // already enforce this for confidential token paths.
         let qty_assignment = match qty_var.commitment.assignment() {
-            Some(i) => Some(int253_to_signed_integer(i)?),
+            Some(i) => Some(scalar_to_signed_integer(i)?),
             None => None,
         };
         spacesuit::range_proof(
@@ -2307,13 +2305,13 @@ impl VM {
 
     /// _qty flv_ **borrow** → _widetoken token_
     ///
-    /// Cleartext branch for `Int253` operands; encrypted (`Variable`)
+    /// Cleartext branch for `Scalar` operands; encrypted (`Variable`)
     /// branch for CS-bound operands.
     fn op_borrow<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         let flv_val = self.pop_value()?;
         let qty_v = self.pop_value()?;
         match (qty_v, flv_val) {
-            (Value::Int253(qty), Value::Int253(flv)) => {
+            (Value::Scalar(qty), Value::Scalar(flv)) => {
                 let pos = ClearToken::new(qty, flv);
                 let neg = pos.negated();
                 self.push_value(Value::ClearToken(neg));
@@ -2325,7 +2323,7 @@ impl VM {
                 self.op_borrow_encrypted_inner(qty, flv, delegate)
             }
             (Value::Point(_), _) | (_, Value::Point(_)) => Err(VMError::TokenRequiresCS),
-            _ => Err(VMError::TypeNotInt253),
+            _ => Err(VMError::TypeNotScalar),
         }
     }
 
@@ -2336,12 +2334,12 @@ impl VM {
         match a.merge_into(b) {
             Ok(c) => {
                 self.push_value(Value::ClearToken(c));
-                self.push_value(Value::Int253(Int253::from(1u64)));
+                self.push_value(Value::Scalar(Scalar::from(1u64)));
             }
             Err((a, b)) => {
                 self.push_value(Value::ClearToken(a));
                 self.push_value(Value::ClearToken(b));
-                self.push_value(Value::Int253(Int253::ZERO));
+                self.push_value(Value::Scalar(Scalar::ZERO));
             }
         }
         Ok(())
@@ -2349,7 +2347,7 @@ impl VM {
 
     /// _a q_ **split** → _a' b_
     fn op_split(&mut self) -> Result<(), VMError> {
-        let q = self.pop_value()?.to_int253()?;
+        let q = self.pop_value()?.to_scalar()?;
         let a = self.pop_value()?.to_clear_token()?;
         match a.split(q) {
             Some((remainder, new_token)) => {
@@ -2365,7 +2363,7 @@ impl VM {
     ///
     /// Consumer-side helper for `issuepub`: pops `tag` (String) and
     /// `cid` (String, exactly 32 bytes — an actor id), pushes
-    /// `flavor_from_actor(cid, tag)` as `Int253`. Pure helper: no CS,
+    /// `flavor_from_actor(cid, tag)` as `Scalar`. Pure helper: no CS,
     /// no txlog effect, no actor-context requirement. Use to
     /// recompute and verify a cleartext token's flavor without
     /// running the corresponding `issuepub`.
@@ -2374,7 +2372,7 @@ impl VM {
         let cid = self.pop_value()?.to_string()?;
         let bytes = array32(&cid.to_bytes()).ok_or(VMError::IndexOutOfRange)?;
         let flv = flavor_from_actor(&ActorID::Hash(bytes), &tag);
-        self.push_value(Value::Int253(flv));
+        self.push_value(Value::Scalar(flv));
         Ok(())
     }
 
@@ -2383,7 +2381,7 @@ impl VM {
     /// Consumer-side helper for `issuepriv`: pops `tag` (String) and
     /// `pred` (String, exactly 32 bytes — a compressed Ristretto
     /// predicate point), pushes `flavor_from_predicate(pred, tag)` as
-    /// `Int253`. Pure helper: no CS, no txlog effect, no
+    /// `Scalar`. Pure helper: no CS, no txlog effect, no
     /// predicate-context requirement. Use to recompute and verify a
     /// confidential token's flavor (the flv commitment is unblinded,
     /// so its point determines the scalar).
@@ -2393,7 +2391,7 @@ impl VM {
         let bytes = array32(&pred.to_bytes()).ok_or(VMError::IndexOutOfRange)?;
         let predicate = Predicate::opaque(curve25519_dalek::ristretto::CompressedRistretto(bytes));
         let flv = flavor_from_predicate(&predicate, &tag);
-        self.push_value(Value::Int253(flv));
+        self.push_value(Value::Scalar(flv));
         Ok(())
     }
 
@@ -2630,7 +2628,7 @@ impl VM {
     /// Pops the child gas grant as a non-negative `u64`.
     fn pop_gas_limit(&mut self) -> Result<u64, VMError> {
         self.pop_value()?
-            .to_int253()?
+            .to_scalar()?
             .to_u64()
             .ok_or(VMError::InvalidBitrange)
     }
@@ -2645,7 +2643,7 @@ impl VM {
     ) -> Result<TaprootProof, VMError> {
         let mut n_vec = Vec::with_capacity(neighbors.len());
         for (i, (k, v)) in neighbors.entries().enumerate() {
-            if *k != Int253::from(i as u64) {
+            if *k != Scalar::from(i as u64) {
                 return Err(VMError::MalformedTaprootProof);
             }
             match v {
@@ -2679,7 +2677,7 @@ impl VM {
         let target = self.pop_actor_id()?;
         let gas = self
             .pop_value()?
-            .to_int253()?
+            .to_scalar()?
             .to_u64()
             .ok_or(VMError::InvalidBitrange)?;
         let refund_predicate = Predicate::opaque(curve25519_dalek::ristretto::CompressedRistretto(
@@ -2720,7 +2718,7 @@ impl VM {
         let callee = self.pop_actor_id()?.to_canonical();
         let gas = self
             .pop_value()?
-            .to_int253()?
+            .to_scalar()?
             .to_u64()
             .ok_or(VMError::InvalidBitrange)?;
         // Debit the grant from the caller (see op_open). A caller that
@@ -2828,7 +2826,7 @@ impl VM {
     /// the current actor (which must be checked out by a prior `load` —
     /// else `SaveWithoutLoad`, since saving would clobber live state).
     /// Portability is the canonical storage gate — every inserted value
-    /// must be portable (`Int253`, `String`, `Point`, `Dict` of
+    /// must be portable (`Scalar`, `String`, `Point`, `Dict` of
     /// portable, non-negative `ClearToken`, `Token`). Non-portable
     /// values (`Contract`, `Merlin`, `Variable`, `Expression`,
     /// `Constraint`, `MultiscalarMul`, `WideToken`, negative
@@ -2890,17 +2888,17 @@ impl VM {
     /// soft failures; type, context, and host invariant errors are hard.
     fn op_addstorage(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
-        let request = self.pop_value()?.to_int253()?;
+        let request = self.pop_value()?.to_scalar()?;
         let Some(bytes) = request.to_u64() else {
-            self.push_value(Value::Int253(Int253::ZERO));
+            self.push_value(Value::Scalar(Scalar::ZERO));
             return Ok(());
         };
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let Some(purchase) = registry.purchase_storage(&actor, bytes, self.block_height)? else {
-            self.push_value(Value::Int253(Int253::ZERO));
+            self.push_value(Value::Scalar(Scalar::ZERO));
             return Ok(());
         };
-        if purchase.fee_sparks.is_zero() || purchase.fee_sparks.is_negative() {
+        if purchase.fee_sparks.is_zero() || purchase.fee_sparks.is_centered_negative() {
             return Err(VMError::StorageArithmeticOverflow);
         }
         self.txlog.push(TxEntry::StoragePurchase {
@@ -2913,7 +2911,7 @@ impl VM {
             -purchase.fee_sparks,
             FLAME_FLAVOR,
         )));
-        self.push_value(Value::Int253(Int253::ONE));
+        self.push_value(Value::Scalar(Scalar::ONE));
 
         Ok(())
     }
@@ -2922,19 +2920,21 @@ impl VM {
     /// [`Self::op_addstorage`].
     fn op_quotestorage(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = self.require_actor()?.clone();
-        let request = self.pop_value()?.to_int253()?;
+        let request = self.pop_value()?.to_scalar()?;
         let Some(bytes) = request.to_u64() else {
-            self.push_value(Value::Int253(Int253::ZERO));
+            self.push_value(Value::Scalar(Scalar::ZERO));
             return Ok(());
         };
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         match registry.quote_storage(&actor, bytes, self.block_height)? {
-            Some(quote) if !quote.fee_sparks.is_zero() && !quote.fee_sparks.is_negative() => {
-                self.push_value(Value::Int253(quote.fee_sparks));
-                self.push_value(Value::Int253(Int253::ONE));
+            Some(quote)
+                if !quote.fee_sparks.is_zero() && !quote.fee_sparks.is_centered_negative() =>
+            {
+                self.push_value(Value::Scalar(quote.fee_sparks));
+                self.push_value(Value::Scalar(Scalar::ONE));
             }
             Some(_) => return Err(VMError::StorageArithmeticOverflow),
-            None => self.push_value(Value::Int253(Int253::ZERO)),
+            None => self.push_value(Value::Scalar(Scalar::ZERO)),
         }
         Ok(())
     }
@@ -2957,7 +2957,7 @@ impl VM {
         for v in contract.into_payload() {
             self.push_value(v);
         }
-        self.push_value(Value::Int253(Int253::from(k as u64)));
+        self.push_value(Value::Scalar(Scalar::from(k as u64)));
         Ok(())
     }
 
@@ -3007,8 +3007,8 @@ impl VM {
         } else {
             0
         };
-        self.push_value(Value::Int253(Int253::from(lt)));
-        self.push_value(Value::Int253(Int253::from(flag)));
+        self.push_value(Value::Scalar(Scalar::from(lt)));
+        self.push_value(Value::Scalar(Scalar::from(flag)));
         Ok(())
     }
 
@@ -3018,7 +3018,7 @@ impl VM {
             .current_call
             .gas_limit
             .saturating_sub(self.current_call.gas_used);
-        self.push_value(Value::Int253(Int253::from(remaining)));
+        self.push_value(Value::Scalar(Scalar::from(remaining)));
         Ok(())
     }
 
@@ -3027,7 +3027,7 @@ impl VM {
         let actor = self.require_actor()?;
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let usage = registry.actor_usage(actor)?;
-        self.push_value(Value::Int253(Int253::from(usage)));
+        self.push_value(Value::Scalar(Scalar::from(usage)));
         Ok(())
     }
 
@@ -3036,7 +3036,7 @@ impl VM {
         let actor = self.require_actor()?.clone();
         let height = self
             .pop_value()?
-            .to_int253()?
+            .to_scalar()?
             .to_u64()
             .ok_or(VMError::InvalidBitrange)?;
         if height < self.block_height {
@@ -3044,7 +3044,7 @@ impl VM {
         }
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let capacity = registry.actor_capacity(&actor, height)?;
-        self.push_value(Value::Int253(Int253::from(capacity)));
+        self.push_value(Value::Scalar(Scalar::from(capacity)));
         Ok(())
     }
 
@@ -3054,14 +3054,14 @@ impl VM {
     /// prover; `None` on the verifier.
     fn op_alloc<D: Delegate>(
         &mut self,
-        witness: Option<Int253>,
+        witness: Option<Scalar>,
         delegate: &mut D,
     ) -> Result<(), VMError> {
         self.require_external()?;
         self.charge_alloc_items(1)?;
         self.current_call.charge_gas(r1cs_gas(1)?)?;
         use bulletproofs::r1cs::ConstraintSystem;
-        let witness_scalar = witness.map(|i| i.to_scalar_mod_order());
+        let witness_scalar = witness.map(|i| i.to_dalek());
         let r1cs_var = delegate
             .cs()
             .allocate(witness_scalar)
@@ -3081,26 +3081,26 @@ impl VM {
         self.require_external()?;
         self.charge_alloc_items(1)?;
         self.current_call.charge_gas(r1cs_gas(1)?)?;
-        use curve25519_dalek::scalar::Scalar;
+        use curve25519_dalek::scalar::Scalar as DalekScalar;
         let var = self.pop_value()?.to_variable()?;
         let (_point, r1cs_var) = delegate.commit_variable(&var.commitment)?;
         let witness = var.commitment.assignment();
-        let expr = Expression::LinearCombination(vec![(r1cs_var, Scalar::ONE)], witness);
+        let expr = Expression::LinearCombination(vec![(r1cs_var, DalekScalar::ONE)], witness);
         self.push_value(Value::Expression(expr));
         Ok(())
     }
 
-    /// _expr n_ **range** → _expr_
+    /// _x n_ **range** → _x_
     ///
-    /// Pops the bit-count and Expression, adds an `n`-bit non-negativity
-    /// range proof, pushes the Expression back.
+    /// Checks a raw scalar in any context. In external execution only,
+    /// an Expression is checked or constrained to the same `[0, 2^n)` range.
+    /// The checked value is returned with its original type.
     fn op_range<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
-        self.require_external()?;
         use bulletproofs::r1cs::LinearCombination as LC;
         use spacesuit::BitRange;
 
-        // Pop n (bit-count) — must be a non-negative Int253 in [1, 64].
-        let n_int = self.pop_value()?.to_int253()?;
+        // Pop n (bit-count) — must be a scalar in [1, 64].
+        let n_int = self.pop_value()?.to_scalar()?;
         let n_u64 = n_int.to_u64().ok_or(VMError::BitCountOutOfRange)?;
         let n_usize = usize::try_from(n_u64).map_err(|_| VMError::BitCountOutOfRange)?;
         if n_usize == 0 {
@@ -3108,16 +3108,24 @@ impl VM {
         }
         let bit_range = BitRange::new(n_usize).ok_or(VMError::BitCountOutOfRange)?;
 
+        let value = self.pop_value()?;
+        if let Value::Scalar(scalar) = value {
+            if !scalar_fits_in_n_bits(scalar, n_usize) {
+                return Err(VMError::InvalidBitrange);
+            }
+            self.push_value(Value::Scalar(scalar));
+            return Ok(());
+        }
+
+        self.require_external()?;
         self.charge_alloc_items(n_usize)?;
 
-        let expr = self.pop_value()?.to_expression()?;
+        let expr = value.to_expression()?;
 
         match &expr {
             Expression::Constant(value) => {
-                // Cleartext: the value must fit in [0, 2^n). Negative
-                // or too-large constants are caught here without
-                // touching the CS.
-                if !int_fits_in_n_bits(*value, n_usize) {
+                // Public constants are checked without touching the CS.
+                if !scalar_fits_in_n_bits(*value, n_usize) {
                     return Err(VMError::InvalidBitrange);
                 }
                 self.push_value(Value::Expression(expr));
@@ -3127,12 +3135,12 @@ impl VM {
                 self.current_call.charge_gas(r1cs_gas(n_usize)?)?;
                 let lc: LC = terms.iter().cloned().collect();
                 // Convert the witness (if present) to spacesuit's
-                // SignedInteger. Non-negative Int253s up to u64::MAX
-                // map cleanly; anything else fails the prover at
+                // SignedInteger. Scalars in the u64 range map cleanly;
+                // other assignments fail the prover at
                 // gadget time via `to_u64() → None` inside
                 // spacesuit::range_proof.
                 let assignment_si = match assignment {
-                    Some(i) => Some(int253_to_signed_integer(*i)?),
+                    Some(i) => Some(scalar_to_signed_integer(*i)?),
                     None => None,
                 };
                 spacesuit::range_proof(delegate.cs(), lc, assignment_si, bit_range)
@@ -3144,9 +3152,9 @@ impl VM {
     }
 
     /// `scalar` — `string → expr`. Pops a String, downcasts to
-    /// `Int253` via `String::to_scalar`, pushes `Expression::Constant`.
+    /// `Scalar` via `String::to_scalar`, pushes `Expression::Constant`.
     /// For `String::Opaque(bytes)`, the bytes are parsed as a
-    /// canonical sign-magnitude Int253. For `StringWitness::Scalar(i)`, the
+    /// canonical scalar. For `StringWitness::Scalar(i)`, the
     /// witness is extracted directly.
     fn op_scalar(&mut self) -> Result<(), VMError> {
         self.require_external()?;
@@ -3189,10 +3197,10 @@ impl VM {
         // Witness assignments (prover only). Negative qty is a
         // protocol error here — borrow's +T is range-proven non-negative.
         let qty_assignment = match qty.commitment.assignment() {
-            Some(i) => Some(int253_to_signed_integer(i)?),
+            Some(i) => Some(scalar_to_signed_integer(i)?),
             None => None,
         };
-        let flv_assignment = flv.commitment.assignment().map(|i| i.to_scalar_mod_order());
+        let flv_assignment = flv.commitment.assignment().map(|i| i.to_dalek());
         // 64-bit range proof on the positive qty.
         spacesuit::range_proof(
             delegate.cs(),
@@ -3234,8 +3242,8 @@ impl VM {
         self.require_external()?;
         use bulletproofs::r1cs::ConstraintSystem;
         self.current_call.charge_gas(r1cs_gas(2)?)?;
-        let qty = self.pop_value()?.to_int253()?;
-        if qty.is_negative() {
+        let qty = self.pop_value()?.to_scalar()?;
+        if qty.is_centered_negative() {
             return Err(VMError::FeeQtyNegative);
         }
         let qty_u64 = qty.to_u64().ok_or(VMError::FeeTooHigh)?;
@@ -3285,10 +3293,10 @@ impl VM {
         let (_, qty_var) = delegate.commit_variable(&qty)?;
         let (_, flv_var) = delegate.commit_variable(&flv)?;
         let qty_assg = match qty.assignment() {
-            Some(i) => Some(int253_to_signed_integer(i)?),
+            Some(i) => Some(scalar_to_signed_integer(i)?),
             None => None,
         };
-        let flv_assg = flv.assignment().map(|i| i.to_scalar_mod_order());
+        let flv_assg = flv.assignment().map(|i| i.to_dalek());
         Ok(spacesuit::AllocatedValue {
             q: qty_var,
             f: flv_var,
@@ -3368,15 +3376,15 @@ impl VM {
     /// checks both equations immediately because it has no deferred batch.
     ///
     /// All four scalar operands (`f`, `f'`, `q`, `q'`) are popped as
-    /// `Int253`. The Token is popped last (deepest on stack). The
+    /// `Scalar`. The Token is popped last (deepest on stack). The
     /// `ClearToken(q, f)` is pushed only after the applicable check is queued
     /// or completed.
     fn op_decrypt<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         use bulletproofs::PedersenGens;
-        let q_blind = self.pop_value()?.to_int253()?;
-        let q_value = self.pop_value()?.to_int253()?;
-        let f_blind = self.pop_value()?.to_int253()?;
-        let f_value = self.pop_value()?.to_int253()?;
+        let q_blind = self.pop_value()?.to_scalar()?;
+        let q_value = self.pop_value()?.to_scalar()?;
+        let f_blind = self.pop_value()?.to_scalar()?;
+        let f_value = self.pop_value()?.to_scalar()?;
         let token = match self.pop_value()? {
             Value::Token(t) => t,
             _ => return Err(VMError::TypeNotToken),
@@ -3392,26 +3400,24 @@ impl VM {
         if self.is_external() {
             // Each equation gets its own random batch factor, so it cannot
             // cancel another opening or an unrelated signature statement.
-            let neg_one = -Scalar::ONE;
+            let neg_one = -DalekScalar::ONE;
             musig::BatchVerification::append(
                 delegate.batch_verifier(),
-                q_value.to_scalar_mod_order(),
-                [q_blind.to_scalar_mod_order(), neg_one],
+                q_value.to_dalek(),
+                [q_blind.to_dalek(), neg_one],
                 [Some(gens.B_blinding), qty_point],
             );
             musig::BatchVerification::append(
                 delegate.batch_verifier(),
-                f_value.to_scalar_mod_order(),
-                [f_blind.to_scalar_mod_order(), neg_one],
+                f_value.to_dalek(),
+                [f_blind.to_dalek(), neg_one],
                 [Some(gens.B_blinding), flv_point],
             );
         } else {
             let qty_point = qty_point.ok_or(VMError::InvalidPoint)?;
             let flv_point = flv_point.ok_or(VMError::InvalidPoint)?;
-            let expected_qty = gens.B * q_value.to_scalar_mod_order()
-                + gens.B_blinding * q_blind.to_scalar_mod_order();
-            let expected_flv = gens.B * f_value.to_scalar_mod_order()
-                + gens.B_blinding * f_blind.to_scalar_mod_order();
+            let expected_qty = gens.B * q_value.to_dalek() + gens.B_blinding * q_blind.to_dalek();
+            let expected_flv = gens.B * f_value.to_dalek() + gens.B_blinding * f_blind.to_dalek();
             if expected_qty != qty_point || expected_flv != flv_point {
                 return Err(VMError::CommitmentOpeningMismatch);
             }
@@ -3421,16 +3427,10 @@ impl VM {
     }
 }
 
-/// Returns `true` iff `value` is non-negative and fits in `[0, 2^n)`.
-/// Used by `op_range` to short-circuit cleartext Expression::Constant
-/// arguments without touching the CS.
-fn int_fits_in_n_bits(value: Int253, n: usize) -> bool {
-    if value.is_negative() {
-        return false;
-    }
-    if n >= 64 {
-        // Any non-negative Int253 fits — but for n in [1, 64] this
-        // collapses to "fits in u64", which we check via to_u64().
+/// Checks a canonical residue against `[0, 2^n)` for `n` in `[1, 64]`.
+/// Used for raw scalars and public Expression constants, without R1CS.
+fn scalar_fits_in_n_bits(value: Scalar, n: usize) -> bool {
+    if n == 64 {
         return value.to_u64().is_some();
     }
     match value.to_u64() {
@@ -3439,10 +3439,8 @@ fn int_fits_in_n_bits(value: Int253, n: usize) -> bool {
     }
 }
 
-/// Converts an `Int253` to `spacesuit::SignedInteger` if it fits the
-/// `±2^64` range. Out-of-range values error `InvalidBitrange`.
-/// Converts a cleartext `Int253` witness to a `SignedInteger` for a
-/// range-proof assignment.
+/// Converts a scalar's centered value to a `spacesuit::SignedInteger`
+/// witness when its magnitude fits u64. Other values error `InvalidBitrange`.
 ///
 /// **Prover/verifier asymmetry (fail-closed, liveness-only).** Callers
 /// invoke this only on the *prover* side (`commitment.assignment()` is
@@ -3458,9 +3456,9 @@ fn int_fits_in_n_bits(value: Int253, n: usize) -> bool {
 /// tx), not a soundness break. Hardening (making such witness-gated
 /// failures tx-level/uncatchable so they never reach a marker) is a
 /// deliberate ZK-review item, not a drive-by change.
-fn int253_to_signed_integer(value: Int253) -> Result<spacesuit::SignedInteger, VMError> {
-    if value.is_negative() {
-        let mag = value.abs();
+fn scalar_to_signed_integer(value: Scalar) -> Result<spacesuit::SignedInteger, VMError> {
+    if value.is_centered_negative() {
+        let mag = value.centered_abs();
         let mag_u64 = mag.to_u64().ok_or(VMError::InvalidBitrange)?;
         Ok(-spacesuit::SignedInteger::from(mag_u64))
     } else {

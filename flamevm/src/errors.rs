@@ -62,13 +62,13 @@ pub enum VMError {
     #[error("Unexpected end of script")]
     UnexpectedEndOfScript,
 
-    /// This error occurs when an instruction requires an Int253.
-    #[error("Item is not an Int253")]
-    TypeNotInt253,
+    /// This error occurs when an instruction requires an Scalar.
+    #[error("Item is not an Scalar")]
+    TypeNotScalar,
 
-    /// This error occurs when 32 bytes do not encode a canonical Int253.
-    #[error("Invalid Int253 encoding")]
-    InvalidInt253Encoding,
+    /// This error occurs when 32 bytes do not encode a canonical Scalar.
+    #[error("Invalid Scalar encoding")]
+    InvalidScalarEncoding,
 
     /// This error occurs when an index is out of range for the addressed stack or buffer.
     #[error("Index out of range")]
@@ -347,8 +347,8 @@ pub enum VMError {
     #[error("Item is not a Constraint")]
     TypeNotConstraint,
 
-    /// This error occurs when a value is outside the bit-range for a rangeproof.
-    #[error("Value out of bit-range for rangeproof")]
+    /// A scalar or R1CS assignment is outside the requested bit range.
+    #[error("Value outside the requested bit range")]
     InvalidBitrange,
 
     /// This error occurs when a false cleartext constraint is verified.

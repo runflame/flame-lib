@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::{empty_state, state_root, ActorID, ActorRegistry, Int253};
+use crate::{empty_state, state_root, ActorID, ActorRegistry, Scalar};
 
 /// Helper: deploys an actor whose `recv` method runs `script`.
 /// Derives the actor's id from the script bytes (treats `script`
@@ -122,13 +122,13 @@ fn failed_call_stack(
 
 #[test]
 fn failed_internal_decrypt_restores_call_arguments() {
-    let q = Int253::from(100u64);
-    let f = Int253::from(7u64);
-    let q_blind = Int253::from(11u64);
-    let wrong_f_blind = Int253::from(99u64);
+    let q = Scalar::from(100u64);
+    let f = Scalar::from(7u64);
+    let q_blind = Scalar::from(11u64);
+    let wrong_f_blind = Scalar::from(99u64);
     let token = Token::new(
-        Commitment::blinded_with_factor(q, Scalar::from(11u64)),
-        Commitment::blinded_with_factor(f, Scalar::from(13u64)),
+        Commitment::blinded_with_factor(q, DalekScalar::from(11u64)),
+        Commitment::blinded_with_factor(f, DalekScalar::from(13u64)),
     );
     let expected_token = Value::Token(token.clone());
 
@@ -169,8 +169,8 @@ fn failed_internal_decrypt_restores_call_arguments() {
     {
         assert_int(actual, expected);
     }
-    assert_int(&vm.current_call.stack[5], Int253::from(5u64));
-    assert_int(&vm.current_call.stack[6], Int253::ZERO);
+    assert_int(&vm.current_call.stack[5], Scalar::from(5u64));
+    assert_int(&vm.current_call.stack[6], Scalar::ZERO);
 }
 
 #[test]
@@ -185,15 +185,15 @@ fn call_rejects_nested_nonportable_argument() {
     let mut vm = vm_for_actor(caller, ScriptBuilder::new().call().to_bytecode());
     let mut inner = Dict::new();
     inner.insert(
-        Int253::ZERO,
-        Value::ClearToken(ClearToken::new(Int253::from(-1i64), FLAME_FLAVOR)),
+        Scalar::ZERO,
+        Value::ClearToken(ClearToken::new(Scalar::from(-1i64), FLAME_FLAVOR)),
     );
     let mut outer = Dict::new();
-    outer.insert(Int253::ZERO, Value::Dict(inner));
+    outer.insert(Scalar::ZERO, Value::Dict(inner));
     vm.current_call.stack = vec![
         Value::Dict(outer),
-        Value::Int253(Int253::ONE),
-        Value::Int253(Int253::from(10_000u64)),
+        Value::Scalar(Scalar::ONE),
+        Value::Scalar(Scalar::from(10_000u64)),
         Value::String(String::from(callee.to_hash().to_vec())),
     ];
 
@@ -280,8 +280,8 @@ fn call_to_checked_out_actor_blocked() {
         vm.step_internal_with_registry(&mut reg).expect("step ok");
     }
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[0], Int253::ZERO);
-    assert_int(&vm.current_call.stack[1], Int253::ZERO);
+    assert_int(&vm.current_call.stack[0], Scalar::ZERO);
+    assert_int(&vm.current_call.stack[1], Scalar::ZERO);
     assert_eq!(vm.txlog.len(), 1, "blocked re-entry must emit no effects");
 }
 
@@ -853,7 +853,7 @@ fn f1_failed_subcall_save_rolls_back_state_mutation() {
 /// error propagates, the rollback runs, the actor survives.
 ///
 /// Concrete trigger: evil's recv does `load; drop; push:0;
-/// save`. The save sees `Int253(0)`, not a Dict, fails
+/// save`. The save sees `Scalar(0)`, not a Dict, fails
 /// `TypeNotDict`. Without F1, the actor was destroyed at tx end.
 /// With F1, the failure rolls back and the actor survives.
 #[test]
@@ -963,7 +963,7 @@ fn call_to_unknown_actor_rejected_with_marker() {
         .to_bytecode();
     let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
     let mut vm = vm_for_actor(a, a_script);
-    let token = Token::cleartext(Int253::from(7u64), Int253::from(9u64)).unwrap();
+    let token = Token::cleartext(Scalar::from(7u64), Scalar::from(9u64)).unwrap();
     vm.push_value(Value::Token(token.clone()));
     for _ in 0..4 {
         vm.step_internal_with_registry(&mut reg).expect("step ok");
@@ -973,20 +973,20 @@ fn call_to_unknown_actor_rejected_with_marker() {
         &vm.current_call.stack[0],
         Value::Token(t) if t.qty() == token.qty() && t.flv() == token.flv()
     ));
-    assert_int(&vm.current_call.stack[1], Int253::ONE);
-    assert_int(&vm.current_call.stack[2], Int253::ZERO);
+    assert_int(&vm.current_call.stack[1], Scalar::ONE);
+    assert_int(&vm.current_call.stack[2], Scalar::ZERO);
     assert_eq!(vm.txlog.len(), 1);
 }
 
 #[test]
 fn entered_call_failure_matrix_restores_portable_bearers() {
-    let token = Value::Token(Token::cleartext(Int253::from(11u64), Int253::from(13u64)).unwrap());
-    let clear = Value::ClearToken(ClearToken::new(Int253::from(17u64), FLAME_FLAVOR));
+    let token = Value::Token(Token::cleartext(Scalar::from(11u64), Scalar::from(13u64)).unwrap());
+    let clear = Value::ClearToken(ClearToken::new(Scalar::from(17u64), FLAME_FLAVOR));
     let mut inner = Dict::new();
-    inner.insert(Int253::ZERO, token.clone());
-    inner.insert(Int253::ONE, clear.clone());
+    inner.insert(Scalar::ZERO, token.clone());
+    inner.insert(Scalar::ONE, clear.clone());
     let mut outer = Dict::new();
-    outer.insert(Int253::ZERO, Value::Dict(inner));
+    outer.insert(Scalar::ZERO, Value::Dict(inner));
     let nested = Value::Dict(outer);
 
     let cases = vec![
@@ -1019,8 +1019,8 @@ fn entered_call_failure_matrix_restores_portable_bearers() {
         let stack = failed_call_stack(child, bearer.clone(), gas, exhaust_after_entry);
         assert_eq!(stack.len(), 3);
         assert_same_bearer(&stack[0], &bearer);
-        assert_int(&stack[1], Int253::ONE);
-        assert_int(&stack[2], Int253::ZERO);
+        assert_int(&stack[1], Scalar::ONE);
+        assert_int(&stack[2], Scalar::ZERO);
     }
 }
 
@@ -1048,9 +1048,9 @@ fn nested_call_failure_restores_one_original_bearer() {
     let a = deploy_recv(&mut reg, a_script.clone(), 10_000);
     let mut vm = vm_for_actor(a, a_script);
 
-    let token = Value::Token(Token::cleartext(Int253::from(23u64), FLAME_FLAVOR).unwrap());
+    let token = Value::Token(Token::cleartext(Scalar::from(23u64), FLAME_FLAVOR).unwrap());
     let mut dict = Dict::new();
-    dict.insert(Int253::ZERO, token);
+    dict.insert(Scalar::ZERO, token);
     let bearer = Value::Dict(dict);
     vm.push_value(bearer.clone());
 
@@ -1066,8 +1066,8 @@ fn nested_call_failure_restores_one_original_bearer() {
 
     assert_eq!(vm.current_call.stack.len(), 3);
     assert_same_bearer(&vm.current_call.stack[0], &bearer);
-    assert_int(&vm.current_call.stack[1], Int253::ONE);
-    assert_int(&vm.current_call.stack[2], Int253::ZERO);
+    assert_int(&vm.current_call.stack[1], Scalar::ONE);
+    assert_int(&vm.current_call.stack[2], Scalar::ZERO);
 }
 
 #[test]
@@ -1086,7 +1086,7 @@ fn successful_call_discards_escrow_copy() {
         .to_bytecode();
     let caller = deploy_recv(&mut reg, caller_script.clone(), 10_000);
     let mut vm = vm_for_actor(caller, caller_script);
-    let token = Value::Token(Token::cleartext(Int253::from(29u64), FLAME_FLAVOR).unwrap());
+    let token = Value::Token(Token::cleartext(Scalar::from(29u64), FLAME_FLAVOR).unwrap());
     vm.push_value(token.clone());
 
     while !vm.current_call.is_finished() || !vm.call_stack.is_empty() {
@@ -1095,6 +1095,6 @@ fn successful_call_discards_escrow_copy() {
 
     assert_eq!(vm.current_call.stack.len(), 3);
     assert_same_bearer(&vm.current_call.stack[0], &token);
-    assert_int(&vm.current_call.stack[1], Int253::ONE);
-    assert_int(&vm.current_call.stack[2], Int253::ONE);
+    assert_int(&vm.current_call.stack[1], Scalar::ONE);
+    assert_int(&vm.current_call.stack[2], Scalar::ONE);
 }

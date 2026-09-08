@@ -33,7 +33,7 @@ fn dict_construction_two_pairs() {
     run_to_end(&mut vm).unwrap();
     assert_dict_keys(
         &vm.current_call.stack[0],
-        &[Int253::from(1u64), Int253::from(5u64)],
+        &[Scalar::from(1u64), Scalar::from(5u64)],
     );
 }
 
@@ -69,9 +69,9 @@ fn put_inserts_into_empty() {
     match &vm.current_call.stack[0] {
         Value::Dict(d) => {
             assert_eq!(d.len(), 1);
-            match d.get(&Int253::from(3u64)) {
-                Some(Value::Int253(i)) => assert_eq!(*i, Int253::from(99u64)),
-                _ => panic!("expected Int253"),
+            match d.get(&Scalar::from(3u64)) {
+                Some(Value::Scalar(i)) => assert_eq!(*i, Scalar::from(99u64)),
+                _ => panic!("expected Scalar"),
             }
         }
         _ => panic!("expected Dict"),
@@ -132,8 +132,8 @@ fn replace_existing_returns_prev() {
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 3);
-    assert_int(&vm.current_call.stack[1], Int253::from(50u64));
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(50u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn replace_absent_returns_zero() {
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
 }
 
 #[test]
@@ -165,8 +165,8 @@ fn get_existing_returns_dict_k_v() {
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 3);
-    assert_int(&vm.current_call.stack[1], Int253::from(5u64));
-    assert_int(&vm.current_call.stack[2], Int253::from(50u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(5u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(50u64));
     match &vm.current_call.stack[0] {
         Value::Dict(d) => assert!(d.is_empty()),
         _ => panic!("expected Dict"),
@@ -200,8 +200,8 @@ fn getopt_existing() {
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[1], Int253::from(50u64));
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(50u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
@@ -215,7 +215,7 @@ fn getopt_missing() {
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
 }
 
 #[test]
@@ -232,8 +232,8 @@ fn getdup_copyable() {
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 3);
-    assert_int(&vm.current_call.stack[1], Int253::from(50u64));
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(50u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
     match &vm.current_call.stack[0] {
         Value::Dict(d) => assert_eq!(d.len(), 1),
         _ => panic!("expected Dict"),
@@ -251,7 +251,7 @@ fn getdup_missing_pushes_zero() {
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
 }
 
 #[test]
@@ -312,7 +312,7 @@ fn first_of_empty_pushes_zero() {
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
 }
 
 #[test]
@@ -329,8 +329,8 @@ fn first_returns_smallest_key() {
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(1u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
@@ -346,8 +346,8 @@ fn last_returns_largest_key() {
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[1], Int253::from(5u64));
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(5u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
@@ -365,8 +365,8 @@ fn next_finds_strictly_greater_key() {
         .to_bytecode();
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[1], Int253::from(5u64));
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(5u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
@@ -382,7 +382,7 @@ fn next_past_last_pushes_zero() {
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
 }
 
 #[test]
@@ -423,7 +423,7 @@ fn empty_dict_is_droppable() {
 #[test]
 fn nonempty_dict_of_droppable_values_is_droppable() {
     // Under the revised drop rules, a dict is droppable iff every
-    // value it has ever held is droppable. A dict of plain Int253s
+    // value it has ever held is droppable. A dict of plain Scalars
     // is droppable, including non-empty ones — dropping it has no
     // value-loss semantics.
     let script = ScriptBuilder::new()
@@ -440,8 +440,8 @@ fn nonempty_dict_of_droppable_values_is_droppable() {
 
 #[test]
 fn token_bearing_dict_can_be_drained_and_empty_shell_dropped() {
-    let key = Int253::from(5u64);
-    let token = ClearToken::new(Int253::from(7u64), Int253::from(9u64));
+    let key = Scalar::from(5u64);
+    let token = ClearToken::new(Scalar::from(7u64), Scalar::from(9u64));
     let mut dict = Dict::new();
     dict.insert(key, Value::ClearToken(token));
     assert!(!dict.is_droppable());

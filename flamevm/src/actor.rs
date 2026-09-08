@@ -175,7 +175,7 @@ pub fn code_state_bytes(code: &[u8], state: &Value) -> Result<u64, VMError> {
 /// result into a debt token and transaction-log effect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoragePurchase {
-    pub fee_sparks: crate::Int253,
+    pub fee_sparks: crate::Scalar,
     pub expiry_height: u64,
 }
 

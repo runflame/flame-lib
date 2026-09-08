@@ -125,7 +125,7 @@ impl<'g> Delegate for Prover<'g> {
         // `expr`s over an opaque commitment fails here on the prover but
         // not the verifier — a fail-closed liveness divergence (the proof
         // binds the whole CS, so the verifier rejects rather than accepts;
-        // see vm.rs `int253_to_signed_integer`). Not a soundness hole.
+        // see vm.rs `scalar_to_signed_integer`). Not a soundness hole.
         let (value, blinding) = commitment.witness().ok_or(VMError::WitnessMissing)?;
         let scalar: curve25519_dalek::scalar::Scalar = value.into();
         Ok(self.cs.commit(scalar, blinding))

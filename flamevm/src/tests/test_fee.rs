@@ -20,7 +20,7 @@ fn phase19_op_fee_records_txlog_and_pushes_debt() {
     };
     assert_eq!(
         wide.0.assignment.as_deref().expect("prover assignment").f,
-        FLAME_FLAVOR.to_scalar_mod_order(),
+        FLAME_FLAVOR.to_dalek(),
     );
     // Txlog: Header at 0, Fee(100) at 1.
     assert_eq!(vm.txlog.len(), 2);
@@ -62,7 +62,7 @@ fn phase19_op_fee_accumulates_total() {
 #[test]
 fn phase19_op_fee_rejects_negative_qty() {
     let pc_gens = PedersenGens::default();
-    // Build script directly so we can push a negative Int253.
+    // Build script directly so we can push a negative Scalar.
     let mut script = Vec::new();
     // pushint8 neg 50 (qty = -50) — minimal (negative, no narrower form)
     script.push(0x11);

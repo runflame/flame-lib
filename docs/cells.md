@@ -65,7 +65,6 @@ The dependency direction is:
 cells
   Cell, CellID, CellRef
   CellBuilder, CellSlice, CellEncode, CellDecode
-  Snake
   BagOfCells
   Trie
 
@@ -82,7 +81,7 @@ Responsibilities are split as follows:
 
 | Layer | Responsibility |
 | --- | --- |
-| `cells` | Cell construction, canonical records and IDs, bounded reading/writing, BoC validation, content lookup, Snake, and generic fixed-key Trie traversal |
+| `cells` | Cell construction, canonical records and IDs, bounded reading/writing including snake strings, BoC validation, content lookup, and generic fixed-key Trie traversal |
 | `flamevm` | Cell encodings for VM values and instructions; Contract, Actor, Predicate, and Dict semantics; portability and linearity checks; execution-time Cell access |
 | `flamechain` | Persistent actor Cell stores, transaction BoC commitment, per-external execution scheduling, block limits, and state commitments |
 | `merkle` | The specialized Utreexo accumulator only; it is not a dependency of `cells` or `flamevm` |
@@ -243,6 +242,7 @@ impl CellBuilder {
     pub fn store_u32(&mut self, value: u32) -> Result<&mut Self, CellError>;
     pub fn store_u64(&mut self, value: u64) -> Result<&mut Self, CellError>;
     pub fn store_bytes(&mut self, value: &[u8]) -> Result<&mut Self, CellError>;
+    pub fn store_snake(&mut self, value: &[u8]) -> Result<&mut Self, CellError>;
     pub fn store_ref(&mut self, value: CellRef) -> Result<&mut Self, CellError>;
     pub fn store<T: CellEncode + ?Sized>(
         &mut self,
@@ -260,9 +260,10 @@ Writing to a Cell can fail only because the payload or reference capacity is
 exhausted; business validation happens before encoding. Once all stores have
 succeeded, `build` is infallible.
 
-`CellBuilder` never spills automatically into another Cell. The containing
-type must decide whether overflow belongs in a `Snake`, Trie, or
-another explicit child. This keeps encodings canonical.
+Primitive `CellBuilder` stores never spill automatically into another Cell.
+The containing type explicitly chooses `store_snake` for length-prefixed byte
+strings, a Trie, or another child layout. Only `store_snake` creates continuation
+Cells, under the canonical rules below.
 
 ```rust
 #[derive(Clone)]
@@ -281,6 +282,11 @@ impl CellSlice<'_> {
     pub fn load_u32(&mut self) -> Result<u32, CellError>;
     pub fn load_u64(&mut self) -> Result<u64, CellError>;
     pub fn load_bytes(&mut self, len: usize) -> Result<&[u8], CellError>;
+    pub fn load_snake<R: CellResolver + ?Sized>(
+        &mut self,
+        cells: &mut R,
+        limit: usize,
+    ) -> Result<Vec<u8>, CellError>;
     pub fn load_ref(&mut self) -> Result<CellRef, CellError>;
 
     pub fn preload<T>(
@@ -330,74 +336,78 @@ lets a composite decoder propagate resolution failures without converting
 between unrelated reader and resolver errors. Builder methods only produce the
 two capacity variants.
 
-## Snake
+## Snake encoding
 
-`Snake` stores an arbitrary byte string as a linear chain. It is the
-byte-granular counterpart of TON's snake encoding.
+Snake is a length-prefixed byte-string encoding operated directly by
+`CellBuilder::store_snake` and `CellSlice::load_snake`, not a separate type or
+buffering writer. It uses a linear chain inspired by TON, but requires full
+nonterminal segments and records the total byte length.
+
+The exact layout is:
+
+1. A four-byte little-endian `u32` byte length, wholly within the current
+   Cell's remaining payload. Insufficient prefix space, or a length above
+   `u32::MAX`, returns `PayloadCapacity` without changing the builder.
+2. String bytes occupy the available parent payload after the prefix. If they
+   overflow, the parent payload must be exactly 8191 bytes and its next
+   reference in serialization order points to the continuation. A missing
+   builder reference slot returns `ReferenceCapacity` without mutation.
+3. Continuation Cells belong only to this string. Each nonterminal continuation
+   has exactly 8191 payload bytes and one reference at index zero; the terminal
+   has exactly the remaining bytes and no references.
+4. Stop when the declared length is satisfied. Empty strings and exact fits
+   create/consume no continuation reference and no empty sentinel.
+
+The parent reference is the reader's next unread reference, not necessarily
+reference zero. Descent is local to this operation: the public builder/slice
+stays on the parent, preserving its later references. When a string fits
+inline, later payload fields are also available; after overflow, the parent's
+payload is full, although it may still have reference slots.
+
+Examples starting in an empty builder (`len` is the four-byte prefix):
 
 ```text
-non-terminal Cell: exactly 8191 payload bytes, exactly one continuation ref
-terminal Cell:     0..=8191 payload bytes, zero refs
+0 bytes:       [len=0]
+8187 bytes:    [len=8187 | 8187 bytes]
+8188 bytes:    [len=8188 | 8187 bytes] -> [1 byte]
+16378 bytes:   [len=16378 | 8187 bytes] -> [8191 bytes]
+16379 bytes:   [len=16379 | 8187 bytes] -> [8191 bytes] -> [1 byte]
 ```
 
-The continuation is always reference 0. No other references are permitted.
-Empty input has one empty terminal Cell. An exact multiple of 8191 bytes ends
-in a full terminal Cell; it does not add an empty sentinel.
-
-Examples:
+A parent with other references can encode a 9000-byte string as:
 
 ```text
-0 bytes:       [0]
-8191 bytes:    [8191]
-8192 bytes:    [8191] -> [1]
-16382 bytes:   [8191] -> [8191]
+parent payload: [28 23 00 00 | 8187 string bytes]
+parent refs:    [earlier object, continuation, later object]
+                                     |
+                                     v
+                         [813 string bytes; no refs]
 ```
 
-There is no stored total length. Length is derived by walking the chain, so a
-length query over a pruned tail may return `MissingCell`. This is preferable to
-reducing every root's useful payload or adding a wrapper Cell solely for a
-cached value. Execution charges for Cells as they are traversed.
-
-Target API:
+After loading the earlier reference and the string, the next `load_ref` returns
+the later object. The length prefix has no type tag, version, or terminator.
 
 ```rust
-impl Snake {
-    pub fn from_bytes(bytes: &[u8]) -> Self;
-    pub fn from_root(root: CellRef) -> Self;
-    pub fn root(&self) -> &CellRef;
-    pub fn reader<'a, R: CellResolver + ?Sized>(
-        &'a self,
-        cells: &'a mut R,
-    ) -> SnakeReader<'a, R>;
-    pub fn to_bytes<R: CellResolver + ?Sized>(
-        &self,
-        cells: &mut R,
-        limit: usize,
-    ) -> Result<Vec<u8>, CellError>;
-}
+builder.store_snake(bytes)?;
+builder.store_ref(later_object)?;
 
-impl<'a, R: CellResolver + ?Sized> SnakeReader<'a, R> {
-    pub fn read(&mut self, output: &mut [u8]) -> Result<usize, CellError>;
-}
-
-pub struct SnakeWriter { /* full segments plus current segment */ }
-
-impl SnakeWriter {
-    pub fn new() -> Self;
-    pub fn write(&mut self, input: &[u8]);
-    pub fn finish(self) -> Snake;
-}
+let bytes = slice.load_snake(cells, max_length)?;
+let later_object = slice.load_ref()?;
 ```
 
-Construction splits input into complete payload Cells and builds the chain
-iteratively from tail to head. Reading walks from head to tail without
-recursion and can return bytes incrementally. The initial writer may retain
-complete 8191-byte segments until `finish`; add a disk-backed spool only if a
-real producer needs strings larger than practical RAM.
+Writing copies input directly into the final payloads and constructs only the
+overflow chain, iteratively from tail to head; it never stages a whole-string
+buffer. Reading checks the declared length against the caller's limit before
+allocation or resolution, then grows the result only from validated data.
+It follows continuation refs through `CellResolver`, checking each resolved
+body's identity and exact payload/reference shape. Short nonterminals, extra
+continuation refs, incorrectly sized terminal payloads, missing bodies, and
+limit overruns fail. Each continuation makes positive progress toward the
+bounded length; no recursive walk or separate snake cycle set is needed.
 
-Decoding rejects a short non-terminal Cell, more than one reference, cycles,
-and configured byte/cell/depth limit overruns. It does not flatten the entire
-string unless the caller asks for `to_bytes`.
+A failed read leaves the parent cursor unchanged, but resolver charges and
+read-only cache entries do not roll back. The successful result is a `Vec<u8>`;
+lazy VM strings remain a separate integration decision.
 
 ## Trie
 
@@ -461,12 +471,15 @@ next child. Loading and hashing the Cells on the requested path therefore
 authenticates the leaf and its position. Sibling subtrees remain as IDs in
 their parent Cells and do not need sibling-hash vectors or the `merkle` crate.
 
-The low-level Trie knows nothing about `Int253`, VM Values, portability, or
-linear types. `Dict2` remains in `flamevm`; it converts `Int253` to a 32-byte
-ordered path and interprets the leaf Cells.
+The low-level Trie knows nothing about `Scalar`, VM Values, portability, or
+linear types. `Dict2` remains in `flamevm`; it uses a `Scalar`'s canonical
+32-byte little-endian encoding directly as the path and interprets the leaf
+Cells. Trie path order is bytewise, not the numeric scalar order used by the
+in-memory `Dict`. Existing `Dict2` tries built with reversed-byte paths must
+be rebuilt; their root commitments generally change.
 
 The eventual FlameVM Dict encoding does not repeat a Dict tag, version, or key
-width: the caller expects a Dict and its `Int253` keys are always 32 bytes. It
+width: the caller expects a Dict and its `Scalar` keys are always 32 bytes. It
 contains only the entry count, semantic summary flags needed without loading
 pruned branches, and the optional Trie-root reference. At minimum those
 summaries include sticky `portable` and `droppable`; an empty Dict has no Trie
@@ -640,8 +653,8 @@ An external transaction has two distinct graphs:
 
 1. Its own canonical `CellEnvelope`, which identifies and transports the
    ExternalTx object.
-2. Exactly one **execution BoC**, whose canonical bytes are a `Snake`
-   field referenced by the ExternalTx root.
+2. Exactly one **execution BoC**, whose canonical bytes are a length-prefixed
+   snake field in a Cell referenced by the ExternalTx root.
 
 The execution BoC excludes Cells used solely to encode the ExternalTx
 envelope. Its `BoCID` is stored in the root payload and checked against the
@@ -718,7 +731,7 @@ all required checks succeed.
 In particular:
 
 - Contract opening, Predicate selection, Dict access/mutation, and
-  Snake reads must not consume a linear argument before a possible
+  snake reads must not consume a linear argument before a possible
   Cell failure.
 - A failed synchronous call returns exactly the caller's `k` arguments and
   rolls back callee effects.
@@ -797,7 +810,7 @@ Cells stay below the FlameVM Value layer:
 | Actor code and state | Actor registry record | Actor's stored BoC, then external transaction BoC for pruned bodies |
 | Predicate program branch | Predicate commitment | External transaction BoC |
 | Dict | Typed Dict wrapper with key width, length, and Trie root | Current resident graph/store, then external transaction BoC |
-| Snake | Typed String/code/proof field | Current resident graph/store, then external transaction BoC |
+| Snake-encoded bytes | Typed String/code/proof field | Current resident graph/store, then external transaction BoC |
 | Utreexo proof data | Flamechain's Utreexo encoding | Its explicitly supplied Cell graph; specialized accumulator-proof verification still applies |
 
 An opcode does not load an arbitrary Cell Value. It performs a typed action
@@ -875,7 +888,7 @@ The end state is:
 
 1. Every consensus type has one expected `CellEncode`/`CellDecode` layout.
 2. Every content object's identity is derived from its canonical root Cell.
-3. Arbitrary byte fields use `Snake`; keyed collections use `Trie`;
+3. Variable byte fields use length-prefixed snake encoding; keyed collections use `Trie`;
    fixed and small fields stay in the parent payload or explicit child Cells.
 4. A standalone graph is transported as a `CellEnvelope`; persistent types
    commit a root `CellID` and the `BoCID` of their retained bodies.
@@ -888,7 +901,7 @@ The end state is:
 
 The Cell API does not prescribe one generic list encoding. Actual types use
 the smallest of the three existing structures: payload for bounded items,
-`Snake` for bytes, and a fixed-width Trie for unbounded keyed or
+snake encoding for bytes, and a fixed-width Trie for unbounded keyed or
 ordinal collections. Add a generic list wrapper only if several real types
 would otherwise duplicate the same layout.
 
@@ -944,7 +957,7 @@ not valid.
 | --- | --- |
 | Cell | `flamevm/src/chunk.rs` already has immutable `Chunk`, 8191-byte/4-ref bounds, the two-byte descriptor, cached hash, and resident/pruned references |
 | Trie | `flamevm/src/trie.rs` already has the fixed-width radix-4 Patricia trie, but it returns `ChunkReferencePruned` instead of resolving through context |
-| Dict adapter | `flamevm/src/dict2.rs` owns the `Int253` ordered-key conversion and should remain VM-specific |
+| Dict adapter | `flamevm/src/dict2.rs` uses canonical `Scalar` bytes directly as keys and should remain VM-specific |
 | Streaming codec | `readerwriter` reads/writes flat byte slices; it has no Cell/ref cursor |
 | BoC | Not implemented |
 | Witness context | The broader proposal exists in `docs/compression.md`; no Cell resolver is threaded through VM entry points |
@@ -982,7 +995,6 @@ the same parent ID; Cell IDs match direct SHA-256 test vectors.
   cells/src/builder.rs
   cells/src/slice.rs
   cells/src/codec.rs
-  cells/src/snake.rs
   cells/src/boc.rs
   cells/src/trie.rs
   cells/src/error.rs
@@ -1009,8 +1021,8 @@ to the new crate.
 - Pass a resolver into traversal and mutation. Resolve only the path used.
 - Keep the 32-byte current maximum and bounded recursive mutation for now; the
   existing recursion is at most 128 radix-4 digits.
-- Keep `int253_to_ordered_key`, `ordered_key_to_int253`, and `Dict2` in
-  `flamevm`; update their imports to the new crate.
+- Keep `Dict2` in `flamevm`, using canonical scalar bytes directly as Trie
+  keys; update its imports to the new crate.
 - Require each owning type to fix Trie `key_bytes`, or encode it only when it
   varies per value. Encode `len` only where that type exposes an authoritative
   O(1) count.
@@ -1039,21 +1051,30 @@ Exit checks: one test covers atomic overflow, independent byte/ref cursors,
 speculative read rollback/commit, and rejection of both trailing bytes and
 trailing refs.
 
-### Step 5: implement `Snake`
+### Step 5: implement length-prefixed snake operations
 
-- Implement the strict full-nonterminal layout above.
-- Build and read iteratively; never recurse with attacker-sized input.
-- Expose incremental reading plus a bounded `to_bytes` convenience method.
-- Resolve continuation refs through `CellResolver`.
-- Keep its first implementation standalone in `cells`; Step 9 adopts it for
+- Extend `CellBuilder` with `store_snake` and `CellSlice` with bounded
+  `load_snake`; keep primitive reads/writes single-Cell and remove the separate
+  snake type, readers, and buffering writer.
+- Implement the `u32` LE prefix and strict full-nonterminal layout above.
+  Precheck builder capacity and length before mutation; on reads, check the
+  length limit before allocation or resolution.
+- Build overflow directly into final Cells from tail to head and read
+  iteratively through `CellResolver`; never recurse with attacker-sized input.
+- Preserve the parent cursor and its later references. Commit reads only on
+  success; do not roll back resolver charges or read-only caches on failure.
+- Keep this implementation isolated in `cells`; Step 9 adopts it for
   scripts, actor code, proofs, and opaque byte-string fields. Changing
   `String::Opaque(Vec<u8>)` into a lazy runtime representation is a separate
   VM-integration change because current string opcodes and call frames assume
   contiguous slices and byte offsets.
 
-Exit checks: golden layouts at lengths 0, 1, 8190, 8191, 8192, and 16382;
-round-trip a long value; reject short nonterminal Cells, extra refs, cycles,
-missing tails, and configured limit overruns.
+Exit checks: golden layouts at empty, inline, exact-fit, and multi-Cell
+boundaries; round-trip a long value; preserve preceding/following fields and
+refs; reject short nonterminals, extra continuation refs, incorrectly sized
+tails, missing bodies, insufficient prefix/ref capacity, and length limits.
+Failed stores/reads leave the parent unchanged, and exact fits never resolve a
+later unrelated reference.
 
 ### Step 6: implement `BagOfCells`
 
@@ -1081,7 +1102,7 @@ a missing root; BoCID golden vectors equal direct SHA-256 of the canonical bag.
 
 - Add a resolver parameter to external execution, internal message execution,
   synchronous calls, Contract opening, Predicate selection, actor code/state
-  loading, Snake access, and Trie/Dict operations.
+  loading, snake access, and Trie/Dict operations.
 - Implement a recording resolver for the prover and a verifying resolver for
   transaction execution. The recording form is a pre-proving discovery tool;
   the proof-producing run uses the frozen bag.
@@ -1155,12 +1176,13 @@ This is a protocol migration, not a mechanical trait rename.
 3. Give leaf VM types Cell layouts, then composite Values, instructions,
    Contract, Message, Actor state/code, ExternalTx, TxEntry/TxLog, Utreexo
    proof wrappers, BlockTx, and Block/Header.
-4. Move the compact `Int253` and Value tag logic from
+4. Move the compact `Scalar` and Value tag logic from
    `flamevm/src/encoding.rs` into VM-owned Cell codec implementations. Encoding
    remains capable of representing non-portable values; boundary validation
    stays outside the codec.
-5. Replace unbounded flat fields with `Snake` or a Trie/explicit Cell
-   sequence. Do not write a length followed by an unbounded allocation.
+5. Replace variable flat byte fields with bounded snake operations; use a
+   Trie/explicit Cell sequence for other collections. Do not allocate from an
+   unchecked declared length.
 6. Replace Predicate program trees, TxLogs, actor-state collections, and block
    witness/effect collections with explicit Cell graphs. Their root Cell IDs
    are the commitments; access loads and verifies Cells along the path rather

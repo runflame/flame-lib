@@ -8,9 +8,11 @@
 //! Tag namespace:
 //!
 //! ```text
-//! 0..=58     Int253 positive immediate (value = tag)
-//! 59..=62    Int253 +U8 / +U32 / +U64 / +FULL (offset-based widths)
-//! 63..=67    Int253 -1 / -U8 / -U32 / -U64 / -FULL
+//! 0..=58     Scalar immediate (value = tag)
+//! 59..=61    Scalar near-zero U8 / U32 / U64 (offset-based widths)
+//! 62         Scalar FULL (canonical 32-byte little-endian residue)
+//! 63..=66    Scalar near-order -1 / -U8 / -U32 / -U64
+//! 67         reserved
 //! 68..=127   String (immediate length 0..=58; 127 = VAR sub-varint)
 //! 128..=187  List (immediate count; 187 = VAR sub-varint)
 //! 188..=247  Dict  (immediate count; 247 = VAR sub-varint)
@@ -30,20 +32,19 @@
 //! sub-tag 3  8 LE bytes   value = 4_295_033_088 + w  range up to `u64::MAX`
 //! ```
 //!
-//! `INT_PFULL` / `INT_NFULL` reject values that fit in a narrower
+//! `INT_FULL` rejects values that fit a narrower near-zero or near-order
 //! width; `DICT_*` rejects keys `0..n-1` (use `LIST_*`).
 
 use core::cmp::Ordering;
 use core::convert::TryFrom;
 
 use curve25519_dalek::ristretto::CompressedRistretto;
-use curve25519_dalek::scalar::Scalar;
 pub use readerwriter::{ReadError, Reader, WriteError, Writer};
 
 use crate::constraints::Commitment;
 use crate::crypto::Point;
 use crate::dict::Dict;
-use crate::int253::Int253;
+use crate::scalar::Scalar;
 use crate::string::String;
 use crate::token::{ClearToken, Token};
 use crate::value::Value;
@@ -64,17 +65,17 @@ impl From<WriteError> for ValueEncodeError {
 
 // ── Tag constants ─────────────────────────────────────────────────
 
-// Int253
+// Scalar
 const INT_IMM_MAX: u8 = 58;
 const INT_PU8: u8 = 59;
 const INT_PU32: u8 = 60;
 const INT_PU64: u8 = 61;
-const INT_PFULL: u8 = 62;
+const INT_FULL: u8 = 62;
 const INT_NEG1: u8 = 63;
 const INT_NU8: u8 = 64;
 const INT_NU32: u8 = 65;
 const INT_NU64: u8 = 66;
-const INT_NFULL: u8 = 67;
+// 67 is reserved.
 
 // Strings
 const STR_IMM_MIN: u8 = 68;
@@ -102,7 +103,7 @@ const RESERVED_VALUE_TAG_MAX: u8 = 254;
 // Number of IMM slots (values 0..=58) shared across int/str/list/dict.
 const IMM_COUNT: u8 = INT_IMM_MAX + 1; // 59
 
-// Int253 width-class bases (the value encoded with a zero payload).
+// Scalar width-class bases (the value encoded with a zero payload).
 const PU8_BASE: u64 = 59;
 const PU32_BASE: u64 = 315;
 const PU64_BASE: u64 = 4_294_967_611; // PU32_BASE + 2^32
@@ -170,18 +171,20 @@ pub(crate) fn read_subvarint(r: &mut impl Reader) -> Result<u64, ReadError> {
     }
 }
 
-// ── Int253 encoding ──────────────────────────────────────────────
+// ── Scalar encoding ──────────────────────────────────────────────
 
-/// Writes an `Int253` in compact canonical form.
-pub fn write_int253(w: &mut impl Writer, int: &Int253) -> Result<(), WriteError> {
-    if int.is_negative() {
-        write_negative_int253(w, int)
+/// Writes a `Scalar` in compact canonical form.
+pub fn write_scalar(w: &mut impl Writer, int: &Scalar) -> Result<(), WriteError> {
+    let near_order = -*int;
+    let near_order_top = Scalar::from(NU64_BASE) + Scalar::from(u64::MAX);
+    if near_order != Scalar::ZERO && near_order <= near_order_top {
+        write_near_order_scalar(w, &near_order)
     } else {
-        write_positive_int253(w, int)
+        write_near_zero_or_full_scalar(w, int)
     }
 }
 
-fn write_positive_int253(w: &mut impl Writer, int: &Int253) -> Result<(), WriteError> {
+fn write_near_zero_or_full_scalar(w: &mut impl Writer, int: &Scalar) -> Result<(), WriteError> {
     if let Some(v) = int.to_u64() {
         if v <= INT_IMM_MAX as u64 {
             return w.write_u8(b"int.tag", v as u8);
@@ -201,9 +204,9 @@ fn write_positive_int253(w: &mut impl Writer, int: &Int253) -> Result<(), WriteE
     }
 
     // Doesn't fit u64. Might still fit PU64 if value <= PU64_BASE + u64::MAX.
-    let pu64_top = Int253::from(PU64_BASE) + Int253::from(u64::MAX);
+    let pu64_top = Scalar::from(PU64_BASE) + Scalar::from(u64::MAX);
     if int.cmp(&pu64_top) != Ordering::Greater {
-        let payload_int = *int - Int253::from(PU64_BASE);
+        let payload_int = *int - Scalar::from(PU64_BASE);
         let payload = payload_int
             .to_u64()
             .expect("invariant: int - PU64_BASE fits u64 when int <= pu64_top");
@@ -212,16 +215,16 @@ fn write_positive_int253(w: &mut impl Writer, int: &Int253) -> Result<(), WriteE
     }
 
     // FULL: write the 32-byte canonical scalar as-is.
-    w.write_u8(b"int.tag", INT_PFULL)?;
+    w.write_u8(b"int.tag", INT_FULL)?;
     w.write(b"int.full", &int.to_bytes())
 }
 
-fn write_negative_int253(w: &mut impl Writer, int: &Int253) -> Result<(), WriteError> {
-    let abs = int.abs();
-    if abs == Int253::ONE {
+/// Writes the modular negation of a nonzero, compact near-order distance.
+fn write_near_order_scalar(w: &mut impl Writer, distance: &Scalar) -> Result<(), WriteError> {
+    if *distance == Scalar::ONE {
         return w.write_u8(b"int.tag", INT_NEG1);
     }
-    if let Some(mag) = abs.to_u64() {
+    if let Some(mag) = distance.to_u64() {
         if mag <= NU8_TOP {
             w.write_u8(b"int.tag", INT_NU8)?;
             return w.write_u8(b"int.u8", (mag - NU8_BASE) as u8);
@@ -235,78 +238,60 @@ fn write_negative_int253(w: &mut impl Writer, int: &Int253) -> Result<(), WriteE
         return w.write_u64(b"int.u64", mag - NU64_BASE);
     }
 
-    let nu64_top_mag = Int253::from(NU64_BASE) + Int253::from(u64::MAX);
-    if abs.cmp(&nu64_top_mag) != Ordering::Greater {
-        let payload_int = abs - Int253::from(NU64_BASE);
-        let payload = payload_int
-            .to_u64()
-            .expect("invariant: magnitude - NU64_BASE fits u64 when abs <= nu64_top_mag");
-        w.write_u8(b"int.tag", INT_NU64)?;
-        return w.write_u64(b"int.u64", payload);
-    }
-
-    // NFULL: write 32-byte sign-magnitude as-is.
-    w.write_u8(b"int.tag", INT_NFULL)?;
-    w.write(b"int.full", &int.to_bytes())
+    let payload = (*distance - Scalar::from(NU64_BASE))
+        .to_u64()
+        .expect("compact near-order distance minus NU64_BASE fits u64");
+    w.write_u8(b"int.tag", INT_NU64)?;
+    w.write_u64(b"int.u64", payload)
 }
 
-/// Reads a compact-encoded `Int253`.
-pub fn read_int253(r: &mut impl Reader) -> Result<Int253, ReadError> {
+/// Reads a compact-encoded `Scalar`.
+pub fn read_scalar(r: &mut impl Reader) -> Result<Scalar, ReadError> {
     let tag = r.read_u8()?;
-    read_int253_with_tag(r, tag)
+    read_scalar_with_tag(r, tag)
 }
 
-fn read_int253_with_tag(r: &mut impl Reader, tag: u8) -> Result<Int253, ReadError> {
+fn read_scalar_with_tag(r: &mut impl Reader, tag: u8) -> Result<Scalar, ReadError> {
     match tag {
-        0..=INT_IMM_MAX => Ok(Int253::from(tag as u64)),
+        0..=INT_IMM_MAX => Ok(Scalar::from(tag as u64)),
         INT_PU8 => {
             let b = r.read_u8()?;
-            Ok(Int253::from(PU8_BASE + (b as u64)))
+            Ok(Scalar::from(PU8_BASE + (b as u64)))
         }
         INT_PU32 => {
             let w = r.read_u32()? as u64;
-            Ok(Int253::from(PU32_BASE + w))
+            Ok(Scalar::from(PU32_BASE + w))
         }
         INT_PU64 => {
             let w = r.read_u64()?;
-            Ok(Int253::from(PU64_BASE) + Int253::from(w))
+            Ok(Scalar::from(PU64_BASE) + Scalar::from(w))
         }
-        INT_PFULL => read_full_int(r, false),
-        INT_NEG1 => Ok(Int253::from(-1i64)),
+        INT_FULL => read_full_scalar(r),
+        INT_NEG1 => Ok(Scalar::from(-1i64)),
         INT_NU8 => {
             let b = r.read_u8()?;
-            Ok(Int253::from_parts(
-                true,
-                Scalar::from(NU8_BASE + (b as u64)),
-            ))
+            Ok(-Scalar::from(NU8_BASE + (b as u64)))
         }
         INT_NU32 => {
             let w = r.read_u32()? as u64;
-            Ok(Int253::from_parts(true, Scalar::from(NU32_BASE + w)))
+            Ok(-Scalar::from(NU32_BASE + w))
         }
         INT_NU64 => {
             let w = r.read_u64()?;
-            let mag = Int253::from(NU64_BASE) + Int253::from(w);
+            let mag = Scalar::from(NU64_BASE) + Scalar::from(w);
             Ok(-mag)
         }
-        INT_NFULL => read_full_int(r, true),
         _ => Err(ReadError::InvalidFormat),
     }
 }
 
-/// Shared FULL-width reader: `negative` selects the required sign and
-/// the range base whose top the magnitude must exceed (canonicality —
-/// a FULL encoding is only legal for values that don't fit the
-/// narrower u64 class of the same sign).
-fn read_full_int(r: &mut impl Reader, negative: bool) -> Result<Int253, ReadError> {
+/// FULL is canonical only outside both compact endpoint ranges.
+fn read_full_scalar(r: &mut impl Reader) -> Result<Scalar, ReadError> {
     let buf = r.read_u8x32()?;
-    let int = Int253::from_bytes(buf).ok_or(ReadError::InvalidFormat)?;
-    if int.is_negative() != negative {
-        return Err(ReadError::InvalidFormat);
-    }
-    let base = if negative { NU64_BASE } else { PU64_BASE };
-    let top = Int253::from(base) + Int253::from(u64::MAX);
-    if int.abs().cmp(&top) != Ordering::Greater {
+    let int = Scalar::from_bytes(buf).ok_or(ReadError::InvalidFormat)?;
+    let near_zero_top = Scalar::from(PU64_BASE) + Scalar::from(u64::MAX);
+    let near_order_top = Scalar::from(NU64_BASE) + Scalar::from(u64::MAX);
+    if int <= near_zero_top || -int <= near_order_top {
         return Err(ReadError::InvalidFormat);
     }
     Ok(int)
@@ -318,7 +303,7 @@ fn read_full_int(r: &mut impl Reader, negative: bool) -> Result<Int253, ReadErro
 ///
 /// For witness-bearing String variants (`Commitment`, `Scalar`,
 /// `Predicate`), the bytes are derived from the variant's canonical
-/// encoding (32-byte compressed point or sign-magnitude int) — the
+/// encoding (32-byte compressed point or canonical scalar) — the
 /// wire form is byte-identical to what an Opaque String wrapping the
 /// same bytes would produce. The witness data itself is discarded;
 /// the prover ferries it via the in-memory ScriptBuilder (and pushes it
@@ -422,8 +407,8 @@ fn read_dict_count_with_tag(r: &mut impl Reader, tag: u8) -> Result<usize, ReadE
 
 // ── Value encoding ────────────────────────────────────────────────
 
-fn keys_are_sequential<'a>(keys: impl Iterator<Item = &'a Int253>) -> bool {
-    keys.enumerate().all(|(i, k)| *k == Int253::from(i as u64))
+fn keys_are_sequential<'a>(keys: impl Iterator<Item = &'a Scalar>) -> bool {
+    keys.enumerate().all(|(i, k)| *k == Scalar::from(i as u64))
 }
 
 /// Maximum nesting depth for `read_value`. Each list/dict entry counts
@@ -444,10 +429,10 @@ fn read_value_with_depth(r: &mut impl Reader, depth: u32) -> Result<Option<Value
     }
     let tag = r.read_u8()?;
     match tag {
-        // Int253
-        0..=INT_NFULL => {
-            let int = read_int253_with_tag(r, tag)?;
-            Ok(Some(Value::Int253(int)))
+        // Scalar
+        0..=INT_NU64 => {
+            let int = read_scalar_with_tag(r, tag)?;
+            Ok(Some(Value::Scalar(int)))
         }
         // Strings
         STR_IMM_MIN..=STR_VAR => {
@@ -479,10 +464,10 @@ fn read_value_with_depth(r: &mut impl Reader, depth: u32) -> Result<Option<Value
             if count > r.remaining_bytes() / 2 {
                 return Err(ReadError::InvalidFormat);
             }
-            let mut entries: Vec<(Int253, Value)> = Vec::with_capacity(count);
-            let mut last_key: Option<Int253> = None;
+            let mut entries: Vec<(Scalar, Value)> = Vec::with_capacity(count);
+            let mut last_key: Option<Scalar> = None;
             for _ in 0..count {
-                let key = read_int253(r)?;
+                let key = read_scalar(r)?;
                 // Reject duplicate or out-of-order keys (canonicality).
                 if let Some(prev) = &last_key {
                     if key.cmp(prev) != Ordering::Greater {
@@ -522,11 +507,11 @@ fn read_value_with_depth(r: &mut impl Reader, depth: u32) -> Result<Option<Value
             let flv = Commitment::Closed(CompressedRistretto(flv_bytes));
             Ok(Some(Value::Token(Token::new(qty, flv))))
         }
-        // ClearToken: tag + cleartext qty + flv as compact `Int253`s.
+        // ClearToken: tag + cleartext qty + flv as compact `Scalar`s.
         // Portability is a domain-boundary rule, not a decoding rule.
         CLEAR_TOKEN_TAG => {
-            let qty = read_int253(r)?;
-            let flv = read_int253(r)?;
+            let qty = read_scalar(r)?;
+            let flv = read_scalar(r)?;
             Ok(Some(Value::ClearToken(ClearToken::new(qty, flv))))
         }
         // Unassigned tags have no payload shape and cannot be skipped.
@@ -547,7 +532,7 @@ pub(crate) fn write_dict(w: &mut impl Writer, dict: &Dict) -> Result<(), ValueEn
     } else {
         write_dict_prefix(w, dict.len())?;
         for (k, v) in dict.entries() {
-            write_int253(w, k)?;
+            write_scalar(w, k)?;
             write_value(w, v)?;
         }
     }
@@ -555,12 +540,12 @@ pub(crate) fn write_dict(w: &mut impl Writer, dict: &Dict) -> Result<(), ValueEn
 }
 
 /// Writes a canonically encodable `Value` without applying domain-level
-/// portability policy. Negative ClearTokens and representable non-portable
+/// portability policy. Centered-debit ClearTokens and representable non-portable
 /// Dicts are accepted; VM-only variants with no byte format return
 /// [`ValueEncodeError::UnsupportedType`].
 pub(crate) fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), ValueEncodeError> {
     match val {
-        Value::Int253(i) => Ok(write_int253(w, i)?),
+        Value::Scalar(i) => Ok(write_scalar(w, i)?),
         Value::String(s) => Ok(write_string(w, s)?),
         Value::Dict(d) => write_dict(w, d),
         Value::Point(p) => {
@@ -573,11 +558,11 @@ pub(crate) fn write_value(w: &mut impl Writer, val: &Value) -> Result<(), ValueE
             w.write(b"token.qty", t.qty.to_point().as_bytes())?;
             Ok(w.write(b"token.flv", t.flv.to_point().as_bytes())?)
         }
-        // ClearToken: tag + cleartext qty + flv as compact `Int253`s.
+        // ClearToken: tag + cleartext qty + flv as compact `Scalar`s.
         Value::ClearToken(t) => {
             w.write_u8(b"cleartoken.tag", CLEAR_TOKEN_TAG)?;
-            write_int253(w, &t.qty)?;
-            Ok(write_int253(w, &t.flv)?)
+            write_scalar(w, &t.qty)?;
+            Ok(write_scalar(w, &t.flv)?)
         }
         Value::WideToken(_)
         | Value::Contract(_)
@@ -603,6 +588,8 @@ pub(crate) fn write_admitted_value(w: &mut impl Writer, val: &Value) -> Result<(
 
 #[cfg(test)]
 mod tests {
+    use core::convert::TryInto;
+
     use super::*;
     use crate::Merlin;
 
@@ -616,12 +603,12 @@ mod tests {
             .collect()
     }
 
-    fn assert_int_wire(value: Int253, expected_hex: &str) {
+    fn assert_int_wire(value: Scalar, expected_hex: &str) {
         let mut encoded = Vec::new();
-        write_int253(&mut encoded, &value).expect("Vec has capacity");
+        write_scalar(&mut encoded, &value).expect("Vec has capacity");
         assert_eq!(encoded, bytes(expected_hex));
         let mut input = encoded.as_slice();
-        assert_eq!(read_int253(&mut input).expect("canonical vector"), value);
+        assert_eq!(read_scalar(&mut input).expect("canonical vector"), value);
         assert!(input.is_empty());
     }
 
@@ -671,38 +658,38 @@ mod tests {
     }
 
     #[test]
-    fn golden_int253_width_boundaries() {
-        let positive_full = Int253::from(PU64_BASE as u128 + u64::MAX as u128 + 1);
-        let negative_full = -Int253::from(NU64_BASE as u128 + u64::MAX as u128 + 1);
+    fn golden_scalar_width_boundaries() {
+        let near_zero_full = Scalar::from(PU64_BASE as u128 + u64::MAX as u128 + 1);
+        let near_order_full = -Scalar::from(NU64_BASE as u128 + u64::MAX as u128 + 1);
         for (value, expected) in [
-            (Int253::ZERO, "00"),
-            (Int253::from(58u64), "3a"),
-            (Int253::from(59u64), "3b00"),
-            (Int253::from(314u64), "3bff"),
-            (Int253::from(315u64), "3c00000000"),
-            (Int253::from(PU32_TOP), "3cffffffff"),
-            (Int253::from(PU64_BASE), "3d0000000000000000"),
+            (Scalar::ZERO, "00"),
+            (Scalar::from(58u64), "3a"),
+            (Scalar::from(59u64), "3b00"),
+            (Scalar::from(314u64), "3bff"),
+            (Scalar::from(315u64), "3c00000000"),
+            (Scalar::from(PU32_TOP), "3cffffffff"),
+            (Scalar::from(PU64_BASE), "3d0000000000000000"),
             (
-                Int253::from(PU64_BASE) + Int253::from(u64::MAX),
+                Scalar::from(PU64_BASE) + Scalar::from(u64::MAX),
                 "3dffffffffffffffff",
             ),
             (
-                positive_full,
+                near_zero_full,
                 "3e3b01000001000000010000000000000000000000000000000000000000000000",
             ),
-            (Int253::from(-1i64), "3f"),
-            (Int253::from(-2i64), "4000"),
-            (Int253::from(-257i64), "40ff"),
-            (Int253::from(-258i64), "4100000000"),
-            (-Int253::from(NU32_TOP), "41ffffffff"),
-            (-Int253::from(NU64_BASE), "420000000000000000"),
+            (Scalar::from(-1i64), "3f"),
+            (Scalar::from(-2i64), "4000"),
+            (Scalar::from(-257i64), "40ff"),
+            (Scalar::from(-258i64), "4100000000"),
+            (-Scalar::from(NU32_TOP), "41ffffffff"),
+            (-Scalar::from(NU64_BASE), "420000000000000000"),
             (
-                -(Int253::from(NU64_BASE) + Int253::from(u64::MAX)),
+                -(Scalar::from(NU64_BASE) + Scalar::from(u64::MAX)),
                 "42ffffffffffffffff",
             ),
             (
-                negative_full,
-                "430201000001000000010000000000000000000000000000000000000000000080",
+                near_order_full,
+                "3eebd2f55c19631258d59cf7a2def9de1400000000000000000000000000000010",
             ),
         ] {
             assert_int_wire(value, expected);
@@ -712,22 +699,22 @@ mod tests {
     #[test]
     fn golden_supported_value_tags() {
         let values = [
-            (Value::Int253(Int253::from(7u64)), "07".to_owned()),
+            (Value::Scalar(Scalar::from(7u64)), "07".to_owned()),
             (
                 Value::String(String::from(vec![0xaa, 0xbb])),
                 "46aabb".to_owned(),
             ),
             (
                 Value::Dict(Dict::from_values(vec![
-                    Value::Int253(Int253::ONE),
-                    Value::Int253(Int253::from(2u64)),
+                    Value::Scalar(Scalar::ONE),
+                    Value::Scalar(Scalar::from(2u64)),
                 ])),
                 "820102".to_owned(),
             ),
             (
                 {
                     let mut dict = Dict::new();
-                    dict.insert(Int253::from(2u64), Value::Int253(Int253::from(3u64)));
+                    dict.insert(Scalar::from(2u64), Value::Scalar(Scalar::from(3u64)));
                     Value::Dict(dict)
                 },
                 "bd0203".to_owned(),
@@ -744,7 +731,7 @@ mod tests {
                 format!("f9{}{}", "22".repeat(32), "33".repeat(32)),
             ),
             (
-                Value::ClearToken(ClearToken::new(Int253::from(-1i64), Int253::ZERO)),
+                Value::ClearToken(ClearToken::new(Scalar::from(-1i64), Scalar::ZERO)),
                 "fa3f00".to_owned(),
             ),
         ];
@@ -758,63 +745,74 @@ mod tests {
         }
     }
 
-    // ── Int253 canonicality: decoder rejection ───────────────────
+    // ── Scalar canonicality: decoder rejection ───────────────────
 
     #[test]
-    fn int_pfull_decoder_rejects_low_value() {
-        // PFULL must encode a value > PU64 range. A small positive value
+    fn scalar_full_decoder_rejects_low_value() {
+        // FULL must encode a value > PU64 range. A small residue
         // in FULL form should be rejected by the decoder.
         let mut buf = Vec::new();
-        buf.push(INT_PFULL);
-        let small = Int253::from(42u64);
+        buf.push(INT_FULL);
+        let small = Scalar::from(42u64);
         buf.extend_from_slice(&small.to_bytes());
         let mut r = buf.as_slice();
-        assert!(matches!(read_int253(&mut r), Err(ReadError::InvalidFormat)));
+        assert!(matches!(read_scalar(&mut r), Err(ReadError::InvalidFormat)));
     }
 
     #[test]
-    fn int_pfull_decoder_rejects_pu64_top_exact() {
-        // Boundary: even the PU64 top, dressed in PFULL, must be rejected.
-        let mut buf = Vec::new();
-        buf.push(INT_PFULL);
-        let top = Int253::from(PU64_BASE) + Int253::from(u64::MAX);
-        buf.extend_from_slice(&top.to_bytes());
-        let mut r = buf.as_slice();
-        assert!(matches!(read_int253(&mut r), Err(ReadError::InvalidFormat)));
+    fn scalar_full_decoder_rejects_compact_endpoint_boundaries() {
+        // Both endpoint ranges must use their shorter width tags.
+        for value in [
+            Scalar::from(PU64_BASE) + Scalar::from(u64::MAX),
+            -(Scalar::from(NU64_BASE) + Scalar::from(u64::MAX)),
+            -Scalar::ONE,
+        ] {
+            let mut buf = vec![INT_FULL];
+            buf.extend_from_slice(&value.to_bytes());
+            assert!(matches!(
+                read_scalar(&mut buf.as_slice()),
+                Err(ReadError::InvalidFormat)
+            ));
+        }
     }
 
     #[test]
-    fn int_pfull_decoder_rejects_negative_in_positive_tag() {
-        // Setting bit 255 inside a PFULL payload must be rejected.
-        let mut buf = Vec::new();
-        buf.push(INT_PFULL);
-        let mut bytes = [0u8; 32];
-        // High bit set, lower bytes encode a magnitude > u64.
-        bytes[31] = 0x80 | 0x01;
-        buf.extend_from_slice(&bytes);
-        let mut r = buf.as_slice();
-        assert!(matches!(read_int253(&mut r), Err(ReadError::InvalidFormat)));
+    fn scalar_full_decoder_rejects_noncanonical_residues() {
+        let modulus = bytes("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010");
+        for payload in [modulus, vec![0xff; 32]] {
+            let mut buf = vec![INT_FULL];
+            buf.extend_from_slice(&payload);
+            assert!(matches!(
+                read_scalar(&mut buf.as_slice()),
+                Err(ReadError::InvalidFormat)
+            ));
+        }
     }
 
     #[test]
-    fn int_nfull_decoder_rejects_low_magnitude() {
-        let mut buf = Vec::new();
-        buf.push(INT_NFULL);
-        let small_neg = Int253::from(-42i64);
-        buf.extend_from_slice(&small_neg.to_bytes());
-        let mut r = buf.as_slice();
-        assert!(matches!(read_int253(&mut r), Err(ReadError::InvalidFormat)));
+    fn scalar_full_roundtrips_across_centered_boundary() {
+        let half_order = Scalar::from_bytes(
+            bytes("f6e97a2e8d31092c6bce7b51ef7c6f0a00000000000000000000000000000008")
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap();
+        for value in [half_order, half_order + Scalar::ONE] {
+            let mut encoded = Vec::new();
+            write_scalar(&mut encoded, &value).unwrap();
+            assert_eq!(encoded[0], INT_FULL);
+            assert_eq!(&encoded[1..], value.as_bytes());
+            assert_eq!(read_scalar(&mut encoded.as_slice()).unwrap(), value);
+        }
     }
 
     #[test]
-    fn int_nfull_decoder_rejects_positive_payload() {
-        // Negative tag with sign bit clear in the payload must be rejected.
-        let mut buf = Vec::new();
-        buf.push(INT_NFULL);
-        let pos_large = Int253::from(PU64_BASE) + Int253::from(u64::MAX) + Int253::ONE;
-        buf.extend_from_slice(&pos_large.to_bytes());
+    fn reserved_scalar_tag_is_rejected() {
+        let buf = [67];
         let mut r = buf.as_slice();
-        assert!(matches!(read_int253(&mut r), Err(ReadError::InvalidFormat)));
+        assert!(matches!(read_scalar(&mut r), Err(ReadError::InvalidFormat)));
+        let mut r = buf.as_slice();
+        assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
     }
 
     // ── Encoding canonicality at the Dict level ──────────────────
@@ -822,8 +820,8 @@ mod tests {
     #[test]
     fn write_dict_sequential_uses_list_encoding() {
         let d = Dict::from_values(vec![
-            Value::Int253(Int253::from(10u64)),
-            Value::Int253(Int253::from(20u64)),
+            Value::Scalar(Scalar::from(10u64)),
+            Value::Scalar(Scalar::from(20u64)),
         ]);
         let mut buf = Vec::new();
         write_dict(&mut buf, &d).unwrap();
@@ -833,8 +831,8 @@ mod tests {
     #[test]
     fn write_dict_non_sequential_uses_dict_encoding() {
         let mut d = Dict::new();
-        d.insert(Int253::from(10u64), Value::Int253(Int253::from(1u64)));
-        d.insert(Int253::from(20u64), Value::Int253(Int253::from(2u64)));
+        d.insert(Scalar::from(10u64), Value::Scalar(Scalar::from(1u64)));
+        d.insert(Scalar::from(20u64), Value::Scalar(Scalar::from(2u64)));
         let mut buf = Vec::new();
         write_dict(&mut buf, &d).unwrap();
         assert!(buf[0] >= DICT_IMM_MIN && buf[0] <= DICT_IMM_MAX);
@@ -843,8 +841,8 @@ mod tests {
     #[test]
     fn write_dict_ignores_sticky_portability_metadata() {
         let mut d = Dict::new();
-        d.insert(Int253::ZERO, Value::Merlin(Merlin::new(b"test")));
-        d.remove(&Int253::ZERO);
+        d.insert(Scalar::ZERO, Value::Merlin(Merlin::new(b"test")));
+        d.remove(&Scalar::ZERO);
         assert!(d.is_empty());
         assert!(!d.is_portable());
         let mut buf = Vec::new();
@@ -858,10 +856,10 @@ mod tests {
         // they should have been list-style.
         let mut buf = Vec::new();
         write_dict_prefix(&mut buf, 2).unwrap();
-        write_int253(&mut buf, &Int253::from(0u64)).unwrap();
-        write_int253(&mut buf, &Int253::from(7u64)).unwrap();
-        write_int253(&mut buf, &Int253::from(1u64)).unwrap();
-        write_int253(&mut buf, &Int253::from(8u64)).unwrap();
+        write_scalar(&mut buf, &Scalar::from(0u64)).unwrap();
+        write_scalar(&mut buf, &Scalar::from(7u64)).unwrap();
+        write_scalar(&mut buf, &Scalar::from(1u64)).unwrap();
+        write_scalar(&mut buf, &Scalar::from(8u64)).unwrap();
         let mut r = buf.as_slice();
         assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
     }
@@ -870,10 +868,10 @@ mod tests {
     fn read_value_dict_rejects_out_of_order_keys() {
         let mut buf = Vec::new();
         write_dict_prefix(&mut buf, 2).unwrap();
-        write_int253(&mut buf, &Int253::from(5u64)).unwrap();
-        write_int253(&mut buf, &Int253::from(0u64)).unwrap();
-        write_int253(&mut buf, &Int253::from(2u64)).unwrap();
-        write_int253(&mut buf, &Int253::from(0u64)).unwrap();
+        write_scalar(&mut buf, &Scalar::from(5u64)).unwrap();
+        write_scalar(&mut buf, &Scalar::from(0u64)).unwrap();
+        write_scalar(&mut buf, &Scalar::from(2u64)).unwrap();
+        write_scalar(&mut buf, &Scalar::from(0u64)).unwrap();
         let mut r = buf.as_slice();
         assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
     }
@@ -882,10 +880,10 @@ mod tests {
     fn read_value_dict_rejects_duplicate_keys() {
         let mut buf = Vec::new();
         write_dict_prefix(&mut buf, 2).unwrap();
-        write_int253(&mut buf, &Int253::from(7u64)).unwrap();
-        write_int253(&mut buf, &Int253::from(0u64)).unwrap();
-        write_int253(&mut buf, &Int253::from(7u64)).unwrap();
-        write_int253(&mut buf, &Int253::from(0u64)).unwrap();
+        write_scalar(&mut buf, &Scalar::from(7u64)).unwrap();
+        write_scalar(&mut buf, &Scalar::from(0u64)).unwrap();
+        write_scalar(&mut buf, &Scalar::from(7u64)).unwrap();
+        write_scalar(&mut buf, &Scalar::from(0u64)).unwrap();
         let mut r = buf.as_slice();
         assert!(matches!(read_value(&mut r), Err(ReadError::InvalidFormat)));
     }
@@ -903,8 +901,8 @@ mod tests {
     }
 
     #[test]
-    fn negative_cleartoken_encoding_is_domain_neutral() {
-        let value = Value::ClearToken(ClearToken::new(Int253::from(-1i64), Int253::ZERO));
+    fn centered_debit_cleartoken_encoding_is_domain_neutral() {
+        let value = Value::ClearToken(ClearToken::new(Scalar::from(-1i64), Scalar::ZERO));
         let mut encoded = Vec::new();
         write_value(&mut encoded, &value).unwrap();
 
@@ -914,8 +912,8 @@ mod tests {
         assert!(!decoded.is_portable());
         match decoded {
             Value::ClearToken(token) => {
-                assert_eq!(token.qty(), Int253::from(-1i64));
-                assert_eq!(token.flv(), Int253::ZERO);
+                assert_eq!(token.qty(), Scalar::from(-1i64));
+                assert_eq!(token.flv(), Scalar::ZERO);
             }
             other => panic!("expected ClearToken, got {:?}", other),
         }
@@ -925,11 +923,11 @@ mod tests {
     fn nested_nonportable_dict_roundtrips_for_diagnostics() {
         let mut inner = Dict::new();
         inner.insert(
-            Int253::ZERO,
-            Value::ClearToken(ClearToken::new(Int253::from(-1i64), Int253::ZERO)),
+            Scalar::ZERO,
+            Value::ClearToken(ClearToken::new(Scalar::from(-1i64), Scalar::ZERO)),
         );
         let mut outer = Dict::new();
-        outer.insert(Int253::ZERO, Value::Dict(inner));
+        outer.insert(Scalar::ZERO, Value::Dict(inner));
 
         let mut encoded = Vec::new();
         write_value(&mut encoded, &Value::Dict(outer)).unwrap();
@@ -954,7 +952,7 @@ mod tests {
         // commitments; original holds Open ones, so we compare bytes
         // and structural shape rather than struct equality.
         let original = Value::Token(
-            Token::cleartext(Int253::from(123u64), Int253::from(7u64))
+            Token::cleartext(Scalar::from(123u64), Scalar::from(7u64))
                 .expect("test quantity is in range"),
         );
         let mut buf = Vec::new();
@@ -968,8 +966,8 @@ mod tests {
         let decoded = read_value(&mut r).expect("decodes").expect("token tag");
         match &decoded {
             Value::Token(t) => {
-                let expected_qty = Commitment::unblinded(Int253::from(123u64));
-                let expected_flv = Commitment::unblinded(Int253::from(7u64));
+                let expected_qty = Commitment::unblinded(Scalar::from(123u64));
+                let expected_flv = Commitment::unblinded(Scalar::from(7u64));
                 assert_eq!(t.qty.to_point(), expected_qty.to_point());
                 assert_eq!(t.flv.to_point(), expected_flv.to_point());
             }
@@ -998,7 +996,7 @@ mod tests {
 
     #[test]
     fn cleartoken_encode_decode_roundtrip() {
-        let original = Value::ClearToken(ClearToken::new(Int253::from(5u64), Int253::from(7u64)));
+        let original = Value::ClearToken(ClearToken::new(Scalar::from(5u64), Scalar::from(7u64)));
         let mut buf = Vec::new();
         write_value(&mut buf, &original).expect("encodes");
         assert_eq!(buf[0], CLEAR_TOKEN_TAG);
@@ -1009,8 +1007,8 @@ mod tests {
             .expect("cleartoken tag");
         match &decoded {
             Value::ClearToken(t) => {
-                assert_eq!(t.qty(), Int253::from(5u64));
-                assert_eq!(t.flv(), Int253::from(7u64));
+                assert_eq!(t.qty(), Scalar::from(5u64));
+                assert_eq!(t.flv(), Scalar::from(7u64));
             }
             _ => panic!("decoded value must be ClearToken"),
         }

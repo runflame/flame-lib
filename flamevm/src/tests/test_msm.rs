@@ -1,6 +1,6 @@
 //! Tests for `MultiscalarMul` — lazy point arithmetic, batched verify.
 //!
-//! Covers the arithmetic lift (Point/Point/Int253/MSM dispatch in
+//! Covers the arithmetic lift (Point/Point/Scalar/MSM dispatch in
 //! `op_add` / `op_neg` / `op_mul`), the linear-type invariants
 //! (non-copyable, droppable, non-portable, non-wire-encodable),
 //! and the deferred-batch semantics of `verify` on an MSM —
@@ -148,7 +148,7 @@ fn op_mul_point_point_rejected() {
     );
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
-        VMError::TypeNotInt253
+        VMError::TypeNotScalar
     ));
 }
 
@@ -167,7 +167,7 @@ fn op_mul_msm_msm_rejected() {
     let mut vm = vm_with_script(script);
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
-        VMError::TypeNotInt253
+        VMError::TypeNotScalar
     ));
 }
 
@@ -377,7 +377,7 @@ fn verify_msm_in_internal_context_rejected() {
 #[test]
 fn verify_msm_debits_decompression_and_finalization_work() {
     let point = curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED;
-    let msm = MultiscalarMul::term(Scalar::ZERO, point);
+    let msm = MultiscalarMul::term(DalekScalar::ZERO, point);
     let expected = GAS_PER_INSTRUCTION
         + 1 // rollback/operand growth for the one-term MSM
         + linear_gas(GAS_MSM_VERIFY_BASE, GAS_MSM_VERIFY_TERM, 1).unwrap()
@@ -473,8 +473,8 @@ fn failed_call_msm_does_not_pollute_parent_batch() {
         .return_();
     let outer = open_with_inner(inner, true)
         // Trivially-true constraint to give the proof something to check.
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(7u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(7u64)))
         .eq()
         .verify();
     let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000).expect("prove ok");
