@@ -402,12 +402,36 @@ pub struct Blockchain {
 
 impl Blockchain {
     pub fn new(params: ChainParams) -> Result<Self, ChainError> {
+        Self::with_genesis_contracts(params, &[]).map(|(chain, _)| chain)
+    }
+
+    /// Genesis whose contract forest already contains `ids`. Returns the
+    /// catchup so callers can derive `Proof::Committed` for them by running
+    /// `Proof::Transient` through [`Catchup::update_proof`].
+    ///
+    /// A fresh chain has no contract to seed an anchor from, so the first
+    /// spendable contracts must be placed here rather than minted by a
+    /// transaction. Duplicate ids are rejected: the accumulator stores ids,
+    /// and two equal leaves would leave one of them unspendable.
+    pub fn with_genesis_contracts(
+        params: ChainParams,
+        ids: &[ContractID],
+    ) -> Result<(Self, Catchup), ChainError> {
         if params.version != 1 {
             return Err(ChainError::UnsupportedVersion);
         }
         let actors = ActorStore::new(params.storage)?;
-        let contracts = Forest::new();
-        let contract_root = contracts.root(&utreexo::utreexo_hasher::<ContractLeaf>());
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
+        let mut work = Forest::new().work_forest();
+        let mut seen = BTreeSet::new();
+        for id in ids {
+            if !seen.insert(*id) {
+                return Err(ChainError::DuplicateContract);
+            }
+            work.insert(&ContractLeaf(*id), &hasher);
+        }
+        let (contracts, catchup) = work.normalize(&hasher);
+        let contract_root = contracts.root(&hasher);
         let header = BlockHeader {
             version: params.version,
             height: 0,
@@ -422,14 +446,17 @@ impl Blockchain {
             },
         };
         let genesis = header.id();
-        Ok(Self {
-            params,
-            header,
-            contracts,
-            actors,
-            active: vec![genesis],
-            undo: BTreeMap::new(),
-        })
+        Ok((
+            Self {
+                params,
+                header,
+                contracts,
+                actors,
+                active: vec![genesis],
+                undo: BTreeMap::new(),
+            },
+            catchup,
+        ))
     }
 
     pub fn tip(&self) -> BlockHash {
@@ -470,7 +497,9 @@ impl Blockchain {
         Ok(self.actors.actor_capacity(actor, height)?)
     }
 
-    pub(crate) fn contract_forest(&self) -> &Forest {
+    /// The committed contract accumulator at the tip. Callers verify
+    /// membership proofs against it before building a spend.
+    pub fn contract_forest(&self) -> &Forest {
         &self.contracts
     }
 
@@ -1079,8 +1108,10 @@ impl Blockchain {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct ContractLeaf(pub ContractID);
+/// Utreexo leaf for a contract id. Public so callers outside the crate can
+/// verify and refresh their own membership proofs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ContractLeaf(pub ContractID);
 
 impl MerkleItem for ContractLeaf {
     fn commit(&self, t: &mut Transcript) {
@@ -1328,6 +1359,67 @@ mod tests {
             BlockTx::from_bytes_bounded(&tx_bytes, 1, limits),
             Err(ReadError::InvalidFormat)
         ));
+    }
+
+    #[test]
+    fn genesis_contracts_match_a_hand_built_forest() {
+        let ids = [[0x11; 32], [0x22; 32], [0x33; 32]];
+        let (chain, _) =
+            Blockchain::with_genesis_contracts(ChainParams::default(), &ids).expect("genesis");
+
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
+        let mut work = Forest::new().work_forest();
+        for id in &ids {
+            work.insert(&ContractLeaf(*id), &hasher);
+        }
+        let (expected, _) = work.normalize(&hasher);
+
+        assert_eq!(
+            chain.contract_forest().root(&hasher),
+            expected.root(&hasher)
+        );
+        assert_eq!(chain.state_commitment().contracts, expected.root(&hasher));
+        assert_eq!(chain.contract_forest().count(), ids.len() as u64);
+        assert_eq!(chain.height(), 0);
+    }
+
+    #[test]
+    fn genesis_catchup_yields_committed_proofs() {
+        let ids = [[0x11; 32], [0x22; 32], [0x33; 32]];
+        let (chain, catchup) =
+            Blockchain::with_genesis_contracts(ChainParams::default(), &ids).expect("genesis");
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
+
+        for id in &ids {
+            let leaf = ContractLeaf(*id);
+            let proof = catchup
+                .update_proof(&leaf, Proof::Transient, &hasher)
+                .expect("transient proof catches up");
+            let Proof::Committed(path) = &proof else {
+                panic!("genesis contract must become Committed");
+            };
+            chain
+                .contract_forest()
+                .verify(&leaf, path, &hasher)
+                .expect("committed proof verifies against the genesis forest");
+        }
+    }
+
+    #[test]
+    fn genesis_rejects_duplicate_contract_ids() {
+        assert!(matches!(
+            Blockchain::with_genesis_contracts(ChainParams::default(), &[[7; 32], [7; 32]]),
+            Err(ChainError::DuplicateContract)
+        ));
+    }
+
+    #[test]
+    fn empty_genesis_matches_plain_new() {
+        let plain = Blockchain::new(ChainParams::default()).expect("new");
+        let (seeded, _) =
+            Blockchain::with_genesis_contracts(ChainParams::default(), &[]).expect("genesis");
+        assert_eq!(plain.tip(), seeded.tip());
+        assert_eq!(plain.state_commitment(), seeded.state_commitment());
     }
 
     #[test]
