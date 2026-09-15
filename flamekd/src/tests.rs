@@ -145,6 +145,60 @@ fn typed_encodings_round_trip_and_reject_other_capabilities() {
 }
 
 #[test]
+fn testnet_encodings_bind_and_check_the_network() {
+    let spend = root();
+    let view = spend.to_view();
+    let recv = view.to_recv();
+    let address = recv.to_address();
+    let tracking = address.to_tracking_address();
+    macro_rules! round_trip {
+        ($value:expr, $type:ty, $hrp:literal, $len:literal) => {{
+            let mainnet = $value.to_bech32(Network::Mainnet);
+            let testnet = $value.to_bech32(Network::Testnet);
+            assert_eq!(mainnet, $value.to_string());
+            assert!(testnet.starts_with(concat!($hrp, "1")));
+            assert_eq!(testnet.len(), $len);
+            assert_eq!(
+                <$type>::from_bech32(&mainnet, Network::Mainnet).unwrap(),
+                $value
+            );
+            assert_eq!(
+                <$type>::from_bech32(&testnet, Network::Testnet).unwrap(),
+                $value
+            );
+            assert_eq!(
+                <$type>::from_bech32(&testnet.to_ascii_uppercase(), Network::Testnet).unwrap(),
+                $value
+            );
+            assert_eq!(
+                <$type>::from_bech32(&mainnet, Network::Testnet),
+                Err(Error::InvalidEncoding)
+            );
+            assert_eq!(
+                <$type>::from_bech32(&testnet, Network::Mainnet),
+                Err(Error::InvalidEncoding)
+            );
+            assert_eq!(testnet.parse::<$type>(), Err(Error::InvalidEncoding));
+            let (_, symbols) = mainnet.split_once('1').unwrap();
+            let replaced_prefix = format!("{}1{symbols}", $hrp);
+            assert_eq!(
+                <$type>::from_bech32(&replaced_prefix, Network::Testnet),
+                Err(Error::InvalidEncoding)
+            );
+        }};
+    }
+    round_trip!(spend, SpendKey, "testspend", 170);
+    round_trip!(view, ViewKey, "testview", 169);
+    round_trip!(recv, RecvKey, "testrecv", 169);
+    round_trip!(address, ReceivingAddress, "tf", 112);
+    round_trip!(tracking, TrackingAddress, "tc", 61);
+    assert_eq!(
+        SpendKey::from_bech32(&view.to_bech32(Network::Testnet), Network::Testnet),
+        Err(Error::InvalidEncoding)
+    );
+}
+
+#[test]
 fn rejects_noncanonical_scalars_invalid_points_and_zero_keys() {
     let parent = root();
     for offset in [0, 32, 64] {

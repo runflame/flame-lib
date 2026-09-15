@@ -2,7 +2,7 @@
 //! Flame key derivation and Bech32f key/address encoding.
 //!
 //! ```
-//! use flamekd::{Mnemonic, RecvKey, SpendKey, HARDENED};
+//! use flamekd::{Mnemonic, Network, RecvKey, SpendKey, HARDENED};
 //!
 //! let mnemonic = Mnemonic::from_entropy(&[0u8; 32])?; // Public test entropy only.
 //! let root = SpendKey::from_mnemonic(&mnemonic, "")?;
@@ -10,6 +10,8 @@
 //! let recv: RecvKey = account.to_recv().to_string().parse()?;
 //! let address = recv.derive_child(0)?.to_address();
 //! assert_eq!(address, account.derive_child(0)?.to_recv().to_address());
+//! let testnet = recv.to_bech32(Network::Testnet);
+//! assert_eq!(RecvKey::from_bech32(&testnet, Network::Testnet)?, recv);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -17,6 +19,9 @@
 //! and `to_bytes` deliberately export key material; callers must protect those
 //! copies. Normal child scalar disclosure together with an ancestor receiving
 //! key can reveal the corresponding ancestor scalar. See `flamekd.md`.
+//!
+//! `Display` and `FromStr` use mainnet. Use `to_bech32` and `from_bech32` to
+//! select a network explicitly. Network selection changes only the encoding.
 
 use std::{fmt, str::FromStr};
 
@@ -40,6 +45,15 @@ mod tests;
 /// The first hardened index; the low 31 bits select a child within either mode.
 pub const HARDENED: u32 = 1 << 31;
 
+/// Selects the network HRP for textual encoding; key material is network-neutral.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Network {
+    /// Mainnet HRPs: `spend`, `view`, `recv`, `f`, and `c`.
+    Mainnet,
+    /// Testnet HRPs: `testspend`, `testview`, `testrecv`, `tf`, and `tc`.
+    Testnet,
+}
+
 /// Invalid key material, encoding, or derivation request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
@@ -58,7 +72,7 @@ pub enum Error {
     /// Only an extended spending key can derive a hardened child.
     #[error("hardened derivation requires an extended spending key")]
     HardenedDerivation,
-    /// The HRP, checksum, case, alphabet, or bit padding is invalid.
+    /// The HRP/network, checksum, case, alphabet, or bit padding is invalid.
     #[error("invalid Bech32f encoding")]
     InvalidEncoding,
     /// The mnemonic does not have a valid BIP39 checksum.
@@ -66,7 +80,7 @@ pub enum Error {
     InvalidMnemonic,
 }
 
-/// Extended spending key `(s, v, t)`, encoded with HRP `spend`.
+/// Extended spending key `(s, v, t)`, with HRP `spend` or `testspend`.
 #[derive(Clone, PartialEq, Eq, ZeroizeOnDrop)]
 pub struct SpendKey {
     s: Scalar,
@@ -74,7 +88,7 @@ pub struct SpendKey {
     t: Scalar,
 }
 
-/// Extended viewing key `(S, v, t)`, encoded with HRP `view`.
+/// Extended viewing key `(S, v, t)`, with HRP `view` or `testview`.
 #[derive(Clone, PartialEq, Eq, ZeroizeOnDrop)]
 pub struct ViewKey {
     #[zeroize(skip)]
@@ -83,7 +97,7 @@ pub struct ViewKey {
     t: Scalar,
 }
 
-/// Extended receiving key `(S, V, t)`, encoded with HRP `recv`.
+/// Extended receiving key `(S, V, t)`, with HRP `recv` or `testrecv`.
 ///
 /// Generates normal descendant addresses and links their activity, without
 /// decrypting or spending. The derivation secret still requires privacy.
@@ -94,14 +108,14 @@ pub struct RecvKey {
     t: Scalar,
 }
 
-/// Receiving address `(S, V)`, encoded with HRP `f`.
+/// Receiving address `(S, V)`, with HRP `f` or `tf`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReceivingAddress {
     spending: RistrettoPoint,
     viewing: RistrettoPoint,
 }
 
-/// One clear-payment/tracking address `(S)`, encoded with HRP `c`.
+/// One clear-payment/tracking address `(S)`, with HRP `c` or `tc`.
 ///
 /// This address does not identify or derive other addresses in the account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -396,29 +410,48 @@ fn join<const N: usize, const M: usize>(parts: [[u8; 32]; M]) -> [u8; N] {
 }
 
 macro_rules! bech32f {
-    ($type:ty, $hrp:literal, $len:literal) => {
+    ($type:ty, $mainnet:literal, $testnet:literal, $len:literal) => {
+        impl $type {
+            /// Encodes for the selected network, exporting any secret key material.
+            pub fn to_bech32(&self, network: Network) -> String {
+                let hrp = match network {
+                    Network::Mainnet => $mainnet,
+                    Network::Testnet => $testnet,
+                };
+                let bytes = Zeroizing::new(self.to_bytes());
+                encoding::encode(hrp, bytes.as_ref())
+            }
+
+            /// Parses for the expected network, rejecting any other type or network.
+            pub fn from_bech32(text: &str, network: Network) -> Result<Self, Error> {
+                let hrp = match network {
+                    Network::Mainnet => $mainnet,
+                    Network::Testnet => $testnet,
+                };
+                let bytes = Zeroizing::new(encoding::decode::<$len>(hrp, text)?);
+                Self::from_bytes(bytes.as_ref())
+            }
+        }
         impl fmt::Display for $type {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                let bytes = Zeroizing::new(self.to_bytes());
-                let encoded = Zeroizing::new(encoding::encode($hrp, bytes.as_ref()));
+                let encoded = Zeroizing::new(self.to_bech32(Network::Mainnet));
                 f.write_str(&encoded)
             }
         }
         impl FromStr for $type {
             type Err = Error;
             fn from_str(text: &str) -> Result<Self, Self::Err> {
-                let bytes = Zeroizing::new(encoding::decode::<$len>($hrp, text)?);
-                Self::from_bytes(bytes.as_ref())
+                Self::from_bech32(text, Network::Mainnet)
             }
         }
     };
 }
 
-bech32f!(SpendKey, "spend", 96);
-bech32f!(ViewKey, "view", 96);
-bech32f!(RecvKey, "recv", 96);
-bech32f!(ReceivingAddress, "f", 64);
-bech32f!(TrackingAddress, "c", 32);
+bech32f!(SpendKey, "spend", "testspend", 96);
+bech32f!(ViewKey, "view", "testview", 96);
+bech32f!(RecvKey, "recv", "testrecv", 96);
+bech32f!(ReceivingAddress, "f", "tf", 64);
+bech32f!(TrackingAddress, "c", "tc", 32);
 
 macro_rules! redacted_debug {
     ($($type:ty),+) => { $(

@@ -5,9 +5,9 @@ use crate::Error;
 
 fn payload_len(hrp: &str) -> Option<usize> {
     match hrp {
-        "spend" | "view" | "recv" => Some(96),
-        "f" => Some(64),
-        "c" => Some(32),
+        "spend" | "view" | "recv" | "testspend" | "testview" | "testrecv" => Some(96),
+        "f" | "tf" => Some(64),
+        "c" | "tc" => Some(32),
         _ => None,
     }
 }
@@ -35,7 +35,7 @@ pub(crate) fn encode(hrp: &str, bytes: &[u8]) -> String {
 
 pub(crate) fn decode<const N: usize>(hrp: &str, text: &str) -> Result<[u8; N], Error> {
     let expected_len = payload_len(hrp).ok_or(Error::InvalidEncoding)?;
-    if text.len() > 166 {
+    if text.len() > 170 {
         return Err(Error::InvalidLength);
     }
     let checked = CheckedHrpstring::new::<Bech32m>(text).map_err(|_| Error::InvalidEncoding)?;
@@ -80,6 +80,11 @@ mod tests {
         round_trip::<96>("recv", 165);
         round_trip::<64>("f", 111);
         round_trip::<32>("c", 60);
+        round_trip::<96>("testspend", 170);
+        round_trip::<96>("testview", 169);
+        round_trip::<96>("testrecv", 169);
+        round_trip::<64>("tf", 112);
+        round_trip::<32>("tc", 61);
     }
 
     #[test]
@@ -127,8 +132,8 @@ mod tests {
 
     #[test]
     fn rejects_single_symbol_changes_throughout_longest_encoding() {
-        let text = encode("spend", &[0x42; 96]);
-        for position in 6..text.len() {
+        let text = encode("testspend", &[0x42; 96]);
+        for position in 10..text.len() {
             let mut changed = text.clone().into_bytes();
             changed[position] = if changed[position] == b'q' {
                 b'p'
@@ -136,7 +141,7 @@ mod tests {
                 b'q'
             };
             assert_eq!(
-                decode::<96>("spend", std::str::from_utf8(&changed).unwrap()),
+                decode::<96>("testspend", std::str::from_utf8(&changed).unwrap()),
                 Err(Error::InvalidEncoding)
             );
         }

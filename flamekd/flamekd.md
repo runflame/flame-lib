@@ -41,38 +41,38 @@ The tuple order below is normative, including for binary serialization.
 
 | Type | Tuple | Capability |
 | --- | --- | --- |
-| `SpendKey` | `(s, v, t)` | Spend, view, and generate addresses; derive normal and hardened children. |
-| `ViewKey` | `(S, v, t)` | View contents and generate addresses; derive normal children. |
-| `RecvKey` | `(S, V, t)` | Generate receiving addresses and track their activity; derive normal children. |
-| `ReceivingAddress` | `(S, V)` | Receive encrypted funds at this address. |
-| `TrackingAddress` | `(S)` | Receive clear funds and identify activity at this spending public key. |
+| Spend Key | `(s, v, t)` | Spend, view, and generate addresses; derive normal and hardened children. |
+| View Key | `(S, v, t)` | View contents and generate addresses; derive normal children. |
+| Recv Key | `(S, V, t)` | Generate receiving addresses and track their activity; derive normal children. |
+| Receiving Address | `(S, V)` | Receive encrypted funds at this address. |
+| Tracking address | `(S)` | Receive clear funds and identify activity at this spending public key. |
 
-`RecvKey` cannot decrypt encrypted contents or authorize spending. A
-`TrackingAddress` does not identify other addresses in the account. Neither
+A Recv Key cannot decrypt encrypted contents or authorize spending. A
+Tracking address does not identify other addresses in the account. Neither
 address type can derive children, because neither contains `t`.
 
 Scalar `s` authorizes spending at its own `S`; scalar `v` enables viewing at its
 own `V`. Hierarchical access requires the corresponding extended key. Derivation
 material `t` alone is not a tracking capability.
 
-`ViewKey` and `RecvKey` cover their own node and descendants reached using only
+View Keys and Recv Keys cover their own node and descendants reached using only
 normal edges. They cannot cross a hardened edge, even when exported at the root.
-To share access to a hardened account, derive that account using `SpendKey` and
-then export its `ViewKey` or `RecvKey`. This specification does not prescribe
+To share access to a hardened account, derive that account using a Spend Key and
+then export its View Key or Recv Key. This specification does not prescribe
 account paths or address-discovery lookahead rules.
 
 ## Conversions
 
 Conversions are deterministic and do not modify the source key.
 
-| Conversion | Result |
-| --- | --- |
-| `SpendKey(s, v, t)` to `ViewKey` | `(s*G, v, t)` |
-| `ViewKey(S, v, t)` to `RecvKey` | `(S, v*G, t)` |
-| `RecvKey(S, V, t)` to `ReceivingAddress` | `(S, V)` |
-| `ReceivingAddress(S, V)` to `TrackingAddress` | `(S)` |
+| Conversion | Input | Output |
+| --- | --- | --- |
+| Spend → View | `(s, v, t)` | `(s*G, v, t)` |
+| View → Recv | `(S, v, t)` | `(S, v*G, t)` |
+| Recv → Receiving Address | `(S, V, t)` | `(S, V)` |
+| Receiving Address → Tracking Address | `(S, V)` | `(S)` |
 
-Conversions MAY be composed. For example, `SpendKey` can produce every public
+Conversions MAY be composed. For example, a Spend Key can produce every public
 address type. The reverse conversions are not provided: removing secrets or
 derivation material does not make them recoverable from the resulting value.
 
@@ -90,7 +90,7 @@ encoded as UTF-8. An omitted passphrase is the empty string. The conversion is:
 ```
 seed = PBKDF2-HMAC-SHA512(
     password = UTF8(NFKD(mnemonic)),
-    salt = UTF8("mnemonic" + NFKD(passphrase)),
+    salt = UTF8("mnemonic" ++ NFKD(passphrase)),
     iterations = 2048,
     output_length = 64
 )
@@ -148,14 +148,14 @@ An index `i` is an unsigned 32-bit integer, `0 <= i < 2^32`.
 * `2^31 <= i < 2^32` selects hardened derivation.
 
 The entire value, including the hardened bit, is appended as `LE32(i)`.
-Indices outside the unsigned 32-bit range MUST be rejected. A `ViewKey` or
-`RecvKey` MUST reject hardened indices before attempting child derivation.
+Indices outside the unsigned 32-bit range MUST be rejected. A View Key or
+Recv Key MUST reject hardened indices before attempting child derivation.
 
 ## Normal derivation
 
 Every normal derivation uses the same parent public values `(S, V, t)`.
-`SpendKey` computes `S = s*G` and `V = v*G`; `ViewKey` computes `V = v*G`;
-`RecvKey` already contains both points.
+A Spend Key computes `S = s*G` and `V = v*G`; a View Key computes `V = v*G`;
+a Recv Key already contains both points.
 
 For a normal index `i`, generate the child adjustments and derivation material:
 
@@ -197,7 +197,7 @@ agree on whether a normal derivation succeeds.
 
 ## Hardened derivation
 
-Only `SpendKey(s, v, t)` can derive a hardened child. Both secret scalars are
+Only a Spend Key `(s, v, t)` can derive a hardened child. Both secret scalars are
 committed, including the secret `v`, not its public point `V`:
 
 ```
@@ -214,7 +214,7 @@ return SpendKey(s + ds, v + dv, t_child)
 
 If either child secret is zero, derivation MUST return an error for that index,
 without retry or index increment. A successful hardened child can subsequently
-be converted to its `ViewKey`, `RecvKey`, and addresses.
+be converted to its View Key, Recv Key, and addresses.
 
 ## Bech32f encoding
 
@@ -231,33 +231,41 @@ qpzry9x8gf2tvdw0s3jn54khce6mua7l
 ```
 
 Unlike BIP 173/350, Bech32f replaces the 90-character maximum with the exact
-type-dependent lengths below. This length override has precedent in
+type- and network-dependent lengths below. This length override has precedent in
 [ZIP 316](https://zips.z.cash/zip-0316).
-The payload is the raw tuple below, and the HRP identifies its type.
+The payload is the raw tuple below, and the HRP identifies its type and network.
 
-| Type | HRP | Raw tuple | Bytes | Payload symbols | Total characters |
-| --- | --- | --- | --- | --- | --- |
-| `SpendKey` | `spend` | `enc(s) + enc(v) + enc(t)` | 96 | 154 | 166 |
-| `ViewKey` | `view` | `enc(S) + enc(v) + enc(t)` | 96 | 154 | 165 |
-| `RecvKey` | `recv` | `enc(S) + enc(V) + enc(t)` | 96 | 154 | 165 |
-| `ReceivingAddress` | `f` | `enc(S) + enc(V)` | 64 | 103 | 111 |
-| `TrackingAddress` | `c` | `enc(S)` | 32 | 52 | 60 |
+| Type | Mainnet HRP | Testnet HRP | Raw tuple | Bytes | Payload symbols | Total characters (mainnet / testnet) |
+| --- | --- | --- | --- | --- | --- | --- |
+| Spend Key | `spend` | `testspend` | `enc(s) ++ enc(v) ++ enc(t)` | 96 | 154 | 166 / 170 |
+| View Key | `view` | `testview` | `enc(S) ++ enc(v) ++ enc(t)` | 96 | 154 | 165 / 169 |
+| Recv Key | `recv` | `testrecv` | `enc(S) ++ enc(V) ++ enc(t)` | 96 | 154 | 165 / 169 |
+| Receiving Address | `f` | `tf` | `enc(S) ++ enc(V)` | 64 | 103 | 111 / 112 |
+| Tracking address | `c` | `tc` | `enc(S)` | 32 | 52 | 60 / 61 |
 
-`+` is byte concatenation. Encode the complete raw tuple in one 8-to-5-bit
+Testnet uses `"test" ++ mainnet_HRP` for keys and `"t" ++ mainnet_HRP` for
+addresses. The network belongs only to the textual encoding: raw tuples, seed
+processing, and key derivation are unchanged. The same key or address can be
+encoded for either network.
+
+`++` denotes concatenation. Encode the complete raw tuple in one 8-to-5-bit
 conversion, reading each byte most-significant bit first. Pad only the final
 group with zero bits: two bits for 96 bytes, three for 64 bytes, four for 32 bytes.
 Do not independently pad the 32-byte elements.
 
-The text is `HRP || "1" || payload || checksum`. Compute the checksum using the
+The text is `HRP ++ "1" ++ payload ++ checksum`. Compute the checksum using the
 lowercase HRP and converted payload symbols. The six checksum symbols are the
 30-bit result of the Bech32m checksum construction, most-significant group first.
 Verification MUST yield polymod `0x2bc830a3` over the expanded HRP and all symbols.
+The checksum binds the HRP and MUST be recomputed when changing networks;
+replacing only the prefix produces an invalid encoding.
 
 Encoders MUST emit lowercase ASCII. Decoders MUST accept all-lowercase and
 all-uppercase encodings, reject mixed case, and normalize accepted uppercase
 input to lowercase before interpreting the HRP and verifying the checksum.
 Decoders MUST reject unknown HRPs, unexpected types, incorrect lengths, invalid
 alphabet symbols, whitespace, non-ASCII text, and checksum failures.
+Decoders given an expected network MUST reject HRPs for the other network.
 
 After removing the checksum, decode 5-to-8 bits without adding padding. Any
 remaining bits MUST be fewer than five and all zero. The decoded length MUST
@@ -297,12 +305,12 @@ with parties authorized for their stated capabilities. Neither address format
 encodes its derivation index or `t`. This does not promise anonymity against
 transaction metadata or other external information.
 
-A parent `RecvKey` can calculate normal-child `ds` and `dv`. Consequently:
+A parent Recv Key can calculate normal-child `ds` and `dv`. Consequently:
 
 - A disclosed normal child viewing scalar reveals parent `v = v_child - dv`.
 - A disclosed normal child spending scalar reveals parent `s = s_child - ds`.
 - Both disclosures, even from different normal descendants, reveal the parent
-  `SpendKey`. A parent `ViewKey` plus a child spending scalar also suffices.
+  Spend Key. A parent View Key plus a child spending scalar also suffices.
 
 The same equations apply along a known entirely normal path by accumulating
 adjustments. Hardened derivation requires both parent secret scalars: recovering
@@ -320,15 +328,16 @@ other outputs when sender points repeat or have known scalar relationships.
 
 ## Test vectors
 
-These vectors use a binary seed of 64 zero bytes. This is public test material,
-not a seed to use for funds. Hex values below are split at 32-byte boundaries;
+These vectors use a binary seed of 64 zero bytes. All Bech32f strings below use
+mainnet HRPs. This is public test material, not a seed to use for funds.
+Hex values below are split at 32-byte boundaries;
 concatenate the lines without whitespace. Paths are descriptive only: `m/0'`
 uses index `0x80000000`, and `m/0'/16909060` then uses normal index `0x01020304`
 (encoded `04 03 02 01`).
 
 ### m
 
-`SpendKey` bytes (`s || v || t`):
+Spend Key bytes (`s ++ v ++ t`):
 
 ```
 4d7864baf60fae7dfc13f6ae21ca3d952effb8150d31f676aabb8385dab5ff07
@@ -336,7 +345,7 @@ uses index `0x80000000`, and `m/0'/16909060` then uses normal index `0x01020304`
 56174cc1d26976a5d1a307b2fb4197379a2f8ba40112452f9f7bc92b2d01f104
 ```
 
-`RecvKey` bytes (`S || V || t`):
+Recv Key bytes (`S ++ V ++ t`):
 
 ```
 58a8ba7ce9e780c32ba28ecdc159508e8afccb74596c6f29f94eff0552ba4336
@@ -344,7 +353,7 @@ uses index `0x80000000`, and `m/0'/16909060` then uses normal index `0x01020304`
 56174cc1d26976a5d1a307b2fb4197379a2f8ba40112452f9f7bc92b2d01f104
 ```
 
-Receiving address:
+Receiving Address:
 
 ```
 f1tz5t5l8fu7qvx2az3mxuzk2s3690ejm5t9kx720efmls2546gvmxvagx0yxfqgdvlscz60n0r58ktp22qcw0s76yk5wnezzamcna5ssfgcs3c
@@ -352,7 +361,7 @@ f1tz5t5l8fu7qvx2az3mxuzk2s3690ejm5t9kx720efmls2546gvmxvagx0yxfqgdvlscz60n0r58ktp
 
 ### m/0
 
-`SpendKey` bytes (`s || v || t`):
+Spend Key bytes (`s ++ v ++ t`):
 
 ```
 ea4b455c0ca4612a80764577662c106e2ddda504bfe8dbbb8046bb9207eb2402
@@ -360,7 +369,7 @@ e5a06f069a42ec117326f2f35b72e70cd7502bbff1076f7c707bf93b75edd600
 89cc4fc8023b48936cd3af9259d4732ac42d373064040470ff0b8155003a5b0c
 ```
 
-`RecvKey` bytes (`S || V || t`):
+Recv Key bytes (`S ++ V ++ t`):
 
 ```
 6c9d43624413b329de20094274dbeebbf43535f7ff307242c7fdd5248a088646
@@ -368,7 +377,7 @@ e5a06f069a42ec117326f2f35b72e70cd7502bbff1076f7c707bf93b75edd600
 89cc4fc8023b48936cd3af9259d4732ac42d373064040470ff0b8155003a5b0c
 ```
 
-Receiving address:
+Receiving Address:
 
 ```
 f1djw5xcjyzwejnh3qp9p8fklwh06r2d0hluc8ysk8lh2jfzsgsergvs8gnuxtjanh4j2f50x4xugvflvzck70k9k573duhsqs5jyy5vgdmtj30
@@ -376,7 +385,7 @@ f1djw5xcjyzwejnh3qp9p8fklwh06r2d0hluc8ysk8lh2jfzsgsergvs8gnuxtjanh4j2f50x4xugvfl
 
 ### m/0'
 
-`SpendKey` bytes (`s || v || t`):
+Spend Key bytes (`s ++ v ++ t`):
 
 ```
 d0ce5cf6dbcf65e686f93acd06ea7b3a2c3ba85c4801edfe909b9aaea0f1950d
@@ -384,7 +393,7 @@ b1f4e8583a3444c70f2331b85562851e50ff564ea3d962ebb717b64bb5408208
 6b1b87cbad0acf6a556ef6e8a93e9f5d04e875ba3daadaf3f6373b9295e02502
 ```
 
-`RecvKey` bytes (`S || V || t`):
+Recv Key bytes (`S ++ V ++ t`):
 
 ```
 8afd6a2bb1c7bacf2b3e50255a829fcb1838d78d4d727b84fa3d16828fab702e
@@ -392,7 +401,7 @@ b1f4e8583a3444c70f2331b85562851e50ff564ea3d962ebb717b64bb5408208
 6b1b87cbad0acf6a556ef6e8a93e9f5d04e875ba3daadaf3f6373b9295e02502
 ```
 
-Receiving address:
+Receiving Address:
 
 ```
 f13t7k52a3c7av72e72qj44q5levvr34udf4e8hp8685tg9ratwqhrf94mj642kjp9ffcx7l5273uxp39df8mnl04kqtvjkg4llkwvgushdv07q
@@ -400,7 +409,7 @@ f13t7k52a3c7av72e72qj44q5levvr34udf4e8hp8685tg9ratwqhrf94mj642kjp9ffcx7l5273uxp3
 
 ### m/0'/16909060
 
-`SpendKey` bytes (`s || v || t`):
+Spend Key bytes (`s ++ v ++ t`):
 
 ```
 17df83b0eb14baecdbeec3a28aae14f160c8e5f325811bb268182e63293a0004
@@ -408,7 +417,7 @@ f13t7k52a3c7av72e72qj44q5levvr34udf4e8hp8685tg9ratwqhrf94mj642kjp9ffcx7l5273uxp3
 2937614f4eab320d2c9af3c24c87c32fb1c508c85189df879a030259469eda09
 ```
 
-`RecvKey` bytes (`S || V || t`):
+Recv Key bytes (`S ++ V ++ t`):
 
 ```
 8a519096ebca5e78f98204887dd2a914e320d37d628ed9f4b49b21a469c0ef14
@@ -416,7 +425,7 @@ b2aac2520ba5a2d4ee78796b9f8b0c563df10c96af7b26979268d5a38560ab06
 2937614f4eab320d2c9af3c24c87c32fb1c508c85189df879a030259469eda09
 ```
 
-Receiving address:
+Receiving Address:
 
 ```
 f13fgep9htef0837vzqjy8m54fzn3jp5mav28dna95nvs6g6wqau2t92kz2g96tgk5aeu8j6ul3vx9v003pjt277exj7fx34drs4s2kps2e0jrr
@@ -426,25 +435,25 @@ f13fgep9htef0837vzqjy8m54fzn3jp5mav28dna95nvs6g6wqau2t92kz2g96tgk5aeu8j6ul3vx9v0
 
 For the same root, the other four Bech32f encodings are:
 
-`SpendKey`:
+Spend Key:
 
 ```
 spend1f4uxfwhkp7h8mlqn76hzrj3aj5h0lwq4p5clva42hwpctk44lurhgd4uu472ld8z4smnlvf384armzarejwa05m7fh05akqvw0lk7p6kzaxvr5nfw6jargc8kta5r9ehnghchfqpzfzjl8mmey4j6q03qs4yv900
 ```
 
-`ViewKey`:
+View Key:
 
 ```
 view1tz5t5l8fu7qvx2az3mxuzk2s3690ejm5t9kx720efmls2546gvm8gd4uu472ld8z4smnlvf384armzarejwa05m7fh05akqvw0lk7p6kzaxvr5nfw6jargc8kta5r9ehnghchfqpzfzjl8mmey4j6q03qszcekyq
 ```
 
-`RecvKey`:
+Recv Key:
 
 ```
 recv1tz5t5l8fu7qvx2az3mxuzk2s3690ejm5t9kx720efmls2546gvmxvagx0yxfqgdvlscz60n0r58ktp22qcw0s76yk5wnezzamcna5sjkzaxvr5nfw6jargc8kta5r9ehnghchfqpzfzjl8mmey4j6q03qse6tpf4
 ```
 
-`TrackingAddress`:
+Tracking address:
 
 ```
 c1tz5t5l8fu7qvx2az3mxuzk2s3690ejm5t9kx720efmls2546gvmq72w85x
