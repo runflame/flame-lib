@@ -58,8 +58,8 @@ material `t` alone is not a tracking capability.
 View Keys and Recv Keys cover their own node and descendants reached using only
 normal edges. They cannot cross a hardened edge, even when exported at the root.
 To share access to a hardened account, derive that account using a Spend Key and
-then export its View Key or Recv Key. This specification does not prescribe
-account paths or address-discovery lookahead rules.
+then export its View Key or Recv Key. The standard wallet paths are defined
+below; address-discovery lookahead rules are outside this specification.
 
 ## Conversions
 
@@ -150,6 +150,54 @@ An index `i` is an unsigned 32-bit integer, `0 <= i < 2^32`.
 The entire value, including the hardened bit, is appended as `LE32(i)`.
 Indices outside the unsigned 32-bit range MUST be rejected. A View Key or
 Recv Key MUST reject hardened indices before attempting child derivation.
+
+## Standard wallet derivation paths
+
+Wallets following the Flame account convention MUST use this path:
+
+```
+m / 35263' / network' / account' / change / n
+```
+
+`m` is the FlameKD root Spend Key derived from the 64-byte seed. Each path
+component applies one child derivation to the preceding node. An apostrophe
+means hardened derivation: `x'` selects index `2^31 + x`; a component without
+an apostrophe selects index `x` directly.
+
+| Component | Value | Derivation |
+| --- | --- | --- |
+| Flame identifier | `35263`, spelling `FLAME` on a telephone keypad | Hardened |
+| `network` | `0` for mainnet, `1` for testnet | Hardened |
+| `account` | Account number, starting at `0` | Hardened |
+| `change` | `0` for receiving, `1` for change | Normal |
+| `n` | Address index within that branch, starting at `0` | Normal |
+
+`account` and `n` MUST be less than `2^31`. The first path component `35263'`
+therefore uses the full child index `0x800089bf`. The Flame identifier is a
+private convention, not a registered BIP purpose or coin type. The network
+component is scoped to Flame.
+
+For account `0`, the receiving paths are:
+
+| Network | Path |
+| --- | --- |
+| Mainnet | `m/35263'/0'/0'/0/n` |
+| Testnet | `m/35263'/1'/0'/0/n` |
+
+Replacing the penultimate component with `1` selects the change branch.
+Both Receiving Addresses and Tracking addresses are conversions of the key
+at the selected path; the address format does not select a different branch.
+
+To delegate an account, derive its Spend Key at
+`m/35263'/network'/account'`, then export its View Key or Recv Key. Either can
+derive `/0/n` and `/1/n`, but cannot derive sibling accounts or cross the
+hardened network boundary. To delegate only receiving addresses, export the
+Recv Key at `m/35263'/network'/account'/0` instead.
+
+Wallets MUST use the Bech32f HRPs matching the selected network. Network and
+origin path are wallet context; they cannot be recovered from the raw key
+tuple. Changing an HRP does not derive the corresponding key on another
+network: that requires deriving the other hardened network branch.
 
 ## Normal derivation
 
@@ -244,9 +292,10 @@ The payload is the raw tuple below, and the HRP identifies its type and network.
 | Tracking address | `c` | `tc` | `enc(S)` | 32 | 52 | 60 / 61 |
 
 Testnet uses `"test" ++ mainnet_HRP` for keys and `"t" ++ mainnet_HRP` for
-addresses. The network belongs only to the textual encoding: raw tuples, seed
-processing, and key derivation are unchanged. The same key or address can be
-encoded for either network.
+addresses. HRP selection affects only textual encoding; raw tuples, seed
+processing, and the derivation algorithm are unchanged. The standard wallet
+paths select separate keys through the hardened network component, and
+wallets MUST encode them with the matching network HRP.
 
 `++` denotes concatenation. Encode the complete raw tuple in one 8-to-5-bit
 conversion, reading each byte most-significant bit first. Pad only the final

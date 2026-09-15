@@ -22,6 +22,7 @@
 //!
 //! `Display` and `FromStr` use mainnet. Use `to_bech32` and `from_bech32` to
 //! select a network explicitly. Network selection changes only the encoding.
+//! Standard wallet path constants live separately in [`wallet`].
 
 use std::{fmt, str::FromStr};
 
@@ -38,6 +39,8 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 pub use bip39::{Language, Mnemonic};
 
 mod encoding;
+
+pub mod util;
 
 #[cfg(test)]
 mod tests;
