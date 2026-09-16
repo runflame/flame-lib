@@ -1,0 +1,8 @@
+[package]
+name = "flame-node"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+flame-chain-service = { path = "../flame-chain-service" }
+flame-minting = { path = "../flame-minting" }

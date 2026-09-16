@@ -1,0 +1,10 @@
+[package]
+name = "flame-minting"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+btc-integration = { path = "../btc-integration" }
+flame-chain-service = { path = "../flame-chain-service" }
+flamechain = { path = "../flamechain" }
+flame-storage = { path = "../flame-storage" }

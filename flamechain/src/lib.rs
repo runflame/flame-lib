@@ -4,6 +4,7 @@ pub mod block;
 pub mod mempool;
 pub mod storage;
 pub mod utreexo;
+pub mod validation;
 
 pub use block::{
     AppliedBlock, Block, BlockHeader, BlockLimits, BlockTx, Blockchain, ChainError, ChainParams,
@@ -11,6 +12,7 @@ pub use block::{
 };
 pub use mempool::{Mempool, MempoolEntry, MempoolError, MempoolPolicy, RebaseReport};
 pub use storage::{Lease, SPARKS_PER_FLAME, StorageError, StorageParams};
+pub use validation::FlameBlockValidator;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]

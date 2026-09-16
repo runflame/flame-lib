@@ -10,6 +10,10 @@ members = [
     "flamevm",
     "btc-integration",
     "flamechain",
+    "flame-chain-service",
+    "flame-minting",
+    "flame-storage",
+    "flame-node",
 ]
 
 # Use the runflame fork of merlin to enable its `dynamic-labels`
