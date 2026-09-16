@@ -78,7 +78,7 @@ lists; block validation checks that both representations match before commit.
 At the beginning of core block `h`, before executing transactions:
 
 1. Remove leases whose `expiry_height == h` and return their units to the pool.
-2. Mark every actor whose remaining capacity is below its usage for destruction.
+2. Mark every actor whose expiring lease leaves its capacity below usage for freezing.
    Such actors cannot execute in this block.
 3. Add `ISSUED_UNITS_PER_CORE_BLOCK` to the pool.
 
@@ -86,25 +86,36 @@ Storage purchases then execute serially in transaction order and update the
 pool immediately. This makes every quote a deterministic function of preceding
 block execution.
 
-At the end of the block, each actor marked in step 2 is destroyed by a separate
-system internal transaction, ordered lexicographically by actor ID. The
-transaction removes its code and state; portable token values are recursively
-retired and all other stored values are discarded. Its unexpired leases remain
-in the expiry index and recycle only at their original expiration heights.
+At the end of the block, marked actors are frozen in lexicographic actor-ID
+order. Their resident code/state bodies are removed, but identity, code/state
+CellIDs, size metadata, and outstanding leases remain. No system internal
+transaction is generated and no token or other linear value is retired.
+Unexpired leases recycle only at their original expiration heights.
+
+A later transaction can recover missing bodies from its committed execution
+BoC. This is not redeployment: the existing actor identity and linear ownership
+remain intact. The current implementation retains registry metadata and both
+code/state roots, not literally one 32-byte record. Explicit self-destruction
+after dismantling checked-out state remains a separate operation.
 
 ## Actor usage and capacity
 
 Actor usage is measured deterministically as:
 
 ```text
-usage = len(code)
-      + len(canonical_encode(state))
+usage = sum(canonical Cell record bytes in the resident code/state graph)
       + LEASE_RECORD_BYTES * number_of_lease_records
 ```
 
-Each coalesced lease record is charged as two canonical `u64` fields: expiry
-height and storage units. Registry-tree overhead is not charged separately; the
-minimum 1 KiB lease provides the fixed per-actor allowance.
+Shared resident bodies are counted once within one actor's code/state graph.
+Pruned descendants occupy only reference hashes in their resident parents;
+their absent bodies are not charged. A fully frozen actor with no remaining
+leases has zero charged usage, although its registry metadata remains.
+
+Each coalesced lease record retains the policy charge for two canonical `u64`
+fields: expiry height and storage units. Registry/header and lease-Trie wrapping
+are not additionally charged; bounding the permanent metadata of frozen actors
+remains a node/protocol design concern rather than a claim that it is free.
 
 An actor's capacity at core-block height `h` is:
 
@@ -126,7 +137,38 @@ Execution memory does not count toward persistent usage, and storage capacity
 does not grant execution RAM. FlameVM charges variable-size allocation work to
 the active frame's gas budget. A provisional constructor therefore needs gas,
 not a storage-derived bootstrap allowance, to execute `addstorage`. The
-transaction-end `usage <= capacity` check remains unchanged.
+transaction-end `usage <= capacity` check remains unchanged. Fetching a missing
+body into the current execution is not a storage purchase or persistent restore.
+
+### Content, availability, and recovery
+
+Actor layouts and their ordered lease Tries are specified in
+[encoding.md](encoding.md). `code_root` and `state_root` are ordinary CellIDs
+for snake-encoded bytecode and one encoded Value. The actor registry commits
+both its actor-layout root and the exact resident graph's `BoCID`.
+
+The VM resolver is scoped to the current actor's resident code/state body set
+and the initiating external transaction's frozen execution BoC. Actor-layout
+and lease-index metadata belong to the registry commitment and archival export,
+not this implicit execution source. Instruction-boundary scope refreshes share
+the immutable body set rather than copying or rebuilding it. Loaded bodies do not
+silently become rent-bearing. `save` and `setcode` retain newly constructed
+reachable bodies and previously owned reachable bodies; they do not union the
+external witness bag into actor storage. Removed branches cease to contribute
+to stored availability or rent. Partial Dicts retain their authenticated
+portability and linearity metadata when their descendants are absent.
+
+Storage reads decode canonical Cells even when an in-memory Value cache exists.
+This prevents earlier executions' private witnesses or loaded Dict branches
+from changing behavior after a restart. Each logical root/continuation access
+still goes through the metered resolver. Failure and re-entrancy checks preserve
+checkout ownership: successful `load` checks out the state once, `save` requires
+that checkout, and enclosing call/transaction rollback restores it.
+
+`Blockchain::actor_storage` returns a read-only `StoredActor` snapshot containing
+the layout root and exact resident BoC for archival and witness construction.
+Expiry freezing is implemented; a dedicated VM operation for arbitrary partial
+pruning or persistent restoration is not yet provided.
 
 ## Pricing
 
@@ -175,22 +217,12 @@ parameters:
 | `134_216_704` bytes | `1` unit | `17_179_738_112_000_000_000` | available |
 | `134_217_728` bytes | `0` units | — | unavailable |
 
-The canonical storage-effect wire vector is pinned alongside the other TxLog
-vectors in FlameVM's golden tests. It covers the `StoragePurchase` and
-`ActorDestroy` tags, canonical actor id, little-endian byte and expiry fields,
-and compact `Scalar` fee encoding.
-
-Actor commitments are canonical independently of persistence encoding.
-`code_root` is a Merlin transcript under `flamevm.actor.code.root` containing
-the code bytes. `state_root` is a transcript under
-`flamevm.actor.state.root` containing the canonical encoded state Value. An
-actor leaf commits, in order, to actor id; live marker; code and state roots;
-u64-LE code and state byte counts; u64-LE lease count; then each lease's
-u64-LE expiry and unit count in expiry order. The actor registry root is the
-Merkle root under `flamechain.actors` over actor-id order, including lease-only
-tombstones. The golden fixture `(actor=07×32, code=1d, state=Scalar(42), one
-1024-byte lease at height 0)` has root
-`2694dc0a474475efe48096f89f41ad71bbadd7694021fc6ede5b3397d967f572`.
+Storage-purchase effects use the TxEntry Cell encoding in
+[encoding.md](encoding.md): the expected actor identity, byte amount, expiry,
+and fixed-width Scalar fee are committed by the transaction-log Trie. Actor
+registry roots likewise use Cell Tries, including lease-only tombstones.
+Tests cover exact price vectors, content/availability commitments, canonical
+public storage reads, expiry freezing, and checkpoint/reorganization recovery.
 
 This endpoint-price formula is deliberately **not path independent**. Splitting
 one large request into many minimum-size purchases pays the successive marginal

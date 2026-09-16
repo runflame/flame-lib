@@ -1,6 +1,6 @@
 //! Tests for actor identity, charged usage, and registry atomicity.
 
-use readerwriter::{Decodable, ReadError};
+use cells::{Cell, CellDecode, CellError};
 
 use super::mem_registry::MemRegistry;
 use crate::{
@@ -73,10 +73,10 @@ fn actorid_forms_share_one_registry_key() {
 
 #[test]
 fn actorid_decode_rejects_unknown_tag() {
-    let mut bytes = [0x42u8].as_slice();
+    let cell = Cell::new(vec![0x42u8], vec![]).unwrap();
     assert!(matches!(
-        ActorID::decode(&mut bytes),
-        Err(ReadError::InvalidFormat)
+        ActorID::from_cell(&cell, &mut ()),
+        Err(CellError::InvalidFormat)
     ));
 }
 

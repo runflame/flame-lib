@@ -1,102 +1,38 @@
-//! Contracts, predicates, and taproot-proofs.
+//! Linear Contracts and Cell-backed Taproot predicates.
 
 use bulletproofs::PedersenGens;
-use core::any::Any;
-use core::fmt;
+use cells::{
+    BagOfCells, CellBuilder, CellDecode, CellEncode, CellError, CellID, CellRef, CellResolver,
+    CellSlice, Trie,
+};
+use core::{any::Any, fmt};
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar;
 use merlin::Transcript;
-use readerwriter::{
-    Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer,
-};
+use std::{convert::TryFrom, sync::Arc};
 
-use crate::encoding::{
-    read_list_prefix, read_string, read_value, write_admitted_value, write_list_prefix, write_value,
-};
-use crate::errors::VMError;
-use crate::vm::Anchor;
-use crate::{Point, String, Value};
+use crate::{errors::VMError, vm::Anchor, ScriptBuilder, Value};
 
-/// 32-byte canonical identifier of a `Contract`. Computed via Merlin
-/// transcript over the contract's canonical wire encoding (see `Contract::id`).
-/// Stored in `TxEntry::Input` to commit a consumed contract's identity
-/// without re-storing its payload.
-pub type ContractID = [u8; 32];
+/// The Cell ID of a Contract output: predicate, anchor, and one payload Value.
+pub type ContractID = CellID;
 
-// ── Predicate ────────────────────────────────────────────────────
-
-/// Prover-side metadata attached to a [`Predicate`]. The witness
-/// helps construct taproot-proofs, signatures, and re-derive the
-/// predicate's key on the prover side; it never crosses the wire.
-///
-/// Today the only impl is [`PredicateTree`] — the Taproot merkle
-/// witness with internal key + program leaves. Other anticipated
-/// witnesses include:
-///
-/// - **Raw private keys** for tests / build-and-sign flows.
-/// - **Keytree derivation indices** so wallets can re-derive a
-///   predicate's key from a seed + path.
-/// - **Multikey / MuSig layouts** for 2-of-2 payment channels and
-///   other multi-party signing protocols.
-///
-/// Each is added by `impl PredicateWitness for MyType` — no touch
-/// to `Predicate` itself or its verifier-side call sites.
-///
-/// `Any` lets prover-side code downcast via
-/// [`Predicate::witness_as`]. `Send + Sync` keeps `Predicate`
-/// usable across threads (the txlog's `Output(Contract)` carries it).
-/// `Debug` supports the manual `Debug` impl on `Predicate`.
+/// Prover-side metadata; never part of a Predicate's 32-byte public encoding.
 pub trait PredicateWitness: Any + Send + Sync + fmt::Debug {
-    /// Canonical 32-byte compressed Ristretto point this witness
-    /// resolves to. Must equal the `point` field of the
-    /// `Predicate` that holds this witness — checked at
-    /// construction time.
     fn to_point(&self) -> CompressedRistretto;
-
-    /// Clones the witness behind a fresh boxed trait object. Used
-    /// by `<Predicate as Clone>::clone`.
     fn clone_witness(&self) -> Box<dyn PredicateWitness>;
-
     fn as_any(&self) -> &dyn Any;
 }
 
-/// Unlock condition for a contract — a Taproot-compressed point
-/// `P = X + H(X, M) · B` where `X` is the internal key and `M` is
-/// the merkle root over the program tree.
-///
-/// The on-wire form is just `point` (32 bytes). `witness` is
-/// optional prover-side metadata; it never serializes.
-///
-/// **Construction:**
-///
-/// - `Predicate::opaque(point)` — verifier-side; the wire-decoded
-///   form, no witness attached.
-/// - `Predicate::tree(tree)` — prover-side; wraps a
-///   [`PredicateTree`] witness.
-/// - `Predicate::with_witness(w)` — prover-side; attaches any
-///   custom [`PredicateWitness`] (Multikey, keytree-derived key,
-///   raw test scalar, …).
-///
-/// **Wire form is invariant across construction styles.** Calling
-/// `.to_point()` on any of the above returns the same 32 bytes —
-/// the constructors enforce this by deriving `point` from the
-/// witness when one is provided.
+/// Unlock condition P = X + H(X, root Cell ID) · B.
 pub struct Predicate {
-    /// Canonical wire form. The only thing observable to
-    /// verifiers; equal to `witness.to_point()` when `witness` is
-    /// `Some` (enforced by the constructors).
     pub(crate) point: CompressedRistretto,
-
-    /// Optional prover metadata. `None` is the verifier's view.
-    /// Skipped by any serialization that targets the wire format.
     pub(crate) witness: Option<Box<dyn PredicateWitness>>,
 }
 
 impl Clone for Predicate {
-    /// Clones the point; delegates witness cloning to [`PredicateWitness::clone_witness`].
     fn clone(&self) -> Self {
-        Predicate {
+        Self {
             point: self.point,
             witness: self.witness.as_ref().map(|w| w.clone_witness()),
         }
@@ -104,54 +40,46 @@ impl Clone for Predicate {
 }
 
 impl fmt::Debug for Predicate {
-    /// Prints only the canonical point. The witness type is opaque
-    /// to the formatter (could be anything implementing
-    /// `PredicateWitness`); we don't try to render it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Predicate").field(&self.point).finish()
     }
 }
 
-/// One leaf in a `PredicateTree`'s merkle commitment. Every program leaf
-/// is paired with a `Blinding` sibling so the position of any given
-/// program inside its pair is uniformly random — observers walking a
-/// merkle proof cannot tell program leaves apart from blinding leaves.
+/// The sum tag distinguishes executable programs from random blinding data.
 #[derive(Clone, Debug)]
 pub enum PredicateLeaf {
-    /// A script program that, if matched by a `TaprootProof`, unlocks the contract.
     Program(Vec<u8>),
-    /// A 32-byte random sibling that hides its program partner's position.
     Blinding([u8; 32]),
 }
 
-/// Prover-side witness for a Taproot predicate.
+impl CellEncode for PredicateLeaf {
+    fn encode(&self, builder: &mut CellBuilder) -> Result<(), CellError> {
+        match self {
+            Self::Program(program) => {
+                builder.store_u8(0)?.store_snake(program)?;
+            }
+            Self::Blinding(bytes) => {
+                builder.store_u8(1)?.store_bytes(bytes)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Prover witness containing the resident program Trie and its blinding leaves.
 ///
-/// The tree commits to one or more **programs** via a balanced merkle
-/// root over `leaves`, then Taproot-tweaks the internal key by
-/// `H(X, M)` to produce the opaque predicate point. Each program leaf
-/// is paired with a `Blinding` sibling derived deterministically from
-/// the `blinding_key` seed passed to `new`, so the on-tree position of
-/// a program within its pair is uniformly random. The seed itself is
-/// not retained — once the leaves are built, the seed is no longer
-/// needed for [`point`](Self::point) or [`taproot_proof_for`](Self::taproot_proof_for).
-///
-/// `point` caches `X + H(X, M) · B` so subsequent reads are O(1).
-/// `flamevm` reads it via `Predicate::to_point()` from the per-contract
-/// txid hash, the txlog's `Send.refund_predicate` encoding, and the
-/// `signtx`/`signcall` verification-key lookup — a hot path that
-/// previously re-walked the merkle root and re-multiplied the
-/// basepoint table on every call.
-///
-/// Fields are `pub(crate)` to enforce the construction invariants:
-/// non-empty `leaves` exactly `2 × programs.len()` in length, an
-/// `internal_key` that decompresses to a valid Ristretto point,
-/// and `point` populated by `new` from the other two fields.
+/// Each program occupies one randomly selected slot in a pair of leaves. The
+/// other slot contains a deterministic, secret-seeded blinding value. The root
+/// Cell is the raw root of an eight-byte-key Trie, with no count envelope.
+/// Its Cell ID commits directly to the paths and leaves in the Taproot tweak.
 #[derive(Clone, Debug)]
 pub struct PredicateTree {
     pub(crate) internal_key: CompressedRistretto,
     pub(crate) leaves: Vec<PredicateLeaf>,
-    /// Cached Taproot-tweaked point `P = X + H(X, M) · B`.
+    root: CellRef,
     pub(crate) point: CompressedRistretto,
+    /// Optional prover programs in logical input order; never public encoding.
+    scripts: Vec<ScriptBuilder>,
 }
 
 impl PredicateWitness for PredicateTree {
@@ -167,559 +95,495 @@ impl PredicateWitness for PredicateTree {
 }
 
 impl Predicate {
-    /// Verifier-style construction: wraps a wire-decoded point. No
-    /// witness attached. The on-wire `point` is the only thing the
-    /// verifier ever sees; constructing via `opaque` is what
-    /// `op_input` and predicate decoding do.
     pub fn opaque(point: CompressedRistretto) -> Self {
-        Predicate {
+        Self {
             point,
             witness: None,
         }
     }
 
-    /// Prover-style construction: attaches a typed witness. The
-    /// predicate's `point` is derived from the witness so the two
-    /// stay in lockstep.
     pub fn with_witness<W: PredicateWitness>(witness: W) -> Self {
-        let point = witness.to_point();
-        Predicate {
-            point,
+        Self {
+            point: witness.to_point(),
             witness: Some(Box::new(witness)),
         }
     }
 
-    /// Convenience: attach a [`PredicateTree`] witness. Equivalent
-    /// to `Predicate::with_witness(tree)`.
     pub fn tree(tree: PredicateTree) -> Self {
         Self::with_witness(tree)
     }
-
-    /// Returns the verifier-visible compressed point. O(1): the
-    /// constructors cache it.
     pub fn to_point(&self) -> CompressedRistretto {
         self.point
     }
-
-    /// Strips any prover-side witness data, leaving only the opaque
-    /// point. Used when sealing a contract into wire encoding.
-    pub fn to_opaque(&self) -> Predicate {
-        Predicate::opaque(self.point)
+    pub fn to_opaque(&self) -> Self {
+        Self::opaque(self.point)
     }
 
-    /// Borrows the witness as `&W` if one is attached and downcasts
-    /// to the requested type. Returns `None` if no witness is
-    /// attached or the witness is of a different type.
-    ///
-    /// Used by prover-side code that needs the concrete witness:
-    /// e.g. `predicate.witness_as::<PredicateTree>()` to construct
-    /// a `TaprootProof`.
     pub fn witness_as<W: PredicateWitness>(&self) -> Option<&W> {
         self.witness.as_ref()?.as_any().downcast_ref::<W>()
     }
 
-    /// The 32-byte verification key for `signtx` / `signcall`.
-    /// Equal to the predicate's opaque point.
     pub fn verification_key(&self) -> CompressedRistretto {
         self.point
     }
-}
 
-/// 32-byte compressed Ristretto — the verifier's view. Any
-/// prover-side witness is dropped on the wire.
-impl Encodable for Predicate {
-    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
-        w.write(b"predicate", self.point.as_bytes())
-    }
-}
-
-impl ExactSizeEncodable for Predicate {
-    fn encoded_size(&self) -> usize {
-        32
-    }
-}
-
-impl Decodable for Predicate {
-    fn decode(r: &mut impl Reader) -> Result<Self, ReadError> {
-        let pt = r.read_u8x32()?;
-        Ok(Predicate::opaque(CompressedRistretto(pt)))
-    }
-}
-
-impl Predicate {
-    /// The secondary Pedersen generator `B_blinding`, compressed.
-    /// Suitable as an internal key when no key-path spend is desired:
-    /// the discrete log of `B_blinding` w.r.t. the primary basepoint
-    /// `B` is unknown by construction, so signing for the resulting
-    /// tweaked predicate point is computationally infeasible.
-    /// `PredicateTree::new(None, …)` substitutes this point.
+    /// Unknown discrete log, disabling the key-path spend.
     pub fn unspendable_key() -> CompressedRistretto {
         PedersenGens::default().B_blinding.compress()
     }
 
-    /// Verifies a `TaprootProof` against this predicate. On success returns
-    /// the unlocked program bytes (the leaf the proof opens). On failure
-    /// (path mismatch, decompression failure, etc.) returns
-    /// `VMError::TaprootProofMismatch` — a hard error: contract-open
-    /// failures must not be recoverable.
-    pub fn verify_taproot_proof<'a>(&self, cp: &'a TaprootProof) -> Result<&'a [u8], VMError> {
-        // Reconstruct the tweaked point P' = X + H(X, M)·B from the proof
-        // and require it to equal the predicate's opaque point.
-        let leaf = program_leaf_hash(&cp.program);
-        let root = merkle_walk_up(leaf, &cp.neighbors, &cp.position)?;
-        let h = taproot_tweak(&cp.internal_key, &root);
-        let x_point = cp
+    /// Authenticates a branch selector and loads its code through this execution's
+    /// resolver. There are no separate sibling hashes or caller-supplied code.
+    /// Missing path/continuation Cells are hard errors, never alternate branches.
+    pub fn open_branch<R: CellResolver + ?Sized>(
+        &self,
+        proof: &TaprootProof,
+        cells: &mut R,
+        max_program_bytes: usize,
+    ) -> Result<Vec<u8>, VMError> {
+        let internal = proof
             .internal_key
             .decompress()
             .ok_or(VMError::TaprootProofMismatch)?;
-        let p_prime = x_point + RISTRETTO_BASEPOINT_TABLE * &h;
-        if p_prime.compress() != self.to_point() {
+        let tweak = taproot_tweak(&proof.internal_key, &proof.root);
+        if (internal + RISTRETTO_BASEPOINT_TABLE * &tweak).compress() != self.point {
             return Err(VMError::TaprootProofMismatch);
         }
-        Ok(&cp.program)
+        let leaf = Trie::lookup(
+            &CellRef::pruned(proof.root),
+            &proof.index.to_be_bytes(),
+            cells,
+        )?
+        .ok_or(VMError::TaprootProofMismatch)?;
+        let mut slice = CellSlice::new(&leaf);
+        if slice.load_u8()? != 0 {
+            return Err(VMError::TaprootProofMismatch);
+        }
+        let program = slice.load_snake(cells, max_program_bytes)?;
+        slice.finish()?;
+        Ok(program)
     }
 }
 
-impl PredicateTree {
-    /// Builds a validated tree.
-    ///
-    /// `internal_key = None` substitutes `Predicate::unspendable_key()`
-    /// (the secondary Pedersen generator `B_blinding`), producing a
-    /// program-only predicate that nobody can sign for — the only way to
-    /// satisfy it is via a `TaprootProof` against one of the embedded leaves.
-    ///
-    /// `blinding_key` seeds a deterministic per-program blinding factor
-    /// so the same `(internal_key, programs, blinding_key)` triple always
-    /// produces the same opaque predicate point.
-    ///
-    /// Errors if `programs` is empty, or if a caller-supplied
-    /// `internal_key` does not decompress to a valid Ristretto point.
-    pub fn new(
-        internal_key: Option<CompressedRistretto>,
-        programs: Vec<Vec<u8>>,
-        blinding_key: [u8; 32],
-    ) -> Result<PredicateTree, VMError> {
-        if programs.is_empty() {
-            return Err(VMError::EmptyPredicateTree);
-        }
-        let internal_key = internal_key.unwrap_or_else(Predicate::unspendable_key);
-        let x_point = internal_key.decompress().ok_or(VMError::InvalidPoint)?;
-        let leaves = create_merkle_leaves(&programs, &blinding_key);
-        // Precompute the Taproot-tweaked point once at construction.
-        // `Predicate::to_point()` returns this cached value in O(1);
-        // hot paths (per-contract `Contract::id`, txid hashing, sig vk lookup)
-        // would otherwise re-walk the merkle tree and re-multiply the
-        // basepoint table on every call.
-        let root = merkle_root_of_leaves(&leaves);
-        let h = taproot_tweak(&internal_key, &root);
-        let point = (x_point + RISTRETTO_BASEPOINT_TABLE * &h).compress();
-        Ok(PredicateTree {
-            internal_key,
-            leaves,
-            point,
-        })
-    }
-
-    /// Convenience: builds a tree with the unspendable internal key
-    /// (`Predicate::unspendable_key`), so the predicate can only be
-    /// satisfied via a `TaprootProof` against one of the embedded programs.
-    /// Equivalent to `PredicateTree::new(None, programs, blinding_key)`.
-    pub fn scripts_only(
-        programs: Vec<Vec<u8>>,
-        blinding_key: [u8; 32],
-    ) -> Result<PredicateTree, VMError> {
-        PredicateTree::new(None, programs, blinding_key)
-    }
-
-    /// Read-only accessor for the internal key.
-    pub fn internal_key(&self) -> &CompressedRistretto {
-        &self.internal_key
-    }
-
-    /// Read-only accessor for the leaves (both program and blinding).
-    pub fn leaves(&self) -> &[PredicateLeaf] {
-        &self.leaves
-    }
-
-    /// Iterator over the program leaves in original input order.
-    pub fn programs(&self) -> impl Iterator<Item = &[u8]> {
-        self.leaves.iter().filter_map(|l| match l {
-            PredicateLeaf::Program(p) => Some(p.as_slice()),
-            PredicateLeaf::Blinding(_) => None,
-        })
-    }
-
-    /// The predicate's merkle commitment `M` — the root over its program/
-    /// blinding leaves.
-    pub fn merkle_root(&self) -> [u8; 32] {
-        merkle_root_of_leaves(&self.leaves)
-    }
-
-    /// Builds a `TaprootProof` that opens the `program_index`-th program leaf.
-    /// Errors if `program_index` is beyond the number of programs.
-    ///
-    /// The returned proof's `neighbors` are leaf-to-root; `position` is a
-    /// bit-packed string where bit `i` (LSB-first within byte) describes
-    /// step `i` of the walk-up: `0` means "current hash on left / neighbor
-    /// on right", `1` means "swap".
-    pub fn taproot_proof_for(&self, program_index: usize) -> Result<TaprootProof, VMError> {
-        let leaf_index = self.program_leaf_index(program_index)?;
-        let program = match &self.leaves[leaf_index] {
-            PredicateLeaf::Program(p) => p.clone(),
-            PredicateLeaf::Blinding(_) => unreachable!("program_leaf_index points at a Program"),
-        };
-        // Descend root-to-leaf, collecting siblings, then reverse so the
-        // resulting list is leaf-to-root (the order `merkle_walk_up` wants).
-        let mut neighbors = Vec::new();
-        let mut bits = Vec::new();
-        let mut sublist: &[PredicateLeaf] = &self.leaves;
-        let mut subindex = leaf_index;
-        while sublist.len() >= 2 {
-            let k = sublist.len().next_power_of_two() / 2;
-            if subindex >= k {
-                neighbors.push(merkle_root_of_leaves(&sublist[..k]));
-                bits.push(1);
-                sublist = &sublist[k..];
-                subindex -= k;
-            } else {
-                neighbors.push(merkle_root_of_leaves(&sublist[k..]));
-                bits.push(0);
-                sublist = &sublist[..k];
-            }
-        }
-        neighbors.reverse();
-        bits.reverse();
-        Ok(TaprootProof {
-            internal_key: self.internal_key,
-            neighbors,
-            position: pack_position_bits(&bits),
-            program,
-        })
-    }
-
-    /// Maps a logical program index to its position among the leaves.
-    /// Programs occupy pairs `(2k, 2k+1)` with the Program in either slot
-    /// per the blinding-factor LSB; we probe slot `2k` first, fall back
-    /// to `2k+1`.
-    fn program_leaf_index(&self, program_index: usize) -> Result<usize, VMError> {
-        let pair = program_index
-            .checked_mul(2)
-            .ok_or(VMError::ProgramIndexOutOfRange)?;
-        if pair >= self.leaves.len() {
-            return Err(VMError::ProgramIndexOutOfRange);
-        }
-        Ok(match &self.leaves[pair] {
-            PredicateLeaf::Program(_) => pair,
-            PredicateLeaf::Blinding(_) => pair + 1,
-        })
-    }
-}
-
-/// Deterministically generates the leaf list: for each program, a
-/// 32-byte blinding factor is squeezed from a domain-separated transcript
-/// keyed by `blinding_key` and bound to the entire program list. The
-/// blinding factor's LSB picks whether the program sits on the left or
-/// right of its blinding sibling.
-fn create_merkle_leaves(progs: &[Vec<u8>], blinding_key: &[u8; 32]) -> Vec<PredicateLeaf> {
-    let mut t = Transcript::new(b"flamevm.taproot.blinding");
-    let n = progs.len() as u64;
-    t.append_message(b"n", &n.to_le_bytes());
-    t.append_message(b"key", blinding_key);
-    for prog in progs {
-        t.append_message(b"prog", prog);
-    }
-    let mut leaves = Vec::with_capacity(progs.len() * 2);
-    for prog in progs {
-        let mut blinding = [0u8; 32];
-        t.challenge_bytes(b"blinding", &mut blinding);
-        let blinding_leaf = PredicateLeaf::Blinding(blinding);
-        let program_leaf = PredicateLeaf::Program(prog.clone());
-        if blinding[0] & 1 == 0 {
-            leaves.push(blinding_leaf);
-            leaves.push(program_leaf);
-        } else {
-            leaves.push(program_leaf);
-            leaves.push(blinding_leaf);
-        }
-    }
-    leaves
-}
-
-/// Balanced merkle root over an ordered leaf list. Splits at
-/// `next_power_of_two(n) / 2`; a singleton leaf hashes to its own root.
-fn merkle_root_of_leaves(leaves: &[PredicateLeaf]) -> [u8; 32] {
-    debug_assert!(!leaves.is_empty(), "merkle_root_of_leaves: empty list");
-    if leaves.len() == 1 {
-        leaf_hash(&leaves[0])
-    } else {
-        let k = leaves.len().next_power_of_two() / 2;
-        let left = merkle_root_of_leaves(&leaves[..k]);
-        let right = merkle_root_of_leaves(&leaves[k..]);
-        merkle_node_hash(&left, &right)
-    }
-}
-
-/// Packs a slice of `0`/`1` bit values into bytes, LSB-first within
-/// each byte. Trailing high bits in the last byte are zero-padded.
-fn pack_position_bits(bits: &[u8]) -> Vec<u8> {
-    let byte_count = bits.len().div_ceil(8);
-    let mut out = vec![0u8; byte_count];
-    for (i, &b) in bits.iter().enumerate() {
-        if b & 1 != 0 {
-            out[i / 8] |= 1 << (i % 8);
-        }
-    }
-    out
-}
-
-// ── TaprootProof ────────────────────────────────────────────────────
-
-/// Taproot path proof + the leaf program being unlocked.
-///
-/// Stack-encoded as four separate strings that the `open` opcode pops
-/// (top to bottom: program, position, neighbors-list, internal_key) and
-/// hands here as a struct. The `neighbors` list is a list-style Dict of
-/// 32-byte strings; the `position` is a bit-packed string where bit `i`
-/// indicates the side (0 = left, 1 = right) of the i-th neighbor.
-#[derive(Clone, Debug)]
-pub struct TaprootProof {
-    /// Internal key `X` of the Taproot construction.
-    pub internal_key: CompressedRistretto,
-    /// Sibling hashes along the merkle path, leaf-to-root.
-    pub neighbors: Vec<[u8; 32]>,
-    /// Position bits: bit `i` is `0` if the i-th neighbor is on the
-    /// right of the running hash, `1` if on the left.
-    pub position: Vec<u8>,
-    /// The leaf program being unlocked.
-    pub program: Vec<u8>,
-}
-
-// ── Contract ─────────────────────────────────────────────────────────
-
-/// A linear-typed contract carrying a payload under an unlock predicate.
-///
-/// `Clone` is the Rust-level deep copy (witnesses on Token payloads
-/// survive). It is not VM copyability — contracts are linear on the stack
-/// (`is_copyable` denies `dup`); they move, not copy, in script flow.
-#[derive(Clone, Debug)]
-pub struct Contract {
-    /// Unlock predicate. Always opaque when the contract crosses the wire;
-    /// may carry prover-witness when the contract is freshly built in-VM.
-    pub predicate: Predicate,
-    /// 32-byte anchor — derived by ratcheting from the prior anchor.
-    pub anchor: Anchor,
-    /// Immutable payload, admitted only through checked Contract construction.
-    payload: Vec<Value>,
-}
-
-impl Contract {
-    /// Constructs a contract, rejecting any non-portable payload item.
-    pub fn new(predicate: Predicate, anchor: Anchor, payload: Vec<Value>) -> Result<Self, VMError> {
-        if payload.iter().any(|v| !v.is_portable()) {
-            return Err(VMError::NonPortableInOutput);
-        }
-        Ok(Contract {
-            predicate,
-            anchor,
-            payload,
-        })
-    }
-
-    /// Borrows the immutable payload.
-    pub fn payload(&self) -> &[Value] {
-        &self.payload
-    }
-
-    /// Consumes the contract and returns its payload.
-    pub fn into_payload(self) -> Vec<Value> {
-        self.payload
-    }
-
-    /// Logical heap work needed to clone this contract for call-failure escrow.
-    pub(crate) fn clone_gas(&self) -> u64 {
-        self.payload
-            .iter()
-            .fold(self.payload.len() as u64, |gas, value| {
-                gas.saturating_add(value.clone_gas())
-            })
-    }
-
-    /// Unique content identity of this contract — commits to its predicate,
-    /// anchor, and payload. Used as the `Output` txlog entry and as the
-    /// `signtx`/`signcall` signed message. Uniqueness comes from the anchor;
-    /// the payload bytes are bound so the id is a true content commitment.
-    ///
-    /// Cannot fail: all Contract construction paths admit only portable values.
-    pub fn id(&self) -> [u8; 32] {
-        let mut t = Transcript::new(b"flamevm.contract.id");
-        t.append_message(b"predicate", self.predicate.to_point().as_bytes());
-        t.append_message(b"anchor", &self.anchor.0);
-        let len = self.payload.len() as u64;
-        t.append_message(b"payload.len", &len.to_le_bytes());
-        // Bind each payload item's canonical wire bytes. Re-use a single
-        // buffer across items; clear between writes.
-        let mut buf = Vec::new();
-        for v in &self.payload {
-            buf.clear();
-            write_value(&mut buf, v).expect("portable payload value must have a canonical encoder");
-            t.append_message(b"payload.item", &buf);
-        }
-        let mut h = [0u8; 32];
-        t.challenge_bytes(b"id", &mut h);
-        h
-    }
-
-    /// Canonical wire bytes — thin wrapper over `Encodable::encode_to_vec`
-    /// for callers that want an owned `Vec<u8>` (e.g. a contract String witness
-    /// serialization). Cannot fail: `Vec<u8>` is an infallible writer
-    /// and payload entries are guaranteed portable by construction.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.encode_to_vec()
-    }
-}
-
-/// Canonical wire form: a list-style `Dict` with three entries —
-/// predicate (`Point`), anchor (32-byte `String`), payload (nested
-/// list-style `Dict` of values). Encoding is representation-only; Contract
-/// construction owns the portability invariant.
-impl Encodable for Contract {
-    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
-        write_list_prefix(w, 3)?;
-        let pred_point = Point::from_compressed(self.predicate.to_point());
-        write_admitted_value(w, &Value::Point(pred_point))?;
-        write_admitted_value(w, &Value::String(String::from(self.anchor.0.to_vec())))?;
-        write_list_prefix(w, self.payload.len())?;
-        for v in &self.payload {
-            write_admitted_value(w, v)?;
-        }
+impl CellEncode for Predicate {
+    fn encode(&self, builder: &mut CellBuilder) -> Result<(), CellError> {
+        builder.store_bytes(self.point.as_bytes())?;
         Ok(())
     }
 }
 
-/// Reads the canonical wire form, then admits the decoded payload through
-/// [`Contract::new`]. This top-level Contract-domain check is independent of parsing;
-/// nested Dict checks remain O(1) through their sticky metadata.
-///
-/// `ReadError::InvalidFormat` on:
-/// - outer shape != list-Dict of exactly 3 entries,
-/// - entry 0 not a `Point`,
-/// - entry 1 not a 32-byte `String`,
-/// - entry 2 not a list-Dict,
-/// - any payload value missing or unparseable.
-impl Decodable for Contract {
-    fn decode(r: &mut impl Reader) -> Result<Contract, ReadError> {
-        let outer_count = read_list_prefix(r).map_err(|_| ReadError::InvalidFormat)?;
-        if outer_count != 3 {
-            return Err(ReadError::InvalidFormat);
+impl CellDecode for Predicate {
+    fn decode<R: CellResolver + ?Sized>(
+        slice: &mut CellSlice<'_>,
+        cells: &mut R,
+    ) -> Result<Self, CellError> {
+        Ok(Self::opaque(CompressedRistretto(<[u8; 32]>::decode(
+            slice, cells,
+        )?)))
+    }
+}
+
+impl PredicateTree {
+    /// Builds a deterministic, blinded program Trie. None disables key spends.
+    pub fn new(
+        internal_key: Option<CompressedRistretto>,
+        programs: Vec<Vec<u8>>,
+        blinding_key: [u8; 32],
+    ) -> Result<Self, VMError> {
+        if programs.is_empty() {
+            return Err(VMError::EmptyPredicateTree);
         }
-        let predicate = match read_value(r) {
-            Ok(Some(Value::Point(p))) => Predicate::opaque(p.to_compressed()),
-            _ => return Err(ReadError::InvalidFormat),
+        let internal_key = internal_key.unwrap_or_else(Predicate::unspendable_key);
+        let internal = internal_key.decompress().ok_or(VMError::InvalidPoint)?;
+        let leaves = create_blinded_leaves(&programs, &blinding_key);
+        let mut trie = Trie::new(8)?;
+        for (index, leaf) in leaves.iter().enumerate() {
+            let index = u64::try_from(index).map_err(|_| VMError::ProgramIndexOutOfRange)?;
+            trie.insert(&index.to_be_bytes(), leaf.to_cell()?, &mut ())?;
+        }
+        let root = trie.into_root().expect("programs are nonempty");
+        let tweak = taproot_tweak(&internal_key, &root.id());
+        let point = (internal + RISTRETTO_BASEPOINT_TABLE * &tweak).compress();
+        Ok(Self {
+            internal_key,
+            leaves,
+            root,
+            point,
+            scripts: Vec::new(),
+        })
+    }
+
+    /// Builds the same public tree as [`Self::new`], retaining each program's
+    /// private assignments and embedded public witnesses for the prover.
+    /// [`ScriptBuilder::push_taproot_proof`] attaches only the selected program.
+    pub fn from_scripts(
+        internal_key: Option<CompressedRistretto>,
+        programs: Vec<ScriptBuilder>,
+        blinding_key: [u8; 32],
+    ) -> Result<Self, VMError> {
+        let mut tree = Self::new(
+            internal_key,
+            programs.iter().map(ScriptBuilder::to_bytecode).collect(),
+            blinding_key,
+        )?;
+        tree.scripts = programs;
+        Ok(tree)
+    }
+
+    pub(crate) fn script_witness(&self, program_index: usize) -> Option<&ScriptBuilder> {
+        self.scripts.get(program_index)
+    }
+
+    pub fn scripts_only(programs: Vec<Vec<u8>>, blinding_key: [u8; 32]) -> Result<Self, VMError> {
+        Self::new(None, programs, blinding_key)
+    }
+    pub fn internal_key(&self) -> &CompressedRistretto {
+        &self.internal_key
+    }
+    pub fn leaves(&self) -> &[PredicateLeaf] {
+        &self.leaves
+    }
+
+    pub fn programs(&self) -> impl Iterator<Item = &[u8]> {
+        self.leaves.iter().filter_map(|leaf| match leaf {
+            PredicateLeaf::Program(program) => Some(program.as_slice()),
+            PredicateLeaf::Blinding(_) => None,
+        })
+    }
+    pub fn root(&self) -> &CellRef {
+        &self.root
+    }
+    pub fn root_id(&self) -> CellID {
+        self.root.id()
+    }
+
+    /// Selects a program in original input order. The proof index is its actual
+    /// blinded Trie position, not its logical program index.
+    pub fn taproot_proof_for(&self, program_index: usize) -> Result<TaprootProof, VMError> {
+        let pair = program_index
+            .checked_mul(2)
+            .ok_or(VMError::ProgramIndexOutOfRange)?;
+        let first = self
+            .leaves
+            .get(pair)
+            .ok_or(VMError::ProgramIndexOutOfRange)?;
+        let index = pair + usize::from(matches!(first, PredicateLeaf::Blinding(_)));
+        Ok(TaprootProof {
+            internal_key: self.internal_key,
+            root: self.root.id(),
+            index: u64::try_from(index).map_err(|_| VMError::ProgramIndexOutOfRange)?,
+        })
+    }
+
+    /// Records only Cells read to open this program, including snake overflow.
+    /// Unused program/blinding bodies remain pruned in the returned witness bag.
+    pub fn witness_for(&self, program_index: usize) -> Result<(TaprootProof, BagOfCells), VMError> {
+        let proof = self.taproot_proof_for(program_index)?;
+        let mut recorder = BranchRecorder {
+            root: &self.root,
+            recorded: BagOfCells::new(),
         };
-        let anchor_bytes = read_string(r)?;
-        if anchor_bytes.len() != 32 {
-            return Err(ReadError::InvalidFormat);
-        }
-        let mut a = [0u8; 32];
-        a.copy_from_slice(&anchor_bytes);
-        let anchor = Anchor(a);
-        let payload_count = read_list_prefix(r).map_err(|_| ReadError::InvalidFormat)?;
-        // Every payload value is ≥1 byte, so a count exceeding remaining
-        // input is unsatisfiable — bound before allocating so a tiny
-        // hostile length prefix can't force a multi-GB allocation.
-        if payload_count > r.remaining_bytes() {
-            return Err(ReadError::InvalidFormat);
-        }
-        let mut payload = Vec::with_capacity(payload_count);
-        for _ in 0..payload_count {
-            match read_value(r) {
-                Ok(Some(v)) => payload.push(v),
-                _ => return Err(ReadError::InvalidFormat),
-            }
-        }
-        Contract::new(predicate, anchor, payload).map_err(|_| ReadError::InvalidFormat)
+        Predicate::opaque(self.point).open_branch(&proof, &mut recorder, u32::MAX as usize)?;
+        Ok((proof, recorder.recorded))
     }
 }
 
-// ── Internal hashing helpers (all via Merlin) ────────────────────
-
-/// `H(X, M)` — the Taproot tweak scalar.
-fn taproot_tweak(internal_key: &CompressedRistretto, merkle_root: &[u8; 32]) -> Scalar {
-    let mut t = Transcript::new(b"flamevm.taproot");
-    t.append_message(b"key", internal_key.as_bytes());
-    t.append_message(b"root", merkle_root);
-    let mut buf = [0u8; 64];
-    t.challenge_bytes(b"h", &mut buf);
-    Scalar::from_bytes_mod_order_wide(&buf)
+struct BranchRecorder<'a> {
+    root: &'a CellRef,
+    recorded: BagOfCells,
 }
 
-/// Domain-tagged leaf hash dispatching on the variant.
-fn leaf_hash(leaf: &PredicateLeaf) -> [u8; 32] {
-    match leaf {
-        PredicateLeaf::Program(p) => program_leaf_hash(p),
-        PredicateLeaf::Blinding(b) => blinding_leaf_hash(b),
-    }
-}
-
-/// Merkle leaf hash for a program leaf — also what the verifier
-/// computes from `TaprootProof::program` before walking up.
-fn program_leaf_hash(program: &[u8]) -> [u8; 32] {
-    let mut t = Transcript::new(b"flamevm.merkle.leaf");
-    t.append_message(b"program", program);
-    let mut h = [0u8; 32];
-    t.challenge_bytes(b"hash", &mut h);
-    h
-}
-
-/// Merkle leaf hash for a blinding leaf. Distinct domain from the
-/// program leaf so a prover can't substitute one for the other.
-fn blinding_leaf_hash(bytes: &[u8; 32]) -> [u8; 32] {
-    let mut t = Transcript::new(b"flamevm.merkle.leaf");
-    t.append_message(b"blinding", bytes);
-    let mut h = [0u8; 32];
-    t.challenge_bytes(b"hash", &mut h);
-    h
-}
-
-fn merkle_node_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    let mut t = Transcript::new(b"flamevm.merkle.node");
-    t.append_message(b"left", left);
-    t.append_message(b"right", right);
-    let mut h = [0u8; 32];
-    t.challenge_bytes(b"hash", &mut h);
-    h
-}
-
-/// Walks up the merkle path from a leaf hash using neighbors and a
-/// position bitstring (bit i: `0` → current on left / neighbor on right,
-/// `1` → swap; LSB-first within byte). The position bitstring must
-/// cover all neighbors — more position bytes than required (up to byte
-/// alignment) is fine; fewer is a `MalformedTaprootProof`.
-fn merkle_walk_up(
-    mut hash: [u8; 32],
-    neighbors: &[[u8; 32]],
-    position: &[u8],
-) -> Result<[u8; 32], VMError> {
-    if neighbors.len() > position.len().saturating_mul(8) {
-        return Err(VMError::MalformedTaprootProof);
-    }
-    for (i, neighbor) in neighbors.iter().enumerate() {
-        let bit = get_bit(position, i);
-        hash = if bit == 0 {
-            merkle_node_hash(&hash, neighbor)
+impl CellResolver for BranchRecorder<'_> {
+    fn resolve(&mut self, reference: &CellRef) -> Result<Arc<cells::Cell>, CellError> {
+        let source = if reference.id() == self.root.id() {
+            self.root
         } else {
-            merkle_node_hash(neighbor, &hash)
+            reference
         };
+        let cell = source
+            .as_resident_arc()
+            .cloned()
+            .ok_or(CellError::MissingCell(source.id()))?;
+        self.recorded.insert(Arc::clone(&cell))?;
+        Ok(cell)
     }
-    Ok(hash)
 }
 
-fn get_bit(bits: &[u8], i: usize) -> u8 {
-    let byte = i / 8;
-    let off = i % 8;
-    if byte >= bits.len() {
-        0
-    } else {
-        (bits[byte] >> off) & 1
+fn create_blinded_leaves(programs: &[Vec<u8>], blinding_key: &[u8; 32]) -> Vec<PredicateLeaf> {
+    let mut transcript = Transcript::new(b"flamevm.taproot.blinding");
+    transcript.append_message(b"n", &(programs.len() as u64).to_le_bytes());
+    transcript.append_message(b"key", blinding_key);
+    for program in programs {
+        transcript.append_message(b"prog", program);
+    }
+    let mut leaves = Vec::with_capacity(programs.len() * 2);
+    for program in programs {
+        let mut blinding = [0; 32];
+        transcript.challenge_bytes(b"blinding", &mut blinding);
+        let pair = if blinding[0] & 1 == 0 {
+            [
+                PredicateLeaf::Blinding(blinding),
+                PredicateLeaf::Program(program.clone()),
+            ]
+        } else {
+            [
+                PredicateLeaf::Program(program.clone()),
+                PredicateLeaf::Blinding(blinding),
+            ]
+        };
+        leaves.extend(pair);
+    }
+    leaves
+}
+
+/// An authenticated root and leaf selector. Path Cells live in the transaction
+/// BoC; this contains neither a parallel proof encoding nor a copy of the code.
+#[derive(Clone, Debug)]
+pub struct TaprootProof {
+    pub internal_key: CompressedRistretto,
+    pub root: CellID,
+    pub index: u64,
+}
+
+impl CellEncode for TaprootProof {
+    fn encode(&self, builder: &mut CellBuilder) -> Result<(), CellError> {
+        builder
+            .store_bytes(self.internal_key.as_bytes())?
+            .store_bytes(&self.root)?
+            .store_u64(self.index)?;
+        Ok(())
+    }
+}
+
+impl CellDecode for TaprootProof {
+    fn decode<R: CellResolver + ?Sized>(
+        slice: &mut CellSlice<'_>,
+        cells: &mut R,
+    ) -> Result<Self, CellError> {
+        Ok(Self {
+            internal_key: CompressedRistretto(<[u8; 32]>::decode(slice, cells)?),
+            root: <[u8; 32]>::decode(slice, cells)?,
+            index: slice.load_u64()?,
+        })
+    }
+}
+
+/// A linear Contract protecting a single portable payload Value.
+#[derive(Clone, Debug)]
+pub struct Contract {
+    pub predicate: Predicate,
+    pub anchor: Anchor,
+    payload: Value,
+}
+
+impl Contract {
+    /// Portability is enforced on entry into the Contract domain, not by codecs.
+    pub fn new(predicate: Predicate, anchor: Anchor, payload: Value) -> Result<Self, VMError> {
+        if !payload.is_portable() {
+            return Err(VMError::NonPortableInOutput);
+        }
+        let contract = Self {
+            predicate,
+            anchor,
+            payload,
+        };
+        // Admission is fallible even for portable values: excessive nesting or
+        // payload length must never reach an infallible identity computation.
+        contract.to_cell()?;
+        Ok(contract)
+    }
+    pub fn payload(&self) -> &Value {
+        &self.payload
+    }
+    pub fn into_payload(self) -> Value {
+        self.payload
+    }
+
+    /// Restores a previously admitted Contract without scanning hidden Dicts.
+    /// "Trusted" refers to the Dict counts/capability summaries checked when the
+    /// output was created, not to its sender or a hash alone. The caller must
+    /// bind this body to an accepted input commitment (including chain membership
+    /// validation). Unlike ordinary `CellDecode`, hidden branches remain pruned;
+    /// accessed nodes and values still undergo their normal decoding checks.
+    pub fn from_trusted_cell<R: CellResolver + ?Sized>(
+        cell: &cells::Cell,
+        resolver: &mut R,
+    ) -> Result<Self, CellError> {
+        let mut slice = CellSlice::new(cell);
+        let predicate = Predicate::decode(&mut slice, resolver)?;
+        let anchor = Anchor(<[u8; 32]>::decode(&mut slice, resolver)?);
+        let payload = Value::decode_trusted(&mut slice, resolver)?;
+        slice.finish()?;
+        Self::new(predicate, anchor, payload).map_err(|_| CellError::InvalidFormat)
+    }
+    pub(crate) fn clone_gas(&self) -> u64 {
+        1u64.saturating_add(self.payload.clone_gas())
+    }
+
+    /// Plain SHA256 identity of the canonical output Cell record.
+    pub fn id(&self) -> ContractID {
+        self.to_cell()
+            .expect("portable Contract payload has a Cell encoding")
+            .id()
+    }
+}
+
+/// Output encoding only: a Contract is not itself a portable VM Value.
+impl CellEncode for Contract {
+    fn encode(&self, builder: &mut CellBuilder) -> Result<(), CellError> {
+        builder
+            .store(&self.predicate)?
+            .store_bytes(&self.anchor.0)?
+            .store(&self.payload)?;
+        Ok(())
+    }
+}
+
+impl CellDecode for Contract {
+    fn decode<R: CellResolver + ?Sized>(
+        slice: &mut CellSlice<'_>,
+        cells: &mut R,
+    ) -> Result<Self, CellError> {
+        let predicate = Predicate::decode(slice, cells)?;
+        let anchor = Anchor(<[u8; 32]>::decode(slice, cells)?);
+        let payload = Value::decode(slice, cells)?;
+        Self::new(predicate, anchor, payload).map_err(|_| CellError::InvalidFormat)
+    }
+}
+
+/// Merlin is retained for proof binding, not Cell content addressing.
+fn taproot_tweak(internal_key: &CompressedRistretto, root: &CellID) -> Scalar {
+    let mut transcript = Transcript::new(b"flamevm.taproot");
+    transcript.append_message(b"key", internal_key.as_bytes());
+    transcript.append_message(b"root", root);
+    let mut bytes = [0; 64];
+    transcript.challenge_bytes(b"h", &mut bytes);
+    Scalar::from_bytes_mod_order_wide(&bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constructor_rejects_unencodable_depth_before_identity_is_used() {
+        let mut value = Value::Scalar(crate::Scalar::ONE);
+        for _ in 0..=crate::encoding::MAX_VALUE_DEPTH {
+            value = Value::Dict(crate::Dict::from_values(vec![value]));
+        }
+        assert!(value.is_portable());
+        assert!(matches!(
+            Contract::new(
+                Predicate::opaque(Predicate::unspendable_key()),
+                Anchor([0; 32]),
+                value
+            ),
+            Err(VMError::Cell(CellError::LimitExceeded))
+        ));
+    }
+
+    #[test]
+    fn contract_id_is_its_output_cell_id_and_payload_is_one_value() {
+        let contract = Contract::new(
+            Predicate::opaque(Predicate::unspendable_key()),
+            Anchor([9; 32]),
+            Value::Scalar(crate::Scalar::from(7u64)),
+        )
+        .unwrap();
+        let cell = contract.to_cell().unwrap();
+        assert_eq!(
+            &cell.payload()[..32],
+            contract.predicate.to_point().as_bytes()
+        );
+        assert_eq!(&cell.payload()[32..64], &[9; 32]);
+        assert_eq!(contract.id(), cell.id());
+        let decoded = Contract::from_cell(&cell, &mut ()).unwrap();
+        assert_eq!(decoded.id(), contract.id());
+        assert!(
+            matches!(decoded.payload(), Value::Scalar(value) if *value == crate::Scalar::from(7u64))
+        );
+        assert!(matches!(
+            Contract::new(
+                Predicate::opaque(Predicate::unspendable_key()),
+                Anchor([0; 32]),
+                Value::Contract(Box::new(contract)),
+            ),
+            Err(VMError::NonPortableInOutput)
+        ));
+    }
+
+    #[test]
+    fn branch_witness_opens_only_the_selected_program_and_checks_commitments() {
+        let programs = vec![vec![1], vec![2; 20_000], vec![3]];
+        let tree = PredicateTree::scripts_only(programs.clone(), [7; 32]).unwrap();
+        let mut trie = Trie::new(8).unwrap();
+        for (index, leaf) in tree.leaves().iter().enumerate() {
+            trie.insert(
+                &(index as u64).to_be_bytes(),
+                leaf.to_cell().unwrap(),
+                &mut (),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            tree.root_id(),
+            trie.root_id().unwrap(),
+            "no predicate count-wrapper Cell"
+        );
+        let predicate = Predicate::opaque(tree.point);
+        let (proof, mut bag) = tree.witness_for(1).unwrap();
+        assert_eq!(
+            predicate.open_branch(&proof, &mut bag, 20_000).unwrap(),
+            programs[1]
+        );
+        assert!(predicate.open_branch(&proof, &mut bag, 19_999).is_err());
+        assert!(predicate
+            .open_branch(&proof, &mut BagOfCells::new(), 20_000)
+            .is_err());
+        let other = tree.taproot_proof_for(0).unwrap();
+        assert!(predicate.open_branch(&other, &mut bag, 20_000).is_err());
+        let mut missing = proof.clone();
+        missing.index = u64::MAX;
+        assert!(matches!(
+            predicate.open_branch(&missing, &mut bag, 20_000),
+            Err(VMError::TaprootProofMismatch)
+        ));
+        let mut forged = proof.clone();
+        forged.root[0] ^= 1;
+        assert!(matches!(
+            predicate.open_branch(&forged, &mut bag, 20_000),
+            Err(VMError::TaprootProofMismatch)
+        ));
+        forged = proof;
+        forged.index ^= 1;
+        let mut all = BagOfCells::collect(tree.root.as_resident_arc().unwrap().clone()).unwrap();
+        assert!(matches!(
+            predicate.open_branch(&forged, &mut all, 20_000),
+            Err(VMError::TaprootProofMismatch)
+        ));
+    }
+
+    #[test]
+    fn predicate_construction_is_deterministic_and_blinded() {
+        let programs = vec![vec![1], vec![2], vec![3]];
+        let a = PredicateTree::scripts_only(programs.clone(), [1; 32]).unwrap();
+        let b = PredicateTree::scripts_only(programs.clone(), [1; 32]).unwrap();
+        let c = PredicateTree::scripts_only(programs, [2; 32]).unwrap();
+        assert_eq!(a.root_id(), b.root_id());
+        assert_eq!(a.point, b.point);
+        assert_ne!(a.root_id(), c.root_id());
+        assert_ne!(a.point, c.point);
+        assert_eq!(a.internal_key, Predicate::unspendable_key());
+        assert!(matches!(
+            a.taproot_proof_for(3),
+            Err(VMError::ProgramIndexOutOfRange)
+        ));
+        let proof = a.taproot_proof_for(0).unwrap();
+        let cell = proof.to_cell().unwrap();
+        assert_eq!(cell.payload().len(), 72);
+        assert!(cell.refs().is_empty());
+        let decoded = TaprootProof::from_cell(&cell, &mut ()).unwrap();
+        assert_eq!(decoded.root, proof.root);
+        assert_eq!(decoded.index, proof.index);
     }
 }

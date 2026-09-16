@@ -103,19 +103,23 @@ fn prove_then_verify_alloc_arithmetic_equality() {
 
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = _pp;
     let proof = proof.expect("proof set");
 
     // Verifier walks the same bytecode and accepts the proof.
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(
+    Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify succeeds");
 }
@@ -132,7 +136,10 @@ fn prove_succeeds_but_verify_fails_on_tampered_proof() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = _pp;
     let proof = proof.expect("proof set");
 
@@ -143,13 +150,14 @@ fn prove_succeeds_but_verify_fails_on_tampered_proof() {
     let tampered = bulletproofs::r1cs::R1CSProof::from_bytes(&proof_bytes).expect("re-parses");
 
     let pc_gens_v = PedersenGens::default();
-    let err = Verifier::verify(
+    let err = Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &tampered,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .unwrap_err();
     assert!(matches!(err, VMError::InvalidR1CSProof));
@@ -172,18 +180,22 @@ fn prove_fails_for_unsatisfiable_equality() {
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
         .expect("prover doesn't refuse construction");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = _pp;
     let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();
-    let err = Verifier::verify(
+    let err = Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .unwrap_err();
     assert!(matches!(err, VMError::InvalidR1CSProof));
@@ -230,18 +242,22 @@ fn prove_then_verify_alloc_multiplication() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = _pp;
     let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(
+    Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify succeeds");
 }
@@ -258,18 +274,22 @@ fn prove_then_verify_alloc_with_negation() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = _pp;
     let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(
+    Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify succeeds");
 }
@@ -293,18 +313,22 @@ fn alloc_without_witness_works_in_verifier_path() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = _pp;
     let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(
+    Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify succeeds");
 }
@@ -418,12 +442,17 @@ fn phase18_prove_verify_roundtrip_binds_txid() {
     let prover_result = Prover::prove(&pc_gens, program, header, 1_000_000).expect("prove ok");
     let txid_p = prover_result.txid;
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = prover_result;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    let verifier_result =
-        Verifier::verify(&pc_gens_v, bytecode, &proof, header, 1_000_000, None).expect("verify ok");
+    let verifier_result = Verifier::verify_with_cells(
+        &pc_gens_v, bytecode, &proof, header, 1_000_000, None, &cells,
+    )
+    .expect("verify ok");
     assert_eq!(
         txid_p, verifier_result.txid,
         "prover and verifier must agree on TxID"
@@ -454,17 +483,21 @@ fn phase18_verifier_rejects_proof_under_different_header() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, prove_header, 1_000_000).expect("prove ok");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    let err = Verifier::verify(
+    let err = Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         verify_header, // mismatch — TxID bound differs
         1_000_000,
         None,
+        &cells,
     )
     .expect_err("must reject under different header");
     assert!(matches!(err, VMError::InvalidR1CSProof));
@@ -503,17 +536,21 @@ fn phase21_txresult_populated_for_trivial_program() {
     // Verifier side: same TxID and txlog; proof is None (consumed).
     let prover_txid = prover_result.txid;
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = prover_result;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    let verifier_result = Verifier::verify(
+    let verifier_result = Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode.clone(),
         &proof,
         header,
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify ok");
     // Cross-verify all the fields agree.
@@ -570,15 +607,20 @@ fn phase21_txlog_ordering_in_txresult() {
     let delegate = StubDelegate::new();
     let result =
         VM::execute_external(dummy_header(), script, 1_000_000, delegate).expect("execute ok");
-    assert_eq!(result.txlog.len(), 3, "Header + 2 Data entries");
+    assert_eq!(
+        result.txlog.len(),
+        4,
+        "Header + CellWitness + 2 Data entries"
+    );
     assert!(matches!(result.txlog[0], TxEntry::Header(_)));
-    match &result.txlog[1] {
-        TxEntry::Data(b) => assert_eq!(b, b"a"),
-        _ => panic!("txlog[1] must be Data(a)"),
-    }
+    assert!(matches!(result.txlog[1], TxEntry::CellWitness(_)));
     match &result.txlog[2] {
+        TxEntry::Data(b) => assert_eq!(b, b"a"),
+        _ => panic!("txlog[2] must be Data(a)"),
+    }
+    match &result.txlog[3] {
         TxEntry::Data(b) => assert_eq!(b, b"b"),
-        _ => panic!("txlog[2] must be Data(b)"),
+        _ => panic!("txlog[3] must be Data(b)"),
     }
 }
 
@@ -592,13 +634,16 @@ fn phase21_deferred_sigs_in_txresult() {
     let pc_gens = PedersenGens::default();
     let (vk, sk) = signing_keypair(7);
     let (script, contract_id) = make_signtx_script_with_contract(vk);
-    let program = ScriptBuilder::parse(&script).expect("decode");
+    let program = script;
     let prover_result =
         Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove ok");
     assert_eq!(prover_result.deferred_sigs.len(), 1);
     let prover_txid = prover_result.txid;
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = prover_result;
     let proof = proof.expect("proof");
     // Sign + verify.
@@ -611,13 +656,14 @@ fn phase21_deferred_sigs_in_txresult() {
     )
     .expect("sign_multi");
     let pc_gens_v = PedersenGens::default();
-    let verifier_result = Verifier::verify(
+    let verifier_result = Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         Some(sig),
+        &cells,
     )
     .expect("verify ok");
     // Verifier-side TxResult also exposes the deferred_sigs.

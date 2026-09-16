@@ -13,6 +13,15 @@ pub trait GasMeter {
     fn charge(&mut self, amount: u64) -> Result<(), CellError>;
 }
 
+impl GasMeter for u64 {
+    fn charge(&mut self, amount: u64) -> Result<(), CellError> {
+        *self = self
+            .checked_sub(amount)
+            .ok_or(CellError::ResourceExhausted)?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BagOfCells {
     cells: BTreeMap<CellID, Arc<Cell>>,
@@ -68,6 +77,20 @@ impl BagOfCells {
 
     pub fn contains(&self, id: &CellID) -> bool {
         self.cells.contains_key(id)
+    }
+
+    /// Iterates the exact committed body set in canonical CellID order.
+    pub fn iter(&self) -> impl Iterator<Item = (&CellID, &Arc<Cell>)> {
+        self.cells.iter()
+    }
+
+    /// Adds another explicit body set. This is construction, never implicit
+    /// resolution from a global cache or another transaction.
+    pub fn extend(&mut self, other: &Self) -> Result<(), CellError> {
+        for cell in other.cells.values() {
+            self.insert(Arc::clone(cell))?;
+        }
+        Ok(())
     }
 
     pub fn id(&self) -> BoCID {
@@ -216,6 +239,10 @@ impl CellEnvelope {
 
     pub fn cells(&self) -> &BagOfCells {
         &self.cells
+    }
+
+    pub fn into_parts(self) -> (CellID, BagOfCells) {
+        (self.root, self.cells)
     }
 
     pub fn encode(&self) -> Vec<u8> {

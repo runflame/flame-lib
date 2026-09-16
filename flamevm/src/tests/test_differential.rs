@@ -6,7 +6,6 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::encoding::read_value;
 use crate::tx::TxID;
 
 fn internal_kind() -> CallKind {
@@ -119,8 +118,8 @@ fn decoders_never_panic_on_random_bytes() {
         let len = (next() % 64) as usize;
         let bytes: Vec<u8> = (0..len).map(|_| (next() & 0xff) as u8).collect();
         let _ = ScriptBuilder::parse(&bytes);
-        let mut r: &[u8] = &bytes;
-        let _ = read_value(&mut r);
+        let cell = Cell::new(bytes, vec![]).unwrap();
+        let _ = Value::from_cell(&cell, &mut ());
     }
 }
 

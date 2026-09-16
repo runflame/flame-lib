@@ -514,6 +514,49 @@ fn canonical_forest_and_proof_vectors() {
 }
 
 #[test]
+fn committed_proofs_roundtrip_with_absolute_positions_in_smaller_roots() {
+    let hasher = utreexo_hasher::<Item>();
+    let mut work = Forest::new().work_forest();
+    for i in 0..6 {
+        work.insert(&Item(i), &hasher);
+    }
+    let (forest, catchup) = work.normalize(&hasher);
+
+    // The second root covers positions 4 and 5 but has proof depth 1.
+    for i in 4..6 {
+        let proof = catchup
+            .update_proof(&Item(i), Proof::Transient, &hasher)
+            .unwrap();
+        let path = proof.as_path().unwrap();
+        assert_eq!(path.position, i);
+        assert_eq!(path.neighbors.len(), 1);
+        forest.verify(&Item(i), path, &hasher).unwrap();
+
+        let bytes = proof.encode_to_vec();
+        let decoded = bytes
+            .as_slice()
+            .read_all(Proof::decode)
+            .expect("a valid absolute forest position must survive decoding");
+        assert_eq!(decoded.as_path(), Some(path));
+    }
+}
+
+#[test]
+fn verify_rejects_wrong_root_height_even_when_hash_matches() {
+    let hasher = utreexo_hasher::<Item>();
+    let item = Item(0);
+    let path = Path::default();
+    let mut forest = Forest::new();
+    forest.roots[1] = Some(hasher.leaf(&item));
+
+    // A matching hash does not make a depth-0 path fit a height-1 root.
+    assert_eq!(
+        forest.verify(&item, &path, &hasher),
+        Err(UtreexoError::InvalidProof)
+    );
+}
+
+#[test]
 fn proof_decoder_rejects_noncanonical_shapes() {
     let mut unknown = [2u8].as_slice();
     assert!(matches!(

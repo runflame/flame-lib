@@ -1,10 +1,9 @@
 //! Tests for the `StringWitness::Contract` witness carrier and `op_input`.
 //!
-//! Mirrors zkvm's `String::Output` pattern: the prover pushes a
-//! `String::contract(c)` carrying open commitments on Token payloads;
-//! the verifier pushes `String::Opaque(c.to_bytes())` and `to_contract`
-//! decodes to closed commitments. There is no separate witness
-//! queue and no re-attachment step.
+//! The prover pushes `String::contract(c)` carrying private Token openings.
+//! Bytecode contains only the ContractID, while the public Contract body is
+//! included in the transaction's BoC. Both paths authenticate that body first;
+//! the prover then restores its matching private witnesses.
 
 #![allow(unused_imports)]
 
@@ -19,14 +18,17 @@ fn input_string_contract_preserves_open_commitments() {
     let contract = Contract::new(
         Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x42; 32]),
-        vec![Value::Token(token)],
+        test_payload(vec![Value::Token(token)]),
     )
     .expect("payload is portable");
-    let mut vm = vm_external_with_script(Vec::new());
-    vm.push_value(Value::String(String::contract(contract)));
-    vm.op_input().expect("input ok");
+    let mut vm = vm_external_with_script(
+        ScriptBuilder::new()
+            .push_str(String::contract(contract))
+            .input(),
+    );
+    run_to_end(&mut vm).expect("input ok");
     match &vm.current_call.stack[0] {
-        Value::Contract(c) => match &c.payload()[0] {
+        Value::Contract(c) => match c.payload() {
             Value::Token(t) => {
                 assert!(
                     t.qty.witness().is_some(),
@@ -37,13 +39,13 @@ fn input_string_contract_preserves_open_commitments() {
                     "flv must be Open under prover-side StringWitness::Contract path"
                 );
             }
-            _ => panic!("payload[0] not Token"),
+            _ => panic!("payload not Token"),
         },
         _ => panic!("stack[0] not Contract"),
     }
 }
 
-/// Verifier path: push `String::Opaque(contract_bytes)`. After
+/// Verifier path: push `String::Opaque(contract_id)` and provide its BoC. After
 /// `op_input` the Token has `Commitment::Closed` (no witness).
 #[test]
 fn input_string_opaque_yields_closed_commitments() {
@@ -51,15 +53,17 @@ fn input_string_opaque_yields_closed_commitments() {
     let contract = Contract::new(
         Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x42; 32]),
-        vec![Value::Token(token)],
+        test_payload(vec![Value::Token(token)]),
     )
     .expect("payload is portable");
-    let contract_bytes = contract.to_bytes();
-    let mut vm = vm_external_with_script(Vec::new());
-    vm.push_value(Value::String(String::from(contract_bytes)));
-    vm.op_input().expect("input ok");
+    let program = ScriptBuilder::new()
+        .with_cells(contract.to_envelope().unwrap().cells().clone())
+        .push_str(String::from(contract.id().to_vec()))
+        .input();
+    let mut vm = vm_external_with_script(program);
+    run_to_end(&mut vm).expect("input ok");
     match &vm.current_call.stack[0] {
-        Value::Contract(c) => match &c.payload()[0] {
+        Value::Contract(c) => match c.payload() {
             Value::Token(t) => {
                 assert!(
                     t.qty.witness().is_none(),
@@ -70,7 +74,7 @@ fn input_string_opaque_yields_closed_commitments() {
                     "flv must be Closed via opaque-bytes path"
                 );
             }
-            _ => panic!("payload[0] not Token"),
+            _ => panic!("payload not Token"),
         },
         _ => panic!("stack[0] not Contract"),
     }
@@ -86,28 +90,33 @@ fn input_string_contract_and_opaque_yield_same_contract_id() {
     let contract1 = Contract::new(
         Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x42; 32]),
-        vec![Value::Token(token1)],
+        test_payload(vec![Value::Token(token1)]),
     )
     .expect("payload is portable");
     let contract2 = Contract::new(
         Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x42; 32]),
-        vec![Value::Token(token2)],
+        test_payload(vec![Value::Token(token2)]),
     )
     .expect("payload is portable");
-    let contract_bytes = contract2.to_bytes();
+    let public = ScriptBuilder::new()
+        .with_cells(contract2.to_envelope().unwrap().cells().clone())
+        .push_str(String::from(contract2.id().to_vec()))
+        .input();
 
-    let mut vm_p = vm_external_with_script(Vec::new());
-    vm_p.push_value(Value::String(String::contract(contract1)));
-    vm_p.op_input().expect("input ok");
+    let mut vm_p = vm_external_with_script(
+        ScriptBuilder::new()
+            .push_str(String::contract(contract1))
+            .input(),
+    );
+    run_to_end(&mut vm_p).expect("input ok");
     let id_p = match &vm_p.current_call.stack[0] {
         Value::Contract(c) => c.id(),
         _ => panic!(),
     };
 
-    let mut vm_v = vm_external_with_script(Vec::new());
-    vm_v.push_value(Value::String(String::from(contract_bytes)));
-    vm_v.op_input().expect("input ok");
+    let mut vm_v = vm_external_with_script(public);
+    run_to_end(&mut vm_v).expect("input ok");
     let id_v = match &vm_v.current_call.stack[0] {
         Value::Contract(c) => c.id(),
         _ => panic!(),
@@ -127,7 +136,7 @@ fn string_contract_clone_preserves_contract() {
     let contract = Contract::new(
         Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x55; 32]),
-        vec![Value::Token(token)],
+        test_payload(vec![Value::Token(token)]),
     )
     .expect("payload is portable");
     let id = contract.id();

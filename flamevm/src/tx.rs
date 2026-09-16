@@ -1,16 +1,19 @@
 use bulletproofs::r1cs::R1CSProof;
 use bulletproofs::PedersenGens;
+use cells::{
+    BagOfCells, Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellRef,
+    CellResolver, CellSlice, Trie,
+};
 use core::convert::TryFrom;
 use curve25519_dalek::ristretto::CompressedRistretto;
-use merkle::{Hash, MerkleItem, MerkleTree};
-use merlin::Transcript;
 use musig::Signature;
-use readerwriter::{Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer};
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
-use crate::actor::{code_root, state_root, ActorID, ActorRegistry};
+use crate::actor::{ActorID, ActorRegistry};
 use crate::contract::{Contract, ContractID};
-use crate::encoding::{write_admitted_value, write_scalar};
+use crate::encoding::{blob_cell, read_blob};
 use crate::errors::VMError;
 use crate::message::Message;
 use crate::prover::Prover;
@@ -42,105 +45,105 @@ pub struct ExternalTx {
 
     /// Constraint system proof for all the constraints
     pub proof: R1CSProof,
+
+    /// Immutable public bodies available to this execution and all its descendants.
+    pub witnesses: Arc<BagOfCells>,
+    /// Claimed effect root, checked against execution; not the envelope root.
+    pub txid: TxID,
+}
+
+impl CellEncode for TxHeader {
+    fn encode(&self, b: &mut CellBuilder) -> Result<(), CellError> {
+        b.store_u32(self.version)?.store_u32(self.locktime)?;
+        Ok(())
+    }
+}
+impl CellDecode for TxHeader {
+    fn decode<R: CellResolver + ?Sized>(
+        s: &mut CellSlice<'_>,
+        _r: &mut R,
+    ) -> Result<Self, CellError> {
+        Ok(Self {
+            version: s.load_u32()?,
+            locktime: s.load_u32()?,
+        })
+    }
+}
+
+/// Script bytes and the separately committed execution BoC share a container.
+/// Its bag does not include the transaction envelope itself (no circular hash).
+fn transaction_script(script: &[u8], witnesses: &BagOfCells) -> Result<Cell, CellError> {
+    let mut b = CellBuilder::new();
+    b.store_snake(script)?;
+    b.store_ref(CellRef::resident(blob_cell(&witnesses.encode())?))?;
+    Ok(b.build())
 }
 
 impl ExternalTx {
-    /// Header committed by this transaction.
     pub fn header(&self) -> TxHeader {
         self.header
     }
-
-    /// Canonical VM bytecode carried by this transaction.
     pub fn script(&self) -> &[u8] {
         &self.script
     }
-
-    /// Optional aggregate signature bytes used by the network envelope.
-    pub fn signature_bytes(&self) -> Option<[u8; 64]> {
-        self.signature.map(|signature| signature.to_bytes())
+    pub fn witnesses(&self) -> &BagOfCells {
+        &self.witnesses
     }
-
-    /// R1CS proof bytes used by block witness commitments.
+    pub fn signature_bytes(&self) -> Option<[u8; 64]> {
+        self.signature.map(|s| s.to_bytes())
+    }
     pub fn proof_bytes(&self) -> Vec<u8> {
         self.proof.to_bytes()
     }
 
-    /// Decodes one canonical transaction envelope under caller-provided
-    /// network bounds. Execution policy remains in [`Self::verify`].
-    pub fn decode_bounded(
-        reader: &mut impl Reader,
-        expected_version: u32,
-        max_script_bytes: usize,
-        max_proof_bytes: usize,
-    ) -> Result<Self, ReadError> {
-        let header = TxHeader {
-            version: reader.read_u32()?,
-            locktime: reader.read_u32()?,
-        };
-        if expected_version != 1 || header.version != expected_version {
-            return Err(ReadError::InvalidFormat);
-        }
-        let script_len =
-            usize::try_from(reader.read_u64()?).map_err(|_| ReadError::InvalidFormat)?;
-        if script_len > max_script_bytes {
-            return Err(ReadError::InvalidFormat);
-        }
-        let script = reader.read_bytes(script_len)?;
-        let signature = match reader.read_u8()? {
-            0 => None,
-            1 => Some(
-                Signature::from_bytes(reader.read_u8x64()?)
-                    .map_err(|_| ReadError::InvalidFormat)?,
-            ),
-            _ => return Err(ReadError::InvalidFormat),
-        };
-        let proof_len =
-            usize::try_from(reader.read_u64()?).map_err(|_| ReadError::InvalidFormat)?;
-        if proof_len > max_proof_bytes {
-            return Err(ReadError::InvalidFormat);
-        }
-        let proof = R1CSProof::from_bytes(&reader.read_bytes(proof_len)?)
-            .map_err(|_| ReadError::InvalidFormat)?;
-        Ok(Self {
-            header,
-            script,
-            signature,
-            proof,
-        })
-    }
-
-    /// Decodes one complete transaction and rejects trailing bytes.
     pub fn from_bytes_bounded(
         bytes: &[u8],
         expected_version: u32,
         max_script_bytes: usize,
         max_proof_bytes: usize,
-    ) -> Result<Self, ReadError> {
-        let mut reader = bytes;
-        reader.read_all(|reader| {
-            Self::decode_bounded(reader, expected_version, max_script_bytes, max_proof_bytes)
-        })
+    ) -> Result<Self, CellError> {
+        // Outer network admission bounds bytes before this function. Decode work
+        // is additionally linear-bounded here, including the nested witness bag.
+        let mut gas = (bytes.len() as u64).saturating_mul(16).saturating_add(1024);
+        let mut envelope = CellEnvelope::decode(bytes, bytes.len(), &mut gas)?;
+        let root = envelope
+            .cells()
+            .get(&envelope.root())
+            .ok_or(CellError::InvalidFormat)?;
+        let mut slice = CellSlice::new(&root);
+        let tx = Self::decode_bounded(
+            &mut slice,
+            &mut envelope,
+            expected_version,
+            max_script_bytes,
+            max_proof_bytes,
+        )?;
+        slice.finish()?;
+        // Extra transport bodies must not create a second encoding of this tx.
+        // Extras inside the execution BoC are allowed: their presence is signed.
+        let canonical = tx.to_envelope()?;
+        if canonical.root() != envelope.root() || canonical.cells().id() != envelope.cells().id() {
+            return Err(CellError::InvalidFormat);
+        }
+        Ok(tx)
     }
 
-    /// Lifecycle step 3: verify the signed transaction — run the opaque
-    /// program, check the proof and the aggregate signature — and return
-    /// its effects. Bulletproof generators are managed inside the crate.
     pub fn verify(&self, limits: Limits) -> Result<TxLog, VMError> {
         self.verify_with_metrics(limits).map(|(log, _)| log)
     }
-
-    /// Verifies the transaction and returns both its effects and actual
-    /// execution counters for consensus admission.
     pub fn verify_with_metrics(&self, limits: Limits) -> Result<(TxLog, TxMetrics), VMError> {
-        let pc_gens = PedersenGens::default();
-        let result = Verifier::verify(
-            &pc_gens,
+        let result = Verifier::verify_with_cells(
+            &PedersenGens::default(),
             self.script.clone(),
             &self.proof,
             self.header,
             limits.gas,
             self.signature,
+            &self.witnesses,
         )?;
+        if result.txid != self.txid {
+            return Err(CellError::InvalidFormat.into());
+        }
         Ok((
             TxLog(result.txlog),
             TxMetrics {
@@ -150,33 +153,110 @@ impl ExternalTx {
             },
         ))
     }
-}
 
-impl Encodable for ExternalTx {
-    fn encode(&self, writer: &mut impl Writer) -> Result<(), WriteError> {
-        writer.write_u32(b"external_tx.version", self.header.version)?;
-        writer.write_u32(b"external_tx.locktime", self.header.locktime)?;
-        writer.write_u64(b"external_tx.script_len", self.script.len() as u64)?;
-        writer.write(b"external_tx.script", &self.script)?;
-        match self.signature {
-            Some(signature) => {
-                writer.write_u8(b"external_tx.signature_present", 1)?;
-                writer.write(b"external_tx.signature", &signature.to_bytes())?;
-            }
-            None => writer.write_u8(b"external_tx.signature_present", 0)?,
-        }
-        let proof = self.proof.to_bytes();
-        writer.write_u64(b"external_tx.proof_len", proof.len() as u64)?;
-        writer.write(b"external_tx.proof", &proof)
+    pub fn encoded_size(&self) -> usize {
+        self.to_envelope()
+            .expect("constructed transaction is encodable")
+            .encode()
+            .len()
     }
 }
 
-impl ExactSizeEncodable for ExternalTx {
-    fn encoded_size(&self) -> usize {
-        25usize
-            .saturating_add(usize::from(self.signature.is_some()) * 64)
-            .saturating_add(self.script.len())
-            .saturating_add(self.proof.to_bytes().len())
+impl CellEncode for ExternalTx {
+    fn encode(&self, b: &mut CellBuilder) -> Result<(), CellError> {
+        b.store(&self.header)?.store_bytes(&self.witnesses.id())?;
+        b.store_ref(CellRef::resident(transaction_script(
+            &self.script,
+            &self.witnesses,
+        )?))?;
+        let signature = self
+            .signature_bytes()
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
+        b.store_ref(CellRef::resident(Cell::new(signature, vec![])?))?;
+        b.store_ref(CellRef::resident(blob_cell(&self.proof.to_bytes())?))?;
+        b.store_ref(CellRef::pruned(self.txid.0))?;
+        Ok(())
+    }
+}
+
+impl ExternalTx {
+    /// Reads one transaction root with limits checked before snake allocation.
+    /// The surrounding transport owns the total byte bound and canonical BoC.
+    pub fn from_cell_bounded<R: CellResolver + ?Sized>(
+        cell: &Cell,
+        resolver: &mut R,
+        expected_version: u32,
+        max_script_bytes: usize,
+        max_proof_bytes: usize,
+    ) -> Result<Self, CellError> {
+        let mut slice = CellSlice::new(cell);
+        let tx = Self::decode_bounded(
+            &mut slice,
+            resolver,
+            expected_version,
+            max_script_bytes,
+            max_proof_bytes,
+        )?;
+        slice.finish()?;
+        Ok(tx)
+    }
+
+    fn decode_bounded<R: CellResolver + ?Sized>(
+        s: &mut CellSlice<'_>,
+        r: &mut R,
+        expected_version: u32,
+        max_script_bytes: usize,
+        max_proof_bytes: usize,
+    ) -> Result<Self, CellError> {
+        let header = TxHeader::decode(s, r)?;
+        if expected_version != 1 || header.version != expected_version {
+            return Err(CellError::InvalidFormat);
+        }
+        let witness_id = <[u8; 32]>::decode(s, r)?;
+        let script_cell = cells::resolve_cell(r, &s.load_ref()?)?;
+        let mut script_slice = CellSlice::new(&script_cell);
+        let script = script_slice.load_snake(r, max_script_bytes)?;
+        let witness_bytes = read_blob(&script_slice.load_ref()?, r, u32::MAX as usize)?;
+        script_slice.finish()?;
+        let mut gas = (witness_bytes.len() as u64)
+            .saturating_mul(16)
+            .saturating_add(1024);
+        let witnesses = BagOfCells::decode(&witness_bytes, witness_bytes.len(), &mut gas)?;
+        if witnesses.id() != witness_id {
+            return Err(CellError::InvalidFormat);
+        }
+        let signature_cell = cells::resolve_cell(r, &s.load_ref()?)?;
+        if !signature_cell.refs().is_empty() {
+            return Err(CellError::InvalidFormat);
+        }
+        let signature = match signature_cell.payload() {
+            [] => None,
+            bytes if bytes.len() == 64 => {
+                Some(Signature::from_bytes(bytes).map_err(|_| CellError::InvalidFormat)?)
+            }
+            _ => return Err(CellError::InvalidFormat),
+        };
+        let proof = R1CSProof::from_bytes(&read_blob(&s.load_ref()?, r, max_proof_bytes)?)
+            .map_err(|_| CellError::InvalidFormat)?;
+        let txid = TxID(s.load_ref()?.id());
+        Ok(Self {
+            header,
+            script,
+            signature,
+            proof,
+            witnesses: Arc::new(witnesses),
+            txid,
+        })
+    }
+}
+
+impl CellDecode for ExternalTx {
+    fn decode<R: CellResolver + ?Sized>(
+        s: &mut CellSlice<'_>,
+        r: &mut R,
+    ) -> Result<Self, CellError> {
+        Self::decode_bounded(s, r, 1, u32::MAX as usize, u32::MAX as usize)
     }
 }
 
@@ -188,7 +268,7 @@ pub struct Limits {
 }
 
 /// Ordered transaction effects — the canonical change set a node
-/// applies to its state. The [`TxID`] is the merkle root over these.
+/// applies to its state. The [`TxID`] is the Cell ID of this ordered Trie.
 pub struct TxLog(Vec<TxEntry>);
 
 /// For the node layer (and tests): wrap a re-derived effect list.
@@ -200,7 +280,7 @@ impl From<Vec<TxEntry>> for TxLog {
 }
 
 impl TxLog {
-    /// Canonical transaction id (merkle root over the effect list).
+    /// Canonical transaction id (Cell ID of the ordered effect Trie envelope).
     pub fn txid(&self) -> TxID {
         TxID::from_log(&self.0)
     }
@@ -254,6 +334,7 @@ pub struct SigningInstructions {
 pub struct UnsignedTx {
     header: TxHeader,
     script: Vec<u8>,
+    witnesses: Arc<BagOfCells>,
     proof: R1CSProof,
     log: TxLog,
     metrics: TxMetrics,
@@ -261,6 +342,12 @@ pub struct UnsignedTx {
 }
 
 impl UnsignedTx {
+    /// Exact public witness set frozen by the prover. Private assignments and
+    /// openings are absent; signing preserves this same bag in `ExternalTx`.
+    pub fn witnesses(&self) -> &BagOfCells {
+        &self.witnesses
+    }
+
     /// The transaction effects.
     pub fn log(&self) -> &TxLog {
         &self.log
@@ -283,6 +370,8 @@ impl UnsignedTx {
             script: self.script,
             signature: Some(signature),
             proof: self.proof,
+            txid: self.log.txid(),
+            witnesses: self.witnesses,
         }
     }
 
@@ -296,13 +385,17 @@ impl UnsignedTx {
             script: self.script,
             signature: None,
             proof: self.proof,
+            txid: self.log.txid(),
+            witnesses: self.witnesses,
         })
     }
 }
 
 impl ScriptBuilder {
     /// Lifecycle step 1: build an unsigned external transaction by
-    /// running the witness-bearing program through the prover.
+    /// running the witness-bearing program through the prover. Embedded Contract
+    /// bodies, selected predicate paths, and nested witnesses are collected into
+    /// the frozen BoC carried through `UnsignedTx` to `ExternalTx::verify`.
     /// Bulletproof generators are managed inside the crate.
     pub fn build_tx(self, header: TxHeader, limits: Limits) -> Result<UnsignedTx, VMError> {
         let pc_gens = PedersenGens::default();
@@ -321,6 +414,7 @@ impl ScriptBuilder {
         Ok(UnsignedTx {
             header,
             script: result.bytecode,
+            witnesses: result.cells,
             proof: result.proof.expect("prover always sets the proof"),
             metrics: TxMetrics {
                 gas_used: result.gas_used,
@@ -365,13 +459,24 @@ impl Message {
         registry: &mut dyn ActorRegistry,
         block: &BlockContext,
     ) -> Result<InternalTx, VMError> {
+        self.execute_tx_with_cells(registry, block, Arc::new(BagOfCells::new()))
+    }
+
+    /// Executes a descendant with its initiating external transaction's exact
+    /// witness availability, never a block-wide coalesced bag.
+    pub fn execute_tx_with_cells(
+        self,
+        registry: &mut dyn ActorRegistry,
+        block: &BlockContext,
+        cells: Arc<BagOfCells>,
+    ) -> Result<InternalTx, VMError> {
         // Internal-tx header: fixed default for now — its source is part
         // of the block envelope design.
         let header = TxHeader {
             version: 1,
             locktime: 0,
         };
-        let result = VM::execute_internal(header, self, registry, block)?;
+        let result = VM::execute_internal_with_cells(header, self, registry, block, cells)?;
         Ok(InternalTx {
             log: TxLog(result.txlog),
             metrics: TxMetrics {
@@ -386,7 +491,7 @@ impl Message {
 /// Transaction ID is a unique 32-byte identifier of a transaction effects represented by `TxLog`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct TxID(pub Hash);
+pub struct TxID(pub [u8; 32]);
 
 /// Entry in a transaction log. All entries are hashed into a [transaction ID](TxID).
 ///
@@ -398,6 +503,9 @@ pub enum TxEntry {
     /// Tx header — bound at run start as the first txlog entry so
     /// `version` and `locktime` participate in `TxID::from_log`.
     Header(TxHeader),
+
+    /// Exact execution-body availability, fixed before proving or signing.
+    CellWitness(cells::BoCID),
 
     /// Plain data entry created by `log` instruction. Contains arbitrary binary string.
     Data(Vec<u8>),
@@ -463,15 +571,13 @@ pub enum TxEntry {
     /// script needed. See docs/flamevm.md §"Design"; TxLog records effects, not
     /// control flow".
     ///
-    /// The MerkleItem encoding hashes `(actor.to_hash(),
-    /// state_root(&state))` — i.e. the merkle leaf commits to the
-    /// canonical state root, not the full bytes, just as
-    /// `Output(Contract)`'s leaf commits to `contract.id()`.
+    /// The entry Cell contains the actor hash and a reference to the state
+    /// Value Cell. Its identity commits to that child without flattening it.
     ActorSave { actor: ActorID, state: Value },
 
     /// Actor-code replacement recorded by `setcode`. Carries the full
-    /// new code blob for state-machine replay; the merkle leaf commits
-    /// to `(actor.to_hash(), code_root(&code))`. Symmetric with
+    /// new code blob for state-machine replay; the entry Cell contains the
+    /// actor hash and a reference to snake-encoded code. Symmetric with
     /// `ActorSave`. See ADR 0018.
     SetCode { actor: ActorID, code: Vec<u8> },
 
@@ -498,14 +604,353 @@ pub enum TxEntry {
         fee_sparks: Scalar,
     },
 
-    /// Deterministic removal of an actor, either by explicit state
-    /// dismantling or by the blockchain's block-boundary expiry process.
+    /// Explicit removal after state dismantling. Lease expiry freezes the
+    /// actor's committed bodies instead of destroying its linear contents.
     ActorDestroy { actor: ActorID },
+}
+
+impl TxID {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+    pub fn from_log(txlog: &[TxEntry]) -> Self {
+        Self(
+            log_cell(txlog)
+                .expect("admitted effects have Cell encodings")
+                .id(),
+        )
+    }
+}
+
+fn log_cell(entries: &[TxEntry]) -> Result<Cell, CellError> {
+    let mut trie = Trie::new(8)?;
+    for (i, entry) in entries.iter().enumerate() {
+        trie.insert(&(i as u64).to_be_bytes(), entry.to_cell()?, &mut ())?;
+    }
+    let mut root = CellBuilder::new();
+    root.store_u64(entries.len() as u64)?;
+    if let Some(reference) = trie.into_root() {
+        root.store_ref(reference)?;
+    }
+    Ok(root.build())
+}
+
+impl TxEntry {
+    pub const TAG_HEADER: u8 = 0;
+    pub const TAG_DATA: u8 = 1;
+    pub const TAG_INPUT: u8 = 2;
+    pub const TAG_RECEIVE: u8 = 3;
+    pub const TAG_OUTPUT: u8 = 4;
+    pub const TAG_ISSUE_PUB: u8 = 5;
+    pub const TAG_ISSUE_PRIV: u8 = 6;
+    pub const TAG_RETIRE: u8 = 7;
+    pub const TAG_FEE: u8 = 8;
+    pub const TAG_ACTOR_SAVE: u8 = 9;
+    pub const TAG_SET_CODE: u8 = 10;
+    pub const TAG_SEND: u8 = 11;
+    pub const TAG_STORAGE_PURCHASE: u8 = 12;
+    pub const TAG_ACTOR_DESTROY: u8 = 13;
+    pub const TAG_ACTOR_DEPLOY: u8 = 14;
+    pub const TAG_CELL_WITNESS: u8 = 15;
+}
+
+impl CellEncode for TxEntry {
+    fn encode(&self, b: &mut CellBuilder) -> Result<(), CellError> {
+        match self {
+            Self::Header(h) => {
+                b.store_u8(Self::TAG_HEADER)?.store(h)?;
+            }
+            Self::CellWitness(id) => {
+                b.store_u8(Self::TAG_CELL_WITNESS)?.store_bytes(id)?;
+            }
+            Self::Data(bytes) => {
+                b.store_u8(Self::TAG_DATA)?
+                    .store_ref(CellRef::resident(blob_cell(bytes)?))?;
+            }
+            Self::Input(id) => {
+                b.store_u8(Self::TAG_INPUT)?.store_bytes(id)?;
+            }
+            Self::Receive(id) => {
+                b.store_u8(Self::TAG_RECEIVE)?.store_bytes(id)?;
+            }
+            Self::Output(contract) => {
+                b.store_u8(Self::TAG_OUTPUT)?
+                    .store_ref(CellRef::resident(contract.to_cell()?))?;
+            }
+            Self::IssuePub(qty, flv) => {
+                b.store_u8(Self::TAG_ISSUE_PUB)?.store(qty)?.store(flv)?;
+            }
+            Self::IssuePriv(qty, flv) => {
+                b.store_u8(Self::TAG_ISSUE_PRIV)?
+                    .store_bytes(qty.as_bytes())?
+                    .store_bytes(flv.as_bytes())?;
+            }
+            Self::Retire(qty, flv) => {
+                b.store_u8(Self::TAG_RETIRE)?
+                    .store_bytes(qty.as_bytes())?
+                    .store_bytes(flv.as_bytes())?;
+            }
+            Self::Fee(qty) => {
+                b.store_u8(Self::TAG_FEE)?.store_u64(*qty)?;
+            }
+            Self::ActorSave { actor, state } => {
+                b.store_u8(Self::TAG_ACTOR_SAVE)?
+                    .store_bytes(&actor.to_hash())?
+                    .store_ref(CellRef::resident(state.to_cell()?))?;
+            }
+            Self::ActorDeploy { actor, code } | Self::SetCode { actor, code } => {
+                b.store_u8(if matches!(self, Self::ActorDeploy { .. }) {
+                    Self::TAG_ACTOR_DEPLOY
+                } else {
+                    Self::TAG_SET_CODE
+                })?
+                .store_bytes(&actor.to_hash())?
+                .store_ref(CellRef::resident(blob_cell(code)?))?;
+            }
+            Self::Send(message) => {
+                b.store_u8(Self::TAG_SEND)?
+                    .store_ref(CellRef::resident(message.to_cell()?))?;
+            }
+            Self::StoragePurchase {
+                actor,
+                bytes,
+                expiry_height,
+                fee_sparks,
+            } => {
+                b.store_u8(Self::TAG_STORAGE_PURCHASE)?
+                    .store_bytes(&actor.to_hash())?
+                    .store_u64(*bytes)?
+                    .store_u64(*expiry_height)?
+                    .store(fee_sparks)?;
+            }
+            Self::ActorDestroy { actor } => {
+                b.store_u8(Self::TAG_ACTOR_DESTROY)?
+                    .store_bytes(&actor.to_hash())?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl CellDecode for TxEntry {
+    fn decode<R: CellResolver + ?Sized>(
+        s: &mut CellSlice<'_>,
+        r: &mut R,
+    ) -> Result<Self, CellError> {
+        Ok(match s.load_u8()? {
+            Self::TAG_HEADER => Self::Header(TxHeader::decode(s, r)?),
+            Self::TAG_CELL_WITNESS => Self::CellWitness(<[u8; 32]>::decode(s, r)?),
+            Self::TAG_DATA => Self::Data(read_blob(&s.load_ref()?, r, u32::MAX as usize)?),
+            Self::TAG_INPUT => Self::Input(<[u8; 32]>::decode(s, r)?),
+            Self::TAG_RECEIVE => Self::Receive(<[u8; 32]>::decode(s, r)?),
+            Self::TAG_OUTPUT => {
+                let cell = cells::resolve_cell(r, &s.load_ref()?)?;
+                Self::Output(Contract::from_cell(&cell, r)?)
+            }
+            Self::TAG_ISSUE_PUB => Self::IssuePub(Scalar::decode(s, r)?, Scalar::decode(s, r)?),
+            Self::TAG_ISSUE_PRIV => Self::IssuePriv(
+                CompressedRistretto(<[u8; 32]>::decode(s, r)?),
+                CompressedRistretto(<[u8; 32]>::decode(s, r)?),
+            ),
+            Self::TAG_RETIRE => Self::Retire(
+                CompressedRistretto(<[u8; 32]>::decode(s, r)?),
+                CompressedRistretto(<[u8; 32]>::decode(s, r)?),
+            ),
+            Self::TAG_FEE => Self::Fee(s.load_u64()?),
+            Self::TAG_ACTOR_SAVE => {
+                let actor = ActorID::Hash(<[u8; 32]>::decode(s, r)?);
+                let cell = cells::resolve_cell(r, &s.load_ref()?)?;
+                Self::ActorSave {
+                    actor,
+                    state: Value::from_cell(&cell, r)?,
+                }
+            }
+            tag @ (Self::TAG_ACTOR_DEPLOY | Self::TAG_SET_CODE) => {
+                let actor = ActorID::Hash(<[u8; 32]>::decode(s, r)?);
+                let code = read_blob(&s.load_ref()?, r, u32::MAX as usize)?;
+                if tag == Self::TAG_ACTOR_DEPLOY {
+                    Self::ActorDeploy { actor, code }
+                } else {
+                    Self::SetCode { actor, code }
+                }
+            }
+            Self::TAG_SEND => {
+                let cell = cells::resolve_cell(r, &s.load_ref()?)?;
+                Self::Send(Message::from_cell(&cell, r)?)
+            }
+            Self::TAG_STORAGE_PURCHASE => Self::StoragePurchase {
+                actor: ActorID::Hash(<[u8; 32]>::decode(s, r)?),
+                bytes: s.load_u64()?,
+                expiry_height: s.load_u64()?,
+                fee_sparks: Scalar::decode(s, r)?,
+            },
+            Self::TAG_ACTOR_DESTROY => Self::ActorDestroy {
+                actor: ActorID::Hash(<[u8; 32]>::decode(s, r)?),
+            },
+            _ => return Err(CellError::InvalidFormat),
+        })
+    }
+}
+
+impl CellEncode for TxLog {
+    fn encode(&self, b: &mut CellBuilder) -> Result<(), CellError> {
+        let cell = log_cell(&self.0)?;
+        b.store_bytes(cell.payload())?;
+        for reference in cell.refs() {
+            b.store_ref(reference.clone())?;
+        }
+        Ok(())
+    }
+}
+
+impl CellDecode for TxLog {
+    fn decode<R: CellResolver + ?Sized>(
+        s: &mut CellSlice<'_>,
+        r: &mut R,
+    ) -> Result<Self, CellError> {
+        let len = usize::try_from(s.load_u64()?).map_err(|_| CellError::LimitExceeded)?;
+        let trie = if len == 0 {
+            Trie::new(8)?
+        } else {
+            Trie::from_cell(s.load_ref()?, 8)?
+        };
+        let mut entries = Vec::new();
+        for (i, (key, reference)) in trie.entries_exact(len, r)?.into_iter().enumerate() {
+            if key != (i as u64).to_be_bytes() {
+                return Err(CellError::InvalidFormat);
+            }
+            let cell = cells::resolve_cell(r, &reference)?;
+            entries.push(TxEntry::from_cell(&cell, r)?);
+        }
+        Ok(Self(entries))
+    }
+}
+
+impl CellEncode for UnsignedTx {
+    fn encode(&self, b: &mut CellBuilder) -> Result<(), CellError> {
+        b.store(&self.header)?.store_bytes(&self.witnesses.id())?;
+        b.store_ref(CellRef::resident(transaction_script(
+            &self.script,
+            &self.witnesses,
+        )?))?;
+        b.store_ref(CellRef::pruned(self.log.txid().0))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod envelope_tests {
     use super::*;
+    use crate::{Anchor, Predicate, PredicateTree, String};
+
+    #[test]
+    fn embedded_nested_witnesses_roundtrip_from_prover_to_verifier() {
+        let leaf = ScriptBuilder::new()
+            .drop_()
+            .alloc(Some(Scalar::from(7u64)))
+            .alloc(Some(Scalar::from(3u64)))
+            .add()
+            .alloc(Some(Scalar::from(10u64)))
+            .eq()
+            .verify();
+        let inner = PredicateTree::from_scripts(None, vec![leaf], [1; 32]).unwrap();
+        let inner_id = inner.root_id();
+        let inner_contract = Contract::new(
+            Predicate::tree(inner.clone()),
+            Anchor([2; 32]),
+            Value::Scalar(Scalar::ONE),
+        )
+        .unwrap();
+        let inner_contract_id = inner_contract.id();
+        let branch = ScriptBuilder::new()
+            .drop_()
+            .push_str(String::contract(inner_contract))
+            .input()
+            .push_taproot_proof(&inner, 0)
+            .unwrap()
+            .push_int(100_000u64)
+            .push_int(0u64)
+            .open()
+            .verify()
+            .drop_();
+        let hidden_contract = Contract::new(
+            Predicate::opaque(Predicate::unspendable_key()),
+            Anchor([3; 32]),
+            Value::Scalar(Scalar::ONE),
+        )
+        .unwrap();
+        let hidden_id = hidden_contract.id();
+        let unused = ScriptBuilder::new()
+            .drop_()
+            .push_str(String::contract(hidden_contract))
+            .drop_();
+        let outer = PredicateTree::from_scripts(None, vec![branch, unused], [4; 32]).unwrap();
+        let contract = Contract::new(
+            Predicate::tree(outer.clone()),
+            Anchor([5; 32]),
+            Value::Scalar(Scalar::ONE),
+        )
+        .unwrap();
+        let contract_id = contract.id();
+        let limits = Limits { gas: 1_000_000 };
+        let program = ScriptBuilder::new()
+            .push_str(String::contract(contract))
+            .input()
+            .push_taproot_proof(&outer, 0)
+            .unwrap()
+            .push_int(400_000u64)
+            .push_int(0u64)
+            .open()
+            .verify()
+            .drop_();
+        // No manual `with_cells`, private script overlay, or verifier sidecar.
+        let unsigned = program
+            .build_tx(
+                TxHeader {
+                    version: 1,
+                    locktime: 0,
+                },
+                limits,
+            )
+            .unwrap();
+        for id in [contract_id, inner_contract_id, outer.root_id(), inner_id] {
+            assert!(unsigned.witnesses().contains(&id));
+        }
+        assert!(
+            !unsigned.witnesses().contains(&hidden_id),
+            "unused program witnesses stay private"
+        );
+        let expected_id = unsigned.log().txid();
+        let expected_metrics = unsigned.metrics();
+        let expected_bag = unsigned.witnesses().id();
+        let tx = unsigned.without_signature().unwrap();
+        let bytes = tx.to_envelope().unwrap().encode();
+        let decoded =
+            ExternalTx::from_bytes_bounded(&bytes, 1, tx.script.len(), tx.proof_bytes().len())
+                .unwrap();
+        assert_eq!(decoded.witnesses().id(), expected_bag);
+        let (log, metrics) = decoded.verify_with_metrics(limits).unwrap();
+        assert_eq!(log.txid(), expected_id);
+        assert_eq!(metrics, expected_metrics);
+        assert_eq!(
+            log.iter()
+                .filter(|entry| matches!(entry, TxEntry::Input(_)))
+                .count(),
+            2
+        );
+
+        let mut missing = decoded;
+        let mut bag = BagOfCells::new();
+        for (id, cell) in missing.witnesses().iter() {
+            if *id != outer.root_id() {
+                bag.insert(Arc::clone(cell)).unwrap();
+            }
+        }
+        missing.witnesses = Arc::new(bag);
+        assert!(
+            matches!(missing.verify(limits), Err(VMError::Cell(CellError::MissingCell(id))) if id == outer.root_id())
+        );
+    }
 
     fn hex_bytes(hex: &str) -> Vec<u8> {
         hex.as_bytes()
@@ -523,32 +968,121 @@ mod envelope_tests {
 
     #[test]
     fn canonical_external_tx_vector_and_bounds() {
-        const VECTOR: &str = "010000000200000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000a101000000000000007e5de4349c5b87f2e1003095aff2e310801e2504b706bc6c062076eee49f90366625b75748908fb2492dd909a6d1428001dfdd201a0a7fae70911cf29112c8319e9d0eba4ca7fe137d5f8026614ab8736204ea46c213d9a20d0d663aa3e8ff1676fcd93dc1cba92d2f820b5b8ae5c99bacce0610dc799f050d1dec5effd5cb6c96950b0ad392e7414252008e6ff97d385437f30c74f106ae586522db4a9d73241ca0ed4f24798b31981e98e96bc121852a567728380ca00d12ee8556c220c13c3ed16d35fca58a3a3773120657b5b49cac1830a472bd083c51f4012ab7de25450a4544cdee6b7577d97a9c3e5a3267da4e13e2ef36a65ce83697cc498f00d005000000000000000000000000000000000000000000000000000000000000000027e4219ec9efc32f50b4b1c8766037a812d135363cbaa38be71527de967eb20839057e9d2324d2932cba8c6a646bb2b9f09661cd1ef8977bbd1df4813803e4040000000000000000000000000000000000000000000000000000000000000000ecd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010";
-        let bytes = hex_bytes(VECTOR);
-        let tx = ExternalTx::from_bytes_bounded(&bytes, 1, 0, 417).unwrap();
-        assert_eq!(tx.encode_to_vec(), bytes);
-        assert_eq!(tx.encoded_size(), bytes.len());
+        // Fixed R1CS bytes keep this transport/shape vector independent of prover randomness.
+        const PROOF: &str = "007e5de4349c5b87f2e1003095aff2e310801e2504b706bc6c062076eee49f90366625b75748908fb2492dd909a6d1428001dfdd201a0a7fae70911cf29112c8319e9d0eba4ca7fe137d5f8026614ab8736204ea46c213d9a20d0d663aa3e8ff1676fcd93dc1cba92d2f820b5b8ae5c99bacce0610dc799f050d1dec5effd5cb6c96950b0ad392e7414252008e6ff97d385437f30c74f106ae586522db4a9d73241ca0ed4f24798b31981e98e96bc121852a567728380ca00d12ee8556c220c13c3ed16d35fca58a3a3773120657b5b49cac1830a472bd083c51f4012ab7de25450a4544cdee6b7577d97a9c3e5a3267da4e13e2ef36a65ce83697cc498f00d005000000000000000000000000000000000000000000000000000000000000000027e4219ec9efc32f50b4b1c8766037a812d135363cbaa38be71527de967eb20839057e9d2324d2932cba8c6a646bb2b9f09661cd1ef8977bbd1df4813803e4040000000000000000000000000000000000000000000000000000000000000000ecd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010";
+        let tx = ExternalTx {
+            header: TxHeader {
+                version: 1,
+                locktime: 2,
+            },
+            script: vec![0x42],
+            signature: None,
+            proof: R1CSProof::from_bytes(&hex_bytes(PROOF)).unwrap(),
+            witnesses: Arc::new(BagOfCells::new()),
+            txid: TxID([0x11; 32]),
+        };
+        let root = tx.to_cell().unwrap();
+        let mut expected_header = vec![1, 0, 0, 0, 2, 0, 0, 0];
+        expected_header.extend_from_slice(&tx.witnesses.id());
+        assert_eq!(root.payload(), expected_header);
+        assert_eq!(root.refs().len(), 4);
+        assert_eq!(root.refs()[3].id(), [0x11; 32]);
+        let bytes = tx.to_envelope().unwrap().encode();
+        let decoded = ExternalTx::from_bytes_bounded(&bytes, 1, 1, 417).unwrap();
+        assert_eq!(decoded.to_envelope().unwrap().encode(), bytes);
+        assert_eq!(decoded.encoded_size(), bytes.len());
 
         let mut trailing = bytes.clone();
         trailing.push(0);
+        assert!(ExternalTx::from_bytes_bounded(&trailing, 1, 1, 417).is_err());
         assert!(matches!(
-            ExternalTx::from_bytes_bounded(&trailing, 1, 0, 417),
-            Err(ReadError::TrailingBytes)
+            ExternalTx::from_bytes_bounded(&bytes, 2, 1, 417),
+            Err(CellError::InvalidFormat)
         ));
         assert!(matches!(
-            ExternalTx::from_bytes_bounded(&bytes, 2, 0, 417),
-            Err(ReadError::InvalidFormat)
-        ));
-        let mut unknown_version = bytes.clone();
-        unknown_version[0] = 2;
-        assert!(matches!(
-            ExternalTx::from_bytes_bounded(&unknown_version, 2, 0, 417),
-            Err(ReadError::InvalidFormat)
+            ExternalTx::from_bytes_bounded(&bytes, 1, 0, 417),
+            Err(CellError::LimitExceeded)
         ));
         assert!(matches!(
-            ExternalTx::from_bytes_bounded(&bytes, 1, 0, 416),
-            Err(ReadError::InvalidFormat)
+            ExternalTx::from_bytes_bounded(&bytes, 1, 1, 416),
+            Err(CellError::LimitExceeded)
         ));
+
+        let mut unknown_version = tx;
+        unknown_version.header.version = 2;
+        let bytes = unknown_version.to_envelope().unwrap().encode();
+        assert!(matches!(
+            ExternalTx::from_bytes_bounded(&bytes, 2, 1, 417),
+            Err(CellError::InvalidFormat)
+        ));
+    }
+
+    #[test]
+    fn execution_bag_is_committed_and_transport_extras_are_rejected() {
+        let limits = Limits { gas: 100_000 };
+        let mut witnesses = BagOfCells::new();
+        witnesses
+            .insert(Arc::new(Cell::new(vec![9], vec![]).unwrap()))
+            .unwrap();
+        let mut tx = ScriptBuilder::new()
+            .with_cells(witnesses)
+            .build_tx(
+                TxHeader {
+                    version: 1,
+                    locktime: 0,
+                },
+                limits,
+            )
+            .unwrap()
+            .without_signature()
+            .unwrap();
+        let log = tx.verify(limits).unwrap();
+        assert!(matches!(log.entries()[1], TxEntry::CellWitness(id) if id == tx.witnesses.id()));
+        let bytes = tx.to_envelope().unwrap().encode();
+        ExternalTx::from_bytes_bounded(&bytes, 1, 0, tx.proof_bytes().len())
+            .unwrap()
+            .verify(limits)
+            .unwrap();
+
+        let (root, mut transport) = tx.to_envelope().unwrap().into_parts();
+        transport
+            .insert(Arc::new(Cell::new(vec![99], vec![]).unwrap()))
+            .unwrap();
+        let extra = CellEnvelope::new(root, transport).unwrap().encode();
+        assert!(matches!(
+            ExternalTx::from_bytes_bounded(&extra, 1, 0, tx.proof_bytes().len()),
+            Err(CellError::InvalidFormat)
+        ));
+
+        tx.witnesses = Arc::new(BagOfCells::new());
+        assert!(
+            tx.verify(limits).is_err(),
+            "stripping an unused witness must still invalidate the proof/TxID"
+        );
+    }
+
+    #[test]
+    fn txlog_trie_roundtrip_and_wrong_count() {
+        let log = TxLog::from(vec![
+            TxEntry::Header(TxHeader {
+                version: 1,
+                locktime: 0,
+            }),
+            TxEntry::CellWitness(BagOfCells::new().id()),
+            TxEntry::Data(vec![42; 20_000]),
+            TxEntry::Fee(17),
+        ]);
+        let cell = log.to_cell().unwrap();
+        assert_eq!(cell.id(), log.txid().0);
+        let mut envelope = log.to_envelope().unwrap();
+        let root = envelope.cells().get(&envelope.root()).unwrap();
+        let decoded = TxLog::from_cell(&root, &mut envelope).unwrap();
+        assert_eq!(decoded.txid(), log.txid());
+        assert!(
+            matches!(&decoded.entries()[2], TxEntry::Data(bytes) if bytes == &vec![42; 20_000])
+        );
+        let malformed = Cell::new(5u64.to_le_bytes().to_vec(), cell.refs().to_vec()).unwrap();
+        assert!(TxLog::from_cell(&malformed, &mut ()).is_err());
     }
 
     #[test]
@@ -591,226 +1125,5 @@ mod envelope_tests {
         assert_eq!(unsigned.metrics().multiplications, 3);
         let tx = unsigned.without_signature().unwrap();
         assert_eq!(tx.verify_with_metrics(limits).unwrap().1.multiplications, 3);
-    }
-}
-
-impl TxID {
-    /// Canonical transaction identity: the merkle root over the txlog
-    /// (header + effect list).
-    pub fn from_log(txlog: &[TxEntry]) -> Self {
-        TxID(MerkleTree::root(b"flamevm.txid", txlog))
-    }
-}
-
-impl MerkleItem for TxEntry {
-    fn commit(&self, t: &mut Transcript) {
-        match self {
-            TxEntry::Header(h) => {
-                // Absorb version and locktime as little-endian u32 —
-                // matches the wire format (docs/flamevm.md).
-                t.append_message(b"tx.version", &h.version.to_le_bytes());
-                t.append_message(b"tx.locktime", &h.locktime.to_le_bytes());
-            }
-            TxEntry::Data(bytes) => {
-                t.append_message(b"data", bytes);
-            }
-            TxEntry::Input(contract_id) => {
-                t.append_message(b"input", contract_id);
-            }
-            TxEntry::Receive(send_id) => {
-                t.append_message(b"receive.send_id", send_id);
-            }
-            TxEntry::ActorDeploy { actor, code } => {
-                t.append_message(b"deploy.actor", &actor.to_hash());
-                t.append_message(b"deploy.code_root", &code_root(code));
-            }
-            TxEntry::Output(contract) => {
-                // Bind to the contract's canonical 32-byte identity hash.
-                // Contract::id() already absorbs predicate / anchor /
-                // payload bytes via Merlin.
-                let id = contract.id();
-                t.append_message(b"output", &id);
-            }
-            TxEntry::IssuePub(qty, flv) => {
-                t.append_message(b"issuepub.qty", &qty.to_bytes());
-                t.append_message(b"issuepub.flv", &flv.to_bytes());
-            }
-            TxEntry::IssuePriv(qty_pt, flv_pt) => {
-                t.append_message(b"issuepriv.qty", qty_pt.as_bytes());
-                t.append_message(b"issuepriv.flv", flv_pt.as_bytes());
-            }
-            TxEntry::Retire(qty_pt, flv_pt) => {
-                t.append_message(b"retire.qty", qty_pt.as_bytes());
-                t.append_message(b"retire.flv", flv_pt.as_bytes());
-            }
-            TxEntry::Fee(qty) => {
-                // Little-endian u64, per docs/flamevm.md "Encoding:
-                // little-endian everywhere". Domain tag distinguishes
-                // this from any other 8-byte append.
-                t.append_message(b"fee.qty", &qty.to_le_bytes());
-            }
-            TxEntry::ActorSave { actor, state } => {
-                // Bind every actor-state mutation into the TxID merkle
-                // root: actor identity (canonical 32-byte hash, not
-                // variant-tagged wire form) + state root. State bytes
-                // ride in the entry itself; the merkle leaf commits
-                // only to the root, matching Output's Contract-as-id
-                // pattern.
-                t.append_message(b"save.actor", &actor.to_hash());
-                t.append_message(b"save.post_state_root", &state_root(state));
-            }
-            TxEntry::SetCode { actor, code } => {
-                t.append_message(b"setcode.actor", &actor.to_hash());
-                t.append_message(b"setcode.code_root", &code_root(code));
-            }
-            TxEntry::Send(msg) => {
-                // Bind to the send's canonical 32-byte MessageID hash,
-                // analogous to `Output(Contract)` committing only to
-                // `contract.id()`. `Message::id()` absorbs the message's
-                // canonical wire encoding under domain
-                // `flamevm.message.id`, so this single leaf commits to
-                // every parameter the future internal tx will be
-                // delivered with.
-                t.append_message(b"send", msg.id().as_bytes());
-            }
-            TxEntry::StoragePurchase {
-                actor,
-                bytes,
-                expiry_height,
-                fee_sparks,
-            } => {
-                t.append_message(b"storage.actor", &actor.to_hash());
-                t.append_message(b"storage.bytes", &bytes.to_le_bytes());
-                t.append_message(b"storage.expiry", &expiry_height.to_le_bytes());
-                t.append_message(b"storage.fee_sparks", &fee_sparks.to_bytes());
-            }
-            TxEntry::ActorDestroy { actor } => {
-                t.append_message(b"destroy.actor", &actor.to_hash());
-            }
-        }
-    }
-}
-
-impl TxEntry {
-    /// Stable wire tags (spec §TxLog transport). New effects append tags
-    /// without renumbering existing entries. Encode-only: the TxLog is
-    /// re-derived by execution, never decoded from the wire by this crate.
-    pub const TAG_HEADER: u8 = 0;
-    pub const TAG_DATA: u8 = 1;
-    pub const TAG_INPUT: u8 = 2;
-    pub const TAG_RECEIVE: u8 = 3;
-    pub const TAG_OUTPUT: u8 = 4;
-    pub const TAG_ISSUE_PUB: u8 = 5;
-    pub const TAG_ISSUE_PRIV: u8 = 6;
-    pub const TAG_RETIRE: u8 = 7;
-    pub const TAG_FEE: u8 = 8;
-    pub const TAG_ACTOR_SAVE: u8 = 9;
-    pub const TAG_SET_CODE: u8 = 10;
-    pub const TAG_SEND: u8 = 11;
-    pub const TAG_STORAGE_PURCHASE: u8 = 12;
-    pub const TAG_ACTOR_DESTROY: u8 = 13;
-    pub const TAG_ACTOR_DEPLOY: u8 = 14;
-}
-
-/// Canonical wire serialization of one effect: a tag byte followed by
-/// the variant's fields, each in its existing canonical form (reusing
-/// `Contract`/`Message`/`ActorID` encoders and `write_value`/`write_scalar`
-/// — never a parallel re-implementation, per spec §TxLog transport).
-/// All integers little-endian (ADR 0006); byte blobs are u64-LE
-/// length-prefixed (matching `Message` payload / `ActorID` ctor style).
-impl Encodable for TxEntry {
-    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
-        match self {
-            TxEntry::Header(h) => {
-                w.write_u8(b"txentry.tag", Self::TAG_HEADER)?;
-                w.write(b"tx.version", &h.version.to_le_bytes())?;
-                w.write(b"tx.locktime", &h.locktime.to_le_bytes())
-            }
-            TxEntry::Data(bytes) => {
-                w.write_u8(b"txentry.tag", Self::TAG_DATA)?;
-                w.write_u64(b"data.len", bytes.len() as u64)?;
-                w.write(b"data.bytes", bytes)
-            }
-            TxEntry::Input(contract_id) => {
-                w.write_u8(b"txentry.tag", Self::TAG_INPUT)?;
-                w.write(b"input.contract_id", contract_id)
-            }
-            TxEntry::Receive(send_id) => {
-                w.write_u8(b"txentry.tag", Self::TAG_RECEIVE)?;
-                w.write(b"receive.send_id", send_id)
-            }
-            TxEntry::ActorDeploy { actor, code } => {
-                w.write_u8(b"txentry.tag", Self::TAG_ACTOR_DEPLOY)?;
-                actor.to_canonical().encode(w)?;
-                w.write_u64(b"deploy.len", code.len() as u64)?;
-                w.write(b"deploy.bytes", code)
-            }
-            TxEntry::Output(contract) => {
-                w.write_u8(b"txentry.tag", Self::TAG_OUTPUT)?;
-                contract.encode(w)
-            }
-            TxEntry::IssuePub(qty, flv) => {
-                w.write_u8(b"txentry.tag", Self::TAG_ISSUE_PUB)?;
-                write_scalar(w, qty)?;
-                write_scalar(w, flv)
-            }
-            TxEntry::IssuePriv(qty_pt, flv_pt) => {
-                w.write_u8(b"txentry.tag", Self::TAG_ISSUE_PRIV)?;
-                w.write(b"issuepriv.qty", qty_pt.as_bytes())?;
-                w.write(b"issuepriv.flv", flv_pt.as_bytes())
-            }
-            TxEntry::Retire(qty_pt, flv_pt) => {
-                w.write_u8(b"txentry.tag", Self::TAG_RETIRE)?;
-                w.write(b"retire.qty", qty_pt.as_bytes())?;
-                w.write(b"retire.flv", flv_pt.as_bytes())
-            }
-            TxEntry::Fee(qty) => {
-                w.write_u8(b"txentry.tag", Self::TAG_FEE)?;
-                w.write_u64(b"fee.qty", *qty)
-            }
-            TxEntry::ActorSave { actor, state } => {
-                w.write_u8(b"txentry.tag", Self::TAG_ACTOR_SAVE)?;
-                actor.to_canonical().encode(w)?;
-                write_admitted_value(w, state)
-            }
-            TxEntry::SetCode { actor, code } => {
-                w.write_u8(b"txentry.tag", Self::TAG_SET_CODE)?;
-                actor.to_canonical().encode(w)?;
-                w.write_u64(b"setcode.len", code.len() as u64)?;
-                w.write(b"setcode.bytes", code)
-            }
-            TxEntry::Send(msg) => {
-                w.write_u8(b"txentry.tag", Self::TAG_SEND)?;
-                msg.encode(w)
-            }
-            TxEntry::StoragePurchase {
-                actor,
-                bytes,
-                expiry_height,
-                fee_sparks,
-            } => {
-                w.write_u8(b"txentry.tag", Self::TAG_STORAGE_PURCHASE)?;
-                actor.to_canonical().encode(w)?;
-                w.write_u64(b"storage.bytes", *bytes)?;
-                w.write_u64(b"storage.expiry", *expiry_height)?;
-                write_scalar(w, fee_sparks)
-            }
-            TxEntry::ActorDestroy { actor } => {
-                w.write_u8(b"txentry.tag", Self::TAG_ACTOR_DESTROY)?;
-                actor.to_canonical().encode(w)
-            }
-        }
-    }
-}
-
-/// Canonical wire serialization of a whole log: u64-LE entry count
-/// followed by each entry's encoding.
-impl Encodable for TxLog {
-    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
-        w.write_u64(b"txlog.len", self.0.len() as u64)?;
-        for entry in &self.0 {
-            entry.encode(w)?;
-        }
-        Ok(())
     }
 }

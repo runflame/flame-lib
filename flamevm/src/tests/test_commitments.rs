@@ -68,17 +68,21 @@ fn prove_then_verify_with_commit_expr_eq() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(
+    Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify succeeds");
 }

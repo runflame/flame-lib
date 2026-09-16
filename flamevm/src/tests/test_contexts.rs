@@ -257,7 +257,7 @@ fn nested_contractopen_does_not_transitively_inherit_actor_identity() {
         Contract::new(
             Predicate::opaque(Predicate::unspendable_key()),
             Anchor([0x44; 32]),
-            Vec::new(),
+            test_payload(Vec::new()),
         )
         .unwrap()
     };

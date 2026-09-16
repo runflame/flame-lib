@@ -1,11 +1,9 @@
 mod actor;
 mod address;
-mod chunk;
 mod constraints;
 mod contract;
 mod crypto;
 mod dict;
-mod dict2;
 mod encoding;
 mod errors;
 mod fees;
@@ -17,7 +15,6 @@ mod scalar;
 mod script;
 mod string;
 mod token;
-mod trie;
 mod tx;
 mod value;
 mod verifier;
@@ -27,14 +24,12 @@ pub use actor::{
     code_root, code_state_bytes, empty_state, state_root, ActorID, ActorRegistry, StoragePurchase,
 };
 pub use address::Address;
-pub use chunk::{Chunk, ChunkID, ChunkRef, MAX_CHUNK_PAYLOAD, MAX_CHUNK_REFS};
 pub use constraints::{
     Commitment, CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,
 };
 pub use contract::{Contract, ContractID, Predicate, PredicateTree, TaprootProof};
 pub use crypto::{Merlin, Point};
 pub use dict::Dict;
-pub use dict2::{Dict2, DICT2_KEY_BYTES};
 pub use errors::VMError;
 pub use fees::{CheckedFee, MAX_FEE};
 pub use message::{Message, MessageID};
@@ -45,7 +40,6 @@ pub use scalar::Scalar;
 pub use script::{Script, ScriptBuilder};
 pub use string::{String, StringWitness};
 pub use token::{flavor_from_actor, ClearToken, Token, WideToken, FLAME_FLAVOR};
-pub use trie::{Trie, MAX_TRIE_KEY_BYTES};
 pub use value::Value;
 pub use verifier::Verifier;
 
@@ -55,9 +49,7 @@ pub use tx::{
 };
 pub use vm::{Anchor, BlockContext};
 
-// Re-export the wire-format traits so downstream crates don't need
-// a direct `readerwriter` dep. Most flamevm types implement these
-// (ActorID, Anchor, Predicate, Contract, Message, Address, Instruction).
-pub use readerwriter::{
-    Codable, Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer,
+pub use cells::{
+    BagOfCells, Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellID,
+    CellRef, CellResolver, CellSlice, Trie,
 };

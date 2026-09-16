@@ -139,7 +139,9 @@ impl Decodable for Proof {
             1 => {
                 let position = reader.read_u64()?;
                 let depth = reader.read_u32()? as usize;
-                if depth > 63 || position >= (1u64 << depth) {
+                // Larger preceding roots make a height-d tree's offset a
+                // multiple of 2^(d+1): bit d is zero, higher bits may be set.
+                if depth > 63 || (position & (1u64 << depth)) != 0 {
                     return Err(ReadError::InvalidFormat);
                 }
                 let neighbors = reader.read_vec(depth, |r| r.read_u8x32().map(Hash))?;
@@ -183,12 +185,13 @@ impl Forest {
         path: &Path,
         hasher: &Hasher<M>,
     ) -> Result<(), UtreexoError> {
-        let computed_root = path.compute_root(item, hasher);
         if let Some((_i, level)) =
             find_root(self.roots_iter().map(|(level, _)| level), path.position)
         {
             // unwrap won't fail because `find_root` returns level for the actually existing root.
-            if self.roots[level].unwrap() == computed_root {
+            if path.neighbors.len() == level
+                && self.roots[level].unwrap() == path.compute_root(item, hasher)
+            {
                 return Ok(());
             }
         }
@@ -449,7 +452,7 @@ impl WorkForest {
         //  |\
         //  a   b   c              ---->   a      c
         //  |\  |\  |\                     |\     |\
-        //      2 x     x 7 8 9                2      7 8 9
+        //  2 x x 7 8 9                    2 7    8 9
         //
         // The catchup structure is needed to transform higher parts of the proofs
         // against the old tree into the paths within a new tree.

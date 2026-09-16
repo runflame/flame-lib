@@ -22,7 +22,6 @@ pub const MAX_TRIE_KEY_BYTES: usize = 32;
 #[derive(Clone, Debug)]
 pub struct Trie {
     key_bytes: usize,
-    len: usize,
     root: Option<CellRef>,
 }
 
@@ -32,28 +31,20 @@ impl Trie {
         check_key_width(key_bytes)?;
         Ok(Self {
             key_bytes,
-            len: 0,
             root: None,
         })
     }
 
-    /// Reconstructs a trie envelope around an authenticated root reference.
-    ///
-    /// The supplied length is trusted envelope metadata. Node shape is checked
-    /// lazily as operations traverse it.
-    pub fn from_trusted_root(
-        key_bytes: usize,
-        len: usize,
-        root: Option<CellRef>,
-    ) -> Result<Self, CellError> {
+    /// Wraps a resident or pruned root without loading or traversing it.
+    /// Accepts `CellRef`, `Cell`, or `Arc<Cell>`. Every node, including the root,
+    /// is resolved and validated on access, regardless of residency.
+    /// Key width belongs to the owning schema; no entry count is needed.
+    /// Use `new` for an empty Trie.
+    pub fn from_cell(root: impl Into<CellRef>, key_bytes: usize) -> Result<Self, CellError> {
         check_key_width(key_bytes)?;
-        if (len == 0) != root.is_none() {
-            return Err(CellError::MalformedTrie);
-        }
         Ok(Self {
             key_bytes,
-            len,
-            root,
+            root: Some(root.into()),
         })
     }
 
@@ -62,14 +53,9 @@ impl Trie {
         self.key_bytes
     }
 
-    /// Number of leaves recorded by the trie envelope.
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
     /// Returns true when the trie has no root.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.root.is_none()
     }
 
     /// Borrows the raw root reference.
@@ -79,8 +65,8 @@ impl Trie {
 
     /// Returns the root Cell commitment, if non-empty.
     ///
-    /// The enclosing schema must separately authenticate the configured key
-    /// width and cached length; neither is part of the raw root Cell.
+    /// The enclosing schema fixes the key width and owns any entry-count field;
+    /// neither is part of the raw root Cell.
     pub fn root_id(&self) -> Option<CellID> {
         self.root.as_ref().map(CellRef::id)
     }
@@ -97,11 +83,34 @@ impl Trie {
         resolver: &mut R,
     ) -> Result<Option<CellRef>, CellError> {
         self.check_key(key)?;
-        let mut current = match self.root.as_ref() {
-            Some(root) => resolve_cell(resolver, root)?,
-            None => return Ok(None),
-        };
-        let total_digits = self.key_bytes * 4;
+        match self.root.as_ref() {
+            Some(root) => Self::lookup_ref(root, key, resolver),
+            None => Ok(None),
+        }
+    }
+
+    /// Looks up one fixed-width key directly from a raw Trie root. No entry
+    /// count or envelope is needed. The caller's schema fixes the key width;
+    /// all visited node shapes and Cell hashes are checked during traversal.
+    pub fn lookup<R: CellResolver + ?Sized>(
+        root: &CellRef,
+        key: &[u8],
+        resolver: &mut R,
+    ) -> Result<Option<Arc<Cell>>, CellError> {
+        match Self::lookup_ref(root, key, resolver)? {
+            Some(reference) => resolve_cell(resolver, &reference).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn lookup_ref<R: CellResolver + ?Sized>(
+        root: &CellRef,
+        key: &[u8],
+        resolver: &mut R,
+    ) -> Result<Option<CellRef>, CellError> {
+        check_key_width(key.len())?;
+        let mut current = resolve_cell(resolver, root)?;
+        let total_digits = key.len() * 4;
         let mut depth = 0;
 
         loop {
@@ -145,8 +154,18 @@ impl Trie {
         value: Cell,
         resolver: &mut R,
     ) -> Result<Option<CellRef>, CellError> {
+        self.insert_ref(key, CellRef::resident(value), resolver)
+    }
+
+    /// Inserts a data reference without requiring its body to be resident.
+    /// As with [`Self::insert`], traversal errors leave this trie unchanged.
+    pub fn insert_ref<R: CellResolver + ?Sized>(
+        &mut self,
+        key: &[u8],
+        value: CellRef,
+        resolver: &mut R,
+    ) -> Result<Option<CellRef>, CellError> {
         self.check_key(key)?;
-        let value = CellRef::resident(value);
         let (root, prior) = match self.root.as_ref() {
             Some(root) => {
                 let root = resolve_cell(resolver, root)?;
@@ -154,20 +173,103 @@ impl Trie {
             }
             None => (leaf_cell(key_digits(key, 0), value)?, None),
         };
-        let new_len = if prior.is_none() {
-            self.len.checked_add(1).ok_or(CellError::MalformedTrie)?
-        } else {
-            self.len
-        };
         self.root = Some(CellRef::resident(root));
-        self.len = new_len;
         Ok(prior)
+    }
+
+    /// Finds the lexicographically smallest key, resolving only its path.
+    pub fn first_key<R: CellResolver + ?Sized>(
+        &self,
+        resolver: &mut R,
+    ) -> Result<Option<Vec<u8>>, CellError> {
+        self.seek_key(None, false, resolver)
+    }
+
+    /// Finds the lexicographically largest key, resolving only its path.
+    pub fn last_key<R: CellResolver + ?Sized>(
+        &self,
+        resolver: &mut R,
+    ) -> Result<Option<Vec<u8>>, CellError> {
+        self.seek_key(None, true, resolver)
+    }
+
+    /// Finds the smallest key strictly greater than `key`.
+    /// Subtrees preceding the requested key are never resolved.
+    pub fn next_key_after<R: CellResolver + ?Sized>(
+        &self,
+        key: &[u8],
+        resolver: &mut R,
+    ) -> Result<Option<Vec<u8>>, CellError> {
+        self.check_key(key)?;
+        self.seek_key(Some(key), false, resolver)
+    }
+
+    /// Visits all leaf references in ascending key order. Data bodies remain
+    /// unresolved. Use a metered resolver to bound traversal of an untrusted DAG.
+    pub fn entries<R: CellResolver + ?Sized>(
+        &self,
+        resolver: &mut R,
+    ) -> Result<Vec<(Vec<u8>, CellRef)>, CellError> {
+        self.collect_entries(usize::MAX, resolver)
+    }
+
+    /// Checks a count owned by an enclosing schema, stopping at the first extra
+    /// entry. The count never sizes an allocation and is not needed for lookup
+    /// or mutation of the Trie itself.
+    pub fn entries_exact<R: CellResolver + ?Sized>(
+        &self,
+        expected_len: usize,
+        resolver: &mut R,
+    ) -> Result<Vec<(Vec<u8>, CellRef)>, CellError> {
+        let entries = self.collect_entries(expected_len, resolver)?;
+        if entries.len() != expected_len {
+            return Err(CellError::MalformedTrie);
+        }
+        Ok(entries)
+    }
+
+    fn collect_entries<R: CellResolver + ?Sized>(
+        &self,
+        limit: usize,
+        resolver: &mut R,
+    ) -> Result<Vec<(Vec<u8>, CellRef)>, CellError> {
+        let mut entries = Vec::new();
+        if let Some(root) = &self.root {
+            collect_entries(
+                root,
+                Vec::new(),
+                self.key_bytes * 4,
+                limit,
+                &mut entries,
+                resolver,
+            )?;
+        }
+        Ok(entries)
+    }
+
+    fn seek_key<R: CellResolver + ?Sized>(
+        &self,
+        after: Option<&[u8]>,
+        reverse: bool,
+        resolver: &mut R,
+    ) -> Result<Option<Vec<u8>>, CellError> {
+        match &self.root {
+            None => Ok(None),
+            Some(root) => seek_cell(
+                root,
+                Vec::new(),
+                self.key_bytes * 4,
+                after,
+                reverse,
+                resolver,
+            ),
+        }
     }
 
     /// Removes a key and returns its data reference, if present.
     ///
     /// Collapsing a now-unary branch resolves the surviving trie node. On any
-    /// error the original root and length remain unchanged.
+    /// error the original root remains unchanged.
     pub fn remove<R: CellResolver + ?Sized>(
         &mut self,
         key: &[u8],
@@ -180,12 +282,7 @@ impl Trie {
         };
         let (new_root, removed) = remove_cell(&root, 0, self.key_bytes * 4, key, resolver)?;
         if removed.is_some() {
-            let new_len = self.len.checked_sub(1).ok_or(CellError::MalformedTrie)?;
-            if (new_len == 0) != new_root.is_none() {
-                return Err(CellError::MalformedTrie);
-            }
             self.root = new_root.map(CellRef::resident);
-            self.len = new_len;
         }
         Ok(removed)
     }
@@ -199,6 +296,89 @@ impl Trie {
         }
         Ok(())
     }
+}
+
+fn seek_cell<R: CellResolver + ?Sized>(
+    reference: &CellRef,
+    mut prefix: Vec<u8>,
+    total_digits: usize,
+    mut after: Option<&[u8]>,
+    reverse: bool,
+    resolver: &mut R,
+) -> Result<Option<Vec<u8>>, CellError> {
+    let cell = resolve_cell(resolver, reference)?;
+    let (label, mask) = parse_cell(&cell, total_digits - prefix.len())?;
+    prefix.extend(label);
+    if let Some(key) = after {
+        match prefix
+            .iter()
+            .copied()
+            .cmp((0..prefix.len()).map(|i| key_digit(key, i)))
+        {
+            std::cmp::Ordering::Less => return Ok(None),
+            std::cmp::Ordering::Greater => after = None,
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    if mask == LEAF_MASK {
+        return Ok(after.is_none().then(|| pack_digits(&prefix)));
+    }
+    for i in 0..4 {
+        let selector = if reverse { 3 - i } else { i };
+        if mask & (1 << selector) == 0
+            || after.is_some_and(|key| selector < key_digit(key, prefix.len()))
+        {
+            continue;
+        }
+        let mut child_prefix = prefix.clone();
+        child_prefix.push(selector);
+        if let Some(key) = seek_cell(
+            &cell.refs()[child_index(mask, selector)],
+            child_prefix,
+            total_digits,
+            after,
+            reverse,
+            resolver,
+        )? {
+            return Ok(Some(key));
+        }
+    }
+    Ok(None)
+}
+
+fn collect_entries<R: CellResolver + ?Sized>(
+    reference: &CellRef,
+    mut prefix: Vec<u8>,
+    total_digits: usize,
+    expected_len: usize,
+    entries: &mut Vec<(Vec<u8>, CellRef)>,
+    resolver: &mut R,
+) -> Result<(), CellError> {
+    let cell = resolve_cell(resolver, reference)?;
+    let (label, mask) = parse_cell(&cell, total_digits - prefix.len())?;
+    prefix.extend(label);
+    if mask == LEAF_MASK {
+        if entries.len() >= expected_len {
+            return Err(CellError::MalformedTrie);
+        }
+        entries.push((pack_digits(&prefix), cell.refs()[0].clone()));
+    } else {
+        for selector in 0..4 {
+            if mask & (1 << selector) != 0 {
+                let mut child_prefix = prefix.clone();
+                child_prefix.push(selector);
+                collect_entries(
+                    &cell.refs()[child_index(mask, selector)],
+                    child_prefix,
+                    total_digits,
+                    expected_len,
+                    entries,
+                    resolver,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_key_width(key_bytes: usize) -> Result<(), CellError> {
@@ -463,6 +643,37 @@ mod tests {
     }
 
     #[test]
+    fn raw_root_lookup_needs_no_count_and_still_checks_nodes() {
+        let mut trie = Trie::new(1).unwrap();
+        for key in [0, 7, 255] {
+            trie.insert(&[key], value(key), &mut ()).unwrap();
+        }
+        let root = trie.into_root().unwrap();
+        let mut bag = crate::BagOfCells::collect(root.as_resident_arc().unwrap().clone()).unwrap();
+        let root = root.to_pruned();
+        for key in [0, 7, 255] {
+            assert_eq!(
+                Trie::lookup(&root, &[key], &mut bag)
+                    .unwrap()
+                    .unwrap()
+                    .payload(),
+                &[key]
+            );
+        }
+        assert!(Trie::lookup(&root, &[8], &mut bag).unwrap().is_none());
+        assert!(Trie::lookup(&root, &[], &mut bag).is_err());
+        assert!(matches!(
+            Trie::lookup(&root, &[7], &mut ()),
+            Err(CellError::MissingCell(_))
+        ));
+        let malformed = CellRef::resident(Cell::new(vec![0], vec![]).unwrap());
+        assert!(matches!(
+            Trie::lookup(&malformed, &[7], &mut ()),
+            Err(CellError::MalformedTrie)
+        ));
+    }
+
+    #[test]
     fn insert_replace_lookup_and_remove() {
         let mut trie = Trie::new(1).unwrap();
         let mut resolver = ();
@@ -473,7 +684,7 @@ mod tests {
                     .is_none()
             );
         }
-        assert_eq!(trie.len(), 4);
+        assert_eq!(trie.entries(&mut resolver).unwrap().len(), 4);
         assert_eq!(
             trie.get(&[0x40], &mut resolver).unwrap().unwrap().payload(),
             &[3]
@@ -485,7 +696,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(payload(prior), 3);
-        assert_eq!(trie.len(), 4);
+        assert_eq!(trie.entries(&mut resolver).unwrap().len(), 4);
         assert_eq!(
             trie.get(&[0x40], &mut resolver).unwrap().unwrap().payload(),
             &[9]
@@ -493,7 +704,7 @@ mod tests {
 
         let removed = trie.remove(&[0x01], &mut resolver).unwrap().unwrap();
         assert_eq!(payload(removed), 2);
-        assert_eq!(trie.len(), 3);
+        assert_eq!(trie.entries(&mut resolver).unwrap().len(), 3);
         assert!(trie.remove(&[0x01], &mut resolver).unwrap().is_none());
     }
 
@@ -518,6 +729,73 @@ mod tests {
         }
         assert!(trie.is_empty());
         assert!(trie.root().is_none());
+    }
+
+    #[test]
+    fn ordered_navigation_and_import_validation() {
+        let mut trie = Trie::new(2).unwrap();
+        let keys = [[0, 0], [0, 1], [0, 255], [1, 0], [127, 128], [255, 255]];
+        for (i, key) in keys.iter().enumerate().rev() {
+            trie.insert(key, value(i as u8), &mut ()).unwrap();
+        }
+        assert_eq!(trie.first_key(&mut ()).unwrap(), Some(keys[0].to_vec()));
+        assert_eq!(trie.last_key(&mut ()).unwrap(), Some(keys[5].to_vec()));
+        for candidate in 0..=u16::MAX {
+            let key = candidate.to_be_bytes();
+            let expected = keys
+                .iter()
+                .find(|stored| **stored > key)
+                .map(|stored| stored.to_vec());
+            assert_eq!(trie.next_key_after(&key, &mut ()).unwrap(), expected);
+        }
+        let entries = trie.entries(&mut ()).unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.0.clone())
+                .collect::<Vec<_>>(),
+            keys
+        );
+        assert_eq!(trie.entries_exact(6, &mut ()).unwrap().len(), 6);
+        for count in [0, 5, 7, usize::MAX] {
+            assert!(matches!(
+                trie.entries_exact(count, &mut ()),
+                Err(CellError::MalformedTrie)
+            ));
+        }
+        let empty = Trie::new(2).unwrap();
+        assert!(empty.entries_exact(0, &mut ()).unwrap().is_empty());
+        assert!(matches!(
+            empty.entries_exact(1, &mut ()),
+            Err(CellError::MalformedTrie)
+        ));
+    }
+
+    #[test]
+    fn ordered_navigation_does_not_load_preceding_siblings_or_value_bodies() {
+        let mut trie = Trie::new(1).unwrap();
+        trie.insert_ref(&[0], CellRef::pruned([7; 32]), &mut ())
+            .unwrap();
+        trie.insert_ref(&[255], CellRef::pruned([8; 32]), &mut ())
+            .unwrap();
+        let (payload, mut refs) = trie
+            .root()
+            .unwrap()
+            .as_resident()
+            .unwrap()
+            .clone()
+            .into_parts();
+        refs[0] = refs[0].to_pruned();
+        let partial = Trie::from_cell(Cell::new(payload, refs).unwrap(), 1).unwrap();
+        assert!(matches!(
+            partial.first_key(&mut ()),
+            Err(CellError::MissingCell(_))
+        ));
+        assert_eq!(partial.last_key(&mut ()).unwrap(), Some(vec![255]));
+        assert_eq!(
+            partial.next_key_after(&[128], &mut ()).unwrap(),
+            Some(vec![255])
+        );
     }
 
     #[test]
@@ -547,7 +825,7 @@ mod tests {
         assert_eq!(resident(&root).payload(), &[LEAF_MASK, 0, 4, 0x12]);
         let root_id = root.id();
 
-        let trie = Trie::from_trusted_root(1, 1, Some(root)).unwrap();
+        let trie = Trie::from_cell(root, 1).unwrap();
         assert_eq!(trie.root_id(), Some(root_id));
         assert_eq!(
             trie.get(&[0x12], &mut resolver).unwrap().unwrap().payload(),
@@ -572,15 +850,23 @@ mod tests {
     }
 
     #[test]
-    fn trusted_root_rejects_a_noncanonical_unary_branch_on_access() {
+    fn resident_and_pruned_roots_reject_noncanonical_nodes_on_access() {
         let child = CellRef::resident(value(1));
         let root = Cell::new(vec![0b0001, 0, 0], vec![child]).unwrap();
-        let trie = Trie::from_trusted_root(1, 1, Some(CellRef::resident(root))).unwrap();
-
-        assert!(matches!(
-            trie.get(&[0], &mut ()),
-            Err(CellError::MalformedTrie)
-        ));
+        let mut bag = crate::BagOfCells::collect(Arc::new(root.clone())).unwrap();
+        for reference in [CellRef::pruned(root.id()), root.into()] {
+            let id = reference.id();
+            let mut trie = Trie::from_cell(reference, 1).unwrap();
+            assert!(matches!(
+                trie.get(&[0], &mut bag),
+                Err(CellError::MalformedTrie)
+            ));
+            assert!(matches!(
+                trie.remove(&[0], &mut bag),
+                Err(CellError::MalformedTrie)
+            ));
+            assert_eq!(trie.root_id(), Some(id));
+        }
     }
 
     #[test]
@@ -608,7 +894,6 @@ mod tests {
         let mut resolver = ();
         trie.insert(&[0x00], value(1), &mut resolver).unwrap();
         trie.insert(&[0x40], value(2), &mut resolver).unwrap();
-        let len = trie.len();
         let root_ref = trie.into_root().unwrap();
         let root_id = root_ref.id();
         let (payload, mut refs) = resident(&root_ref).clone().into_parts();
@@ -616,7 +901,7 @@ mod tests {
         let root = Cell::new(payload, refs).unwrap();
         assert_eq!(root.id(), root_id);
 
-        let mut trie = Trie::from_trusted_root(1, len, Some(CellRef::resident(root))).unwrap();
+        let mut trie = Trie::from_cell(root, 1).unwrap();
         assert!(matches!(
             trie.get(&[0x00], &mut resolver),
             Err(CellError::MissingCell(_))
@@ -652,14 +937,14 @@ mod tests {
         refs[1] = CellRef::pruned(refs[1].id());
         let root = Cell::new(payload, refs).unwrap();
 
-        let mut trie = Trie::from_trusted_root(1, 2, Some(CellRef::resident(root))).unwrap();
+        let mut trie = Trie::from_cell(root, 1).unwrap();
         let before = trie.root_id();
         assert!(matches!(
             trie.remove(&[0x00], &mut resolver),
             Err(CellError::MissingCell(_))
         ));
         assert_eq!(trie.root_id(), before);
-        assert_eq!(trie.len(), 2);
+        assert!(!trie.is_empty());
     }
 
     #[test]
@@ -682,29 +967,44 @@ mod tests {
     }
 
     #[test]
-    fn trusted_metadata_cannot_overflow_or_commit_an_impossible_empty_root() {
-        let mut resolver = ();
+    fn root_constructor_preserves_lazy_access_and_validates_key_width() {
         let mut original = Trie::new(1).unwrap();
-        original.insert(&[0], value(1), &mut resolver).unwrap();
+        original.insert(&[0], value(1), &mut ()).unwrap();
         let root = original.into_root().unwrap();
-
-        let mut overflowing = Trie::from_trusted_root(1, usize::MAX, Some(root.clone())).unwrap();
-        let before = overflowing.root_id();
+        let cell = root.as_resident_arc().unwrap().clone();
+        let wrong_width = Trie::from_cell(cell.clone(), 2).unwrap();
         assert!(matches!(
-            overflowing.insert(&[0x40], value(2), &mut resolver),
+            wrong_width.get(&[0, 0], &mut ()),
             Err(CellError::MalformedTrie)
         ));
-        assert_eq!(overflowing.root_id(), before);
-        assert_eq!(overflowing.len(), usize::MAX);
-
-        let mut wrong_count = Trie::from_trusted_root(1, 2, Some(root)).unwrap();
-        let before = wrong_count.root_id();
         assert!(matches!(
-            wrong_count.remove(&[0], &mut resolver),
-            Err(CellError::MalformedTrie)
+            Trie::from_cell(cell.clone(), MAX_TRIE_KEY_BYTES + 1),
+            Err(CellError::TrieKeyTooLong { .. })
         ));
-        assert_eq!(wrong_count.root_id(), before);
-        assert_eq!(wrong_count.len(), 2);
+        assert!(matches!(
+            Trie::from_cell(root.to_pruned(), MAX_TRIE_KEY_BYTES + 1),
+            Err(CellError::TrieKeyTooLong { .. })
+        ));
+        let mut lazy = Trie::from_cell(root.to_pruned(), 1).unwrap();
+        assert_eq!(lazy.root_id(), Some(root.id()));
+        assert!(matches!(
+            lazy.remove(&[0], &mut ()),
+            Err(CellError::MissingCell(id)) if id == root.id()
+        ));
+        assert_eq!(lazy.root_id(), Some(root.id()));
+        let mut bag = crate::BagOfCells::collect(cell).unwrap();
+        let removed = lazy.remove(&[0], &mut bag).unwrap().unwrap();
+        assert_eq!(resolve_cell(&mut bag, &removed).unwrap().payload(), &[1]);
+        assert!(lazy.is_empty());
+
+        // Zero-byte keys are valid: a singleton has an empty compressed label.
+        let mut singleton = Trie::new(0).unwrap();
+        singleton.insert(&[], value(7), &mut ()).unwrap();
+        let singleton = Trie::from_cell(resident(singleton.root().unwrap()).clone(), 0).unwrap();
+        assert_eq!(
+            singleton.get(&[], &mut ()).unwrap().unwrap().payload(),
+            &[7]
+        );
     }
 
     struct MapResolver {
@@ -736,8 +1036,8 @@ mod tests {
         let missing_id = refs[0].id();
         let missing_body = Arc::new(resident(&refs[0]).clone());
         refs[0] = CellRef::pruned(missing_id);
-        let root = CellRef::resident(Cell::new(payload, refs).unwrap());
-        let trie = Trie::from_trusted_root(1, 2, Some(root)).unwrap();
+        let root = Cell::new(payload, refs).unwrap();
+        let trie = Trie::from_cell(root, 1).unwrap();
         let mut resolver = MapResolver {
             cells: HashMap::from([(missing_id, missing_body)]),
             calls: Vec::new(),

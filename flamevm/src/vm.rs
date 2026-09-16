@@ -2,14 +2,16 @@
 
 use bulletproofs::r1cs;
 use bulletproofs::r1cs::R1CSProof;
+use cells::{
+    resolve_cell, BagOfCells, Cell, CellBuilder, CellDecode, CellEncode, CellError, CellID,
+    CellRef, CellResolver, CellSlice,
+};
 use core::convert::TryFrom;
 use core::mem;
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar as DalekScalar;
 use merlin::Transcript;
-use readerwriter::{
-    Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::actor::{empty_state, ActorID, ActorRegistry};
 use crate::constraints::Commitment;
@@ -63,21 +65,19 @@ impl Anchor {
 }
 
 /// 32 raw bytes — fixed size, no tag, no length prefix.
-impl Encodable for Anchor {
-    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
-        w.write(b"anchor", &self.0)
+impl CellEncode for Anchor {
+    fn encode(&self, w: &mut CellBuilder) -> Result<(), CellError> {
+        w.store_bytes(&self.0)?;
+        Ok(())
     }
 }
 
-impl ExactSizeEncodable for Anchor {
-    fn encoded_size(&self) -> usize {
-        32
-    }
-}
-
-impl Decodable for Anchor {
-    fn decode(r: &mut impl Reader) -> Result<Self, ReadError> {
-        Ok(Anchor(r.read_u8x32()?))
+impl CellDecode for Anchor {
+    fn decode<R: CellResolver + ?Sized>(
+        r: &mut CellSlice<'_>,
+        cells: &mut R,
+    ) -> Result<Self, CellError> {
+        Ok(Anchor(<[u8; 32]>::decode(r, cells)?))
     }
 }
 
@@ -245,7 +245,10 @@ impl CallFrame {
                     return Ok(None);
                 };
                 match instr {
-                    Instruction::PushStr(s) => s.len(),
+                    Instruction::PushStr(s) => {
+                        s.check_len()?;
+                        s.len()
+                    }
                     _ => 0,
                 }
             }
@@ -342,6 +345,13 @@ impl CallFrame {
     }
 }
 
+impl cells::GasMeter for CallFrame {
+    fn charge(&mut self, amount: u64) -> Result<(), CellError> {
+        self.charge_gas(amount)
+            .map_err(|_| CellError::ResourceExhausted)
+    }
+}
+
 /// Identity-bearing scope tag carried by every CallFrame.
 pub enum CallKind {
     /// Outer scope of an external transaction.
@@ -396,6 +406,9 @@ impl CallKind {
 pub struct CallFrame {
     /// Isolated stack visible to scripts in this scope.
     pub(crate) stack: Vec<Value>,
+
+    /// Only this actor's committed storage bodies; never another actor's cache.
+    actor_cells: Arc<BagOfCells>,
 
     /// The frame's executable code (decoded instructions or raw bytecode).
     code: Script,
@@ -486,6 +499,7 @@ impl CallFrame {
     pub(crate) fn from_code(code: Script, kind: CallKind, gas_limit: u64) -> Self {
         Self {
             stack: Vec::new(),
+            actor_cells: Arc::new(BagOfCells::new()),
             code,
             cursor: 0,
             labels: Vec::new(),
@@ -531,6 +545,9 @@ pub struct TxResult {
     /// re-broadcast without re-encoding.
     pub bytecode: Vec<u8>,
 
+    /// The immutable witness set committed by the initiating external transaction.
+    pub cells: Arc<BagOfCells>,
+
     /// R1CS proof. `Some` on the prover side, `None` on the verifier
     /// side (the verifier consumed it during `cs.verify`).
     pub proof: Option<R1CSProof>,
@@ -562,6 +579,10 @@ impl core::fmt::Debug for TxResult {
 pub(crate) struct VM {
     header: TxHeader,
     block_height: u64,
+    cells: Arc<BagOfCells>,
+    contract_witnesses: BTreeMap<ContractID, Contract>,
+    script_witnesses: BTreeMap<CellID, Vec<Instruction>>,
+    value_witnesses: BTreeMap<CellID, Value>,
 
     /// Per-tx current anchor. `None` for fresh ExternalRoot txs (the
     /// first `op_input` seeds it); `Some(M)` at the start of an
@@ -589,7 +610,61 @@ pub(crate) struct VM {
     deferred_multiplications: usize,
 }
 
+/// Execution-local resolution, priced identically for resident and pruned refs.
+/// A cache hit cannot turn an absent transaction witness into an available one.
+struct ExecutionCells<'a> {
+    external: &'a BagOfCells,
+    actor: &'a BagOfCells,
+    gas_used: &'a mut u64,
+    gas_limit: u64,
+}
+
+impl ExecutionCells<'_> {
+    fn charge(&mut self, gas: u64) -> Result<(), CellError> {
+        *self.gas_used = self
+            .gas_used
+            .checked_add(gas)
+            .ok_or(CellError::ResourceExhausted)?;
+        if *self.gas_used > self.gas_limit {
+            return Err(CellError::ResourceExhausted);
+        }
+        Ok(())
+    }
+}
+
+impl CellResolver for ExecutionCells<'_> {
+    fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
+        self.charge(1)?;
+        let cell = match reference {
+            CellRef::Resident(cell) => Arc::clone(cell),
+            CellRef::Pruned(id) => self
+                .actor
+                .get(id)
+                .or_else(|| self.external.get(id))
+                .ok_or(CellError::MissingCell(*id))?,
+        };
+        self.charge((cell.encoded_size() as u64).saturating_add(cell.refs().len() as u64))?;
+        Ok(cell)
+    }
+}
+
 impl VM {
+    fn resolver(&mut self) -> ExecutionCells<'_> {
+        ExecutionCells {
+            external: &self.cells,
+            actor: &self.current_call.actor_cells,
+            gas_limit: self.current_call.gas_limit,
+            gas_used: &mut self.current_call.gas_used,
+        }
+    }
+
+    fn with_cells(mut self, cells: Arc<BagOfCells>) -> Self {
+        if matches!(self.current_call.kind, CallKind::ExternalRoot) {
+            self.txlog[1] = TxEntry::CellWitness(cells.id());
+        }
+        self.cells = cells;
+        self
+    }
     /// Executes an external transaction script with the given delegate,
     /// then calls `delegate.finalize`. Crate-internal: the public path
     /// is `ScriptBuilder::build_tx` / `ExternalTx::verify`.
@@ -617,6 +692,10 @@ impl VM {
         gas_limit: u64,
         delegate: &mut D,
     ) -> Result<TxResult, VMError> {
+        // Freeze public availability before any private witness is executed.
+        let cells = Arc::new(program.cell_witnesses()?);
+        let contract_witnesses = program.contract_witnesses();
+        let script_witnesses = program.script_witnesses()?;
         let bytecode = program.to_bytecode();
         let mut frame = CallFrame::new(
             program.into_instructions(),
@@ -625,37 +704,73 @@ impl VM {
         );
         frame.charge_gas(alloc_byte_gas(bytecode.len())?)?;
         frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
-        let mut vm = Self::new(header, frame);
+        let mut vm = Self::new(header, frame).with_cells(cells);
+        vm.contract_witnesses = contract_witnesses;
+        vm.script_witnesses = script_witnesses;
         while vm.step_external(delegate)? {}
         Ok(vm.into_result(bytecode, None))
     }
 
-    /// Verifier entry: runs external-root **bytecode**, decoding on demand
-    /// without materializing a `Vec<Instruction>`. The witness-free
-    /// counterpart of [`run`]. See ADR 0015.
-    pub(crate) fn run_bytecode<D: Delegate>(
+    /// Verifier entry: decodes external-root bytecode on demand using the
+    /// immutable body set committed by its initiating transaction.
+    pub(crate) fn run_bytecode_with_cells<D: Delegate>(
         header: TxHeader,
         bytecode: Vec<u8>,
         gas_limit: u64,
         delegate: &mut D,
+        cells: &BagOfCells,
     ) -> Result<TxResult, VMError> {
         let mut frame =
             CallFrame::from_bytecode(bytecode.clone(), CallKind::ExternalRoot, gas_limit);
         frame.charge_gas(alloc_byte_gas(bytecode.len())?)?;
         frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
-        let mut vm = Self::new(header, frame);
+        let mut vm = Self::new(header, frame).with_cells(Arc::new(cells.clone()));
         while vm.step_external(delegate)? {}
         Ok(vm.into_result(bytecode, None))
     }
 
     /// Executes an internal transaction. On clean exit runs the tx-end
     /// self-destruct sweep against `registry`.
+    #[cfg(test)]
     pub fn execute_internal(
         header: TxHeader,
         message: Message,
         registry: &mut dyn ActorRegistry,
         block: &BlockContext,
     ) -> Result<TxResult, VMError> {
+        Self::execute_internal_with_cells(
+            header,
+            message,
+            registry,
+            block,
+            Arc::new(BagOfCells::new()),
+        )
+    }
+
+    pub fn execute_internal_with_cells(
+        header: TxHeader,
+        message: Message,
+        registry: &mut dyn ActorRegistry,
+        block: &BlockContext,
+        cells: Arc<BagOfCells>,
+    ) -> Result<TxResult, VMError> {
+        // Admission and MessageID/transport construction re-encode arguments.
+        // Price that work before cloning or traversing any of their Cell graphs.
+        let mut message_work = 0u64;
+        for value in message.payload() {
+            message_work = message_work
+                .checked_add(value.encoding_gas()?.checked_mul(4).ok_or(VMError::OutOfGas)?)
+                .and_then(|gas| gas.checked_add(value.clone_gas().saturating_mul(2)))
+                .ok_or(VMError::OutOfGas)?;
+        }
+        if let ActorID::Constructor(code) = &message.target {
+            message_work = message_work
+                .checked_add(alloc_byte_gas(code.len())?.saturating_mul(2))
+                .ok_or(VMError::OutOfGas)?;
+        }
+        if message_work > message.gas {
+            return Err(VMError::OutOfGas);
+        }
         registry.push_checkpoint();
         let target = message.target.clone();
         let message_bytes = message.encoded_size();
@@ -692,18 +807,35 @@ impl VM {
                 return Err(e);
             }
         };
-        let initial_gas = alloc_byte_gas(message_bytes)?
+        let initial_gas = message_work.saturating_add(alloc_byte_gas(message_bytes)?)
             .saturating_add(code_bytes.saturating_mul(GAS_PER_ALLOC_BYTE))
             .saturating_add(alloc_item_gas(message.payload().len())?);
         if initial_gas > message.gas {
             registry.pop_checkpoint_rollback();
             return Err(VMError::OutOfGas);
         }
-        let script = match registry.load_code(&message.target) {
+        let actor_cells = match registry.actor_cells(&message.target) {
+            Ok(cells) => cells,
+            Err(error) => {
+                registry.pop_checkpoint_rollback();
+                return Err(error);
+            }
+        };
+        let mut initial_gas = initial_gas;
+        let mut resolver = ExecutionCells {
+            external: &cells,
+            actor: &actor_cells,
+            gas_used: &mut initial_gas,
+            gas_limit: message.gas,
+        };
+        let script = match registry.load_code_with_cells(&message.target, &mut resolver) {
             Ok(script) => script,
             Err(e) => {
                 registry.pop_checkpoint_rollback();
-                return Err(e);
+                return Err(match e {
+                    VMError::Cell(CellError::ResourceExhausted) => VMError::OutOfGas,
+                    other => other,
+                });
             }
         };
         // MessageID is the canonical hash of the whole send (anchor,
@@ -720,6 +852,7 @@ impl VM {
             caller,
         };
         let mut frame = CallFrame::from_bytecode(script, kind, gas).with_anchor(anchor);
+        frame.actor_cells = actor_cells;
         if let Err(e) = frame.charge_gas(initial_gas) {
             registry.pop_checkpoint_rollback();
             return Err(e);
@@ -731,7 +864,7 @@ impl VM {
         for v in payload {
             frame.stack.push(v);
         }
-        let mut vm = Self::new(header, frame);
+        let mut vm = Self::new(header, frame).with_cells(cells);
         vm.block_height = block.height;
         // Commit the triggering MessageID into the Internal TxID merkle
         // root. Symmetric with `op_input` for external txs: the first
@@ -775,7 +908,11 @@ impl VM {
 
     fn new(header: TxHeader, initial_call: CallFrame) -> Self {
         // Header is the first txlog entry so TxID binds to version + locktime.
-        let txlog = vec![TxEntry::Header(header)];
+        let cells = Arc::new(BagOfCells::new());
+        let mut txlog = vec![TxEntry::Header(header)];
+        if matches!(initial_call.kind, CallKind::ExternalRoot) {
+            txlog.push(TxEntry::CellWitness(cells.id()));
+        }
         // Seed last_anchor from the root frame's kind: ExternalRoot →
         // None (op_input must seed); InternalRoot → Some(Message.anchor)
         // (already unique from prior tx's op_send split).
@@ -783,6 +920,10 @@ impl VM {
         Self {
             header,
             block_height: 0,
+            cells,
+            contract_witnesses: BTreeMap::new(),
+            script_witnesses: BTreeMap::new(),
+            value_witnesses: BTreeMap::new(),
             last_anchor,
             current_call: initial_call,
             call_stack: Vec::new(),
@@ -837,6 +978,7 @@ impl VM {
             gas_used: self.current_call.gas_used,
             multiplications: self.deferred_multiplications,
             bytecode,
+            cells: self.cells,
             proof,
             deferred_sigs,
         }
@@ -908,7 +1050,16 @@ impl VM {
         // (one borrow live at a time — borrow checker requires the split).
         let (result, registry) = match registry {
             None => (self.step_inner(delegate, None), None),
-            Some(r) => (self.step_inner(delegate, Some(&mut *r)), Some(r)),
+            Some(r) => {
+                let prepared = if let Some(actor) = self.current_call.kind.actor() {
+                    r.actor_cells(actor)
+                        .map(|cells| self.current_call.actor_cells = cells)
+                } else {
+                    Ok(())
+                };
+                let result = prepared.and_then(|()| self.step_inner(delegate, Some(&mut *r)));
+                (result, Some(r))
+            }
         };
         self.post_step(delegate, registry, depth_before, result)
     }
@@ -945,6 +1096,10 @@ impl VM {
                 Ok(cont)
             }
             Err(e) => {
+                let e = match e {
+                    VMError::Cell(CellError::ResourceExhausted) => VMError::OutOfGas,
+                    other => other,
+                };
                 if self.call_stack.is_empty() {
                     return Err(e);
                 }
@@ -989,6 +1144,7 @@ impl VM {
                 Ok(())
             }
             I::PushStr(s) => {
+                s.check_len()?;
                 self.push_value(Value::String(s));
                 Ok(())
             }
@@ -1249,6 +1405,14 @@ impl VM {
         self.current_call.charge_gas(gas)
     }
 
+    /// Charge bounded serialization work before an opcode constructs Cell data.
+    /// Copies includes subsequent effect/identity encoding of an admitted value.
+    fn charge_value_encoding(&mut self, value: &Value, copies: u64) -> Result<(), VMError> {
+        self.current_call.charge_gas(
+            value.encoding_gas()?.checked_mul(copies).ok_or(VMError::OutOfGas)?,
+        )
+    }
+
     fn charge_top_value_growth(&mut self, n: usize) -> Result<(), VMError> {
         let len = self.current_call.stack.len();
         if len < n {
@@ -1374,6 +1538,7 @@ impl VM {
     /// merlin back, then the new String.
     fn op_tread(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
+        String::check_length(n)?;
         self.charge_alloc_bytes(n)?;
         let label = self.pop_value()?.to_string()?;
         self.charge_alloc_bytes(label.len())?;
@@ -1419,7 +1584,12 @@ impl VM {
         for _ in 0..n {
             let key = self.pop_value()?.to_scalar()?;
             let value = self.pop_value()?;
-            if dict.insert_strict(key, value).is_err() {
+            self.charge_value_encoding(&value, 1)?;
+            if dict
+                .insert_strict_resolved(key, value, &mut self.resolver())
+                .map_err(|(error, _value)| VMError::from(error))?
+                .is_err()
+            {
                 return Err(VMError::DictKeyOccupied);
             }
         }
@@ -1434,7 +1604,12 @@ impl VM {
         let k = self.pop_value()?.to_scalar()?;
         let mut dict = self.pop_value()?.to_dict()?;
         self.charge_alloc_items(1)?;
-        if dict.insert_strict(k, v).is_err() {
+        self.charge_value_encoding(&v, 1)?;
+        if dict
+            .insert_strict_resolved(k, v, &mut self.resolver())
+            .map_err(|(error, _value)| VMError::from(error))?
+            .is_err()
+        {
             return Err(VMError::DictKeyOccupied);
         }
         self.push_value(Value::Dict(dict));
@@ -1449,7 +1624,13 @@ impl VM {
         let k = self.pop_value()?.to_scalar()?;
         let mut dict = self.pop_value()?.to_dict()?;
         self.charge_alloc_items(1)?;
-        let prev = dict.insert(k, v);
+        self.charge_value_encoding(&v, 1)?;
+        let prev = dict
+            .insert_resolved(k, v, &mut self.resolver())
+            .map_err(|(error, _value)| VMError::from(error))?;
+        let prev = prev
+            .map(|value| self.restore_private_value(value))
+            .transpose()?;
         self.push_value(Value::Dict(dict));
         match prev {
             Some(prev_v) => {
@@ -1468,7 +1649,10 @@ impl VM {
     fn op_get(&mut self) -> Result<(), VMError> {
         let k = self.pop_value()?.to_scalar()?;
         let mut dict = self.pop_value()?.to_dict()?;
-        let v = dict.remove(&k).ok_or(VMError::DictKeyNotFound)?;
+        let v = dict
+            .remove_resolved(&k, &mut self.resolver())?
+            .ok_or(VMError::DictKeyNotFound)?;
+        let v = self.restore_private_value(v)?;
         self.push_value(Value::Dict(dict));
         self.push_value(Value::Scalar(k));
         self.push_value(v);
@@ -1480,7 +1664,10 @@ impl VM {
     fn op_getopt(&mut self) -> Result<(), VMError> {
         let k = self.pop_value()?.to_scalar()?;
         let mut dict = self.pop_value()?.to_dict()?;
-        let v = dict.remove(&k);
+        let v = dict.remove_resolved(&k, &mut self.resolver())?;
+        let v = v
+            .map(|value| self.restore_private_value(value))
+            .transpose()?;
         self.push_value(Value::Dict(dict));
         self.push_optional_value(v);
         Ok(())
@@ -1491,15 +1678,15 @@ impl VM {
     /// errors if the value exists but isn't copyable.
     fn op_getdup(&mut self) -> Result<(), VMError> {
         let k = self.pop_value()?.to_scalar()?;
-        let dict = self.pop_value()?.to_dict()?;
-        let copied = match dict.get(&k) {
+        let mut dict = self.pop_value()?.to_dict()?;
+        let copied = match dict.get_resolved(&k, &mut self.resolver())? {
             Some(v) => {
                 let bytes = match v {
                     Value::String(s) => s.len(),
                     _ => 0,
                 };
                 self.charge_alloc_bytes(bytes)?;
-                Some(v.try_clone()?)
+                Some(self.restore_private_value(v.try_clone()?)?)
             }
             None => None,
         };
@@ -1523,7 +1710,7 @@ impl VM {
     /// alongside a flag, or `0` if the dict is empty.
     fn op_first(&mut self) -> Result<(), VMError> {
         let dict = self.pop_value()?.to_dict()?;
-        let k = dict.first_key();
+        let k = dict.first_key_resolved(&mut self.resolver())?;
         self.push_value(Value::Dict(dict));
         self.push_optional_value(k.map(Value::Scalar));
         Ok(())
@@ -1532,7 +1719,7 @@ impl VM {
     /// `last` — `dict → dict {k 1 | 0}`. Mirror of `first`.
     fn op_last(&mut self) -> Result<(), VMError> {
         let dict = self.pop_value()?.to_dict()?;
-        let k = dict.last_key();
+        let k = dict.last_key_resolved(&mut self.resolver())?;
         self.push_value(Value::Dict(dict));
         self.push_optional_value(k.map(Value::Scalar));
         Ok(())
@@ -1543,7 +1730,7 @@ impl VM {
     fn op_next(&mut self) -> Result<(), VMError> {
         let k = self.pop_value()?.to_scalar()?;
         let dict = self.pop_value()?.to_dict()?;
-        let next_k = dict.next_key_after(&k);
+        let next_k = dict.next_key_after_resolved(&k, &mut self.resolver())?;
         self.push_value(Value::Dict(dict));
         self.push_optional_value(next_k.map(Value::Scalar));
         Ok(())
@@ -1686,10 +1873,10 @@ impl VM {
         let n_bytes = n / 8;
         let x = self.pop_value()?.to_scalar()?;
         let s = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(s.len().checked_add(n_bytes).ok_or(VMError::OutOfGas)?)?;
+        self.charge_alloc_bytes(s.appended_len(n_bytes)?)?;
         // Canonical 32-byte scalar; low `n` bits = first `n_bytes`.
         let raw = x.to_bytes();
-        let appended = s.append_bytes(&raw[..n_bytes]);
+        let appended = s.append_bytes(&raw[..n_bytes])?;
         self.push_value(Value::String(appended));
         Ok(())
     }
@@ -1700,8 +1887,8 @@ impl VM {
     fn op_write_int(&mut self) -> Result<(), VMError> {
         let x = self.pop_value()?.to_scalar()?;
         let s = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(s.len().checked_add(32).ok_or(VMError::OutOfGas)?)?;
-        let appended = s.append_bytes(&x.to_bytes());
+        self.charge_alloc_bytes(s.appended_len(32)?)?;
+        let appended = s.append_bytes(&x.to_bytes())?;
         self.push_value(Value::String(appended));
         Ok(())
     }
@@ -1710,8 +1897,8 @@ impl VM {
     fn op_append(&mut self) -> Result<(), VMError> {
         let s2 = self.pop_value()?.to_string()?;
         let s1 = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(s1.len().checked_add(s2.len()).ok_or(VMError::OutOfGas)?)?;
-        self.push_value(Value::String(s1.append_bytes(&s2.to_bytes())));
+        self.charge_alloc_bytes(s1.appended_len(s2.len())?)?;
+        self.push_value(Value::String(s1.append_bytes(&s2.to_bytes())?));
         Ok(())
     }
 
@@ -1731,8 +1918,8 @@ impl VM {
     fn op_write_zeros(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
         let s = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(s.len().checked_add(n).ok_or(VMError::OutOfGas)?)?;
-        let appended = s.append_zeros(n);
+        self.charge_alloc_bytes(s.appended_len(n)?)?;
+        let appended = s.append_zeros(n)?;
         self.push_value(Value::String(appended));
         Ok(())
     }
@@ -2144,20 +2331,25 @@ impl VM {
         array32(&s.to_bytes()).ok_or(VMError::MalformedAddress)
     }
 
-    /// Actor destinations accept the compact legacy 32-byte hash or an exact
-    /// canonical `ActorID` encoding. The latter preserves constructor code for
-    /// deploy-on-first-delivery.
+    /// Actor destinations accept a 32-byte hash or a canonical ActorID Cell
+    /// envelope, including constructor code for deploy-on-first-delivery.
     fn pop_actor_id(&mut self) -> Result<ActorID, VMError> {
         let bytes = self.pop_value()?.to_string()?.to_bytes_vec();
         if let Some(hash) = array32(&bytes) {
             return Ok(ActorID::Hash(hash));
         }
-        let mut reader = bytes.as_slice();
-        let actor = ActorID::decode(&mut reader).map_err(|_| VMError::MalformedAddress)?;
-        if !reader.is_empty() {
-            return Err(VMError::MalformedAddress);
-        }
-        Ok(actor)
+        let envelope = cells::CellEnvelope::decode(&bytes, bytes.len(), &mut self.current_call)?;
+        let root = envelope
+            .cells()
+            .get(&envelope.root())
+            .ok_or(VMError::MalformedAddress)?;
+        let mut resolver = ExecutionCells {
+            external: envelope.cells(),
+            actor: &self.current_call.actor_cells,
+            gas_limit: self.current_call.gas_limit,
+            gas_used: &mut self.current_call.gas_used,
+        };
+        ActorID::from_cell(&root, &mut resolver).map_err(VMError::from)
     }
 
     fn op_nop(&mut self) -> Result<(), VMError> {
@@ -2416,9 +2608,6 @@ impl VM {
         Ok(())
     }
 
-    // (TaprootProof is now constructed from distinct stack pieces; see
-    // `taproot_proof_from_stack_pieces` below `op_open`. The earlier packed
-    // bag-of-bytes layout was replaced per Architect's response on todo
     /// Merlin message for `signcall`: binds the signature to the
     /// program bytes only. Programs add further context (anchor,
     /// actor identity) via explicit checks inside their script.
@@ -2430,86 +2619,117 @@ impl VM {
         out
     }
 
-    /// _string_ **input** → _contract_
+    /// _contract-id:string32_ **input** → _contract_
     ///
-    /// External-only. The prover pushes a `StringWitness::Contract(c)` carrying
-    /// open commitments on Token payloads; the verifier pushes
-    /// `String::Opaque(contract_bytes)` and `to_contract()` decodes to closed
-    /// commitments. No separate witness operand — witnesses ride the
-    /// stack with the value.
+    /// The public body must resolve in the frozen transaction BoC. Private
+    /// witnesses may replace its typed values only after matching this identity.
     fn op_input(&mut self) -> Result<(), VMError> {
         self.require_external()?;
         let encoded = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(encoded.len())?;
-        let contract = encoded.to_contract()?;
-        // Seed the per-tx anchor from the input contract's id — the contract
-        // is a spend-once source on the wire, so its id is unique. Any
-        // prior `last_anchor` (e.g. unused residue from a previous
-        // input + outputs sequence) is replaced. See spec §Anchors.
-        self.last_anchor = Some(Anchor(contract.id()));
-        self.txlog.push(TxEntry::Input(contract.id()));
+        let id = array32(&encoded.to_bytes()).ok_or(VMError::MalformedContractEncoding)?;
+        let cell = resolve_cell(&mut self.resolver(), &CellRef::pruned(id))?;
+        let public = Contract::from_trusted_cell(&cell, &mut self.resolver())?;
+        self.charge_value_encoding(public.payload(), 3)?;
+        if public.id() != id {
+            return Err(VMError::MalformedContractEncoding);
+        }
+        if let Some(witness) = self.contract_witnesses.get(&id) {
+            if witness.id() != id {
+                return Err(VMError::MalformedContractEncoding);
+            }
+            let mut pending = vec![witness.payload()];
+            while let Some(value) = pending.pop() {
+                match value {
+                    Value::Dict(dict) => pending.extend(dict.cached_values()),
+                    other => {
+                        self.value_witnesses
+                            .insert(other.to_cell()?.id(), other.clone());
+                    }
+                }
+            }
+        }
+        let predicate = public.predicate.clone();
+        let anchor = public.anchor;
+        let payload = self.restore_private_value(public.into_payload())?;
+        let contract = Contract::new(predicate, anchor, payload)?;
+        self.last_anchor = Some(Anchor(id));
+        self.txlog.push(TxEntry::Input(id));
         self.push_value(Value::Contract(Box::new(contract)));
         Ok(())
     }
 
-    /// _args… k pred_ **contract** → _contract_
+    /// Private leaf witnesses never materialize a Dict or bypass a public path.
+    fn restore_private_value(&mut self, public: Value) -> Result<Value, VMError> {
+        if matches!(public, Value::Dict(_)) || !public.is_portable() {
+            return Ok(public);
+        }
+        self.charge_value_encoding(&public, 1)?;
+        let id = public.to_cell()?.id();
+        Ok(self.value_witnesses.get(&id).cloned().unwrap_or(public))
+    }
+
+    /// _payload pred_ **contract** → _contract_
     fn op_contract(&mut self) -> Result<(), VMError> {
         let pred = self.pop_value()?.to_point()?.to_predicate()?;
-        let k = self.pop_byte_count(usize::MAX)?;
-        let payload = self.pop_n_values(k)?;
+        let payload = self.pop_value()?;
+        self.charge_value_encoding(&payload, 2)?;
         let anchor = self.consume_anchor()?;
         let contract = Contract::new(pred, anchor, payload)?;
         self.push_value(Value::Contract(Box::new(contract)));
         Ok(())
     }
 
-    /// _args… k pred_ **output** → ø
+    /// _payload pred_ **output** → ø
     fn op_output(&mut self) -> Result<(), VMError> {
         let pred = self.pop_value()?.to_point()?.to_predicate()?;
-        let k = self.pop_byte_count(usize::MAX)?;
-        let payload = self.pop_n_values(k)?;
+        let payload = self.pop_value()?;
+        self.charge_value_encoding(&payload, 2)?;
         let anchor = self.consume_anchor()?;
         let contract = Contract::new(pred, anchor, payload)?;
         self.txlog.push(TxEntry::Output(contract));
         Ok(())
     }
 
-    /// _contract ik nbrs pos script gas portable-args… k_ **open** → _results… k'_
+    /// _contract ik root:string32 index gas portable-args… k_ **open** → _results… k'_
     ///
-    /// Verifies the taproot-proofs, then enters the unlocked script in an
-    /// isolated `ContractOpen` frame via [`enter_contract_open_frame`].
+    /// Loads the selected program through the authenticated Cell Trie. The
+    /// isolated frame receives one payload Value, followed by explicit arguments.
     fn op_open(&mut self) -> Result<(), VMError> {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
         Self::require_portable_call_args(&args)?;
         let gas = self.pop_gas_limit()?;
-        // The callee's budget comes out of the caller's: debit the full
-        // grant now; leftover is refunded on clean return, burned on
-        // failure.
         self.current_call.charge_gas(gas)?;
-        let prog = self.pop_value()?.to_string()?;
-        let position = self.pop_value()?.to_string()?;
-        let neighbors = self.pop_value()?.to_dict()?;
-        let internal_key = self.pop_value()?.to_point()?;
+        let index = self
+            .pop_value()?
+            .to_scalar()?
+            .to_u64()
+            .ok_or(VMError::MalformedTaprootProof)?;
+        let root = array32(&self.pop_value()?.to_string()?.to_bytes())
+            .ok_or(VMError::MalformedTaprootProof)?;
+        let internal_key = self.pop_value()?.to_point()?.to_compressed();
         let contract = self.pop_value()?.to_contract()?;
-
-        let proof_bytes = neighbors
-            .len()
-            .checked_mul(32)
-            .and_then(|n| n.checked_add(position.len()))
-            .and_then(|n| n.checked_add(prog.len()))
-            .ok_or(VMError::OutOfGas)?;
-        self.charge_alloc_items(neighbors.len())?;
-        self.charge_alloc_bytes(proof_bytes)?;
         self.current_call.charge_gas(GAS_POINT_DECOMPRESS)?;
-
-        let cp = Self::taproot_proof_from_stack_pieces(internal_key, &neighbors, &position, &prog)?;
-        let _ = contract.predicate.verify_taproot_proof(&cp)?;
-        // `Script` keeps prover witnesses inline; `Opaque` streams bytes
-        // (no parse) on the verifier. See ADR 0015.
-        let code_bytes = prog.len();
-        let code = prog.into_script()?;
-        // Split parent's anchor for the callee + stash post-call.
+        let proof = TaprootProof {
+            internal_key,
+            root,
+            index,
+        };
+        let bytes = contract.predicate.open_branch(
+            &proof,
+            &mut self.resolver(),
+            usize::try_from(gas).unwrap_or(usize::MAX),
+        )?;
+        let code_bytes = bytes.len();
+        let id = crate::script::script_cell(&bytes)?.id();
+        let code = if let Some(instructions) = self.script_witnesses.get(&id) {
+            if crate::string::compile_instructions(instructions) != bytes {
+                return Err(VMError::TaprootProofMismatch);
+            }
+            Script::Transparent(instructions.clone())
+        } else {
+            Script::Opaque(bytes)
+        };
         let child_anchor = self.split_anchor_for_call()?;
         self.enter_contract_open_frame(contract, code, code_bytes, gas, args, child_anchor)?;
         Ok(())
@@ -2600,7 +2820,6 @@ impl VM {
         self.current_call.snap_failure_arg_count = args.len();
         let external_context = self.is_external();
         let caller_id = self.current_call.kind.actor().map(ActorID::to_hash);
-        let payload_len = contract.payload().len();
         let mut frame = CallFrame::from_code(
             code,
             CallKind::ContractOpen {
@@ -2612,10 +2831,8 @@ impl VM {
         )
         .with_anchor(child_anchor);
         frame.gas_used = alloc_byte_gas(code_bytes)?
-            .saturating_add(alloc_item_gas(payload_len.saturating_add(args.len()))?);
-        for v in contract.into_payload() {
-            frame.stack.push(v);
-        }
+            .saturating_add(alloc_item_gas(1usize.saturating_add(args.len()))?);
+        frame.stack.push(contract.into_payload());
         for v in args {
             frame.stack.push(v);
         }
@@ -2631,39 +2848,6 @@ impl VM {
             .to_scalar()?
             .to_u64()
             .ok_or(VMError::InvalidBitrange)
-    }
-
-    /// Builds a `TaprootProof` from the four stack-popped pieces. `neighbors`
-    /// must be a list-style Dict of 32-byte Strings.
-    fn taproot_proof_from_stack_pieces(
-        internal_key: Point,
-        neighbors: &Dict,
-        position: &String,
-        program: &String,
-    ) -> Result<TaprootProof, VMError> {
-        let mut n_vec = Vec::with_capacity(neighbors.len());
-        for (i, (k, v)) in neighbors.entries().enumerate() {
-            if *k != Scalar::from(i as u64) {
-                return Err(VMError::MalformedTaprootProof);
-            }
-            match v {
-                Value::String(s) => {
-                    if s.len() != 32 {
-                        return Err(VMError::MalformedTaprootProof);
-                    }
-                    let mut h = [0u8; 32];
-                    h.copy_from_slice(&s.to_bytes_vec());
-                    n_vec.push(h);
-                }
-                _ => return Err(VMError::MalformedTaprootProof),
-            }
-        }
-        Ok(TaprootProof {
-            internal_key: internal_key.to_compressed(),
-            neighbors: n_vec,
-            position: position.to_bytes_vec(),
-            program: program.to_bytes_vec(),
-        })
     }
 
     /// _args… k refund gas addr_ **send** → ø
@@ -2686,6 +2870,10 @@ impl VM {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
 
+        for value in &args {
+            self.charge_value_encoding(value, 4)?;
+        }
+        self.charge_clone_values(&args)?;
         let anchor = self.consume_anchor()?;
         let caller = self.current_call.kind.actor().cloned();
         // Single source of truth: the full Message lives in the
@@ -2735,27 +2923,37 @@ impl VM {
         // re-entrant call into an actor that's mid-update lands here
         // too: its state is checked out, so `resolve_method` returns
         // `ActorEmpty` (ADR 0017 — the state is the re-entrancy lock).
-        let pre_frame: Result<(Vec<u8>, ActorID, u64), VMError> = (|| {
+        let pre_frame: Result<(Vec<u8>, ActorID, u64, Arc<BagOfCells>), VMError> = (|| {
             if self.call_stack.len() >= MAX_CALL_DEPTH {
                 return Err(VMError::CallDepthExceeded);
             }
             let code_bytes = registry.actor_code_bytes(&callee)?;
-            let initial_gas = code_bytes
+            let mut initial_gas = code_bytes
                 .saturating_mul(GAS_PER_ALLOC_BYTE)
                 .saturating_add(alloc_item_gas(args.len())?);
             if initial_gas > gas {
                 return Err(VMError::OutOfGas);
             }
-            let script = registry.load_code(&callee)?;
-            Ok((script, caller, initial_gas))
+            let actor_cells = registry.actor_cells(&callee)?;
+            let mut resolver = ExecutionCells {
+                external: &self.cells,
+                actor: &actor_cells,
+                gas_used: &mut initial_gas,
+                gas_limit: gas,
+            };
+            let script = registry.load_code_with_cells(&callee, &mut resolver)?;
+            Ok((script, caller, initial_gas, actor_cells))
         })();
-        let (script, caller, initial_gas) = match pre_frame {
+        let (script, caller, initial_gas, actor_cells) = match pre_frame {
             Ok(v) => v,
             Err(error) => {
                 // Pre-frame failure (reentrancy, missing actor, etc.):
                 // restore the moved arguments. Availability failures refund
                 // the grant; an insufficient child budget burns it.
-                if !matches!(error, VMError::OutOfGas) {
+                if !matches!(
+                    error,
+                    VMError::OutOfGas | VMError::Cell(CellError::ResourceExhausted)
+                ) {
                     self.current_call.gas_used = self.current_call.gas_used.saturating_sub(gas);
                 }
                 let arg_count = args.len();
@@ -2786,6 +2984,7 @@ impl VM {
         )
         .with_anchor(callee_anchor);
         frame.gas_used = initial_gas;
+        frame.actor_cells = actor_cells;
         for v in args {
             frame.stack.push(v);
         }
@@ -2814,7 +3013,7 @@ impl VM {
         let state_bytes = registry.actor_state_bytes(&actor)?;
         self.current_call
             .charge_gas(state_bytes.saturating_mul(GAS_PER_ALLOC_BYTE))?;
-        let state = registry.load_state(&actor)?;
+        let state = registry.load_state_with_cells(&actor, &mut self.resolver())?;
         self.push_value(state);
         Ok(())
     }
@@ -2842,6 +3041,7 @@ impl VM {
         if !state.is_portable() {
             return Err(VMError::NonPortableInState);
         }
+        self.charge_value_encoding(&state, 2)?;
         self.current_call.charge_gas(state.clone_gas())?;
         // Rust-level deep clone for the txlog entry. The registry
         // takes ownership of one copy; the txlog gets another.
@@ -2939,25 +3139,22 @@ impl VM {
         Ok(())
     }
 
-    /// _contract_ **signtx** → _items… k_
+    /// _contract_ **signtx** → _payload_
     ///
     /// External-only. Defers a TxID-bound signature for the contract's predicate,
-    /// pours the contract's payload onto the stack, pushes `k`.
+    /// and returns its single payload Value.
     fn op_signtx(&mut self) -> Result<(), VMError> {
         self.require_external()?;
         let contract = self.pop_value()?.to_contract()?;
+        self.charge_value_encoding(contract.payload(), 1)?;
         // Each authorized contract contributes one key/message term to the final
         // aggregate-signature verification.
         self.current_call.charge_gas(GAS_SIGNATURE_VERIFY)?;
-        let k = contract.payload().len();
         self.deferred_sigs.push(DeferredSig::TxBound {
             verification_key: contract.predicate.verification_key(),
             contract_id: contract.id(),
         });
-        for v in contract.into_payload() {
-            self.push_value(v);
-        }
-        self.push_value(Value::Scalar(Scalar::from(k as u64)));
+        self.push_value(contract.into_payload());
         Ok(())
     }
 
@@ -3470,3 +3667,216 @@ fn scalar_to_signed_integer(value: Scalar) -> Result<spacesuit::SignedInteger, V
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod tests;
+
+#[cfg(test)]
+mod cell_execution_tests {
+    use super::*;
+    use crate::{PredicateTree, Prover, Verifier};
+    use bulletproofs::PedersenGens;
+
+    #[test]
+    fn wrapping_existing_dictionaries_prepays_growing_encoding_work() {
+        let frame = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 15_000);
+        let mut vm = VM::new(TxHeader { version: 1, locktime: 0 }, frame);
+        vm.push_value(Value::String(String::from(vec![7; 1000])));
+        let mut costs = Vec::new();
+        for _ in 0..20 {
+            vm.push_value(Value::Scalar(Scalar::ZERO));
+            vm.push_value(Value::Scalar(Scalar::ONE));
+            let before = vm.current_call.gas_used;
+            match vm.op_dict() {
+                Ok(()) => costs.push(vm.current_call.gas_used - before),
+                Err(VMError::OutOfGas) => {
+                    assert!(costs.len() >= 2);
+                    assert!(costs.windows(2).all(|pair| pair[1] > pair[0]));
+                    return;
+                }
+                Err(error) => panic!("unexpected error: {:?}", error),
+            }
+        }
+        panic!("nested serialization must exhaust the finite budget");
+    }
+
+    #[test]
+    fn dictionary_insertion_rejects_unpaid_large_value_encoding() {
+        let frame = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 100);
+        let mut vm = VM::new(TxHeader { version: 1, locktime: 0 }, frame);
+        vm.push_value(Value::Dict(Dict::new()));
+        vm.push_value(Value::Scalar(Scalar::ZERO));
+        vm.push_value(Value::String(String::from(vec![7; String::MAX_LEN])));
+        assert!(matches!(vm.op_put(), Err(VMError::OutOfGas)));
+    }
+
+    #[test]
+    fn input_dict_loads_only_the_requested_path_even_with_private_witnesses() {
+        struct Recording {
+            source: BagOfCells,
+            used: BagOfCells,
+        }
+        impl CellResolver for Recording {
+            fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
+                let cell = self.source.resolve(reference)?;
+                self.used.insert(Arc::clone(&cell))?;
+                Ok(cell)
+            }
+        }
+        let mut dict = Dict::new();
+        dict.insert(Scalar::ONE, Value::Scalar(Scalar::from(11u64)));
+        dict.insert(Scalar::from(2u64), Value::Scalar(Scalar::from(22u64)));
+        let contract = Contract::new(
+            Predicate::opaque(Predicate::unspendable_key()),
+            Anchor([3; 32]),
+            Value::Dict(dict),
+        )
+        .unwrap();
+        let id = contract.id();
+        let mut recording = Recording {
+            source: BagOfCells::collect(Arc::new(contract.to_cell().unwrap())).unwrap(),
+            used: BagOfCells::new(),
+        };
+        let root = resolve_cell(&mut recording, &CellRef::pruned(id)).unwrap();
+        let loaded = Contract::from_trusted_cell(&root, &mut recording).unwrap();
+        let mut dict = loaded.into_payload().to_dict().unwrap();
+        dict.get_resolved(&Scalar::ONE, &mut recording)
+            .unwrap()
+            .unwrap();
+        assert!(recording.used.len() < recording.source.len());
+        let cells = Arc::new(recording.used);
+
+        let mut costs = Vec::new();
+        for private_overlay in [false, true] {
+            let frame = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 1_000_000);
+            let mut vm = VM::new(
+                TxHeader {
+                    version: 1,
+                    locktime: 0,
+                },
+                frame,
+            )
+            .with_cells(Arc::clone(&cells));
+            if private_overlay {
+                vm.contract_witnesses.insert(id, contract.clone());
+            }
+            vm.push_value(Value::String(String::from(id.to_vec())));
+            vm.op_input()
+                .expect("input does not eagerly hydrate hidden branches");
+            vm.op_signtx().unwrap();
+            let Value::Dict(dict) = &vm.current_call.stack[0] else {
+                panic!("expected Dict")
+            };
+            assert_eq!(dict.cached_values().count(), 0);
+            for _ in 0..2 {
+                vm.push_value(Value::Scalar(Scalar::ONE));
+                let before = vm.current_call.gas_used;
+                vm.op_getdup().unwrap();
+                costs.push(vm.current_call.gas_used - before);
+                assert!(matches!(vm.pop_value().unwrap(), Value::Scalar(n) if n == Scalar::ONE));
+                assert!(
+                    matches!(vm.pop_value().unwrap(), Value::Scalar(n) if n == Scalar::from(11u64))
+                );
+            }
+            vm.push_value(Value::Scalar(Scalar::from(2u64)));
+            assert!(matches!(
+                vm.op_getdup(),
+                Err(VMError::Cell(CellError::MissingCell(_)))
+            ));
+        }
+        assert!(costs.iter().all(|cost| *cost == costs[0]));
+    }
+
+    #[test]
+    fn contract_and_branch_bodies_use_the_committed_bag_and_private_overlays() {
+        let branch = ScriptBuilder::new()
+            .drop_()
+            .alloc(Some(Scalar::from(9u64)))
+            .drop_()
+            .push_int(0u64)
+            .return_();
+        let tree = PredicateTree::scripts_only(vec![branch.to_bytecode()], [7; 32]).unwrap();
+        let (proof, cells) = tree.witness_for(0).unwrap();
+        let contract = Contract::new(
+            Predicate::tree(tree),
+            Anchor([1; 32]),
+            Value::Scalar(Scalar::ONE),
+        )
+        .unwrap();
+        let program = ScriptBuilder::new()
+            .with_cells(cells)
+            .with_script_witness(branch)
+            .unwrap()
+            .push_str(String::contract(contract))
+            .input()
+            .push_point(*proof.internal_key.as_bytes())
+            .push_str(String::from(proof.root.to_vec()))
+            .push_int(proof.index)
+            .push_int(100_000u64)
+            .push_int(0u64)
+            .open()
+            .verify()
+            .drop_();
+        let header = TxHeader {
+            version: 1,
+            locktime: 0,
+        };
+        let pc = PedersenGens::default();
+        let result = Prover::prove(&pc, program, header, 1_000_000).unwrap();
+        let proof = result.proof.as_ref().unwrap();
+        let verified = Verifier::verify_with_cells(
+            &pc,
+            result.bytecode.clone(),
+            proof,
+            header,
+            1_000_000,
+            None,
+            &result.cells,
+        )
+        .unwrap();
+        assert_eq!(result.txid, verified.txid);
+        assert_eq!(result.gas_used, verified.gas_used);
+        assert!(matches!(result.txlog[1], TxEntry::CellWitness(id) if id == result.cells.id()));
+        assert!(
+            Verifier::verify(&pc, result.bytecode.clone(), proof, header, 1_000_000, None).is_err()
+        );
+        let mut extended = result.cells.as_ref().clone();
+        extended
+            .insert(Arc::new(Cell::new(vec![99], vec![]).unwrap()))
+            .unwrap();
+        assert!(Verifier::verify_with_cells(
+            &pc,
+            result.bytecode,
+            proof,
+            header,
+            1_000_000,
+            None,
+            &extended
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn cell_resolution_has_identical_gas_for_ram_actor_storage_and_witnesses() {
+        let cell = Arc::new(Cell::new(vec![7; 128], vec![]).unwrap());
+        let bag = BagOfCells::collect(cell.clone()).unwrap();
+        let empty = BagOfCells::new();
+        let mut costs = Vec::new();
+        for (reference, actor, external) in [
+            (CellRef::Resident(cell.clone()), &empty, &empty),
+            (CellRef::Pruned(cell.id()), &bag, &empty),
+            (CellRef::Pruned(cell.id()), &empty, &bag),
+        ] {
+            let mut gas = 0;
+            let mut resolver = ExecutionCells {
+                external,
+                actor,
+                gas_used: &mut gas,
+                gas_limit: 1000,
+            };
+            assert_eq!(
+                resolve_cell(&mut resolver, &reference).unwrap().id(),
+                cell.id()
+            );
+            costs.push(gas);
+        }
+        assert_eq!(costs, vec![131; 3]);
+    }
+}

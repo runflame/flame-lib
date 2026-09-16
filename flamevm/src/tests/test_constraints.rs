@@ -44,17 +44,21 @@ fn range_proof_accepts_in_range_value() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(
+    Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify succeeds");
 }
@@ -83,17 +87,21 @@ fn range_proof_rejects_out_of_range_value() {
         }
         Ok(_pp) => {
             let TxResult {
-                bytecode, proof, ..
+                bytecode,
+                proof,
+                cells,
+                ..
             } = _pp;
             let proof = proof.expect("proof set");
             let pc_gens_v = PedersenGens::default();
-            let err = Verifier::verify(
+            let err = Verifier::verify_with_cells(
                 &pc_gens_v,
                 bytecode,
                 &proof,
                 dummy_header(),
                 1_000_000,
                 None,
+                &cells,
             )
             .expect_err("verifier must reject out-of-range proof");
             assert!(matches!(err, VMError::InvalidR1CSProof));
@@ -151,17 +159,21 @@ fn constraint_and_overload_combines_two_constraints() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(
+    Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify succeeds");
 }
@@ -182,17 +194,21 @@ fn constraint_or_overload_combines_two_constraints() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(
+    Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify succeeds");
 }
@@ -209,17 +225,21 @@ fn constraint_not_overload_negates_constraint() {
         .verify();
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove succeeds");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(
+    Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify succeeds");
 }
@@ -241,17 +261,21 @@ fn constraint_and_with_false_branch_rejected() {
     let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
         .expect("prove succeeds (constructs proof of unsatisfiable constraint)");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    let err = Verifier::verify(
+    let err = Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .unwrap_err();
     assert!(matches!(err, VMError::InvalidR1CSProof));
@@ -275,41 +299,7 @@ fn range_expression_in_internal_context_errors_external_only() {
 /// `last_anchor`. The outer program returns the inner's failure
 /// or success marker on the stack for the caller's continuation.
 fn open_with_inner(inner: ScriptBuilder, recover_failed_contract: bool) -> ScriptBuilder {
-    let inner_bytes = inner.to_bytecode();
-    let recovery = ScriptBuilder::new().push_int(0u64).return_().to_bytecode();
-    let tree = PredicateTree::scripts_only(vec![inner_bytes.clone(), recovery], TEST_BLINDING_KEY)
-        .expect("scripts_only tree");
-    let cp = tree.taproot_proof_for(0).expect("cp");
-    let recovery_cp = tree.taproot_proof_for(1).expect("recovery cp");
-    let pred_point = tree.point;
-    let contract = Contract::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![])
-        .expect("empty payload is portable");
-    let contract_bytes = encode_contract_to_bytes(&contract);
-
-    let mut outer = ScriptBuilder::new()
-        .push_str(String::from(contract_bytes))
-        .input()
-        .push_point(*cp.internal_key.as_bytes());
-    for (i, h) in cp.neighbors.iter().enumerate() {
-        outer = outer.push_str(String::from(h.to_vec())).push_int(i as u64);
-    }
-    outer = outer
-        .push_int(cp.neighbors.len() as u64)
-        .dict()
-        .push_str(String::from(cp.position.clone()))
-        .push_script(inner)
-        .push_int(1024u64)
-        .push_int(0u64)
-        .open();
-    if recover_failed_contract {
-        outer = push_taproot_proof_to_program(outer.drop_().drop_(), &recovery_cp)
-            .push_int(1024u64)
-            .push_int(0u64)
-            .open()
-            .verify()
-            .drop_();
-    }
-    outer
+    open_with_test_inner(inner, recover_failed_contract)
 }
 
 /// A failed `open` whose child allocated an *unsatisfiable* R1CS
@@ -347,7 +337,10 @@ fn failed_call_unsat_cs_does_not_pollute_parent_proof() {
         .verify();
     let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000).expect("prove ok");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = result;
     let proof = proof.expect("proof set");
 
@@ -355,13 +348,14 @@ fn failed_call_unsat_cs_does_not_pollute_parent_proof() {
     // out of the CS; only the parent's satisfiable `7+3==10`
     // remains.
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(
+    Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify must accept — failed call's CS contributions rolled back");
 }
@@ -390,18 +384,22 @@ fn clean_call_cs_alloc_propagates_to_parent_proof() {
     let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000)
         .expect("prover always builds something");
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = result;
     let proof = proof.expect("proof set");
 
     let pc_gens_v = PedersenGens::default();
-    let err = Verifier::verify(
+    let err = Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect_err("verify must reject — child's unsat constraint inherited cleanly");
     assert!(matches!(err, VMError::InvalidR1CSProof));
@@ -437,7 +435,6 @@ fn failed_call_rolls_back_every_state_lane() {
     let inner = ScriptBuilder::new()
         // ── lane 1: TxLog (Output) ──────────────────────────────
         .push_int(42u64)
-        .push_int(1u64)
         .push_point([0xbb; 32])
         .output()
         // ── lane 2: TxLog (Send) ────────────────────────────────
@@ -447,11 +444,12 @@ fn failed_call_rolls_back_every_state_lane() {
         .push_str(String::from(vec![0xcc; 32])) // addr (32 B)
         .send()
         // ── lane 3: deferred_sigs (signtx records TxBound) ──────
-        .push_int(0u64) // payload count = 0
+        .push_int(0u64)
+        .dict() // one empty Dict payload
         .push_point([0xdd; 32]) // predicate
         .contract() // → Contract on stack
-        .signtx() // pours payload + count; records TxBound
-        .drop_() // drop count = 0
+        .signtx() // returns the single payload; records TxBound
+        .drop_()
         // ── lane 4: MSM/sig batch (non-identity 1·G) ────────────
         .push_int(1u64)
         .push_point(g_bytes)
@@ -493,13 +491,14 @@ fn failed_call_rolls_back_every_state_lane() {
     // Send would have made this length 4.
     assert_eq!(
         result.txlog.len(),
-        2,
-        "txlog must be only [Header, Input] after rollback (got len={}, entries={:?})",
+        3,
+        "txlog must be [Header, CellWitness, Input] after rollback (got len={}, entries={:?})",
         result.txlog.len(),
         result.txlog,
     );
     assert!(matches!(result.txlog[0], TxEntry::Header(_)));
-    assert!(matches!(result.txlog[1], TxEntry::Input(_)));
+    assert!(matches!(result.txlog[1], TxEntry::CellWitness(_)));
+    assert!(matches!(result.txlog[2], TxEntry::Input(_)));
 
     // ── deferred_sigs assertion: signtx's TxBound was rolled back ──
     assert!(
@@ -519,16 +518,20 @@ fn failed_call_rolls_back_every_state_lane() {
     //   - batch: 1·G != identity → `BatchSignatureVerificationFailed`.
     //   - CS: 7+3==99 unsatisfiable → `InvalidR1CSProof`.
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = result;
     let proof = proof.expect("proof set");
-    let verifier_result = Verifier::verify(
+    let verifier_result = Verifier::verify_with_cells(
         &pc_gens,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
-        None, // no txbound sig — if a TxBound leaked, verify rejects with MissingTxBoundSignature
+        None, // no txbound sig — if a TxBound leaked, verify rejects with MissingTxBoundSignature,
+        &cells,
     )
     .expect("verify must accept — every rollback lane fired");
     assert_eq!(verifier_result.multiplications, 2);

@@ -73,10 +73,33 @@ impl Verifier {
         gas_limit: u64,
         txbound_signature: Option<musig::Signature>,
     ) -> Result<TxResult, VMError> {
+        Self::verify_with_cells(
+            pc_gens,
+            bytecode,
+            proof,
+            header,
+            gas_limit,
+            txbound_signature,
+            &cells::BagOfCells::new(),
+        )
+    }
+
+    /// Verifies using exactly the public witness set committed by this external
+    /// transaction. Callers must pass the same set to all induced actor work.
+    pub fn verify_with_cells(
+        pc_gens: &PedersenGens,
+        bytecode: Vec<u8>,
+        proof: &R1CSProof,
+        header: TxHeader,
+        gas_limit: u64,
+        txbound_signature: Option<musig::Signature>,
+        cells: &cells::BagOfCells,
+    ) -> Result<TxResult, VMError> {
         let mut verifier = Verifier::new();
         // Verifier-side: stream the wire bytecode directly — decode one
         // instruction at a time, no `Vec<Instruction>`. See ADR 0015.
-        let mut result = VM::run_bytecode(header, bytecode, gas_limit, &mut verifier)?;
+        let mut result =
+            VM::run_bytecode_with_cells(header, bytecode, gas_limit, &mut verifier, cells)?;
         result.multiplications = result
             .multiplications
             .saturating_add(verifier.cs.metrics().multipliers);

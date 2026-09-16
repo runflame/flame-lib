@@ -363,11 +363,12 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
     assert_int(&vm.current_call.stack[1], Scalar::from(1u64));
     assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 
-    // Txlog: Header + IssuePriv(qty_point, unblinded_flv_point).
-    assert_eq!(vm.txlog.len(), 2);
+    // External log: Header + CellWitness + IssuePriv.
+    assert_eq!(vm.txlog.len(), 3);
     assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
+    assert!(matches!(vm.txlog[1], TxEntry::CellWitness(_)));
     let expected_flv_pt = Commitment::unblinded(expected_flv).to_point();
-    match &vm.txlog[1] {
+    match &vm.txlog[2] {
         TxEntry::IssuePriv(q, f) => {
             assert_eq!(*q, qty_commit.to_point());
             assert_eq!(*f, expected_flv_pt);
@@ -460,6 +461,8 @@ fn issuepriv_prove_then_verify_end_to_end() {
     //   retire:    Token → ø                 (TxEntry::Retire)
     //   push:0 return: exit with 0 results
     let inner = ScriptBuilder::new()
+        .roll_k(1)
+        .drop_() // discard the empty Contract payload below the argument
         .commit()
         .push_str(tag_str.clone())
         .issuepriv()
@@ -471,34 +474,31 @@ fn issuepriv_prove_then_verify_end_to_end() {
     // Single-leaf NUMS-only predicate tree.
     let tree = PredicateTree::scripts_only(vec![inner_bytes.clone()], TEST_BLINDING_KEY)
         .expect("scripts_only tree");
-    let cp = tree.taproot_proof_for(0).expect("taproot_proof for leaf 0");
+    let cp = test_taproot_proof(&tree, 0).expect("taproot_proof for leaf 0");
     let pred_point = tree.point;
 
     // Contract with empty payload — the witness rides on the open arg.
-    let contract = Contract::new(Predicate::opaque(pred_point), Anchor([0xa1; 32]), vec![])
-        .expect("empty payload is portable");
-    let contract_bytes = encode_contract_to_bytes(&contract);
+    let contract = Contract::new(
+        Predicate::opaque(pred_point),
+        Anchor([0xa1; 32]),
+        test_payload(vec![]),
+    )
+    .expect("empty payload is portable");
 
     // Outer:
-    //   pushstr(contract_bytes); input;
+    //   pushstr(contract_id); input (body from the BoC);
     //   pushpoint(internal_key);
-    //   neighbors-dict; position;
-    //   push_script(inner) (witness-preserving);
+    //   pushstr(program_trie_root); push(program_index);
+    //   branch cells and private script witnesses attached to the builder;
     //   gas=20_000;
     //   pushstr(qty_witness); k=1; open;
     //   verify; drop  (consume the success + count markers)
-    let mut outer = ScriptBuilder::new()
-        .push_str(String::from(contract_bytes))
+    let outer = ScriptBuilder::new()
+        .push_str(String::contract(contract))
         .input()
-        .push_point(*cp.internal_key.as_bytes());
-    for (i, h) in cp.neighbors.iter().enumerate() {
-        outer = outer.push_str(String::from(h.to_vec())).push_int(i as u64);
-    }
-    let outer = outer
-        .push_int(cp.neighbors.len() as u64)
-        .dict()
-        .push_str(String::from(cp.position.clone()))
-        .push_script(inner) // witness-bearing
+        .with_script_witness(inner)
+        .unwrap();
+    let outer = push_taproot_proof_to_program(outer, &cp)
         .push_int(20_000u64) // gas
         .push_str(String::commitment(qty_commit.clone())) // qty witness arg
         .push_int(1u64) // k = 1 arg
@@ -510,7 +510,10 @@ fn issuepriv_prove_then_verify_end_to_end() {
     let result = Prover::prove(&pc_gens, outer, dummy_header(), 1_000_000).expect("prove ok");
     let txid_p = result.txid;
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = result;
     let proof = proof.expect("proof set");
 
@@ -518,13 +521,14 @@ fn issuepriv_prove_then_verify_end_to_end() {
     // witnesses on the wire (the leaf bytes encode just the opaque
     // commitment point and the bare opcodes).
     let pc_gens_v = PedersenGens::default();
-    let verified = Verifier::verify(
+    let verified = Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify ok");
     assert_eq!(verified.txid, txid_p, "txid round-trips");

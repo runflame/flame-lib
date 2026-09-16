@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+cells = { path = "../cells" }
 flamevm = { path = "../flamevm" }
 hex = "0.3"
 merkle = { path = "../merkle" }

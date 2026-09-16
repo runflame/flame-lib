@@ -5,38 +5,9 @@ use thiserror::Error;
 /// Represents an error in proof creation, verification, or parsing.
 #[derive(Error, Debug)]
 pub enum VMError {
-    /// A Chunk payload exceeded the format limit.
-    #[error("Chunk payload exceeds 8191 bytes")]
-    ChunkPayloadTooLarge,
-
-    /// A Chunk contained more than four child references.
-    #[error("Chunk contains more than four references")]
-    ChunkTooManyReferences,
-
-    /// A requested Chunk body is not resident in the current view.
-    #[error("Chunk reference is pruned: {0:?}")]
-    ChunkReferencePruned([u8; 32]),
-
-    /// A supplied Chunk body does not match the pruned commitment it replaces.
-    #[error("Chunk body does not match its pruned reference")]
-    ChunkReferenceHashMismatch,
-
-    /// A fixed-width trie received a key of the wrong length.
-    #[error("Trie key length mismatch: expected {expected}, got {actual}")]
-    TrieKeyLengthMismatch {
-        /// Configured key length.
-        expected: usize,
-        /// Supplied key length.
-        actual: usize,
-    },
-
-    /// A trie key exceeds the recursive implementation's current bound.
-    #[error("Trie keys cannot exceed 32 bytes")]
-    TrieKeyTooLong,
-
-    /// A resident Chunk does not contain a well-formed trie record.
-    #[error("Malformed trie Chunk")]
-    MalformedTrie,
+    /// A Cell was missing, malformed, or exceeded the execution budget.
+    #[error(transparent)]
+    Cell(#[from] cells::CellError),
 
     /// This error occurs when VM is left with some items on the stack at the end of a frame.
     #[error("Stack is not cleared by the script")]
@@ -89,6 +60,10 @@ pub enum VMError {
     /// This error occurs when an instruction requires a String.
     #[error("Item is not a String")]
     TypeNotString,
+
+    /// A VM String must fit in one Cell payload, without snake continuations.
+    #[error("String exceeds the single-Cell payload limit")]
+    StringTooLong,
 
     /// This error occurs when `verify` sees a zero value on top of the stack.
     #[error("verify failed: zero value")]

@@ -22,10 +22,11 @@ fn phase19_op_fee_records_txlog_and_pushes_debt() {
         wide.0.assignment.as_deref().expect("prover assignment").f,
         FLAME_FLAVOR.to_dalek(),
     );
-    // Txlog: Header at 0, Fee(100) at 1.
-    assert_eq!(vm.txlog.len(), 2);
+    // Txlog: Header at 0, CellWitness at 1, Fee(100) at 2.
+    assert_eq!(vm.txlog.len(), 3);
     assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
-    assert!(matches!(vm.txlog[1], TxEntry::Fee(100)));
+    assert!(matches!(vm.txlog[1], TxEntry::CellWitness(_)));
+    assert!(matches!(vm.txlog[2], TxEntry::Fee(100)));
     // total_fee accumulator updated.
     assert_eq!(vm.total_fee.total(), 100);
 }
@@ -48,10 +49,10 @@ fn phase19_op_fee_accumulates_total() {
     let (vm, _prover) = run_external_steps(&pc_gens, program, 4);
     // 2 WideTokens stacked.
     assert_eq!(vm.current_call.stack.len(), 2);
-    // Txlog: Header + Fee(30) + Fee(70).
-    assert_eq!(vm.txlog.len(), 3);
-    assert!(matches!(vm.txlog[1], TxEntry::Fee(30)));
-    assert!(matches!(vm.txlog[2], TxEntry::Fee(70)));
+    // Txlog: Header + CellWitness + Fee(30) + Fee(70).
+    assert_eq!(vm.txlog.len(), 4);
+    assert!(matches!(vm.txlog[2], TxEntry::Fee(30)));
+    assert!(matches!(vm.txlog[3], TxEntry::Fee(70)));
     // Accumulator carries the sum.
     assert_eq!(vm.total_fee.total(), 100);
 }
@@ -63,12 +64,8 @@ fn phase19_op_fee_accumulates_total() {
 fn phase19_op_fee_rejects_negative_qty() {
     let pc_gens = PedersenGens::default();
     // Build script directly so we can push a negative Scalar.
-    let mut script = Vec::new();
-    // pushint8 neg 50 (qty = -50) — minimal (negative, no narrower form)
-    script.push(0x11);
-    script.push(50);
-    // fee
-    script.push(0x9b);
+    // pushint8 neg 50 (qty = -50) — minimal, followed by fee.
+    let script = vec![0x11, 50, 0x9b];
     let program = ScriptBuilder::parse(&script).expect("decode");
     // Run both instructions; fee must error.
     let mut vm = VM::new(
@@ -150,10 +147,7 @@ fn phase19_op_fee_rejects_aggregate_over_cap() {
 /// needs Bulletproofs to allocate the WideToken's CS variables.
 #[test]
 fn phase19_op_fee_rejects_internal_context() {
-    let mut script = Vec::new();
-    // qty=1, fee
-    script.push(0x01); // push:1
-    script.push(0x9b); // fee
+    let script = vec![0x01, 0x9b]; // push:1, fee
     let mut vm = vm_with_script(script);
     let err = run_to_end(&mut vm).unwrap_err();
     assert!(matches!(err, VMError::ExternalOnly));

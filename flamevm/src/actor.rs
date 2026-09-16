@@ -1,10 +1,12 @@
 //! Actor data model: identity, state, lifecycle counters, registry.
 
-use merlin::Transcript;
-use readerwriter::{Decodable, Encodable, ReadError, Reader, WriteError, Writer};
+use cells::{
+    BagOfCells, CellBuilder, CellDecode, CellEncode, CellError, CellRef, CellResolver, CellSlice,
+};
+use std::sync::Arc;
 
 use crate::dict::Dict;
-use crate::encoding::write_value;
+use crate::encoding::{blob_cell, read_blob};
 use crate::errors::VMError;
 use crate::value::Value;
 
@@ -23,22 +25,21 @@ use crate::value::Value;
 ///   the actor under the same canonical id.
 ///
 /// **Equivalence invariant**: `Constructor(bytes).to_hash()` ==
-/// `Hash(h).to_hash()` whenever `h == H_{flamevm.actorid}(bytes)`.
+/// `Hash(h).to_hash()` whenever `h == code_root(bytes)`.
 /// Both addresses route to the same actor; the registry
 /// canonicalizes on the hash so callers can use whichever form
 /// they have on hand.
 ///
 /// Wire form: a tag byte (`0x00` Hash, `0x01` Constructor) followed
 /// by the payload. The Hash variant's payload is a bare 32 bytes;
-/// the Constructor variant's payload is an 8-byte little-endian
-/// length followed by the script bytes.
+/// the Constructor variant has one reference to snake-encoded code.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ActorID {
     /// Canonical 32-byte hash of the constructor script.
     Hash([u8; 32]),
 
     /// Constructor script bytes. Hashes to the same canonical
-    /// id as `Hash(H_{flamevm.actorid}(bytes))`.
+    /// id as `Hash(code_root(bytes))`.
     Constructor(Vec<u8>),
 }
 
@@ -53,13 +54,7 @@ impl ActorID {
     pub fn to_hash(&self) -> [u8; 32] {
         match self {
             ActorID::Hash(h) => *h,
-            ActorID::Constructor(bytes) => {
-                let mut t = Transcript::new(b"flamevm.actorid");
-                t.append_message(b"constructor", bytes);
-                let mut h = [0u8; 32];
-                t.challenge_bytes(b"id", &mut h);
-                h
-            }
+            ActorID::Constructor(bytes) => code_root(bytes),
         }
     }
 
@@ -74,43 +69,38 @@ impl ActorID {
 }
 
 /// Canonical wire form (tag byte + payload). `Hash` writes a 32-byte
-/// payload; `Constructor` writes an 8-byte little-endian length then
-/// the script bytes.
-impl Encodable for ActorID {
-    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
+/// payload; `Constructor` stores one reference to snake-encoded code.
+impl CellEncode for ActorID {
+    fn encode(&self, w: &mut CellBuilder) -> Result<(), CellError> {
         match self {
             ActorID::Hash(h) => {
-                w.write_u8(b"actorid.tag", Self::TAG_HASH)?;
-                w.write(b"actorid.hash", h)
+                w.store_u8(Self::TAG_HASH)?.store_bytes(h)?;
             }
             ActorID::Constructor(bytes) => {
-                w.write_u8(b"actorid.tag", Self::TAG_CONSTRUCTOR)?;
-                let len = bytes.len() as u64;
-                w.write(b"actorid.ctor.len", &len.to_le_bytes())?;
-                w.write(b"actorid.ctor.bytes", bytes)
+                w.store_u8(Self::TAG_CONSTRUCTOR)?;
+                w.store_ref(CellRef::resident(blob_cell(bytes)?))?;
             }
         }
+        Ok(())
     }
 }
 
-impl Decodable for ActorID {
-    fn decode(r: &mut impl Reader) -> Result<Self, ReadError> {
-        let tag = r.read_u8()?;
+impl CellDecode for ActorID {
+    fn decode<R: CellResolver + ?Sized>(
+        r: &mut CellSlice<'_>,
+        cells: &mut R,
+    ) -> Result<Self, CellError> {
+        let tag = r.load_u8()?;
         match tag {
             Self::TAG_HASH => {
-                let h = r.read_u8x32()?;
+                let h = <[u8; 32]>::decode(r, cells)?;
                 Ok(ActorID::Hash(h))
             }
             Self::TAG_CONSTRUCTOR => {
-                let len = r.read_u64()? as usize;
-                // Bound the attacker-controlled length before allocating.
-                if len > r.remaining_bytes() {
-                    return Err(ReadError::InvalidFormat);
-                }
-                let bytes = r.read_bytes(len)?;
+                let bytes = read_blob(&r.load_ref()?, cells, u32::MAX as usize)?;
                 Ok(ActorID::Constructor(bytes))
             }
-            _ => Err(ReadError::InvalidFormat),
+            _ => Err(CellError::InvalidFormat),
         }
     }
 }
@@ -129,28 +119,22 @@ pub fn empty_state() -> Value {
     Value::Dict(Dict::new())
 }
 
-/// Canonical 32-byte commitment to an actor's state `Value` — the
-/// `TxEntry::ActorSave` merkle leaf. Infallible in valid registry
+/// Canonical state Cell ID, referenced by `TxEntry::ActorSave`.
+/// Infallible in valid registry
 /// context: op_save gates stored states on portability, and all
 /// portable values are wire-encodable.
 pub fn state_root(state: &Value) -> [u8; 32] {
-    let mut buf = Vec::new();
-    write_value(&mut buf, state).expect("actor state in valid registry context is wire-encodable");
-    let mut t = Transcript::new(b"flamevm.actor.state.root");
-    t.append_message(b"state", &buf);
-    let mut h = [0u8; 32];
-    t.challenge_bytes(b"root", &mut h);
-    h
+    state
+        .to_cell()
+        .expect("admitted actor state is encodable")
+        .id()
 }
 
-/// Canonical 32-byte commitment to an actor's code blob — the
-/// `TxEntry::SetCode` merkle leaf.
+/// Canonical snake Cell ID of an actor's code, referenced by `TxEntry::SetCode`.
 pub fn code_root(code: &[u8]) -> [u8; 32] {
-    let mut t = Transcript::new(b"flamevm.actor.code.root");
-    t.append_message(b"code", code);
-    let mut h = [0u8; 32];
-    t.challenge_bytes(b"root", &mut h);
-    h
+    blob_cell(code)
+        .expect("actor code fits the byte-string format")
+        .id()
 }
 
 // ── Actor data sizing ─────────────────────────────────────────────
@@ -158,16 +142,18 @@ pub fn code_root(code: &[u8]) -> [u8; 32] {
 /// Canonical charged size of an actor's code and state. Lease-record overhead
 /// belongs to the blockchain host because FlameVM does not own lease records.
 ///
-/// `Err(MalformedActorState)` if the state can't be encoded. Note:
+/// Returns an error if the state can't be encoded. Note:
 /// encodability ≠ portability — op_save's `is_portable` check is the
 /// authoritative storage gate; this reports the rare case of a portable
 /// value that lacks an encoder.
 pub fn code_state_bytes(code: &[u8], state: &Value) -> Result<u64, VMError> {
-    let mut size = readerwriter::SizeWriter::new();
-    write_value(&mut size, state).map_err(|_| VMError::MalformedActorState)?;
-    (code.len() as u64)
-        .checked_add(size.len() as u64)
-        .ok_or(VMError::StorageArithmeticOverflow)
+    let mut graph = BagOfCells::collect(Arc::new(blob_cell(code)?))?;
+    graph.extend(&BagOfCells::collect(Arc::new(state.to_cell()?))?)?;
+    let size = graph.iter().try_fold(0u64, |size, (_, cell)| {
+        size.checked_add(cell.encoded_size() as u64)
+            .ok_or(VMError::StorageArithmeticOverflow)
+    });
+    size
 }
 
 /// Result of a successful persistent-storage purchase. The host owns
@@ -187,6 +173,29 @@ pub struct StoragePurchase {
 /// transaction.
 ///
 pub trait ActorRegistry {
+    /// Bodies committed as resident for this actor, never a node-global cache.
+    fn actor_cells(&self, _id: &ActorID) -> Result<Arc<BagOfCells>, VMError> {
+        Ok(Arc::new(BagOfCells::new()))
+    }
+
+    /// Execution-only recovery from the initiating transaction's immutable BoC.
+    /// Implementations must not implicitly persist externally supplied bodies.
+    fn load_code_with_cells(
+        &self,
+        id: &ActorID,
+        _cells: &mut dyn CellResolver,
+    ) -> Result<Vec<u8>, VMError> {
+        self.load_code(id)
+    }
+
+    fn load_state_with_cells(
+        &mut self,
+        id: &ActorID,
+        _cells: &mut dyn CellResolver,
+    ) -> Result<Value, VMError> {
+        self.load_state(id)
+    }
+
     // ── lookup ─────────────────────────────────────────────────
 
     /// **Checks out** the actor's state — moves it out of the registry

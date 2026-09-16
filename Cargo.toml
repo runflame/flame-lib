@@ -6,6 +6,7 @@ members = [
     "readerwriter",
     "merkle",
     "starsig",
+    "flamekd",
     "musig",
     "spacesuit",
     "flamevm",

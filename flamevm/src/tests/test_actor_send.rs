@@ -3,7 +3,7 @@
 use super::test_helpers::*;
 use crate::tx::{TxEntry, TxID};
 use crate::{ActorID, Scalar};
-use readerwriter::Encodable;
+use cells::CellEncode;
 
 fn send_script(target: &ActorID, refund: [u8; 32], selector: u64, gas: u64) -> Vec<u8> {
     ScriptBuilder::new()
@@ -81,7 +81,10 @@ fn send_payload_changes_transaction_id() {
 
 #[test]
 fn send_rejects_malformed_addresses() {
-    for (refund, target) in [(vec![0; 16], vec![0; 32]), (vec![0; 32], vec![0; 16])] {
+    for (refund, target, malformed_refund) in [
+        (vec![0; 16], vec![0; 32], true),
+        (vec![0; 32], vec![0; 16], false),
+    ] {
         let code = ScriptBuilder::new()
             .push_int(0u64)
             .push_str(String::from(refund))
@@ -91,10 +94,13 @@ fn send_rejects_malformed_addresses() {
             .to_bytecode();
         let mut reg = MemRegistry::new();
         let actor = deploy_actor(&mut reg, code);
-        assert!(matches!(
-            deliver_err(&mut reg, msg_to(actor)),
-            VMError::MalformedAddress
-        ));
+        let error = deliver_err(&mut reg, msg_to(actor));
+        if malformed_refund {
+            assert!(matches!(error, VMError::MalformedAddress));
+        } else {
+            // Non-hash destinations are decoded as ActorID Cell envelopes.
+            assert!(matches!(error, VMError::Cell(CellError::InsufficientBytes)));
+        }
     }
 }
 
@@ -173,7 +179,7 @@ fn send_preserves_constructor_code_for_first_delivery() {
         .push_int(0u64)
         .push_str(String::from(vec![0; 32]))
         .push_int(0u64)
-        .push_str(String::from(target.encode_to_vec()))
+        .push_str(String::from(target.to_envelope().unwrap().encode()))
         .send()
         .to_bytecode();
     let mut vm = vm_external_with_script(script);

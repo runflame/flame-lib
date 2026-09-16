@@ -21,13 +21,21 @@ pub enum CellRef {
     Pruned(CellID),
 }
 
-impl CellRef {
-    pub fn resident(cell: Cell) -> Self {
-        Self::Resident(Arc::new(cell))
+impl From<Cell> for CellRef {
+    fn from(cell: Cell) -> Self {
+        Self::resident(cell)
     }
+}
 
-    pub fn resident_arc(cell: Arc<Cell>) -> Self {
-        Self::Resident(cell)
+impl From<Arc<Cell>> for CellRef {
+    fn from(cell: Arc<Cell>) -> Self {
+        Self::resident(cell)
+    }
+}
+
+impl CellRef {
+    pub fn resident(cell: impl Into<Arc<Cell>>) -> Self {
+        Self::Resident(cell.into())
     }
 
     pub fn pruned(id: CellID) -> Self {
@@ -218,6 +226,20 @@ mod tests {
 
     fn leaf(byte: u8) -> Cell {
         Cell::new(vec![byte], vec![]).unwrap()
+    }
+
+    #[test]
+    fn cell_conversions_create_resident_references_without_copying_bodies() {
+        let cell = leaf(7);
+        let id = cell.id();
+        let payload = cell.payload().as_ptr();
+        let reference: CellRef = cell.into();
+        assert_eq!(reference.id(), id);
+        assert_eq!(reference.as_resident().unwrap().payload().as_ptr(), payload);
+
+        let cell = reference.as_resident_arc().unwrap().clone();
+        let reference: CellRef = cell.clone().into();
+        assert!(Arc::ptr_eq(reference.as_resident_arc().unwrap(), &cell));
     }
 
     #[test]

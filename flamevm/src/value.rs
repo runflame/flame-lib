@@ -220,7 +220,7 @@ impl Value {
     /// Downcast to Scalar.
     pub fn to_scalar(self)      -> Result<Scalar, VMError>     { match self { Value::Scalar(x) => Ok(x),     _ => Err(VMError::TypeNotScalar) } }
     /// Downcast to String.
-    pub fn to_string(self)      -> Result<String, VMError>     { match self { Value::String(x) => Ok(x),     _ => Err(VMError::TypeNotString) } }
+    pub fn to_string(self)      -> Result<String, VMError>     { match self { Value::String(x) => { x.check_len()?; Ok(x) }, _ => Err(VMError::TypeNotString) } }
     /// Downcast to Dict.
     pub fn to_dict(self)        -> Result<Dict, VMError>       { match self { Value::Dict(x) => Ok(x),       _ => Err(VMError::TypeNotDict) } }
     /// Downcast to Point.

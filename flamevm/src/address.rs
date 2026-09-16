@@ -1,131 +1,56 @@
-//! Routing addresses: spend predicates and actor message targets.
+//! Routing addresses encoded as an expected Cell sum type.
 
-use readerwriter::{Decodable, Encodable, ReadError, Reader, WriteError, Writer};
+use crate::{ActorID, Dict, Predicate};
+use cells::{CellBuilder, CellDecode, CellEncode, CellError, CellRef, CellResolver, CellSlice};
 
-use crate::actor::ActorID;
-use crate::contract::Predicate;
-use crate::crypto::Point;
-use crate::dict::Dict;
-use crate::encoding::{
-    read_list_prefix, read_string, read_value, write_admitted_value, write_list_prefix,
-};
-use crate::scalar::Scalar;
-use crate::string::String;
-use crate::value::Value;
-
-/// Routing target. See module docs for context.
 #[derive(Debug)]
 pub enum Address {
-    /// Spend authority: the target is a [`Predicate`] gating a
-    /// contract. Used by `op_output` (and helpers) that pay to a
-    /// key/script address. The script consumer satisfies the
-    /// predicate via signature or reveal to unlock the contract later.
     Predicate(Predicate),
-
-    /// Message routing target: deliver `args` to `dst` with the given gas
-    /// allotment. A selector, when used, is an ordinary argument.
     MessageTarget { dst: ActorID, args: Dict, gas: u64 },
 }
 
 impl Address {
-    /// Tag value for the [`Address::Predicate`] variant on the wire.
-    pub const TAG_PREDICATE: u8 = 0x00;
-    /// Tag value for the [`Address::MessageTarget`] variant on the wire.
-    pub const TAG_MESSAGE_TARGET: u8 = 0x01;
+    pub const TAG_PREDICATE: u8 = 0;
+    pub const TAG_MESSAGE_TARGET: u8 = 1;
 
-    /// Convenience: encode to a fresh `Vec<u8>`. Returns the
-    /// `WriteError` from `Encodable::encode`.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, WriteError> {
-        let mut out = Vec::new();
-        self.encode(&mut out)?;
-        Ok(out)
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CellError> {
+        Ok(self.to_envelope()?.encode())
     }
 }
 
-/// Canonical wire form: a list-Dict whose first entry is the tag
-/// byte (as `Scalar`), remaining entries the variant payload. See
-/// `Address::TAG_*` constants.
-///
-/// Layout:
-/// - `Predicate`: `[tag, point]`.
-/// - `MessageTarget`: `[tag, dst_string, args_dict, gas_int]`.
-///
-/// `dst` is wrapped as a `String` carrying the bytes of
-/// [`ActorID::encode`] so the outer list-Dict reader sees a uniform
-/// value-typed payload.
-impl Encodable for Address {
-    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
+impl CellEncode for Address {
+    fn encode(&self, builder: &mut CellBuilder) -> Result<(), CellError> {
         match self {
-            Address::Predicate(p) => {
-                write_list_prefix(w, 2)?;
-                write_admitted_value(w, &Value::Scalar(Scalar::from(Self::TAG_PREDICATE as u64)))?;
-                write_admitted_value(w, &Value::Point(Point::from_compressed(p.to_point())))
+            Self::Predicate(predicate) => {
+                builder.store_u8(Self::TAG_PREDICATE)?.store(predicate)?;
             }
-            Address::MessageTarget { dst, args, gas } => {
-                write_list_prefix(w, 4)?;
-                write_admitted_value(
-                    w,
-                    &Value::Scalar(Scalar::from(Self::TAG_MESSAGE_TARGET as u64)),
-                )?;
-                let mut dst_bytes = Vec::new();
-                dst.encode(&mut dst_bytes)?;
-                write_admitted_value(w, &Value::String(String::from(dst_bytes)))?;
-                // Serialization is the Rust-level data path, so use
-                // `Clone`, not the VM-level `try_clone` (dicts are
-                // non-copyable on the stack).
-                write_admitted_value(w, &Value::Dict(args.clone()))?;
-                write_admitted_value(w, &Value::Scalar(Scalar::from(*gas)))
+            Self::MessageTarget { dst, args, gas } => {
+                builder
+                    .store_u8(Self::TAG_MESSAGE_TARGET)?
+                    .store(dst)?
+                    .store_u64(*gas)?;
+                builder.store_ref(CellRef::resident(args.to_cell()?))?;
             }
         }
+        Ok(())
     }
 }
 
-/// Reads the canonical wire form. Pure parse; strict on shape
-/// (rejects unknown tag/arity, non-32-byte point, non-canonical
-/// scalar/string/dict, gas outside u64). VM-level callers that want
-/// `VMError::MalformedAddress` map the `ReadError` themselves.
-impl Decodable for Address {
-    fn decode(r: &mut impl Reader) -> Result<Self, ReadError> {
-        let count = read_list_prefix(r).map_err(|_| ReadError::InvalidFormat)?;
-        let tag_val = read_value(r).map_err(|_| ReadError::InvalidFormat)?;
-        let tag = match tag_val {
-            Some(Value::Scalar(i)) => {
-                let bytes = i.to_bytes();
-                // Reject if anything beyond the low byte is set
-                // so a large scalar cannot alias a small tag.
-                if bytes[1..].iter().any(|b| *b != 0) {
-                    return Err(ReadError::InvalidFormat);
-                }
-                bytes[0]
+impl CellDecode for Address {
+    fn decode<R: CellResolver + ?Sized>(
+        slice: &mut CellSlice<'_>,
+        cells: &mut R,
+    ) -> Result<Self, CellError> {
+        match slice.load_u8()? {
+            Self::TAG_PREDICATE => Ok(Self::Predicate(Predicate::decode(slice, cells)?)),
+            Self::TAG_MESSAGE_TARGET => {
+                let dst = ActorID::decode(slice, cells)?;
+                let gas = slice.load_u64()?;
+                let cell = cells::resolve_cell(cells, &slice.load_ref()?)?;
+                let args = Dict::from_cell(&cell, cells)?;
+                Ok(Self::MessageTarget { dst, args, gas })
             }
-            _ => return Err(ReadError::InvalidFormat),
-        };
-        match (tag, count) {
-            (Self::TAG_PREDICATE, 2) => {
-                let p = match read_value(r) {
-                    Ok(Some(Value::Point(p))) => Predicate::opaque(p.to_compressed()),
-                    _ => return Err(ReadError::InvalidFormat),
-                };
-                Ok(Address::Predicate(p))
-            }
-            (Self::TAG_MESSAGE_TARGET, 4) => {
-                let dst_bytes = read_string(r)?;
-                let mut dst_r = dst_bytes.as_slice();
-                let dst = ActorID::decode(&mut dst_r)?;
-                if !dst_r.is_empty() {
-                    return Err(ReadError::InvalidFormat);
-                }
-                let args = match read_value(r) {
-                    Ok(Some(Value::Dict(d))) => d,
-                    _ => return Err(ReadError::InvalidFormat),
-                };
-                let gas = match read_value(r) {
-                    Ok(Some(Value::Scalar(i))) => i.to_u64().ok_or(ReadError::InvalidFormat)?,
-                    _ => return Err(ReadError::InvalidFormat),
-                };
-                Ok(Address::MessageTarget { dst, args, gas })
-            }
-            _ => Err(ReadError::InvalidFormat),
+            _ => Err(CellError::InvalidFormat),
         }
     }
 }
@@ -133,116 +58,27 @@ impl Decodable for Address {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoding::write_value;
-
-    use curve25519_dalek::ristretto::CompressedRistretto;
+    use cells::Cell;
 
     #[test]
-    fn address_decode_rejects_unknown_tag() {
-        // Build a list-Dict of two values: tag=99, dummy point.
-        let mut bytes = Vec::new();
-        write_list_prefix(&mut bytes, 2).unwrap();
-        write_value(&mut bytes, &Value::Scalar(Scalar::from(99u64))).unwrap();
-        write_value(
-            &mut bytes,
-            &Value::Point(Point::from_compressed(CompressedRistretto([0u8; 32]))),
-        )
-        .unwrap();
-        let mut r = bytes.as_slice();
-        let err = Address::decode(&mut r).expect_err("must error");
-        assert!(matches!(err, ReadError::InvalidFormat));
-    }
-
-    #[test]
-    fn address_decode_rejects_wrong_arity_for_message() {
-        // tag = MessageTarget but only 3 entries instead of 4.
-        let mut bytes = Vec::new();
-        write_list_prefix(&mut bytes, 3).unwrap();
-        write_value(
-            &mut bytes,
-            &Value::Scalar(Scalar::from(Address::TAG_MESSAGE_TARGET as u64)),
-        )
-        .unwrap();
-        write_value(
-            &mut bytes,
-            &Value::String(String::from(vec![ActorID::TAG_HASH; 33])),
-        )
-        .unwrap();
-        write_value(&mut bytes, &Value::Scalar(Scalar::from(0u64))).unwrap();
-        let mut r = bytes.as_slice();
-        let err = Address::decode(&mut r).expect_err("must error");
-        assert!(matches!(err, ReadError::InvalidFormat));
-    }
-
-    #[test]
-    fn address_decode_rejects_negative_gas() {
-        let addr = Address::MessageTarget {
-            dst: ActorID::Hash([0u8; 32]),
-            args: Dict::new(),
-            gas: 0,
-        };
-        let mut bytes = addr.to_bytes().expect("encode");
-        // Bytes ends with the encoded gas (Scalar from 0u64). Replace
-        // it with a fresh -1 Scalar. To keep the surgery simple, just
-        // append a fresh list-Dict instead with the negative tail:
-        bytes.clear();
-        write_list_prefix(&mut bytes, 4).unwrap();
-        write_value(
-            &mut bytes,
-            &Value::Scalar(Scalar::from(Address::TAG_MESSAGE_TARGET as u64)),
-        )
-        .unwrap();
-        write_value(
-            &mut bytes,
-            &Value::String(String::from(ActorID::Hash([0u8; 32]).encode_to_vec())),
-        )
-        .unwrap();
-        write_value(&mut bytes, &Value::Dict(Dict::new())).unwrap();
-        write_value(&mut bytes, &Value::Scalar(Scalar::from(-1i64))).unwrap();
-        let mut r = bytes.as_slice();
-        let err = Address::decode(&mut r).expect_err("must error");
-        assert!(matches!(err, ReadError::InvalidFormat));
-    }
-
-    #[test]
-    fn address_decode_rejects_trailing_bytes_inside_dst() {
-        // Encode the message target; tamper with the dst-string
-        // bytes to add a trailing byte after the ActorID.
-        let mut bytes = Vec::new();
-        write_list_prefix(&mut bytes, 4).unwrap();
-        write_value(
-            &mut bytes,
-            &Value::Scalar(Scalar::from(Address::TAG_MESSAGE_TARGET as u64)),
-        )
-        .unwrap();
-        // dst string contains a valid Hash ActorID + 1 trailing byte.
-        let mut dst_payload = ActorID::Hash([1u8; 32]).encode_to_vec();
-        dst_payload.push(0xff);
-        write_value(&mut bytes, &Value::String(String::from(dst_payload))).unwrap();
-        write_value(&mut bytes, &Value::Dict(Dict::new())).unwrap();
-        write_value(&mut bytes, &Value::Scalar(Scalar::from(0u64))).unwrap();
-        let mut r = bytes.as_slice();
-        let err = Address::decode(&mut r).expect_err("must error");
-        assert!(matches!(err, ReadError::InvalidFormat));
-    }
-
-    #[test]
-    fn message_target_roundtrips_without_a_method_field() {
-        let expected_dst = ActorID::Hash([3u8; 32]);
-        let encoded = Address::MessageTarget {
-            dst: expected_dst.clone(),
+    fn routing_roundtrip_and_invalid_tags() {
+        let address = Address::MessageTarget {
+            dst: ActorID::Constructor(vec![1, 2, 3]),
             args: Dict::new(),
             gas: 42,
+        };
+        let cell = address.to_cell().unwrap();
+        match Address::from_cell(&cell, &mut ()).unwrap() {
+            Address::MessageTarget { dst, args, gas } => {
+                assert_eq!(dst, ActorID::Constructor(vec![1, 2, 3]));
+                assert!(args.is_empty());
+                assert_eq!(gas, 42);
+            }
+            _ => panic!("wrong address variant"),
         }
-        .to_bytes()
-        .unwrap();
-        let mut input = encoded.as_slice();
-        let decoded = Address::decode(&mut input).unwrap();
-        assert!(input.is_empty());
         assert!(matches!(
-            decoded,
-            Address::MessageTarget { dst, args, gas }
-                if dst == expected_dst && args.is_empty() && gas == 42
+            Address::from_cell(&Cell::new(vec![2], vec![]).unwrap(), &mut ()),
+            Err(CellError::InvalidFormat)
         ));
     }
 }

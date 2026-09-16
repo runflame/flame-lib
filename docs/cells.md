@@ -13,10 +13,21 @@ Design of cells in Flame is heavily inspired by cells used within TON blockchain
 
 ## Status
 
-This document specifies the target architecture and the migration from the
-current code. It is not a description of fully implemented behavior yet.
-`docs/compression.md` records the motivation and broader experiments;
-this document is the concrete design to implement.
+The Cell crate, VM/chain codecs other than the deferred Utreexo formats,
+unified Dict, witness-backed predicate and actor reads, and per-external
+execution closure are implemented. Exact typed
+layouts are specified in [encoding.md](encoding.md). The architecture below
+also describes constraints on future disk adapters and explicit partial
+pruning APIs; those adapters/opcodes are not implemented.
+`docs/compression.md` records the motivation and broader experiments.
+
+Runtime `String` currently contains at most 8191 bytes. Its expected encoding
+is one Cell with those raw bytes and no references or length prefix; the Cell
+descriptor already supplies the length. Scripts, cryptographic proofs, and
+other potentially longer protocol byte fields still use Snake encoding.
+Replacing the VM String type with a first-class Cell is a proposal below,
+not part of the implemented migration. Utreexo forest, proof, and path
+serialization also remains unchanged for now.
 
 The word **Cell** in this document always means the low-level encoding object.
 It does not reintroduce the old FlameVM UTXO `Cell` type, which has been renamed
@@ -124,11 +135,11 @@ an `Arc<Cell>` and may populate an execution-local cache, but it does not mutate
 the parent Cell or change persistent availability. Explicit pruning and
 persistent restoration build a new stored graph/frontier.
 
-The core API retains the useful parts of the current `Chunk` API:
+The core immutable API is:
 
 ```rust
 impl CellRef {
-    pub fn resident(cell: Cell) -> Self;
+    pub fn resident(cell: impl Into<Arc<Cell>>) -> Self;
     pub fn pruned(id: CellID) -> Self;
     pub fn id(&self) -> CellID;
     pub fn as_resident(&self) -> Option<&Cell>;
@@ -143,6 +154,11 @@ impl Cell {
     pub fn encoded_size(&self) -> usize;
 }
 ```
+
+`Cell` and `Arc<Cell>` implement conversion into `CellRef`: `cell.into()`
+creates a resident reference. Moving a `Cell` preserves its payload/reference
+allocations; converting an `Arc<Cell>` reuses that allocation without copying
+the body.
 
 There is no mutating `hydrate` method. Hydration belongs to the resolver cache,
 while explicit pruning returns/rebuilds a `Pruned` reference.
@@ -161,7 +177,7 @@ positions.
 
 ### Canonical Cell record
 
-The current `Chunk` descriptor is retained:
+The compact descriptor is:
 
 ```text
 descriptor: u16 little-endian
@@ -336,6 +352,162 @@ lets a composite decoder propagate resolution failures without converting
 between unrelated reader and resolver errors. Builder methods only produce the
 two capacity variants.
 
+## Proposal: replace the VM String with a first-class Cell
+
+This section is a design proposal, not an instruction to introduce new VM
+types yet. The current `CellBuilder` and `CellSlice` remain codec helpers.
+The goal is to expose their byte/reference operations to programs without
+adding a second graph format or weakening the ownership rules of typed Values.
+
+### Two alternatives
+
+Both alternatives keep an immutable Cell as the portable, content-addressed
+result. The choice is whether temporary reading and writing use one VM type
+or two.
+
+| Property | Combined read/write object | Separate Builder and Slice |
+| --- | --- | --- |
+| Temporary VM types | One buffer/cursor type | Builder plus Slice |
+| Basic layout | Payload, refs, and independent byte/ref read cursors | Builder has payload/ref buffers; Slice has a shared Cell and two cursors |
+| Reading an existing Cell | Copy its bounded body into writable buffers, or add shared/read-only storage with copy-on-write | Share its immutable body; only cursors change |
+| Writing | Append bytes/refs to the same object being read | Append only to Builder |
+| Reading after writing | Direct, but must define whether already-read prefixes remain | Finalize Builder, then open a Slice |
+| Editing after reading | Convenient; cursor, append position, and final identity need explicit rules | Explicit new Builder; no hidden edit or cursor invalidation |
+| Identity | No stable ID while writable; finalization hashes the complete result | Cell ID is always stable; Builder is unhashed; Slice still refers to its original Cell |
+| Copying | Copying must copy buffers or define copy-on-write; sharing a mutable cursor is unsafe | Cell/Slice copies share immutable storage with independent cursors; Builder need not be copyable |
+| Implementation | Fewer opcode type distinctions, more object states and corner cases | Closely matches the existing crate; one additional VM variant, simpler invariants |
+
+The simplest combined object would have mutable `payload`, mutable `refs`,
+`byte_offset`, and `ref_offset`. Reads advance offsets without deleting data;
+writes append, never overwrite. Finalizing includes the entire buffers,
+including already-read prefixes. Keeping only the unread remainder would be
+a separate, explicit operation. Opening an existing Cell would copy at most
+8191 payload bytes and four reference handles. Avoiding that copy requires an
+additional shared-versus-writable representation and detachment on first
+write; merging the public types does not eliminate that internal distinction.
+
+Recommendation: keep **immutable Cell, separate Builder, separate Slice** for
+the initial VM interface. Ordinary decoding stays zero-copy, Cell identity
+never depends on a cursor, and the current crate already has the necessary
+operations. Add a combined convenience interface later only if actual
+contract code frequently reads and appends to the same bounded buffer.
+
+### Proposed values and transitions
+
+An illustrative runtime layout is:
+
+```text
+Cell value:     CellRef — resident Arc<Cell> or pruned CellID
+Builder value: owned CellBuilder — payload buffer and reference buffer
+Slice value:   Arc<Cell> + byte cursor + reference cursor
+
+new builder --store bytes/refs--> builder --finalize--> immutable Cell
+immutable Cell --resolve/open--> Slice --load bytes/refs--> advanced Slice
+```
+
+`CellSlice<'a>` currently borrows a Cell and therefore cannot itself live on
+the VM stack independently of that borrow. A VM Slice would own an `Arc<Cell>`
+and its offsets; it should not use self-referential pointers or unsafe lifetime
+extensions. Offset updates can reuse the existing checked parsing logic.
+Small cursor fields fit the established payload/ref limits; the canonical
+encoding has no cursor fields.
+
+Payload and reference cursors remain independent. Reading bytes does not
+implicitly consume refs. Reading a child reference yields another Cell value;
+opening that child resolves its body using the *current* execution context.
+It neither transfers the parent's cursor nor captures the sender's actor
+storage authority. Missing permitted witness data has the existing hard
+failure/rollback behavior. Copying a pruned reference does not assert that its
+body is available.
+
+Finalization consumes the Builder and yields a new immutable Cell. Failed
+stores leave the Builder unchanged. Failed reads leave both Slice offsets
+unchanged, but work already charged is not refunded. `finish` checks exact
+consumption of both streams; it is distinct from simply dropping a cursor.
+There is no implicit Builder-to-Slice conversion and no automatic spill on
+ordinary stores. Explicit Snake operations remain available for schemas that
+actually require a byte chain.
+
+### Ownership and portability
+
+| Proposed Value | Copyable | Droppable | Portable |
+| --- | --- | --- | --- |
+| Raw immutable Cell/reference | Yes; share the graph, not its bodies | Yes | Yes |
+| Slice | Yes; independent offsets over shared immutable data | Yes | No; transient execution state |
+| Builder | No initially; moves avoid implicit buffer copies | Yes | No; finalize before crossing a storage/call boundary |
+
+These are plain binary-data capabilities, **not ownership of whatever their
+bytes might encode**. A copyable raw Cell can contain the serialization of a
+Token, Contract, or actor record without granting permission to instantiate
+that linear object. Repeatedly parsing those bytes must not create assets.
+
+Consequently the initial interface should expose primitive byte/ref reads,
+not an unrestricted `Cell -> Value` decoder. `input` still authenticates and
+consumes an existing ContractID; actor `load` still checks out that actor's
+typed state; Dict operations still transfer owned typed values. Only these
+business-logic boundaries may decode linear types. Likewise there must be no
+generic `Token -> copyable Cell` conversion that consumes a live token and
+forgets its ownership. Debug serialization is not a transferable asset claim.
+
+Dropping a Slice or Builder therefore discards only a cursor or plain-data
+draft. This does not relax the non-droppability of Tokens, Contracts, or typed
+Dicts containing them. Slice/Builder Values inserted into a Dict would clear
+its sticky portability flag, just like other transient non-portable Values.
+They may return upward through a synchronous call, but may not be arguments
+moving downward or cross an asynchronous send boundary.
+
+### Bytes, identity, and gas
+
+Existing byte-oriented instructions need an explicit rule when their operand
+can have references. Initially, operations such as signatures, fixed-size IDs,
+byte hashing, and concatenation should require a **zero-reference Cell** of
+the appropriate payload length. They must not silently ignore child refs or
+flatten an arbitrary graph. Byte concatenation fails if its result exceeds
+8191 bytes; storing a child reference is a different operation.
+
+`CellID` hashes the complete canonical record, including child IDs. It is not
+the same operation as SHA256 of payload bytes. Advancing a Slice changes
+neither its source Cell nor its ID; computing a commitment to the unread tail
+requires explicitly constructing a new Cell. Typed program loading should
+continue to use the current program/Snake schema, not reinterpret an arbitrary
+Cell graph as concatenated bytecode.
+
+Charge before allocation, copying, hashing, or path rebuilding: bytes appended
+or copied, refs stored, Cell finalization, and every logical child resolution.
+Opening or copying a Slice shares its body and charges only cursor/reference
+work plus the standard logical resolution charge. Any explicit conversion
+from an existing Cell into a writable Builder charges for copying its bounded
+payload and refs. A cached Cell ID is cheap to read; finalizing new content
+pays for its hash. Physical residency, private prover metadata, and cache hits
+must not change consensus gas or which bodies are visible.
+
+### Minimal migration sequence
+
+1. Agree on the separate-type interface and byte/ref semantics above. Specify
+   the primitive stack transitions, capacities, error results, and capability
+   table before assigning opcode numbers. Keep String unchanged meanwhile.
+2. Replace the plain byte-string VM variant with immutable Cell/reference.
+   Preserve the existing zero-ref raw-byte encoding as that subset. Decide
+   deliberately whether its existing Value discriminant can be reused in the
+   coordinated consensus activation; do not add a schema version. Keep prover
+   witness metadata outside the public Cell identity.
+3. Add transient Builder and owned Slice Values with only the existing
+   byte/ref operations, explicit finalize/open, independent cursors, and exact
+   finish. Do not add editing, seeking, graph flattening, automatic spilling,
+   or generic typed-value decoding in this first step.
+4. Migrate byte-oriented opcodes to explicit zero-ref checks; migrate program,
+   predicate, Contract-input, and actor readers through their expected typed
+   Cell schemas and scoped resolver. Preserve all linear-domain gates.
+5. Add gas and conformance tests: zero/max capacity, fifth ref, pruned child,
+   cursor-copy independence, atomic failure, discarded drafts, stable identity,
+   partial-witness reads, call rollback, prover/verifier equality, and attempts
+   to manufacture or duplicate linear values through raw bytes. Only then
+   remove the obsolete String API and update the VM specification.
+
+This proposal does not change the current Cell record, BoC, Trie, actor
+availability commitments, or Utreexo encoding. It changes the VM-facing data
+and execution interface; those changes require their own reviewed activation.
+
 ## Snake encoding
 
 Snake is a length-prefixed byte-string encoding operated directly by
@@ -406,8 +578,9 @@ limit overruns fail. Each continuation makes positive progress toward the
 bounded length; no recursive walk or separate snake cycle set is needed.
 
 A failed read leaves the parent cursor unchanged, but resolver charges and
-read-only cache entries do not roll back. The successful result is a `Vec<u8>`;
-lazy VM strings remain a separate integration decision.
+read-only cache entries do not roll back. The successful result is a `Vec<u8>`.
+Snake is used for program/proof blobs and other explicitly unbounded byte
+fields, not for the bounded single-Cell VM String.
 
 ## Trie
 
@@ -439,24 +612,38 @@ The wrapper remains small:
 ```rust
 pub struct Trie {
     key_bytes: usize,
-    len: usize,
     root: Option<CellRef>,
 }
 ```
 
-The raw trie root does not commit `key_bytes` or `len`. The owning type fixes
-`key_bytes` when it is inherent in that type, and encodes it only when it truly
-varies per value. It encodes `len` when the value must reconstruct an O(1)
-entry count without loading the whole Trie. `into_root` (or `into_parts`)
-preserves the existing ability to unwrap the bookkeeping layer.
+`Trie::from_cell(root, key_bytes)` accepts `impl Into<CellRef>`: a resident or
+pruned `CellRef`, a `Cell`, or an `Arc<Cell>`. It checks the configured key width
+but does not load or inspect the root. Every visited node, including the root,
+is resolved and its child mask and compressed path label validated on access,
+regardless of residency. One constructor therefore supports a wholly pruned
+Dict without extra pruned/resident bookkeeping in Dict.
 
-`len` is authoritative committed metadata, not a hint used to preallocate. It
-must equal the leaf count. `new`, `insert`, and `remove` maintain that invariant;
-constructing from a pruned root is allowed only for a root that was previously
-created by a valid state transition. A full-state import validates the count by
-walking the graph. Untrusted witness data can supply bodies for an existing
-root but cannot replace the committed `len`. If arbitrary untrusted Trie roots
-are admitted later, subtree counts or a full validation proof will be required.
+Key width is a separate constant chosen by the owning schema. There is no
+entry count in a raw Trie node, and lookup, insertion, deletion, and ordered
+navigation do not need one. `Trie::new(key_bytes)` creates an empty Trie with
+no root; `into_root()` unwraps the Trie to its raw `Option<CellRef>`.
+
+Counts belong to the owning type when needed. Dict retains its O(1) entry count
+in memory and commits it in its existing envelope, updating it atomically with
+successful mutations. TxLog and block sequence envelopes likewise keep their
+counts. `entries_exact(count, resolver)` validates the leaf count on full
+import, stopping at the first extra leaf without preallocating from the claimed
+count. Lazy Dict imports rely on prior admission of this metadata. Ordinary
+`entries(resolver)` enumerates without a count; a metered resolver must bound
+traversal of an untrusted graph. No extra root Cell or count field is added to
+the Trie encoding.
+
+`Trie::lookup(root, key, resolver)` needs no cached count or envelope. Its key
+width comes from the key supplied by the owning schema, and it validates node
+shape and content identity along the requested path. Predicate branch opening
+uses this API: the Taproot commitment is directly to the raw eight-byte-key
+Trie root, not an intermediate count Cell. Membership lookup does not need to
+assert the total size or validate unvisited siblings.
 
 `get`, `insert`, and `remove` take a `CellResolver`. They resolve only the path
 being traversed. Mutations rebuild the affected path and swap the root only
@@ -471,19 +658,25 @@ next child. Loading and hashing the Cells on the requested path therefore
 authenticates the leaf and its position. Sibling subtrees remain as IDs in
 their parent Cells and do not need sibling-hash vectors or the `merkle` crate.
 
-The low-level Trie knows nothing about `Scalar`, VM Values, portability, or
-linear types. `Dict2` remains in `flamevm`; it uses a `Scalar`'s canonical
-32-byte little-endian encoding directly as the path and interprets the leaf
-Cells. Trie path order is bytewise, not the numeric scalar order used by the
-in-memory `Dict`. Existing `Dict2` tries built with reversed-byte paths must
-be rebuilt; their root commitments generally change.
+The low-level Trie knows nothing about Scalar, VM Values, portability, or
+linear types. FlameVM has one `Dict` over this Trie. It reverses the canonical
+32-byte little-endian Scalar bytes to obtain big-endian key paths, so bytewise
+Trie order agrees with unsigned numeric order. There is no separate Dict2,
+small-dictionary representation, or list-mode encoding.
 
-The eventual FlameVM Dict encoding does not repeat a Dict tag, version, or key
-width: the caller expects a Dict and its `Scalar` keys are always 32 bytes. It
-contains only the entry count, semantic summary flags needed without loading
-pruned branches, and the optional Trie-root reference. At minimum those
-summaries include sticky `portable` and `droppable`; an empty Dict has no Trie
-root and is droppable. Pruning changes availability, not these semantic fields.
+The expected Dict encoding has no repeated type tag or key width: payload
+`count:u64 LE | flags:u8`, plus an optional Trie-root reference. The flags
+are sticky `portable` (bit 0) and `droppable` (bit 1). An empty Dict has no
+root and is droppable even when its stored droppable bit is false. Pruning
+does not reset either flag. Generic imports validate summaries/counts; reads
+of authenticated prior state may leave unrequested branches pruned.
+
+Here "trusted" is about the previously validated count/capability summaries,
+not a trusted sender and not permission to skip hashes or parsing checks.
+`Contract::from_trusted_cell` contrasts with ordinary `CellDecode`, which walks
+the complete typed payload; chain membership checks must still establish that
+an input Contract actually exists. A Cell hash alone grants no linear ownership.
+
 
 ## Bag of Cells
 
@@ -686,6 +879,16 @@ archive, a database record not committed as resident for the current object,
 or the network. A physical cache may avoid decoding a body again only after
 the resolver has established that the ID belongs to source 2 or 3.
 
+The current `ExecutionCells` implementation already combines attached bodies,
+the current actor's retained `BagOfCells`, and the external transaction's BoC,
+in that order. `ActorStore` is currently RAM-backed. There is no disk backend
+or general-purpose resolver-composition adapter yet. The `CellResolver` trait
+allows a composite implementation to consult actor-scoped disk storage and
+then the transaction BoC. Such a fallback must continue only on a missing
+requested ID, not suppress integrity, resource-limit, or storage errors. It
+must charge logical access once, regardless of which source supplies the body,
+and disk lookup must enforce the same committed-residency scope as RAM lookup.
+
 ### Crossing ownership domains
 
 Persistent-store authority does not travel with a value. While actor A is
@@ -802,7 +1005,7 @@ and prevents those values from crossing a boundary that forbids them.
 
 ## VM-visible uses
 
-Cells stay below the FlameVM Value layer:
+In the implemented interface, Cells stay below the FlameVM Value layer:
 
 | Use | Root held by | Body source when accessed |
 | --- | --- | --- |
@@ -810,10 +1013,11 @@ Cells stay below the FlameVM Value layer:
 | Actor code and state | Actor registry record | Actor's stored BoC, then external transaction BoC for pruned bodies |
 | Predicate program branch | Predicate commitment | External transaction BoC |
 | Dict | Typed Dict wrapper with key width, length, and Trie root | Current resident graph/store, then external transaction BoC |
-| Snake-encoded bytes | Typed String/code/proof field | Current resident graph/store, then external transaction BoC |
-| Utreexo proof data | Flamechain's Utreexo encoding | Its explicitly supplied Cell graph; specialized accumulator-proof verification still applies |
+| Bounded VM String | Its zero-ref raw-byte Cell | Current resident graph/store, then external transaction BoC |
+| Snake-encoded bytes | Typed program/protocol-proof/blob field | Current resident graph/store, then external transaction BoC |
+| Utreexo proof data | Existing Utreexo format, unchanged | Explicit legacy proof input; specialized accumulator verification applies; Cell migration deferred |
 
-An opcode does not load an arbitrary Cell Value. It performs a typed action
+Current opcodes do not load an arbitrary Cell Value. They perform a typed action
 such as opening a Contract, reading a Dict key, or executing a Predicate
 branch; that implementation follows Cells through the current resolver.
 
@@ -888,16 +1092,19 @@ The end state is:
 
 1. Every consensus type has one expected `CellEncode`/`CellDecode` layout.
 2. Every content object's identity is derived from its canonical root Cell.
-3. Variable byte fields use length-prefixed snake encoding; keyed collections use `Trie`;
+3. Unbounded protocol byte fields use length-prefixed Snake encoding; keyed
+   collections use `Trie`. VM String uses one zero-ref Cell with raw bytes;
    fixed and small fields stay in the parent payload or explicit child Cells.
 4. A standalone graph is transported as a `CellEnvelope`; persistent types
    commit a root `CellID` and the `BoCID` of their retained bodies.
 5. Exact encoded size comes from Cell records and BoC bytes, not a parallel
    `SizeWriter` pass.
 6. No consensus code uses `serde` as a canonical format.
-7. The `readerwriter` crate and `flamevm/src/encoding.rs` are removed after all
-   callers migrate. VM-specific compact Value rules move into the relevant
-   `CellEncode`/`CellDecode` implementations rather than into `cells`.
+7. Cell-based VM/chain formats replace `readerwriter`; the legacy crate remains
+   only for the separately deferred Utreexo forest/proof/path formats.
+   `flamevm/src/encoding.rs` now contains
+   only VM-owned `CellEncode`/`CellDecode` implementations and typed byte-string
+   helpers. It is not a flat Reader/Writer compatibility layer.
 
 The Cell API does not prescribe one generic list encoding. Actual types use
 the smallest of the three existing structures: payload for bounded items,
@@ -907,8 +1114,9 @@ would otherwise duplicate the same layout.
 
 The two-byte Cell record and the small BoC/CellEnvelope headers are the
 bootstrap framing for this system, implemented directly inside `cells`.
-Everything above that boundary is a typed Cell graph; no generic flat
-Reader/Writer layer remains.
+Above that boundary, the migrated types are typed Cell graphs with no generic
+flat Reader/Writer layer. Utreexo's existing codec boundary is an explicit
+temporary exception, not a second codec for these migrated types.
 
 Cell hashing replaces serialization-to-`Vec<u8>` followed by a separate object
 hash for IDs such as Contract, Actor state/code, Message, transaction, and
@@ -940,8 +1148,8 @@ access by resolving and hashing the Cells from that root to the requested
 item; there is no separately encoded sibling path. Utreexo is the sole
 exception because its dynamic accumulator update proofs have semantics beyond
 loading a persistent Cell path. Its algorithms remain in `merkle`, scoped to
-Flamechain's Utreexo module; Flamechain-owned wrappers give its proof data Cell
-encodings.
+Flamechain's Utreexo module. Its forest, proof, and path serialization is
+deliberately deferred and retains the existing format and Reader/Writer API.
 
 This migration changes every downstream consensus hash whose preimage changes,
 including ContractID, MessageID, actor code/state roots, TxID, block witness
@@ -949,288 +1157,48 @@ and effects roots, and BlockHash. All formats must switch together in one
 coordinated consensus activation with golden vectors; mixed old/new hashing is
 not valid.
 
-## Implementation plan on the current codebase
+## Implementation map
 
-### Current baseline
-
-| Target | Current implementation |
+| Area | Implementation |
 | --- | --- |
-| Cell | `flamevm/src/chunk.rs` already has immutable `Chunk`, 8191-byte/4-ref bounds, the two-byte descriptor, cached hash, and resident/pruned references |
-| Trie | `flamevm/src/trie.rs` already has the fixed-width radix-4 Patricia trie, but it returns `ChunkReferencePruned` instead of resolving through context |
-| Dict adapter | `flamevm/src/dict2.rs` uses canonical `Scalar` bytes directly as keys and should remain VM-specific |
-| Streaming codec | `readerwriter` reads/writes flat byte slices; it has no Cell/ref cursor |
-| BoC | Not implemented |
-| Witness context | The broader proposal exists in `docs/compression.md`; no Cell resolver is threaded through VM entry points |
-| Actor scheduling | `flamechain/src/block.rs::execute_body` currently executes all external transactions, then drains one block-wide `VecDeque<Message>` |
-| Canonical codecs | `readerwriter` is used by `flamevm`, `flamechain`, and `merkle`; `flamevm` publicly re-exports it |
-| Generic Merkle commitments | `flamevm` and `flamechain` still use `merkle` for TxLog, block, and actor-state roots in addition to Utreexo; all non-Utreexo uses must become Cell graphs |
+| Primitive and streaming API | `cells/src/cell.rs`, `builder.rs`, `slice.rs`, `codec.rs`: immutable Cells, exact expected-type codecs, inline length-prefixed snake operations |
+| Transport | `cells/src/boc.rs`: strict CellID ordering, duplicate rejection, bounded parsing, exact body membership, CellEnvelope |
+| Trie | `cells/src/trie.rs`: one radix-4 Patricia format; resolver-backed get/insert/remove/ordered navigation; raw root wrapping/unwrapping |
+| Dict | `flamevm/src/dict.rs`: one Trie index, typed runtime witness cache, sticky summaries, lazy authenticated reads; no Dict2 |
+| VM codecs | `flamevm/src/encoding.rs` plus type-owned codecs: fixed scalars/points/tokens, tagged Values, single-Value Contracts, actors, messages, scripts |
+| Predicates | `flamevm/src/contract.rs`: program Trie, index selector, path-only witness collection and resolver-based branch opening |
+| Execution | `flamevm/src/vm.rs`: fixed BoC before proving, scoped and metered resolution, public-path validation before restoring private witnesses |
+| Transactions | `flamevm/src/tx.rs`: separate transport/execution bags, CellWitness effect, TxLog Trie and claimed TxID validation |
+| Actor storage | `flamechain/src/storage.rs`: content roots plus retained BoCID, leases Trie, freeze instead of bulk destruction, explicit persistence only |
+| Scheduling and blocks | `flamechain/src/block.rs`: external then FIFO descendants with one bag, Cell-backed block/record commitments and exact transport decoding |
+| Utreexo | `merkle` plus `flamechain/src/utreexo`: specialized accumulator and legacy forest/proof/path serialization retained; Cell migration deferred |
 
-### Step 1: rename Chunks to Cells
+The old `flamevm/src/chunk.rs`, local Trie, and Dict2 are deleted.
+`readerwriter/` remains only for the deferred Utreexo codec boundary.
+`cells` and `flamevm` have no dependency on `merkle`.
+Instruction bytecode keeps its own compact opcode operands; those bytes are
+stored in script Cells, not routed through a generic serialization facade.
 
-- Rename `Chunk`, `ChunkRef`, `ChunkID`, limits, errors, tests, and comments to
-  `Cell`, `CellRef`, and `CellID`.
-- Preserve the current descriptor layout and limit tests.
-- Replace the current Merlin transcript hash with direct
-  `SHA256(canonical_cell_record)` and intentionally update the golden ID
-  vector.
-- Replace mutating `hydrate` with resolver/cache behavior so loading cannot
-  accidentally alter persistent availability.
-- Remove the term `Chunk` from this subsystem.
+### Remaining extensions
 
-Steps 1-3 should land as one extraction change rather than rename a file in
-place only to move it again.
+- Explicit VM operations to prune selected Dict branches or persist selected
+  witness bodies. Existing `save`/`setcode` are the persistence boundary.
+- Database adapters and archival retrieval outside consensus execution.
+- The first-class raw Cell/Builder/Slice proposal above, replacing String
+  opcodes only after review. Runtime String currently has a bounded zero-ref
+  Cell encoding; no standalone Snake or buffering SnakeWriter is introduced.
+- Utreexo forest, proof, and path encoding. Keep its current serialization
+  until that separate migration is requested.
+- A more compact frozen-actor registry layout. The current implementation
+  retains code/state IDs, sizes, and lease metadata rather than just one hash.
+- A coordinated deployment/activation strategy for the changed consensus
+  identities; the code does not provide automatic legacy-state migration.
 
-Exit checks: boundary records round-trip; descriptors with ref count 5-7 are
-rejected; reference order affects ID; resident and pruned references produce
-the same parent ID; Cell IDs match direct SHA-256 test vectors.
-
-### Step 2: create the `cells` crate
-
-- Add `cells` beside `flamevm` in the workspace.
-- Create only the modules needed by this design:
-
-  ```text
-  cells/src/lib.rs
-  cells/src/cell.rs
-  cells/src/builder.rs
-  cells/src/slice.rs
-  cells/src/codec.rs
-  cells/src/boc.rs
-  cells/src/trie.rs
-  cells/src/error.rs
-  ```
-
-- Move Cell, Trie, codec, and BoC failures out of `VMError` into the single
-  `cells::CellError`; map it into `VMError` only at the VM boundary.
-- Do not depend on `readerwriter` during extraction. Decode the compact Cell
-  record directly; Builder/Slice become its public codec.
-- Add `cells` dependencies to `flamevm` and `flamechain`. Neither `cells` nor
-  `flamevm` depends on `merkle`; Flamechain retains `merkle` only in its
-  Utreexo implementation.
-
-Exit checks: `cells` builds and tests alone; its dependency graph contains no
-FlameVM, chain, `merkle`, or `merlin` crate; FlameVM's public Cell exports point
-to the new crate.
-
-### Step 3: move Trie to `cells`
-
-- Move `flamevm/src/trie.rs` with its existing tests and replace `VMError` with
-  `cells::CellError`.
-- Change `root: Option<Cell>` to `root: Option<CellRef>` so a root may also be
-  unloaded.
-- Pass a resolver into traversal and mutation. Resolve only the path used.
-- Keep the 32-byte current maximum and bounded recursive mutation for now; the
-  existing recursion is at most 128 radix-4 digits.
-- Keep `Dict2` in `flamevm`, using canonical scalar bytes directly as Trie
-  keys; update its imports to the new crate.
-- Require each owning type to fix Trie `key_bytes`, or encode it only when it
-  varies per value. Encode `len` only where that type exposes an authoritative
-  O(1) count.
-- Return owned refs/Cells from resolver-backed lookups. Keep construction from
-  pruned roots on the authenticated-state path; validate leaf count on a full
-  untrusted import and never allocate from `len` alone.
-
-Exit checks: move the current insert/get/remove, prefix-split, collapse, order,
-malformed-node, and atomic-failure tests; add resolution tests where an accessed
-unloaded path succeeds from a bag and an unrelated missing path is not loaded.
-
-### Step 4: implement Builder, Slice, and typed codecs
-
-- Implement the API specified above with separate payload/ref cursors.
-- Make primitive stores atomic and little-endian.
-- Implement transactional `preload`/`try_load` and exact `finish`.
-- Add `CellEncode`/`CellDecode`, `to_cell`, and exact `from_cell` helpers.
-- Define the shared `CellError` variants used by builders, slices, resolvers,
-  Trie, and BoC.
-- Implement codecs first for primitives, `CellID`, and test-only structs. Keep
-  sum-type discriminants in the crate that owns the sum type.
-- Do not add bit APIs, arbitrary-capacity builders, proc macros, a generic I/O
-  facade, or TON's runtime `TypeCoder`.
-
-Exit checks: one test covers atomic overflow, independent byte/ref cursors,
-speculative read rollback/commit, and rejection of both trailing bytes and
-trailing refs.
-
-### Step 5: implement length-prefixed snake operations
-
-- Extend `CellBuilder` with `store_snake` and `CellSlice` with bounded
-  `load_snake`; keep primitive reads/writes single-Cell and remove the separate
-  snake type, readers, and buffering writer.
-- Implement the `u32` LE prefix and strict full-nonterminal layout above.
-  Precheck builder capacity and length before mutation; on reads, check the
-  length limit before allocation or resolution.
-- Build overflow directly into final Cells from tail to head and read
-  iteratively through `CellResolver`; never recurse with attacker-sized input.
-- Preserve the parent cursor and its later references. Commit reads only on
-  success; do not roll back resolver charges or read-only caches on failure.
-- Keep this implementation isolated in `cells`; Step 9 adopts it for
-  scripts, actor code, proofs, and opaque byte-string fields. Changing
-  `String::Opaque(Vec<u8>)` into a lazy runtime representation is a separate
-  VM-integration change because current string opcodes and call frames assume
-  contiguous slices and byte offsets.
-
-Exit checks: golden layouts at empty, inline, exact-fit, and multi-Cell
-boundaries; round-trip a long value; preserve preceding/following fields and
-refs; reject short nonterminals, extra continuation refs, incorrectly sized
-tails, missing bodies, insufficient prefix/ref capacity, and length limits.
-Failed stores/reads leave the parent unchanged, and exact fits never resolve a
-later unrelated reference.
-
-### Step 6: implement `BagOfCells`
-
-- Implement the one canonical rootless format and exact-set `BoCID` above.
-- Collect attached graphs iteratively, hash-deduplicate, and sort records by
-  `CellID`.
-- Decode into a sorted lookup table without eagerly reconstructing child
-  graphs.
-- Check the outer witness-byte bound, then charge declared Cell-count gas
-  before allocating. Charge record parsing and graph validation as they
-  proceed; use checked arithmetic for sizes and aggregate counts.
-- Keep pruned branches implicit as missing bodies.
-- Implement `CellEnvelope` as the canonical root-plus-bag wrapper and require a
-  complete envelope's root body to be present.
-- Do not implement TON indexes, format tags/versions, CRC, cache flags, levels,
-  depths, exotic Cells, or compact child indexes.
-
-Exit checks: canonical output is independent of insertion/traversal order;
-duplicate/non-sorted/malformed/cyclic records fail; a partial graph resolves
-supplied bodies and reports omitted ones; prepaid gas stops a declared flood of
-tiny Cells before lookup-table allocation; root framing round-trips and rejects
-a missing root; BoCID golden vectors equal direct SHA-256 of the canonical bag.
-
-### Step 7: thread Cell resolution through FlameVM
-
-- Add a resolver parameter to external execution, internal message execution,
-  synchronous calls, Contract opening, Predicate selection, actor code/state
-  loading, snake access, and Trie/Dict operations.
-- Implement a recording resolver for the prover and a verifying resolver for
-  transaction execution. The recording form is a pre-proving discovery tool;
-  the proof-producing run uses the frozen bag.
-- Scope persistent lookup to the current Contract/Actor's committed store; use
-  the external transaction BoC as the only source for a pruned body.
-- Add deterministic gas/accounting for every logical Cell resolution based on
-  canonical size. A physical cache hit receives the same charge.
-- Keep the execution cache separate from the actor's stored BoC. Add explicit
-  persistent prune/restore operations only with the owning high-level type.
-- Migrate actor code/state records to `StoredGraph`; include both content root
-  and retained-body `BoCID` in the actor commitment and derive rent from the
-  retained records rather than the execution cache.
-- Map missing Cell errors through existing external, synchronous-call, and
-  asynchronous bounce boundaries without weakening argument recovery.
-- At call/send boundaries, carry attached resident graphs but never the source
-  actor's storage authority. Make every Cell-loading operation commit stack,
-  linear-value, and effect changes only after resolution and typed decoding
-  succeed.
-
-Exit checks: the same access succeeds from RAM, actor storage, and the
-committed transaction bag; it fails when the body exists only in a node-local
-or another actor's store; loaded witness data is not persisted by an unrelated
-save; pruned data passed from actor A cannot borrow A's store in actor B;
-call/send/return failures conserve their linear arguments; non-portable decoded
-values are rejected at the correct business boundary.
-
-### Step 8: bind one BoC to one complete execution closure
-
-- Add one execution `BagOfCells` to `ExternalTx` and its bounded envelope
-  codec. It is separate from the `CellEnvelope` that will transport ExternalTx
-  itself after Step 9; the old outer codec may remain temporarily.
-- Commit its `BoCID` as the mandatory second external TxLog entry, after the
-  header, before proof construction, TxID finalization, or `signtx`
-  instructions.
-- Pass the frozen `BoCID` into external VM construction so its initial TxLog is
-  `[Header, CellWitness]`; internal execution keeps its own existing
-  `[Header, Receive]` prefix and inherits the resolver context.
-- Extend `TxEntry` encoding and `flamechain::validate_log_shape` for that
-  external-only prefix; include the full bag in `BlockTx` witness-size/hash
-  accounting. If this step lands before the protocol-wide Cell migration in
-  Step 9, the existing TxLog commitment may be extended temporarily; do not
-  introduce a second Merkle abstraction in `cells`.
-- Accept/freeze the bag before `Prover::prove`. An optional discovery pass may
-  build it first, but the proof-producing run and verifier both use the frozen
-  bag. Stateful tooling must simulate actor descendants if it wants to
-  discover their requirements; missing descendant bodies retain normal bounce
-  behavior.
-- Decode/read the declared transaction gas budget before allocating the BoC
-  lookup table, so Cell-count gas can be charged up front.
-- Refactor `flamechain/src/block.rs::execute_body`: create a fresh send queue
-  inside each external-transaction iteration and drain it completely before
-  advancing to the next external transaction.
-- Borrow the same immutable BoC/resolver scope for the external execution and
-  all descendant messages. Do not add a BoC field to `Message` or `CallFrame`.
-- Keep block-global gas, multiplication, message, and output-uniqueness state
-  outside the per-external loop.
-
-Exit checks: an actor descendant can load a body from its initiating BoC;
-another external transaction cannot; supplied data cannot be ignored; removing
-or adding a record changes TxID/signing instructions; the execution order is
-external A, all A descendants, external B, all B descendants.
-
-### Step 9: replace `readerwriter` and the old encoding module
-
-This is a protocol migration, not a mechanical trait rename.
-
-1. Inventory and freeze old/new golden vectors for every consensus type.
-2. For every consensus use, document the expected root type and exact payload
-   field/reference order. Do not add a root tag or per-type version; define a
-   discriminant only for an actual sum type.
-3. Give leaf VM types Cell layouts, then composite Values, instructions,
-   Contract, Message, Actor state/code, ExternalTx, TxEntry/TxLog, Utreexo
-   proof wrappers, BlockTx, and Block/Header.
-4. Move the compact `Scalar` and Value tag logic from
-   `flamevm/src/encoding.rs` into VM-owned Cell codec implementations. Encoding
-   remains capable of representing non-portable values; boundary validation
-   stays outside the codec.
-5. Replace variable flat byte fields with bounded snake operations; use a
-   Trie/explicit Cell sequence for other collections. Do not allocate from an
-   unchecked declared length.
-6. Replace Predicate program trees, TxLogs, actor-state collections, and block
-   witness/effect collections with explicit Cell graphs. Their root Cell IDs
-   are the commitments; access loads and verifies Cells along the path rather
-   than decoding a `merkle::Path` or sibling list.
-7. Replace ID functions that hash `encode_to_vec()` with canonical root Cell IDs,
-   while preserving normalized preimage/hash identities such as `ActorID`.
-   Keep cryptographic Merlin transcripts separate.
-8. Replace `encoded_size`/`SizeWriter` accounting with canonical Cell/BoC
-   record sizes.
-9. Remove `merkle` from `flamevm`. In `flamechain`, remove its use from block
-   witness/effect and actor-state commitments; retain it only behind the
-   Utreexo module. Put Cell codecs on Flamechain-owned Utreexo wrappers so the
-   algorithm crate remains independent of `cells` and serialization.
-10. Switch all consensus formats together in one coordinated consensus
-   activation and regenerate golden vectors.
-11. Remove FlameVM's `readerwriter` re-exports, remove all crate dependencies,
-   delete `readerwriter/`, and delete the old standalone encoding module after
-   its last codec moves.
-12. Update `docs/flamevm.md`, `docs/blockchain.md`, and `docs/compression.md` to
-   reference this specification and remove superseded flat/witness formats.
-
-The current production `readerwriter` users to migrate are:
-
-```text
-flamevm:
-  actor.rs address.rs contract.rs encoding.rs message.rs ops.rs
-  script.rs string.rs tx.rs vm.rs
-
-flamechain:
-  block.rs and Flamechain-owned Utreexo wrapper codecs
-
-merkle:
-  remove Path's Reader/Writer implementation; retain only Utreexo algorithms
-```
-
-The current non-Utreexo `merkle` users to remove are
-`flamevm/src/tx.rs`, `flamechain/src/block.rs`, and
-`flamechain/src/storage.rs`. The bespoke Predicate tree in
-`flamevm/src/contract.rs` also becomes a Cell graph: its root `CellID` is used
-in the key tweak and its selected branch is supplied as loaded Cells, not a
-neighbor-hash proof.
-
-Exit checks: repository search finds no `readerwriter` dependency or import;
-all public decode entry points are bounded and exact; all consensus ID golden
-vectors are updated in one coordinated change; `cargo tree -p cells` and
-`cargo tree -p flamevm` contain no `merkle`; repository imports of `merkle`
-are confined to Flamechain's Utreexo module and tests; `cargo test --workspace`
-passes.
+Verification covers canonical Cell/BoC boundaries, partial Trie traversal,
+sticky Dict capabilities, public/private witness separation, call-failure
+escrow, execution-bag commitment, actor freeze/recovery, and immediate
+per-external queue draining. Tests should be run together: these encodings
+change VM, proof, actor, and block commitments as one format.
 
 ## Security and consensus invariants
 
@@ -1255,7 +1223,7 @@ passes.
 - Hydration is a read cache operation, not a persistent state mutation.
 - Consensus gas depends on canonical work, not physical cache hits.
 
-## Explicit non-goals
+## Non-goals of the implemented migration
 
 - Bit-level payload APIs.
 - TON levels, depths, exotic/pruned-branch Cells, Merkle proof/update Cells,
@@ -1263,7 +1231,8 @@ passes.
 - Multiple BoC variants, optional indexes, CRC, cache bits, or reference-index
   compression.
 - Implicit network/database retrieval during consensus execution.
-- A first-class raw Cell Value or Cell-manipulation opcodes in FlameVM.
+- Implementing the proposed first-class raw Cell Value or Cell-manipulation
+  opcodes before their separate design review.
 - A generic storage engine or automatic persistence of hydrated data.
 - A proc-macro codec framework or speculative generic collection family.
 

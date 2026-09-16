@@ -11,6 +11,85 @@ fn s(bytes: &[u8]) -> String {
 }
 
 #[test]
+fn string_literals_have_the_same_single_cell_limit_in_both_execution_paths() {
+    for transparent in [false, true] {
+        for len in [String::MAX_LEN, String::MAX_LEN + 1] {
+            let program = ScriptBuilder::new().push_str(String::from(vec![7; len]));
+            let mut vm = if transparent {
+                vm_with_script(program)
+            } else {
+                VM::new(
+                    dummy_header(),
+                    CallFrame::from_bytecode(
+                        program.to_bytecode(),
+                        CallKind::InternalRoot {
+                            actor: ActorID::Hash([0; 32]),
+                            caller: None,
+                        },
+                        1_000_000,
+                    ),
+                )
+            };
+            if len == String::MAX_LEN {
+                run_to_end(&mut vm).unwrap();
+                assert_str(&vm.current_call.stack[0], &vec![7; len]);
+            } else {
+                assert!(matches!(run_to_end(&mut vm), Err(VMError::StringTooLong)));
+                assert!(vm.current_call.stack.is_empty());
+            }
+        }
+    }
+    let bytes = ScriptBuilder::new()
+        .push_str(String::from(vec![7; String::MAX_LEN + 1]))
+        .to_bytecode();
+    assert!(matches!(
+        ScriptBuilder::parse(&bytes),
+        Err(VMError::StringTooLong)
+    ));
+}
+
+#[test]
+fn string_growth_and_transcript_reads_never_create_continuations() {
+    let full = || ScriptBuilder::new().push_str(String::from(vec![0; String::MAX_LEN]));
+    for program in [
+        full().push_str(s(&[1])).append(),
+        full().push_int(0u64).write_int(),
+        full().push_int(0u64).push_int(8u64).write_bits(),
+        full().push_int(1u64).write_zeros(),
+        full().push_int(u64::MAX).write_zeros(),
+        ScriptBuilder::new()
+            .push_str(s(b"test"))
+            .transcript()
+            .push_str(s(b"bytes"))
+            .push_int((String::MAX_LEN + 1) as u64)
+            .tread(),
+    ] {
+        let mut vm = vm_with_script(program);
+        assert!(matches!(run_to_end(&mut vm), Err(VMError::StringTooLong)));
+        assert!(vm.current_call.stack.iter().all(|value| {
+            !matches!(value, Value::String(string) if string.len() > String::MAX_LEN)
+        }));
+    }
+    let mut vm = vm_with_script(
+        ScriptBuilder::new()
+            .push_str(s(&[]))
+            .push_int(String::MAX_LEN as u64)
+            .write_zeros(),
+    );
+    run_to_end(&mut vm).unwrap();
+    assert_str(&vm.current_call.stack[0], &vec![0; String::MAX_LEN]);
+
+    assert!(matches!(
+        s(&[0]).append_zeros(usize::MAX),
+        Err(VMError::StringTooLong)
+    ));
+    assert!(matches!(
+        String::from(vec![0; String::MAX_LEN]).append_bytes(&[0]),
+        Err(VMError::StringTooLong)
+    ));
+}
+
+#[test]
 fn read_bits_n_zero_succeeds_and_yields_zero() {
     let mut vm = vm_with_script(
         ScriptBuilder::new()

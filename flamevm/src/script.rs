@@ -1,21 +1,30 @@
 //! Fluent `ScriptBuilder` + the compiled `Script` value it produces.
 
-use std::collections::VecDeque;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 
-use readerwriter::Encodable;
+use cells::{
+    BagOfCells, CellBuilder, CellDecode, CellEncode, CellError, CellID, CellResolver, CellSlice,
+};
 
+use crate::contract::{Contract, ContractID, PredicateTree};
 use crate::crypto::Point;
 use crate::errors::VMError;
 use crate::ops::Instruction;
 use crate::scalar::Scalar;
-use crate::string::String;
+use crate::string::{compile_instructions, String, StringWitness};
 
 /// A program is a list of [`Instruction`]s. Build with the fluent
-/// methods (`alloc`, `add`, `eq`, `verify`, …) and call `to_bytecode()`
-/// / `to_witnesses()` to derive the prover/verifier views.
+/// methods (`alloc`, `add`, `eq`, `verify`, …) and call `build_tx` to package
+/// bytecode, proof, and the public witness BoC for the verifier. `to_bytecode`
+/// alone deliberately omits witnesses and is not a standalone transaction.
 #[derive(Clone, Debug, Default)]
 pub struct ScriptBuilder {
     instructions: Vec<Instruction>,
+    cells: Vec<BagOfCells>,
+    scripts: BTreeMap<CellID, Vec<Instruction>>,
     /// Build-time only: active loop scopes for `build_break` /
     /// `build_continue`. Balanced (pushed/popped) by `build_loop` /
     /// `build_while`, so any finished program leaves this empty.
@@ -37,7 +46,82 @@ impl ScriptBuilder {
         Self {
             instructions: Vec::new(),
             loop_scopes: Vec::new(),
+            cells: Vec::new(),
+            scripts: BTreeMap::new(),
         }
+    }
+
+    /// Adds public witness bodies before the transaction freezes its BoC.
+    pub fn with_cells(mut self, cells: BagOfCells) -> Self {
+        self.cells.push(cells);
+        self
+    }
+
+    /// Attaches prover-only instructions for a branch opened from authenticated
+    /// Cells. The key is the canonical snake-code Cell ID, not a caller label.
+    pub fn with_script_witness(mut self, script: ScriptBuilder) -> Result<Self, CellError> {
+        let id = script_cell(&script.to_bytecode())?.id();
+        self.cells.extend(script.cells);
+        self.scripts.extend(script.scripts);
+        self.scripts.insert(id, script.instructions);
+        Ok(self)
+    }
+
+    /// Public bodies only. Secret commitment/assignment witnesses never enter
+    /// this bag. Nested scripts contribute their embedded Contract witnesses;
+    /// their bytecode already lives in literals or selected predicate leaves.
+    pub fn cell_witnesses(&self) -> Result<BagOfCells, CellError> {
+        let mut bag = BagOfCells::new();
+        for cells in &self.cells {
+            bag.extend(cells)?;
+        }
+        for witness in self.witnesses() {
+            if let StringWitness::Contract(contract) = witness {
+                bag.extend(&BagOfCells::collect(Arc::new(contract.to_cell()?))?)?;
+            }
+        }
+        Ok(bag)
+    }
+
+    /// Private Contract witnesses indexed by their public output Cell identity.
+    pub fn contract_witnesses(&self) -> BTreeMap<ContractID, Contract> {
+        self.witnesses()
+            .into_iter()
+            .filter_map(|witness| match witness {
+                StringWitness::Contract(contract) => Some((contract.id(), contract.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Private script overlays; execution must compare their canonical bytecode
+    /// with the authenticated program before using any contained witnesses.
+    pub fn script_witnesses(&self) -> Result<BTreeMap<CellID, Vec<Instruction>>, CellError> {
+        let mut scripts = self.scripts.clone();
+        for witness in self.witnesses() {
+            if let StringWitness::Script(instructions) = witness {
+                let id = script_cell(&compile_instructions(instructions))?.id();
+                scripts.insert(id, instructions.clone());
+            }
+        }
+        Ok(scripts)
+    }
+
+    fn witnesses(&self) -> Vec<&StringWitness> {
+        let mut pending = vec![self.instructions.as_slice()];
+        pending.extend(self.scripts.values().map(Vec::as_slice));
+        let mut witnesses = Vec::new();
+        while let Some(instructions) = pending.pop() {
+            for instruction in instructions {
+                if let Instruction::PushStr(String::Witness(witness)) = instruction {
+                    witnesses.push(witness.as_ref());
+                    if let StringWitness::Script(nested) = witness.as_ref() {
+                        pending.push(nested);
+                    }
+                }
+            }
+        }
+        witnesses
     }
 
     /// Parses a bytecode slice into a ScriptBuilder. Witness-bearing
@@ -97,7 +181,7 @@ impl ScriptBuilder {
         let mut out = Vec::new();
         for instr in &self.instructions {
             // `Vec<u8>` writer is infallible.
-            instr.encode(&mut out).expect("Vec writer never fails");
+            instr.encode(&mut out);
         }
         out
     }
@@ -135,9 +219,10 @@ impl ScriptBuilder {
     /// the compiled bytes of `inner.to_bytecode()`, so both sides
     /// see the same wire form.
     pub fn push_script(mut self, inner: ScriptBuilder) -> Self {
-        self.instructions.push(Instruction::PushStr(String::script(
-            inner.into_instructions(),
-        )));
+        self.cells.extend(inner.cells);
+        self.scripts.extend(inner.scripts);
+        self.instructions
+            .push(Instruction::PushStr(String::script(inner.instructions)));
         self
     }
 
@@ -672,10 +757,34 @@ impl ScriptBuilder {
     /// `input`. Witness data (open commitments on Token
     /// payloads) rides on the pushed String value — call
     /// `push_str(String::contract(c))` before this on the prover side;
-    /// verifiers push `String::Opaque(contract.to_bytes())`.
+    /// verifiers push `String::Opaque(contract.id().to_vec())` and resolve
+    /// the body from the transaction's public witness BoC.
     pub fn input(mut self) -> Self {
         self.instructions.push(Instruction::Input);
         self
+    }
+
+    /// Pushes `internal_key root_id index` and embeds the selected public Cell
+    /// path into this program. For a tree made with `PredicateTree::from_scripts`,
+    /// also retains that program's assignments and nested witnesses. No caller
+    /// assembly of a separate witness bag is needed before `build_tx`.
+    ///
+    /// `program_index` selects a program in logical input order, not a blinded
+    /// Trie position. Push the gas grant, arguments, and count before `open`.
+    pub fn push_taproot_proof(
+        mut self,
+        tree: &PredicateTree,
+        program_index: usize,
+    ) -> Result<Self, VMError> {
+        let (proof, cells) = tree.witness_for(program_index)?;
+        self.cells.push(cells);
+        if let Some(script) = tree.script_witness(program_index) {
+            self = self.with_script_witness(script.clone())?;
+        }
+        Ok(self
+            .push_point(*proof.internal_key.as_bytes())
+            .push_str(String::from(proof.root.to_vec()))
+            .push_int(proof.index))
     }
     pub fn contract(mut self) -> Self {
         self.instructions.push(Instruction::Contract);
@@ -802,7 +911,7 @@ impl Script {
             Script::Transparent(instrs) => {
                 let mut out = Vec::new();
                 for instr in instrs {
-                    instr.encode(&mut out).expect("Vec writer never fails");
+                    instr.encode(&mut out);
                 }
                 out
             }
@@ -816,5 +925,75 @@ impl Script {
             Script::Transparent(instrs) => Ok(instrs),
             Script::Opaque(b) => Ok(ScriptBuilder::parse(&b)?.into_instructions()),
         }
+    }
+}
+
+impl CellEncode for Script {
+    fn encode(&self, builder: &mut CellBuilder) -> Result<(), CellError> {
+        builder.store_snake(&self.to_bytecode())?;
+        Ok(())
+    }
+}
+
+impl CellDecode for Script {
+    fn decode<R: CellResolver + ?Sized>(
+        slice: &mut CellSlice<'_>,
+        cells: &mut R,
+    ) -> Result<Self, CellError> {
+        Ok(Self::Opaque(slice.load_snake(cells, u32::MAX as usize)?))
+    }
+}
+
+/// Canonical code identity shared by scripts and prover overlays.
+pub(crate) fn script_cell(bytecode: &[u8]) -> Result<cells::Cell, CellError> {
+    let mut builder = CellBuilder::new();
+    builder.store_snake(bytecode)?;
+    Ok(builder.build())
+}
+
+#[cfg(test)]
+mod witness_tests {
+    use super::*;
+    use crate::{vm::Anchor, Predicate, Value};
+
+    #[test]
+    fn nested_witnesses_are_collected_separately_from_bytecode() {
+        let contract = Contract::new(
+            Predicate::opaque(Predicate::unspendable_key()),
+            Anchor([5; 32]),
+            Value::Scalar(Scalar::ONE),
+        )
+        .unwrap();
+        let id = contract.id();
+        let reference = String::contract(contract);
+        assert_eq!(reference.to_bytes_vec(), id);
+        assert_eq!(reference.len(), 32);
+        assert!(String::from(id.to_vec()).to_contract().is_err());
+
+        let branch = ScriptBuilder::new()
+            .push_str(reference)
+            .input()
+            .alloc(Some(Scalar::from(9u64)));
+        let branch_id = script_cell(&branch.to_bytecode()).unwrap().id();
+        let program = ScriptBuilder::new()
+            .push_script(branch.clone())
+            .with_script_witness(branch)
+            .unwrap();
+        let bag = program.cell_witnesses().unwrap();
+        assert!(bag.contains(&id));
+        assert!(
+            !bag.contains(&branch_id),
+            "inline bytecode needs no duplicate code Cell"
+        );
+        assert_eq!(program.contract_witnesses()[&id].id(), id);
+        let scripts = program.script_witnesses().unwrap();
+        assert!(
+            matches!(scripts[&branch_id].last(), Some(Instruction::Alloc(Some(value))) if *value == Scalar::from(9u64))
+        );
+        let bytecode = program.to_bytecode();
+        let public = ScriptBuilder::parse(&bytecode).unwrap();
+        assert_eq!(public.to_bytecode(), bytecode);
+        assert!(public.contract_witnesses().is_empty());
+        assert!(public.script_witnesses().unwrap().is_empty());
     }
 }

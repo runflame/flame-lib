@@ -5,6 +5,14 @@
 This is an exploratory subproject. It does not yet define consensus rules or
 describe implemented behavior.
 
+The concrete implementation is now specified in [cells.md](cells.md) and
+[encoding.md](encoding.md). Those documents supersede the provisional
+Tree/Link, request-manifest, and ContractRef API sketches below. The code uses
+Cell Tries, a whole execution BoC committed through TxID, ID-only Contract
+inputs, lazy authenticated Dict paths, and actor freezing. Utreexo alone
+retains specialized accumulator proofs. The sketches here remain design
+rationale, not additional APIs to implement alongside Cells.
+
 Here, **compression** means authenticated pruning: replace resident data with a
 small cryptographic commitment while keeping enough witness data elsewhere to
 restore selected contents later. **Decompression** means verifying that witness
@@ -639,9 +647,9 @@ selected by the provider plus the membership or adjacency leaves needed to
 prove that key query. The generic Tree never decides key equality, absence,
 linearity, or portability.
 
-The existing `merkle::Path`/hasher machinery should be reused where its shape
-matches. Loading a whole Tree uses one bounded canonical Tree preimage under
-its root rather than a second generic node database.
+In the implemented design, Cell paths replace separate sibling-hash proofs.
+Only Utreexo retains the specialized `merkle` accumulator machinery. See
+[Cell resolution](cells.md#resolution-and-witness-context).
 
 ### Contract API
 

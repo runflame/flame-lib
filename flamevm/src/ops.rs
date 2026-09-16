@@ -1,10 +1,7 @@
 //! Definition of all instructions in FlameVM,
 //! their codes and decoding/encoding utility functions.
 
-use readerwriter::{Encodable, Reader, WriteError, Writer};
-
 use crate::crypto::Point;
-use crate::encoding::{read_subvarint, write_subvarint};
 use crate::errors::VMError;
 use crate::scalar::Scalar;
 use crate::string::String;
@@ -242,8 +239,8 @@ pub enum Instruction {
     Return,       // a(k-1) … a(0) k return → ø
     Type,         // x type → x code
     Input,        // s input → contract
-    Contract,     // items… k pred contract → contract
-    Output,       // items… k pred output → ø
+    Contract,     // payload pred contract → contract
+    Output,       // payload pred output → ø
     Open,         // contract ik nbrs pos script gas portable-args… k open → results… k'
     Send,         // portable-args… k refund gas addr send → ø (anonymous outside actor frames)
     Call,         // portable-args… k gas addr call → results… k' 1 | args… k 0 (actor-only)
@@ -252,7 +249,7 @@ pub enum Instruction {
     Setcode,      // code setcode → ø (actor-only)
     AddStorage,   // q addstorage → {debt 1 | 0} (actor-only)
     QuoteStorage, // q quotestorage → {fee 1 | 0} (actor-only)
-    Signtx,       // contract signtx → items… k (external-only)
+    Signtx,       // contract signtx → payload (external-only)
     Signcall,     // contract script sig gas portable-args… m signcall → results… k'
     Timelock,     // ø timelock → n {0|1}
     Version,      // ø version → n
@@ -267,28 +264,28 @@ pub enum Instruction {
     Ext(u8),      // unknown opcode byte; produced by the parser for any unassigned tag
 }
 
-impl Encodable for Instruction {
+impl Instruction {
     /// Writes this instruction's canonical bytecode to `w`.
-    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
-        let op = |w: &mut dyn Writer, b: u8| w.write_u8(b"op", b);
+    pub fn encode(&self, w: &mut Vec<u8>) {
+        let op = |w: &mut Vec<u8>, b: u8| w.push(b);
         match self {
             Instruction::PushInt(i) => encode_push_int(i, w),
             Instruction::PushStr(s) => {
-                op(w, OP_PUSHSTR)?;
-                write_subvarint(w, s.len() as u64)?;
+                op(w, OP_PUSHSTR);
+                write_subvarint(w, s.len() as u64);
                 // Use `bytes_view` so witness-bearing variants
                 // (Commitment / Scalar / Predicate) serialize to
                 // their canonical opaque bytes. `as_bytes` would
                 // panic for those — the verifier's wire form must
                 // match regardless of which variant the prover
                 // used.
-                w.write(b"pushstr.bytes", &s.to_bytes_vec())
+                w.extend_from_slice(&s.to_bytes_vec())
             }
             Instruction::PushPoint(p) => {
-                op(w, OP_PUSHPOINT)?;
+                op(w, OP_PUSHPOINT);
                 // Always serializes the canonical 32-byte form;
                 // witness variants compute their compressed point.
-                w.write(b"pushpoint.bytes", &p.to_bytes())
+                w.extend_from_slice(&p.to_bytes())
             }
             Instruction::PushToken => op(w, OP_PUSHTOKEN),
             Instruction::Drop => op(w, OP_DROP),
@@ -364,15 +361,15 @@ impl Encodable for Instruction {
             Instruction::Verify => op(w, OP_VERIFY),
             Instruction::Fee => op(w, OP_FEE),
             Instruction::Label(n) => {
-                op(w, OP_LABEL)?;
+                op(w, OP_LABEL);
                 write_subvarint(w, *n as u64)
             }
             Instruction::Jump(n) => {
-                op(w, OP_JUMP)?;
+                op(w, OP_JUMP);
                 write_subvarint(w, *n as u64)
             }
             Instruction::JumpIf(n) => {
-                op(w, OP_JUMPIF)?;
+                op(w, OP_JUMPIF);
                 write_subvarint(w, *n as u64)
             }
             Instruction::Return => op(w, OP_RETURN),
@@ -408,22 +405,39 @@ impl Encodable for Instruction {
 }
 
 impl Instruction {
+    /// Canonical bytecode; this is not a Cell record.
+    pub fn encode_to_vec(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.encoded_size());
+        self.encode(&mut bytes);
+        bytes
+    }
+
+    /// Canonical instruction size without serializing or allocating.
+    pub fn encoded_size(&self) -> usize {
+        match self {
+            Self::PushInt(value) => 1 + push_int_parts(value).1,
+            Self::PushStr(value) => 1 + subvarint_size(value.len() as u64) + value.len(),
+            Self::PushPoint(_) => 33,
+            Self::Label(n) | Self::Jump(n) | Self::JumpIf(n) => 1 + subvarint_size(u64::from(*n)),
+            _ => 1,
+        }
+    }
+
     /// Heap bytes needed to materialize the next decoded instruction.
     /// Only `pushstr` is variable-sized; inspect its length prefix before
     /// `parse` allocates the owned buffer.
     pub(crate) fn decoded_allocation_bytes(bytes: &[u8]) -> Result<usize, VMError> {
         let mut reader = bytes;
-        let opcode = reader
-            .read_u8()
-            .map_err(|_| VMError::UnexpectedEndOfScript)?;
+        let opcode = take_bytes(&mut reader, 1)?[0];
         if opcode != OP_PUSHSTR {
             return Ok(0);
         }
         let len = read_subvarint(&mut reader).map_err(|_| VMError::UnexpectedEndOfScript)?;
         let len = usize::try_from(len).map_err(|_| VMError::OutOfGas)?;
-        if len > reader.remaining_bytes() {
+        if len > reader.len() {
             return Err(VMError::UnexpectedEndOfScript);
         }
+        String::check_length(len)?;
         Ok(len)
     }
 
@@ -437,10 +451,8 @@ impl Instruction {
     /// Unknown opcode bytes return `Instruction::Ext(b)` rather than
     /// erroring, so future protocol versions can introduce new opcodes
     /// without breaking older verifiers.
-    pub fn parse(reader: &mut impl Reader) -> Result<Instruction, VMError> {
-        let byte = reader
-            .read_u8()
-            .map_err(|_| VMError::UnexpectedEndOfScript)?;
+    pub fn parse(reader: &mut &[u8]) -> Result<Instruction, VMError> {
+        let byte = take_bytes(reader, 1)?[0];
         match byte {
             // push:k
             0x00..=OP_PUSH_SMALL_MAX => Ok(Instruction::PushInt(Scalar::from(byte as u64))),
@@ -456,23 +468,20 @@ impl Instruction {
             OP_PUSHINT_FULL => parse_pushint_full(reader),
             OP_PUSHSTR => {
                 let len =
-                    read_subvarint(reader).map_err(|_| VMError::UnexpectedEndOfScript)? as usize;
+                    usize::try_from(read_subvarint(reader)?).map_err(|_| VMError::OutOfGas)?;
                 // Bound the claimed length against remaining input BEFORE
                 // allocating — a tiny length prefix must not force a giant
                 // allocation on adversarial bytecode.
-                if len > reader.remaining_bytes() {
+                if len > reader.len() {
                     return Err(VMError::UnexpectedEndOfScript);
                 }
-                let buf = reader
-                    .read_bytes(len)
-                    .map_err(|_| VMError::UnexpectedEndOfScript)?;
+                String::check_length(len)?;
+                let buf = take_bytes(reader, len)?.to_vec();
                 Ok(Instruction::PushStr(String::from(buf)))
             }
             OP_PUSHPOINT => {
                 let mut buf = [0u8; 32];
-                reader
-                    .read(&mut buf)
-                    .map_err(|_| VMError::UnexpectedEndOfScript)?;
+                buf.copy_from_slice(take_bytes(reader, 32)?);
                 Ok(Instruction::PushPoint(Point::from_bytes(buf)))
             }
             OP_PUSHTOKEN => Ok(Instruction::PushToken),
@@ -590,7 +599,7 @@ impl Instruction {
 /// Reads a `label`/`jump`/`jumpif` operand: a sub-varint label number,
 /// narrowed to `u32` (a label number that large is malformed bytecode).
 fn parse_label_op(
-    reader: &mut impl Reader,
+    reader: &mut &[u8],
     build: fn(u32) -> Instruction,
 ) -> Result<Instruction, VMError> {
     let n = read_subvarint(reader).map_err(|_| VMError::UnexpectedEndOfScript)?;
@@ -603,83 +612,89 @@ fn parse_label_op(
 /// Encodes `i` using the narrowest opcode pair that fits. The
 /// resulting byte sequence matches what the VM's byte-dispatch handler
 /// expects to parse.
-fn encode_push_int(i: &Scalar, w: &mut impl Writer) -> Result<(), WriteError> {
-    let bytes = i.to_bytes();
-    let negated = -*i;
-    let neg = *i != Scalar::ZERO && negated.to_u128().is_some();
-    let compact = if neg { negated } else { *i };
+fn encode_push_int(i: &Scalar, bytes: &mut Vec<u8>) {
+    let (tag, width, payload) = push_int_parts(i);
+    bytes.push(tag);
+    bytes.extend_from_slice(&payload[..width]);
+}
 
-    // Try push:k for canonical residues 0..=15.
-    if let Some(v) = i.to_u64() {
-        if v <= OP_PUSH_SMALL_MAX as u64 {
-            return w.write_u8(b"pushsmall", v as u8);
+fn push_int_parts(i: &Scalar) -> (u8, usize, [u8; 32]) {
+    if let Some(n) = i.to_u64() {
+        if n <= OP_PUSH_SMALL_MAX as u64 {
+            return (n as u8, 0, [0; 32]);
         }
     }
+    let negative = -*i;
+    let is_negative = *i != Scalar::ZERO && negative.to_u128().is_some();
+    let compact = if is_negative { negative } else { *i };
+    let (positive_tag, width) = match compact.to_u128() {
+        Some(n) if n <= u8::MAX as u128 => (OP_PUSHINT8_POS, 1),
+        Some(n) if n <= u16::MAX as u128 => (OP_PUSHINT16_POS, 2),
+        Some(n) if n <= u64::MAX as u128 => (OP_PUSHINT64_POS, 8),
+        Some(_) => (OP_PUSHINT128_POS, 16),
+        None => return (OP_PUSHINT_FULL, 32, i.to_bytes()),
+    };
+    (
+        positive_tag + u8::from(is_negative),
+        width,
+        compact.to_bytes(),
+    )
+}
 
-    // Compact opcodes encode a small residue or its modular negation.
-    if let Some(v) = compact.to_u128() {
-        if v <= u8::MAX as u128 {
-            w.write_u8(
-                b"pushint.tag",
-                if neg {
-                    OP_PUSHINT8_NEG
-                } else {
-                    OP_PUSHINT8_POS
-                },
-            )?;
-            return w.write_u8(b"pushint8", v as u8);
-        }
-        if v <= u16::MAX as u128 {
-            w.write_u8(
-                b"pushint.tag",
-                if neg {
-                    OP_PUSHINT16_NEG
-                } else {
-                    OP_PUSHINT16_POS
-                },
-            )?;
-            return w.write(b"pushint16", &(v as u16).to_le_bytes());
-        }
-        if v <= u64::MAX as u128 {
-            w.write_u8(
-                b"pushint.tag",
-                if neg {
-                    OP_PUSHINT64_NEG
-                } else {
-                    OP_PUSHINT64_POS
-                },
-            )?;
-            return w.write(b"pushint64", &(v as u64).to_le_bytes());
-        }
-        // 16-byte fits but not 8.
-        w.write_u8(
-            b"pushint.tag",
-            if neg {
-                OP_PUSHINT128_NEG
-            } else {
-                OP_PUSHINT128_POS
-            },
-        )?;
-        return w.write(b"pushint128", &v.to_le_bytes());
+/// Bytecode sub-varints use disjoint ranges, so every number has one encoding.
+pub(crate) fn write_subvarint(bytes: &mut Vec<u8>, n: u64) {
+    let (tag, width, payload) = match n {
+        0..=255 => (0, 1, n),
+        256..=65_791 => (1, 2, n - 256),
+        65_792..=4_295_033_087 => (2, 4, n - 65_792),
+        _ => (3, 8, n - 4_295_033_088),
+    };
+    bytes.push(tag);
+    bytes.extend_from_slice(&payload.to_le_bytes()[..width]);
+}
+
+pub(crate) fn read_subvarint(bytes: &mut &[u8]) -> Result<u64, VMError> {
+    let (width, base) = match take_bytes(bytes, 1)?[0] {
+        0 => (1, 0u64),
+        1 => (2, 256),
+        2 => (4, 65_792),
+        3 => (8, 4_295_033_088),
+        _ => return Err(VMError::UnexpectedEndOfScript),
+    };
+    let mut payload = [0; 8];
+    payload[..width].copy_from_slice(take_bytes(bytes, width)?);
+    base.checked_add(u64::from_le_bytes(payload))
+        .ok_or(VMError::UnexpectedEndOfScript)
+}
+
+fn subvarint_size(n: u64) -> usize {
+    match n {
+        0..=255 => 2,
+        256..=65_791 => 3,
+        65_792..=4_295_033_087 => 5,
+        _ => 9,
     }
+}
 
-    // Else: pushint full (32-byte canonical little-endian scalar).
-    w.write_u8(b"pushint.tag", OP_PUSHINT_FULL)?;
-    w.write(b"pushint.full", &bytes)
+fn take_bytes<'a>(input: &mut &'a [u8], count: usize) -> Result<&'a [u8], VMError> {
+    if count > input.len() {
+        return Err(VMError::UnexpectedEndOfScript);
+    }
+    let (head, tail) = input.split_at(count);
+    *input = tail;
+    Ok(head)
 }
 
 /// Reads a compact pushint payload, optionally negating it modulo ℓ.
 /// Every payload fits below ℓ; non-minimal widths are rejected.
 fn parse_pushint_n(
-    reader: &mut impl Reader,
+    reader: &mut &[u8],
     width_bytes: usize,
     negate: bool,
 ) -> Result<Instruction, VMError> {
     debug_assert!(width_bytes <= 16);
     let mut buf = [0u8; 16];
-    reader
-        .read(&mut buf[..width_bytes])
-        .map_err(|_| VMError::UnexpectedEndOfScript)?;
+    buf[..width_bytes].copy_from_slice(take_bytes(reader, width_bytes)?);
     let mag = u128::from_le_bytes(buf);
     // Canonical minimal width: reject a value representable by a narrower
     // class (push:k for residues 0..15, push:0 for zero, the next-smaller
@@ -698,11 +713,9 @@ fn parse_pushint_n(
     Ok(Instruction::PushInt(if negate { -scalar } else { scalar }))
 }
 
-fn parse_pushint_full(reader: &mut impl Reader) -> Result<Instruction, VMError> {
+fn parse_pushint_full(reader: &mut &[u8]) -> Result<Instruction, VMError> {
     let mut buf = [0u8; 32];
-    reader
-        .read(&mut buf)
-        .map_err(|_| VMError::UnexpectedEndOfScript)?;
+    buf.copy_from_slice(take_bytes(reader, 32)?);
     let int = Scalar::from_bytes(buf).ok_or(VMError::InvalidScalarEncoding)?;
     // Full form is only for residues whose value and modular negation both
     // exceed 128 bits; either compact endpoint must use its narrower opcode.
@@ -715,6 +728,42 @@ fn parse_pushint_full(reader: &mut impl Reader) -> Result<Instruction, VMError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytecode_subvarints_are_canonical_and_bounded() {
+        for (value, expected) in [
+            (0, "0000"),
+            (255, "00ff"),
+            (256, "010000"),
+            (65_791, "01ffff"),
+            (65_792, "0200000000"),
+            (4_295_033_087, "02ffffffff"),
+            (4_295_033_088, "030000000000000000"),
+            (u64::MAX, "03fffefefffeffffff"),
+        ] {
+            let mut encoded = Vec::new();
+            write_subvarint(&mut encoded, value);
+            assert_eq!(encoded, bytes(expected));
+            assert_eq!(subvarint_size(value), encoded.len());
+            let mut input = encoded.as_slice();
+            assert_eq!(read_subvarint(&mut input).unwrap(), value);
+            assert!(input.is_empty());
+        }
+        assert!(read_subvarint(&mut &[3, 255, 255, 255, 255, 255, 255, 255, 255][..]).is_err());
+        assert!(read_subvarint(&mut &[4][..]).is_err());
+        assert!(read_subvarint(&mut &[3, 0][..]).is_err());
+        for instruction in [
+            Instruction::PushStr(String::from(vec![7; 256])),
+            Instruction::Label(u32::MAX),
+            Instruction::PushInt(Scalar::from(-256i64)),
+            Instruction::Alloc(Some(Scalar::ONE)),
+        ] {
+            let encoded = instruction.encode_to_vec();
+            assert_eq!(instruction.encoded_size(), encoded.len());
+            let parsed = Instruction::parse(&mut encoded.as_slice()).unwrap();
+            assert_eq!(parsed.encode_to_vec(), encoded);
+        }
+    }
 
     fn bytes(hex: &str) -> Vec<u8> {
         hex.as_bytes()

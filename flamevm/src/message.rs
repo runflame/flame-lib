@@ -1,14 +1,13 @@
 //! Outbound messages and MessageID identity.
 
-use merlin::Transcript;
-use readerwriter::{Encodable, WriteError, Writer};
+use cells::{CellBuilder, CellDecode, CellEncode, CellError, CellRef, CellResolver, CellSlice};
 
 use crate::actor::ActorID;
 use crate::contract::Predicate;
-use crate::encoding::write_admitted_value;
 use crate::errors::VMError;
 use crate::value::Value;
 use crate::vm::Anchor;
+use crate::{Dict, Scalar};
 
 /// Unique identity of a scheduled internal transaction (a queued `Send`).
 /// Uniqueness is inherited from the embedded `anchor`: each send consumes a
@@ -76,14 +75,18 @@ impl Message {
         if payload.iter().any(|v| !v.is_portable()) {
             return Err(VMError::NonPortableInSend);
         }
-        Ok(Self {
+        let message = Self {
             target,
             caller,
             anchor,
             payload,
             gas,
             refund_predicate,
-        })
+        };
+        // Admission must establish encodability before id()/TxLog hashing can
+        // assume it: portable values may still exceed the typed depth bound.
+        message.to_cell()?;
+        Ok(message)
     }
 
     /// Borrows the immutable payload.
@@ -96,61 +99,81 @@ impl Message {
         self.payload
     }
 
-    /// Canonical message length without allocating an encoded buffer.
+    /// Canonical standalone Cell-envelope length, including resident bodies.
     pub fn encoded_size(&self) -> usize {
-        let mut size = readerwriter::SizeWriter::new();
-        self.encode(&mut size)
-            .expect("admitted message is encodable");
-        size.len()
+        self.to_envelope()
+            .expect("admitted message is encodable")
+            .encode()
+            .len()
     }
 
     /// Unique ID identifying the message that spawns the internal transaction.
     /// Note: MessageID is not the same as TxID, which can only be determined after
     /// processing the message.
     pub fn id(&self) -> MessageID {
-        let buf = self.encode_to_vec();
-        let mut t = Transcript::new(b"flamevm.message.id");
-        t.append_message(b"send", &buf);
-        let mut h = [0u8; 32];
-        t.challenge_bytes(b"id", &mut h);
-        MessageID(h)
+        MessageID(self.to_cell().expect("admitted message is encodable").id())
     }
 }
 
 /// Canonical wire form. Field order:
 ///
-/// 1. `anchor` — 32 raw bytes (via `Anchor: Encodable`).
+/// 1. `anchor` — 32 raw bytes.
 /// 2. `target` — `ActorID::encode`, preserving Hash or Constructor form.
-/// 3. `caller` — `0x00` for None, `0x01 ‖ ActorID::encode(canonical)`
+/// 3. `caller` — `0x00` for None, `0x01 ‖ canonical actor hash`
 ///    for Some.
-/// 4. `refund_predicate` — 32-byte compressed Ristretto (via
-///    `Predicate: Encodable`).
+/// 4. `refund_predicate` — 32-byte compressed Ristretto.
 /// 5. `gas` — little-endian u64.
-/// 6. `payload` — little-endian u64 count, then each value's
-///    canonical `write_value` encoding.
+/// 6. `payload` — reference to a Dict with consecutive keys `0..k`.
 ///
-/// Fails only if the writer runs out of capacity. Portability is enforced by
+/// Portability is enforced by
 /// [`Message::new`] before a payload enters the asynchronous domain.
-impl Encodable for Message {
-    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
-        self.anchor.encode(w)?;
+impl CellEncode for Message {
+    fn encode(&self, w: &mut CellBuilder) -> Result<(), CellError> {
+        w.store(&self.anchor)?;
         // Preserve Constructor bytes: they are the code needed for
         // deploy-on-first-delivery. Registry lookup still canonicalizes the id.
-        self.target.encode(w)?;
+        w.store(&self.target)?;
         match &self.caller {
-            None => w.write_u8(b"send.caller.tag", 0)?,
+            None => {
+                w.store_u8(0)?;
+            }
             Some(c) => {
-                w.write_u8(b"send.caller.tag", 1)?;
-                c.to_canonical().encode(w)?;
+                w.store_u8(1)?.store_bytes(&c.to_hash())?;
             }
         }
-        self.refund_predicate.encode(w)?;
-        w.write_u64(b"send.gas", self.gas)?;
-        w.write_u64(b"send.payload.len", self.payload.len() as u64)?;
-        for v in &self.payload {
-            write_admitted_value(w, v)?;
-        }
+        w.store(&self.refund_predicate)?.store_u64(self.gas)?;
+        w.store_ref(CellRef::resident(
+            Dict::from_values(self.payload.clone()).to_cell()?,
+        ))?;
         Ok(())
+    }
+}
+
+impl CellDecode for Message {
+    fn decode<R: CellResolver + ?Sized>(
+        s: &mut CellSlice<'_>,
+        cells: &mut R,
+    ) -> Result<Self, CellError> {
+        let anchor = Anchor::decode(s, cells)?;
+        let target = ActorID::decode(s, cells)?;
+        let caller = match s.load_u8()? {
+            0 => None,
+            1 => Some(ActorID::Hash(<[u8; 32]>::decode(s, cells)?)),
+            _ => return Err(CellError::InvalidFormat),
+        };
+        let refund = Predicate::decode(s, cells)?;
+        let gas = s.load_u64()?;
+        let root = cells::resolve_cell(cells, &s.load_ref()?)?;
+        let mut dict = Dict::from_cell(&root, cells)?;
+        let mut payload = Vec::new();
+        for i in 0..dict.len() {
+            payload.push(
+                dict.remove_resolved(&Scalar::from(i as u64), cells)?
+                    .ok_or(CellError::InvalidFormat)?,
+            );
+        }
+        Self::new(target, caller, anchor, payload, gas, refund)
+            .map_err(|_| CellError::InvalidFormat)
     }
 }
 
@@ -223,6 +246,26 @@ mod tests {
                 dummy_predicate(),
             ),
             Err(VMError::NonPortableInSend)
+        ));
+    }
+
+    #[test]
+    fn new_rejects_unencodable_depth_before_message_identity() {
+        let mut value = Value::Scalar(Scalar::ONE);
+        for _ in 0..=crate::encoding::MAX_VALUE_DEPTH {
+            value = Value::Dict(Dict::from_values(vec![value]));
+        }
+        assert!(value.is_portable());
+        assert!(matches!(
+            Message::new(
+                ActorID::Hash([0x11; 32]),
+                None,
+                Anchor([0x22; 32]),
+                vec![value],
+                1_000,
+                dummy_predicate(),
+            ),
+            Err(VMError::Cell(CellError::LimitExceeded))
         ));
     }
 }

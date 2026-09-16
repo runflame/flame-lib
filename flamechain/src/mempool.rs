@@ -128,7 +128,9 @@ impl Mempool {
             return Err(MempoolError::Full);
         }
         let witness_bytes = self.check_envelope(&block_tx)?;
-        let witness_id = block_tx.witness_hash().0;
+        let witness_id = block_tx
+            .witness_hash()
+            .map_err(|_| MempoolError::InvalidEnvelope)?;
         if self.witness_ids.contains(&witness_id) {
             return Err(MempoolError::Duplicate);
         }
@@ -148,7 +150,7 @@ impl Mempool {
             return Err(MempoolError::InvalidEnvelope);
         }
         let txid = log.txid();
-        if self.txids.contains(&(txid.0).0) {
+        if self.txids.contains(txid.as_bytes()) {
             return Err(MempoolError::Duplicate);
         }
         let fee = metrics.total_fee;
@@ -184,7 +186,7 @@ impl Mempool {
             .checked_add(witness_bytes)
             .ok_or(MempoolError::Full)?;
         self.witness_ids.insert(witness_id);
-        self.txids.insert((txid.0).0);
+        self.txids.insert(*txid.as_bytes());
         self.entries.push(MempoolEntry {
             block_tx,
             txid,
@@ -217,9 +219,9 @@ impl Mempool {
         if bytes > self.consensus.max_witness_bytes
             || bytes
                 > self
-                .policy
-                .max_witness_bytes
-                .saturating_sub(self.witness_bytes)
+                    .policy
+                    .max_witness_bytes
+                    .saturating_sub(self.witness_bytes)
         {
             return Err(MempoolError::Full);
         }
@@ -363,7 +365,7 @@ mod tests {
         let contract = Contract::new(
             Predicate::opaque(Predicate::unspendable_key()),
             Anchor([7; 32]),
-            vec![],
+            flamevm::empty_state(),
         )
         .expect("empty payload is portable");
         let id = contract.id();
