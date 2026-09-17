@@ -1,8 +1,8 @@
-use corepc_client::bitcoin::{OutPoint, TxOut, Txid};
-use thiserror::Error;
-
 use crate::btc::rpc::BtcTransactionWithPrevouts;
 use crate::protocol::vote::{MintingVoteAuth, MintingVoteOutput, UncheckedMintingVote};
+use corepc_client::bitcoin::{OutPoint, TxOut, Txid};
+use flamechain::BlockHash;
+use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthenticatedMintingVote {
@@ -20,6 +20,14 @@ impl AuthenticatedMintingVote {
 
     pub fn auth(&self) -> &MintingVoteAuth {
         self.unchecked.auth()
+    }
+
+    pub fn block_height(&self) -> u32 {
+        self.output().data.block_height()
+    }
+
+    pub fn block_hash(&self) -> BlockHash {
+        self.output().data.block_hash()
     }
 }
 

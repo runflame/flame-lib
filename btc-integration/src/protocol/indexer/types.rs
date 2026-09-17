@@ -19,6 +19,16 @@ pub struct HistoryUpdate {
     pub next_cursor: BtcBlockTip,
 }
 
+impl HistoryUpdate {
+    pub fn get_indexed_blocks(&self) -> &[IndexedBlock] {
+        match &self.change {
+            HistoryChange::Extension { new_blocks } | HistoryChange::Reorg { new_blocks, .. } => {
+                new_blocks
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HistoryChange {
     Extension {

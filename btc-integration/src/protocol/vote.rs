@@ -116,7 +116,23 @@ pub enum MintingVoteData {
 }
 
 impl MintingVoteData {
-    pub fn to_script(&self) -> ScriptBuf {
+    pub fn block_height(&self) -> u32 {
+        match self {
+            Self::V1 {
+                flame_block_height, ..
+            } => *flame_block_height,
+        }
+    }
+
+    pub fn block_hash(&self) -> BlockHash {
+        match self {
+            Self::V1 {
+                flame_block_hash, ..
+            } => *flame_block_hash,
+        }
+    }
+
+    pub(crate) fn to_script(&self) -> ScriptBuf {
         let Self::V1 {
             flame_block_height,
             flame_block_hash,
@@ -130,7 +146,7 @@ impl MintingVoteData {
         ScriptBuf::from_bytes(script)
     }
 
-    pub fn from_output(output: &TxOut) -> Option<Self> {
+    pub(crate) fn from_output(output: &TxOut) -> Option<Self> {
         let mut reader = output.script_pubkey.as_bytes();
         reader.read_all(Self::read).ok()
     }

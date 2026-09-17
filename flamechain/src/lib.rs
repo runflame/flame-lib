@@ -62,9 +62,65 @@ impl fmt::Display for InvalidFlameNetwork {
 
 impl std::error::Error for InvalidFlameNetwork {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FlameHeight(u32);
+
+impl FlameHeight {
+    pub const fn new(height: u32) -> Self {
+        Self(height)
+    }
+
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for FlameHeight {
+    fn from(height: u32) -> Self {
+        Self::new(height)
+    }
+}
+
+impl From<FlameHeight> for u32 {
+    fn from(height: FlameHeight) -> Self {
+        height.as_u32()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CoreFlameHeight(u32);
+
+impl CoreFlameHeight {
+    pub const fn new(height: u32) -> Self {
+        Self(height)
+    }
+
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for CoreFlameHeight {
+    fn from(height: u32) -> Self {
+        Self::new(height)
+    }
+}
+
+impl From<CoreFlameHeight> for u32 {
+    fn from(height: CoreFlameHeight) -> Self {
+        height.as_u32()
+    }
+}
+
 /// The hash of a Flame block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockHash([u8; 32]);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockTip {
+    pub hash: BlockHash,
+    pub height: u64,
+}
 
 impl BlockHash {
     pub const fn new(bytes: [u8; 32]) -> Self {

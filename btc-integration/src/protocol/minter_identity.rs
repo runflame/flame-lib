@@ -1,5 +1,6 @@
 use corepc_client::bitcoin::{ScriptBuf, secp256k1::PublicKey};
 use flamevm::Predicate;
+use std::hash::{Hash, Hasher};
 use thiserror::Error;
 
 use crate::protocol::minter_p2wsh::MinterP2wsh;
@@ -14,7 +15,7 @@ pub struct MinterIdentity {
 
 impl MinterIdentity {
     /// Derives an identity from the canonical single-key authorization script.
-    pub fn single_key(flame_predicate: &Predicate, public_key: &PublicKey) -> Self {
+    pub(crate) fn single_key(flame_predicate: &Predicate, public_key: &PublicKey) -> Self {
         let witness_script = minter_witness_script::build(flame_predicate, public_key);
         Self {
             p2wsh: MinterP2wsh::from_witness_script(witness_script.as_bytes()),
@@ -23,7 +24,7 @@ impl MinterIdentity {
         }
     }
 
-    pub fn new(witness_script: ScriptBuf) -> Result<Self, MinterIdentityError> {
+    pub(crate) fn new(witness_script: ScriptBuf) -> Result<Self, MinterIdentityError> {
         let flame_predicate = minter_witness_script::parse_authentication_prefix(&witness_script)
             .map_err(|_| MinterIdentityError::InvalidAuthenticationPrefix)?;
         let p2wsh = MinterP2wsh::from_witness_script(witness_script.as_bytes());
@@ -55,6 +56,12 @@ impl PartialEq for MinterIdentity {
 }
 
 impl Eq for MinterIdentity {}
+
+impl Hash for MinterIdentity {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.p2wsh.hash(state);
+    }
+}
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum MinterIdentityError {
