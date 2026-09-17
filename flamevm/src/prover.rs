@@ -80,12 +80,7 @@ impl<'g> Prover<'g> {
         // we'll fold it in after the R1CS prove. `VM::run` consumes
         // the witness-bearing ScriptBuilder and stores its bytecode form on
         // the returned TxResult.
-        let mut result = VM::run(
-            header,
-            program,
-            gas_limit,
-            &mut prover,
-        )?;
+        let mut result = VM::run(header, program, gas_limit, &mut prover)?;
         result.multiplications = result
             .multiplications
             .saturating_add(prover.cs.metrics().multipliers);
@@ -93,7 +88,10 @@ impl<'g> Prover<'g> {
         // proof commits to the full transaction effects (header +
         // log), not just the constraint system shape. Verifier
         // mirrors this exact step before `cs.verify`.
-        prover.cs.transcript().append_message(b"flamevm.txid", &result.txid.0);
+        prover
+            .cs
+            .transcript()
+            .append_message(b"flamevm.txid", &result.txid.0);
         let proof = prover.into_proof()?;
         result.proof = Some(proof);
         Ok(result)
@@ -127,11 +125,9 @@ impl<'g> Delegate for Prover<'g> {
         // `expr`s over an opaque commitment fails here on the prover but
         // not the verifier — a fail-closed liveness divergence (the proof
         // binds the whole CS, so the verifier rejects rather than accepts;
-        // see vm.rs `int253_to_signed_integer`). Not a soundness hole.
-        let (value, blinding) =
-            commitment.witness().ok_or(VMError::WitnessMissing)?;
+        // see vm.rs `scalar_to_signed_integer`). Not a soundness hole.
+        let (value, blinding) = commitment.witness().ok_or(VMError::WitnessMissing)?;
         let scalar: curve25519_dalek::scalar::Scalar = value.into();
         Ok(self.cs.commit(scalar, blinding))
     }
-
 }

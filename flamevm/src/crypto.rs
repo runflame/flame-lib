@@ -2,7 +2,7 @@ use curve25519_dalek::ristretto::CompressedRistretto;
 use merlin::Transcript;
 
 use crate::constraints::Commitment;
-use crate::cell::Predicate;
+use crate::contract::Predicate;
 use crate::errors::VMError;
 
 /// Ristretto255 group element on the stack — always 32 bytes on the

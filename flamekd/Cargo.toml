@@ -1,0 +1,19 @@
+[package]
+name = "flamekd"
+version = "0.1.0"
+authors = ["Oleg Andreev <oleganza@gmail.com>"]
+edition = "2021"
+license = "Apache-2.0"
+description = "Flame hierarchical spending, viewing, and receiving keys"
+readme = "flamekd.md"
+
+[dependencies]
+bech32 = "0.11"
+bip39 = { version = "2.2", features = ["all-languages", "zeroize"] }
+curve25519-dalek = "4"
+merlin = "3"
+thiserror = "2"
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+hex = "0.3"

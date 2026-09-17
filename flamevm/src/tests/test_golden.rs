@@ -1,186 +1,273 @@
-//! Absolute golden vectors for consensus-committed hashes. Unlike the
-//! relative TxID tests (which only compare two computed roots), these
-//! pin frozen outputs, so a uniform shift — domain-label rename, field
-//! reorder in `Message::encode`, LE/BE flip — that moves every leaf
-//! identically is caught here (it would silently fork the chain against
-//! any other implementation). Audit p4.
-//!
-//! Expected values were produced by a standalone reference that writes the
-//! documented fields directly rather than calling FlameVM encoders.
-
-#![allow(unused_imports)]
+//! Frozen Cell-based consensus vectors, generated independently from descriptor
+//! bytes, SHA256, and the documented radix-4 path layout (not VM encoders).
 
 use super::test_helpers::*;
-use crate::tx::{TxEntry, TxHeader, TxID, TxLog};
 use crate::{code_root, state_root};
 
-fn h(version: u32, locktime: u32) -> TxHeader {
-    TxHeader { version, locktime }
+fn hex(bytes: &[u8]) -> std::string::String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[test]
 fn golden_consensus_hashes() {
-    let actor = ActorID::Hash([0x07; 32]);
-
-    let empty = format!("{:?}", TxID::from_log(&[TxEntry::Header(h(1, 0))]));
-    let data = format!(
-        "{:?}",
-        TxID::from_log(&[TxEntry::Header(h(1, 0)), TxEntry::Data(vec![1, 2, 3])])
+    let header = || TxEntry::Header(dummy_header());
+    let actor = ActorID::Hash([7; 32]);
+    let samples = [
+        (
+            vec![header()],
+            "881bb76904e627c9c79c0a525987f072024033dc78d45743df418b4e601dd62c",
+        ),
+        (
+            vec![header(), TxEntry::Data(vec![1, 2, 3])],
+            "d78b7ff69a8c3f308d1c347460c802f1ad39aad093e54e3f9d7a96bbdb09de84",
+        ),
+        (
+            vec![header(), TxEntry::Fee(1000)],
+            "191ca034b9a0acd11e92f87accdff54fef6b0d631e81e1d4fc123cfdc3c810f5",
+        ),
+        (
+            vec![
+                header(),
+                TxEntry::ActorSave {
+                    actor: actor.clone(),
+                    state: Value::Scalar(Scalar::from(42u64)),
+                },
+            ],
+            "f1ee34ac75a5c37e528ca38cd498860a5aac7c4352dd2d94ecce849121963ebc",
+        ),
+        (
+            vec![
+                header(),
+                TxEntry::SetCode {
+                    actor: actor.clone(),
+                    code: vec![0x1d],
+                },
+            ],
+            "864ce848ec493fe3df21e8b765be7613a65b0f07828bd1dc89c36c24eb25e8f0",
+        ),
+        (
+            vec![
+                header(),
+                TxEntry::ActorDeploy {
+                    actor,
+                    code: vec![0x1d],
+                },
+            ],
+            "cda8173e68708ad6c830610128d6b329e920b111ea35127df580ed443053791d",
+        ),
+    ];
+    for (entries, expected) in samples {
+        assert_eq!(hex(TxID::from_log(&entries).as_bytes()), expected);
+        let log = crate::TxLog::from(entries);
+        let decoded: crate::TxLog = decode_envelope(&log.to_envelope().unwrap().encode()).unwrap();
+        assert_eq!(decoded.txid(), log.txid());
+    }
+    assert_eq!(
+        hex(&state_root(&Value::Scalar(Scalar::from(42u64)))),
+        "4377380d51c730f99228f59486cdd68bfcc79ab9281fc80c249bb8478984ea35"
     );
-    let fee = format!(
-        "{:?}",
-        TxID::from_log(&[TxEntry::Header(h(1, 0)), TxEntry::Fee(1000)])
+    assert_eq!(
+        hex(&code_root(&[0x1d])),
+        "9bce55aad1742ba6593542c4e6f8162568c1f7c211e7c46d6ad29542f9150a5c"
     );
-    let save = format!(
-        "{:?}",
-        TxID::from_log(&[
-            TxEntry::Header(h(1, 0)),
-            TxEntry::ActorSave {
-                actor: actor.clone(),
-                state: Value::Int253(Int253::from(42u64))
-            },
+    assert_eq!(
+        hex(&ActorID::Constructor(vec![1, 2, 3]).to_hash()),
+        "2ce7935d93d22e90e74c4e780d5fcf361607b431fbb1f8b217dc6fea5da9baff"
+    );
+    let contract = Contract::new(
+        Predicate::opaque(CompressedRistretto([0x77; 32])),
+        Anchor([0x88; 32]),
+        Value::Scalar(Scalar::from(9u64)),
+    )
+    .unwrap();
+    assert_eq!(
+        hex(&contract.id()),
+        "5b4cd468f4a5c19949c7791ecde65394b785b909345195928374114044d078f0"
+    );
+    assert_eq!(
+        hex(TxID::from_log(&[
+            header(),
+            TxEntry::Input(contract.id()),
+            TxEntry::Output(contract)
         ])
+        .as_bytes()),
+        "9773ed29353f6b97cce5f516a03aa471c798a9c88f6b58664721e9b205301c2f"
     );
-    let setcode = format!(
-        "{:?}",
-        TxID::from_log(&[
-            TxEntry::Header(h(1, 0)),
-            TxEntry::SetCode {
-                actor: actor.clone(),
-                code: vec![0x1d]
-            },
-        ])
+    assert_ne!(
+        TxID::from_log(&[header(), TxEntry::Data(vec![1]), TxEntry::Fee(7)]),
+        TxID::from_log(&[header(), TxEntry::Fee(7), TxEntry::Data(vec![1])])
     );
-    let deploy = format!(
-        "{:?}",
-        TxID::from_log(&[
-            TxEntry::Header(h(1, 0)),
-            TxEntry::ActorDeploy {
-                actor: actor.clone(),
-                code: vec![0x1d]
-            },
-        ])
-    );
-    let state_root = format!("{:?}", state_root(&Value::Int253(Int253::from(42u64))));
-    let code_root = format!("{:?}", code_root(&[0x1d]));
-    let ctor_id = format!("{:?}", ActorID::Constructor(vec![1, 2, 3]).to_hash());
-
-    assert_eq!(
-        empty,
-        "TxID(Hash(78dc804f3642b6109767b19068165ba37a437071f0c07ea70103c27e6cf02d3a))"
-    );
-    assert_eq!(
-        data,
-        "TxID(Hash(fcaeb40b2b33204c7ce80dd6082aa90ce6b2e67822143cc8e7338adda1c65e30))"
-    );
-    assert_eq!(
-        fee,
-        "TxID(Hash(929da748969f08c76bbe87b4df3e7f97c90a875e352eb1f3960c8dddf0568e40))"
-    );
-    assert_eq!(
-        save,
-        "TxID(Hash(c16bcabda54dfb5f7d63b81a452bc1a14d8e13d15cedfb40b9825d2836cf30d7))"
-    );
-    assert_eq!(
-        setcode,
-        "TxID(Hash(6cc0bb6da93f45f4015000ce5e6f4054a2b341024a0363516508f4531e81346f))"
-    );
-    assert_eq!(
-        deploy,
-        "TxID(Hash(e0f675fdae45f4d7369c0d425cca252421206a164de2f2d16c42b00c546a1a00))"
-    );
-    assert_eq!(state_root, "[55, 153, 101, 152, 10, 104, 94, 233, 140, 125, 135, 90, 162, 101, 75, 190, 192, 18, 163, 108, 189, 73, 155, 248, 201, 51, 241, 232, 8, 129, 177, 182]");
-    assert_eq!(code_root, "[49, 139, 70, 84, 16, 230, 41, 133, 96, 138, 164, 96, 140, 192, 168, 177, 16, 219, 77, 211, 98, 38, 102, 149, 123, 241, 218, 249, 204, 253, 100, 198]");
-    assert_eq!(ctor_id, "[78, 236, 146, 161, 207, 157, 64, 230, 4, 244, 221, 152, 140, 235, 119, 206, 6, 194, 76, 78, 145, 123, 221, 5, 115, 126, 193, 163, 197, 207, 76, 100]");
-
-    // Structural: header-only ≠ single-effect; effect order is committed.
-    assert_ne!(empty, data);
-    let ab = format!(
-        "{:?}",
-        TxID::from_log(&[
-            TxEntry::Header(h(1, 0)),
-            TxEntry::Data(vec![1]),
-            TxEntry::Fee(7)
-        ])
-    );
-    let ba = format!(
-        "{:?}",
-        TxID::from_log(&[
-            TxEntry::Header(h(1, 0)),
-            TxEntry::Fee(7),
-            TxEntry::Data(vec![1])
-        ])
-    );
-    assert_ne!(ab, ba, "effect order is committed");
 }
 
-/// Golden wire bytes for the canonical TxLog/TxEntry encoding
-/// (encode-only; spec §TxLog transport). Pins tag values, field order,
-/// and LE widths — any serializer drift shows up as a diff here.
+/// A raw record writer independent of CellBuilder and all type codecs.
+fn record(payload: &[u8], refs: &[[u8; 32]]) -> Vec<u8> {
+    let descriptor = payload.len() as u16 | ((refs.len() as u16) << 13);
+    let mut bytes = descriptor.to_le_bytes().to_vec();
+    bytes.extend_from_slice(payload);
+    for reference in refs {
+        bytes.extend_from_slice(reference);
+    }
+    bytes
+}
+
+#[test]
+fn golden_string_is_raw_bytes_in_one_cell() {
+    let string = String::from(b"abc".to_vec());
+    let cell = string.to_cell().unwrap();
+    assert_eq!(cell.encode(), record(b"abc", &[]));
+    assert_eq!(hex(&cell.encode()), "0300616263");
+    assert_eq!(
+        hex(&cell.id()),
+        "c602df104f2bfde94e05197faa97f07dda1d43d559f0c423f93e9bb9669d24ff"
+    );
+    let value = Value::String(string).to_cell().unwrap();
+    assert_eq!(value.encode(), record(&[1], &[cell.id()]));
+    assert_eq!(
+        hex(&value.id()),
+        "d2b64a4e5655f7a299aa1898303e2e9024569783fe55527f38cc5624a63d8f0b"
+    );
+}
+
 #[test]
 fn golden_txlog_wire_encoding() {
-    use curve25519_dalek::ristretto::CompressedRistretto as CR;
-    use readerwriter::Encodable;
-    let actor = ActorID::Hash([0x07; 32]);
-    let log = TxLog::from(vec![
-        TxEntry::Header(h(1, 7)),
-        TxEntry::Data(vec![0xab, 0xcd]),
-        TxEntry::Input([0x11; 32]),
-        TxEntry::Receive([0x22; 32]),
-        TxEntry::ActorDeploy {
-            actor: actor.clone(),
-            code: vec![0x1d],
-        },
-        TxEntry::IssuePub(Int253::from(5u64), Int253::from(-3i64)),
-        TxEntry::IssuePriv(CR([0x33; 32]), CR([0x44; 32])),
-        TxEntry::Retire(CR([0x55; 32]), CR([0x66; 32])),
-        TxEntry::Fee(1_000),
-        TxEntry::ActorSave {
-            actor: actor.clone(),
-            state: Value::Int253(Int253::from(42u64)),
-        },
-        TxEntry::SetCode {
-            actor: actor.clone(),
-            code: vec![0x1d],
-        },
-        TxEntry::Output(Cell::new(
-            Predicate::opaque(CR([0x77; 32])),
-            Anchor([0x88; 32]),
-            vec![Value::Int253(Int253::from(9u64))],
-        ).expect("payload is portable")),
-        TxEntry::Send(Message::new(
-            actor,
-            None,
-            Anchor([0x99; 32]),
-            Vec::new(),
-            50,
-            Predicate::opaque(CR([0xaa; 32])),
-        ).expect("message payload is portable")),
-    ]);
-    let wire = log.encode_to_vec();
-    let hex: std::string::String = wire.iter().map(|b| format!("{b:02x}")).collect();
-    assert_eq!(hex, "0d00000000000000000100000007000000010200000000000000abcd0211111111111111111111111111111111111111111111111111111111111111110322222222222222222222222222222222222222222222222222222222222222220e00070707070707070707070707070707070707070707070707070707070707070701000000000000001d050540010633333333333333333333333333333333333333333333333333333333333333334444444444444444444444444444444444444444444444444444444444444444075555555555555555555555555555555555555555555555555555555555555555666666666666666666666666666666666666666666666666666666666666666608e803000000000000090007070707070707070707070707070707070707070707070707070707070707072a0a00070707070707070707070707070707070707070707070707070707070707070701000000000000001d0483f8777777777777777777777777777777777777777777777777777777777777777764888888888888888888888888888888888888888888888888888888888888888881090b999999999999999999999999999999999999999999999999999999999999999900070707070707070707070707070707070707070707070707070707070707070700aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa32000000000000000000000000000000");
+    let mut header = vec![0];
+    header.extend_from_slice(&1u32.to_le_bytes());
+    header.extend_from_slice(&7u32.to_le_bytes());
+    assert_eq!(
+        TxEntry::Header(TxHeader {
+            version: 1,
+            locktime: 7
+        })
+        .to_cell()
+        .unwrap()
+        .encode(),
+        record(&header, &[])
+    );
+    for (entry, tag, data) in [
+        (TxEntry::Input([0x11; 32]), 2, [0x11; 32]),
+        (TxEntry::Receive([0x22; 32]), 3, [0x22; 32]),
+        (TxEntry::CellWitness([0x33; 32]), 15, [0x33; 32]),
+        (
+            TxEntry::ActorDestroy {
+                actor: ActorID::Hash([7; 32]),
+            },
+            13,
+            [7; 32],
+        ),
+    ] {
+        assert_eq!(
+            entry.to_cell().unwrap().encode(),
+            record(&[&[tag][..], &data].concat(), &[])
+        );
+    }
+    for (entry, tag, first, second) in [
+        (
+            TxEntry::IssuePriv(
+                CompressedRistretto([0x33; 32]),
+                CompressedRistretto([0x44; 32]),
+            ),
+            6,
+            [0x33; 32],
+            [0x44; 32],
+        ),
+        (
+            TxEntry::Retire(
+                CompressedRistretto([0x55; 32]),
+                CompressedRistretto([0x66; 32]),
+            ),
+            7,
+            [0x55; 32],
+            [0x66; 32],
+        ),
+    ] {
+        assert_eq!(
+            entry.to_cell().unwrap().encode(),
+            record(&[&[tag][..], &first, &second].concat(), &[])
+        );
+    }
+    let issue = TxEntry::IssuePub(Scalar::from(5u64), Scalar::from(-3i64));
+    assert_eq!(
+        issue.to_cell().unwrap().payload(),
+        [
+            &[5][..],
+            Scalar::from(5u64).as_bytes(),
+            Scalar::from(-3i64).as_bytes()
+        ]
+        .concat()
+    );
+    assert_eq!(
+        TxEntry::Fee(1000).to_cell().unwrap().encode(),
+        record(&[&[8][..], &1000u64.to_le_bytes()].concat(), &[])
+    );
+
+    let actor = ActorID::Hash([7; 32]);
+    for (entry, tag, child) in [
+        (TxEntry::Data(vec![1, 2, 3]), 1, code_root(&[1, 2, 3])),
+        (
+            TxEntry::ActorSave {
+                actor: actor.clone(),
+                state: Value::Scalar(Scalar::from(42u64)),
+            },
+            9,
+            state_root(&Value::Scalar(Scalar::from(42u64))),
+        ),
+        (
+            TxEntry::SetCode {
+                actor: actor.clone(),
+                code: vec![0x1d],
+            },
+            10,
+            code_root(&[0x1d]),
+        ),
+        (
+            TxEntry::ActorDeploy {
+                actor: actor.clone(),
+                code: vec![0x1d],
+            },
+            14,
+            code_root(&[0x1d]),
+        ),
+    ] {
+        let payload = if tag == 1 {
+            vec![tag]
+        } else {
+            [&[tag][..], &[7; 32]].concat()
+        };
+        assert_eq!(
+            entry.to_cell().unwrap().encode(),
+            record(&payload, &[child])
+        );
+    }
+    let contract = fixture_contract();
+    assert_eq!(
+        TxEntry::Output(contract.clone())
+            .to_cell()
+            .unwrap()
+            .encode(),
+        record(&[4], &[contract.id()])
+    );
+    let message = dummy_message(50);
+    assert_eq!(
+        TxEntry::Send(message.clone()).to_cell().unwrap().encode(),
+        record(&[11], &[message.to_cell().unwrap().id()])
+    );
 }
 
 #[test]
 fn golden_storage_effect_wire_encoding() {
-    use readerwriter::Encodable;
-
-    let actor = ActorID::Hash([0x07; 32]);
-    let log = TxLog::from(vec![
-        TxEntry::StoragePurchase {
-            actor: actor.clone(),
-            bytes: 1_024,
-            expiry_height: 52_500,
-            fee_sparks: Int253::from(1_000_007_630u64),
-        },
-        TxEntry::ActorDestroy { actor },
-    ]);
-    let hex: std::string::String = log
-        .encode_to_vec()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-
-    assert_eq!(hex, "02000000000000000c000707070707070707070707070707070707070707070707070707070707070707000400000000000014cd0000000000003c93e69a3b0d000707070707070707070707070707070707070707070707070707070707070707");
+    let purchase = TxEntry::StoragePurchase {
+        actor: ActorID::Hash([7; 32]),
+        bytes: 1024,
+        expiry_height: 52_500,
+        fee_sparks: Scalar::from(1_000_007_630u64),
+    };
+    let payload = [
+        &[12][..],
+        &[7; 32],
+        &1024u64.to_le_bytes(),
+        &52_500u64.to_le_bytes(),
+        Scalar::from(1_000_007_630u64).as_bytes(),
+    ]
+    .concat();
+    assert_eq!(purchase.to_cell().unwrap().encode(), record(&payload, &[]));
 }

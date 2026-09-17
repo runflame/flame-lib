@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 
 use super::test_helpers::*;
-use crate::{ActorID, ActorRegistry, Int253};
+use crate::{ActorID, ActorRegistry, Scalar};
 
 /// Builds an InternalRoot VM with explicit identity fields.
 fn vm_internal_with(
@@ -12,14 +12,13 @@ fn vm_internal_with(
     anchor: Anchor,
     script: Vec<u8>,
 ) -> VM {
-    let kind = CallKind::InternalRoot {
-        actor,
-        caller,
-    };
+    let kind = CallKind::InternalRoot { actor, caller };
     VM::new(
         dummy_header(),
         CallFrame::new(
-            ScriptBuilder::parse(&script).expect("parse").into_instructions(),
+            ScriptBuilder::parse(&script)
+                .expect("parse")
+                .into_instructions(),
             kind,
             1_000_000,
         )
@@ -32,7 +31,9 @@ fn vm_external(script: Vec<u8>) -> VM {
     VM::new(
         dummy_header(),
         CallFrame::new(
-            ScriptBuilder::parse(&script).expect("parse").into_instructions(),
+            ScriptBuilder::parse(&script)
+                .expect("parse")
+                .into_instructions(),
             CallKind::ExternalRoot,
             1_000_000,
         ),
@@ -86,12 +87,7 @@ fn selfid_in_constructor_form_uses_canonical_hash_seed() {
 fn anchor_in_internal_root_pushes_frame_anchor() {
     let id = ActorID::Hash([0u8; 32]);
     let anc = Anchor([0xff; 32]);
-    let mut vm = vm_internal_with(
-        id,
-        None,
-        anc,
-        ScriptBuilder::new().anchor().to_bytecode(),
-    );
+    let mut vm = vm_internal_with(id, None, anc, ScriptBuilder::new().anchor().to_bytecode());
     vm.step_internal().expect("step ok");
     match vm.current_call.stack.last().expect("stack non-empty") {
         Value::String(s) => assert_eq!(s.as_opaque().unwrap(), &[0xff; 32]),
@@ -148,4 +144,3 @@ fn callerid_in_external_root_errors_actor_context() {
     let err = vm.step_internal().expect_err("must error");
     assert!(matches!(err, VMError::OpcodeRequiresActorContext));
 }
-

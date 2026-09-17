@@ -11,7 +11,7 @@ pub use block::{
     ExecutionKind, ExecutionRecord, ReorgOutcome, StateCommitment,
 };
 pub use mempool::{Mempool, MempoolEntry, MempoolError, MempoolPolicy, RebaseReport};
-pub use storage::{Lease, SPARKS_PER_FLAME, StorageError, StorageParams};
+pub use storage::{Lease, SPARKS_PER_FLAME, StorageError, StorageParams, StoredActor};
 pub use validation::FlameBlockValidator;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

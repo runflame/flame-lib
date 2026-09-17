@@ -2,31 +2,33 @@
 
 use bulletproofs::r1cs;
 use bulletproofs::r1cs::R1CSProof;
+use cells::{
+    resolve_cell, BagOfCells, Cell, CellBuilder, CellDecode, CellEncode, CellError, CellID,
+    CellRef, CellResolver, CellSlice,
+};
 use core::convert::TryFrom;
-use curve25519_dalek::ristretto::CompressedRistretto;
-use curve25519_dalek::scalar::Scalar;
 use core::mem;
+use curve25519_dalek::ristretto::CompressedRistretto;
+use curve25519_dalek::scalar::Scalar as DalekScalar;
 use merlin::Transcript;
-use readerwriter::{Decodable, Encodable, ExactSizeEncodable, ReadError, Reader, WriteError, Writer};
+use std::{collections::BTreeMap, sync::Arc};
 
-use crate::errors::VMError;
-use crate::tx::TxHeader;
-use crate::cell::{TaprootProof, Cell, CellID, Predicate};
+use crate::actor::{empty_state, ActorID, ActorRegistry};
 use crate::constraints::Commitment;
+use crate::contract::{Contract, ContractID, Predicate, TaprootProof};
+use crate::errors::VMError;
 use crate::fees::CheckedFee;
-use crate::token::{
-    flavor_from_actor, flavor_from_predicate, FLAME_FLAVOR,
-};
-use crate::tx::{TxEntry, TxID};
-use crate::{
-    ClearToken, Constraint, Dict, Expression, Int253, Merlin, Point, String, Token, Value, Variable,
-    WideToken,
-};
+use crate::message::Message;
 use crate::ops::Instruction;
 use crate::script::{Script, ScriptBuilder};
-use crate::actor::{empty_state, ActorID, ActorRegistry};
-use crate::message::Message;
 use crate::string::array32;
+use crate::token::{flavor_from_actor, flavor_from_predicate, FLAME_FLAVOR};
+use crate::tx::TxHeader;
+use crate::tx::{TxEntry, TxID};
+use crate::{
+    ClearToken, Constraint, Dict, Expression, Merlin, Point, Scalar, String, Token, Value,
+    Variable, WideToken,
+};
 
 /// Bitcoin BIP-65 convention threshold for distinguishing
 /// `TxHeader::locktime` as a block height vs. a Unix timestamp:
@@ -44,11 +46,11 @@ impl Anchor {
     /// Deterministically splits this anchor into two distinct
     /// children. Used by every consume site that needs a unique
     /// entity-anchor: the `left` half is embedded in the new entity
-    /// (cell / message / callee frame), the `right` half replaces
+    /// (contract / message / callee frame), the `right` half replaces
     /// the consumer's current anchor.
     ///
     /// Uniqueness inherits from the parent: if `self` came from a
-    /// spend-once source (an input cell's id) and from a chain of
+    /// spend-once source (an input contract's id) and from a chain of
     /// prior splits over that source, both children are unique
     /// within the network.
     pub fn split(&self) -> (Anchor, Anchor) {
@@ -63,23 +65,23 @@ impl Anchor {
 }
 
 /// 32 raw bytes — fixed size, no tag, no length prefix.
-impl Encodable for Anchor {
-    fn encode(&self, w: &mut impl Writer) -> Result<(), WriteError> {
-        w.write(b"anchor", &self.0)
+impl CellEncode for Anchor {
+    fn encode(&self, w: &mut CellBuilder) -> Result<(), CellError> {
+        w.store_bytes(&self.0)?;
+        Ok(())
     }
 }
 
-impl ExactSizeEncodable for Anchor {
-    fn encoded_size(&self) -> usize { 32 }
-}
-
-impl Decodable for Anchor {
-    fn decode(r: &mut impl Reader) -> Result<Self, ReadError> {
-        Ok(Anchor(r.read_u8x32()?))
+impl CellDecode for Anchor {
+    fn decode<R: CellResolver + ?Sized>(
+        r: &mut CellSlice<'_>,
+        cells: &mut R,
+    ) -> Result<Self, CellError> {
+        Ok(Anchor(<[u8; 32]>::decode(r, cells)?))
     }
 }
 
-// `Predicate` lives in `cell::predicate`; re-exported via `Predicate`.
+// `Predicate` lives in `contract::predicate`; re-exported via `Predicate`.
 
 /// External signature check deferred to transaction finalization. `TxBound`
 /// comes from external-only `signtx`; `Explicit` comes from external
@@ -89,7 +91,7 @@ impl Decodable for Anchor {
 pub enum DeferredSig {
     TxBound {
         verification_key: CompressedRistretto,
-        cell_id: CellID,
+        contract_id: ContractID,
     },
     Explicit {
         verification_key: CompressedRistretto,
@@ -138,7 +140,6 @@ pub trait Delegate {
         &mut self,
         commitment: &Commitment,
     ) -> Result<(CompressedRistretto, r1cs::Variable), VMError>;
-
 }
 
 /// No-op [`Delegate`] used by internal-context steps. CS opcodes
@@ -236,9 +237,7 @@ impl CallFrame {
     /// Returns the next instruction; `Ok(None)` at end of program. For
     /// `Script::Opaque` this decodes one instruction at the cursor and
     /// advances by its encoded length.
-    pub(crate) fn next_instruction(
-        &mut self,
-    ) -> Result<Option<Instruction>, VMError> {
+    pub(crate) fn next_instruction(&mut self) -> Result<Option<Instruction>, VMError> {
         let cursor = self.cursor;
         let allocation_bytes = match &self.code {
             Script::Transparent(instrs) => {
@@ -246,7 +245,10 @@ impl CallFrame {
                     return Ok(None);
                 };
                 match instr {
-                    Instruction::PushStr(s) => s.len(),
+                    Instruction::PushStr(s) => {
+                        s.check_len()?;
+                        s.len()
+                    }
                     _ => 0,
                 }
             }
@@ -343,6 +345,13 @@ impl CallFrame {
     }
 }
 
+impl cells::GasMeter for CallFrame {
+    fn charge(&mut self, amount: u64) -> Result<(), CellError> {
+        self.charge_gas(amount)
+            .map_err(|_| CellError::ResourceExhausted)
+    }
+}
+
 /// Identity-bearing scope tag carried by every CallFrame.
 pub enum CallKind {
     /// Outer scope of an external transaction.
@@ -355,16 +364,13 @@ pub enum CallKind {
     },
 
     /// Synchronous actor-to-actor call inside an internal tx.
-    ActorCall {
-        actor: ActorID,
-        caller: ActorID,
-    },
+    ActorCall { actor: ActorID, caller: ActorID },
 
-    /// `open` / `signcall` of a cell predicate. `external_context`
+    /// `open` / `signcall` of a contract predicate. `external_context`
     /// snapshots the caller's `is_external()` at frame creation so
     /// `require_external` propagates correctly across the isolation
     /// boundary (ADR 0013).
-    CellOpen {
+    ContractOpen {
         predicate: Predicate,
         external_context: bool,
         /// Canonical id of the directly invoking actor, for `callerid`
@@ -379,22 +385,20 @@ impl CallKind {
     pub fn actor(&self) -> Option<&ActorID> {
         match self {
             Self::InternalRoot { actor, .. } | Self::ActorCall { actor, .. } => Some(actor),
-            Self::ExternalRoot | Self::CellOpen { .. } => None,
+            Self::ExternalRoot | Self::ContractOpen { .. } => None,
         }
     }
 
-
-    /// Returns only the caller's canonical id. `CellOpen` stores this
+    /// Returns only the caller's canonical id. `ContractOpen` stores this
     /// compact form for read-only attribution without inheriting the actor.
     pub fn caller_id(&self) -> Option<[u8; 32]> {
         match self {
             Self::InternalRoot { caller, .. } => caller.as_ref().map(ActorID::to_hash),
             Self::ActorCall { caller, .. } => Some(caller.to_hash()),
-            Self::CellOpen { caller_id, .. } => *caller_id,
+            Self::ContractOpen { caller_id, .. } => *caller_id,
             Self::ExternalRoot => None,
         }
     }
-
 }
 
 /// An isolated execution scope with its own stack, code, and gas budget.
@@ -402,6 +406,9 @@ impl CallKind {
 pub struct CallFrame {
     /// Isolated stack visible to scripts in this scope.
     pub(crate) stack: Vec<Value>,
+
+    /// Only this actor's committed storage bodies; never another actor's cache.
+    actor_cells: Arc<BagOfCells>,
 
     /// The frame's executable code (decoded instructions or raw bytecode).
     code: Script,
@@ -418,7 +425,7 @@ pub struct CallFrame {
     /// This frame's starting anchor (todo #4 — previously stored in
     /// every `CallKind` variant). Only the root internal frame uses it:
     /// `VM::new` seeds `last_anchor` from it. Child frames (`op_call` /
-    /// cell-open) set `last_anchor` directly on entry, so theirs is
+    /// contract-open) set `last_anchor` directly on entry, so theirs is
     /// informational. `None` for `ExternalRoot` (seeded by `op_input`).
     pub(crate) anchor: Option<Anchor>,
 
@@ -443,11 +450,11 @@ pub struct CallFrame {
     pub(crate) snap_total_fee: CheckedFee,
 
     /// Entry-owned values returned to the caller when the child fails.
-    /// Actor calls escrow their arguments; cell calls escrow the original
-    /// locked Cell followed by their explicit arguments.
+    /// Actor calls escrow their arguments; contract calls escrow the original
+    /// locked Contract followed by their explicit arguments.
     pub(crate) snap_failure_values: Vec<Value>,
-    /// Number of explicit call arguments. For cell calls this intentionally
-    /// excludes the separately restored locked Cell.
+    /// Number of explicit call arguments. For contract calls this intentionally
+    /// excludes the separately restored locked Contract.
     pub(crate) snap_failure_arg_count: usize,
 
     /// Snapshot of the delegate's MSM/signature batch state taken
@@ -466,45 +473,33 @@ pub struct CallFrame {
     /// constraints the failed callee made are dropped. `None` in
     /// internal context (no real CS).
     pub(crate) snap_cs: Option<r1cs::Checkpoint>,
-
 }
 
 impl CallFrame {
     /// Builds a fresh CallFrame over pre-decoded `instructions` (prover
     /// and pre-parsed paths). The verifier / internal execution uses
     /// [`CallFrame::from_bytecode`] to stream raw bytecode instead.
-    pub fn new(
-        instructions: Vec<Instruction>,
-        kind: CallKind,
-        gas_limit: u64,
-    ) -> Self {
+    pub fn new(instructions: Vec<Instruction>, kind: CallKind, gas_limit: u64) -> Self {
         Self::from_code(Script::Transparent(instructions), kind, gas_limit)
     }
 
     /// Builds a CallFrame that decodes raw `bytecode` on demand — no
     /// `Vec<Instruction>` is materialized. See ADR 0015.
-    pub(crate) fn from_bytecode(
-        bytecode: Vec<u8>,
-        kind: CallKind,
-        gas_limit: u64,
-    ) -> Self {
+    pub(crate) fn from_bytecode(bytecode: Vec<u8>, kind: CallKind, gas_limit: u64) -> Self {
         Self::from_code(Script::Opaque(bytecode), kind, gas_limit)
     }
 
     /// Sets this frame's starting anchor (todo #4). Chained at the
-    /// internal-root / call / cell-open construction sites.
+    /// internal-root / call / contract-open construction sites.
     pub(crate) fn with_anchor(mut self, anchor: Anchor) -> Self {
         self.anchor = Some(anchor);
         self
     }
 
-    pub(crate) fn from_code(
-        code: Script,
-        kind: CallKind,
-        gas_limit: u64,
-    ) -> Self {
+    pub(crate) fn from_code(code: Script, kind: CallKind, gas_limit: u64) -> Self {
         Self {
             stack: Vec::new(),
+            actor_cells: Arc::new(BagOfCells::new()),
             code,
             cursor: 0,
             labels: Vec::new(),
@@ -550,6 +545,9 @@ pub struct TxResult {
     /// re-broadcast without re-encoding.
     pub bytecode: Vec<u8>,
 
+    /// The immutable witness set committed by the initiating external transaction.
+    pub cells: Arc<BagOfCells>,
+
     /// R1CS proof. `Some` on the prover side, `None` on the verifier
     /// side (the verifier consumed it during `cs.verify`).
     pub proof: Option<R1CSProof>,
@@ -562,7 +560,7 @@ pub struct TxResult {
     pub deferred_sigs: Vec<DeferredSig>,
 }
 
-/// Manual Debug — the linear `Cell` in `txlog` blocks `#[derive]`.
+/// Manual Debug — the linear `Contract` in `txlog` blocks `#[derive]`.
 impl core::fmt::Debug for TxResult {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("TxResult")
@@ -581,12 +579,16 @@ impl core::fmt::Debug for TxResult {
 pub(crate) struct VM {
     header: TxHeader,
     block_height: u64,
+    cells: Arc<BagOfCells>,
+    contract_witnesses: BTreeMap<ContractID, Contract>,
+    script_witnesses: BTreeMap<CellID, Vec<Instruction>>,
+    value_witnesses: BTreeMap<CellID, Value>,
 
     /// Per-tx current anchor. `None` for fresh ExternalRoot txs (the
     /// first `op_input` seeds it); `Some(M)` at the start of an
     /// internal tx (where `M` is the delivering Message's anchor —
     /// itself a split-child from the originating tx's `op_send`).
-    /// Consumed-and-replaced via split by `cell` / `output` / `send`;
+    /// Consumed-and-replaced via split by `contract` / `output` / `send`;
     /// `call` / `open` / `signcall` split it into disjoint callee and
     /// caller-continuation subtrees.
     pub(crate) last_anchor: Option<Anchor>,
@@ -606,10 +608,63 @@ pub(crate) struct VM {
     /// Multiplications added by deferred randomized constraints. Ordinary
     /// gates are read from the finalized constraint system by the delegate.
     deferred_multiplications: usize,
+}
 
+/// Execution-local resolution, priced identically for resident and pruned refs.
+/// A cache hit cannot turn an absent transaction witness into an available one.
+struct ExecutionCells<'a> {
+    external: &'a BagOfCells,
+    actor: &'a BagOfCells,
+    gas_used: &'a mut u64,
+    gas_limit: u64,
+}
+
+impl ExecutionCells<'_> {
+    fn charge(&mut self, gas: u64) -> Result<(), CellError> {
+        *self.gas_used = self
+            .gas_used
+            .checked_add(gas)
+            .ok_or(CellError::ResourceExhausted)?;
+        if *self.gas_used > self.gas_limit {
+            return Err(CellError::ResourceExhausted);
+        }
+        Ok(())
+    }
+}
+
+impl CellResolver for ExecutionCells<'_> {
+    fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
+        self.charge(1)?;
+        let cell = match reference {
+            CellRef::Resident(cell) => Arc::clone(cell),
+            CellRef::Pruned(id) => self
+                .actor
+                .get(id)
+                .or_else(|| self.external.get(id))
+                .ok_or(CellError::MissingCell(*id))?,
+        };
+        self.charge((cell.encoded_size() as u64).saturating_add(cell.refs().len() as u64))?;
+        Ok(cell)
+    }
 }
 
 impl VM {
+    fn resolver(&mut self) -> ExecutionCells<'_> {
+        ExecutionCells {
+            external: &self.cells,
+            actor: &self.current_call.actor_cells,
+            gas_limit: self.current_call.gas_limit,
+            gas_used: &mut self.current_call.gas_used,
+        }
+    }
+
+    fn with_cells(mut self, cells: Arc<BagOfCells>) -> Self {
+        if matches!(self.current_call.kind, CallKind::ExternalRoot) {
+            self.txlog[1] = TxEntry::CellWitness(cells.id());
+        }
+        self.cells = cells;
+        self
+    }
     /// Executes an external transaction script with the given delegate,
     /// then calls `delegate.finalize`. Crate-internal: the public path
     /// is `ScriptBuilder::build_tx` / `ExternalTx::verify`.
@@ -620,11 +675,7 @@ impl VM {
         gas_limit: u64,
         mut delegate: D,
     ) -> Result<TxResult, VMError> {
-        let mut frame = CallFrame::from_bytecode(
-            script.clone(),
-            CallKind::ExternalRoot,
-            gas_limit,
-        );
+        let mut frame = CallFrame::from_bytecode(script.clone(), CallKind::ExternalRoot, gas_limit);
         frame.charge_gas(alloc_byte_gas(script.len())?)?;
         frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
         let mut vm = Self::new(header, frame);
@@ -641,6 +692,10 @@ impl VM {
         gas_limit: u64,
         delegate: &mut D,
     ) -> Result<TxResult, VMError> {
+        // Freeze public availability before any private witness is executed.
+        let cells = Arc::new(program.cell_witnesses()?);
+        let contract_witnesses = program.contract_witnesses();
+        let script_witnesses = program.script_witnesses()?;
         let bytecode = program.to_bytecode();
         let mut frame = CallFrame::new(
             program.into_instructions(),
@@ -649,40 +704,73 @@ impl VM {
         );
         frame.charge_gas(alloc_byte_gas(bytecode.len())?)?;
         frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
-        let mut vm = Self::new(header, frame);
+        let mut vm = Self::new(header, frame).with_cells(cells);
+        vm.contract_witnesses = contract_witnesses;
+        vm.script_witnesses = script_witnesses;
         while vm.step_external(delegate)? {}
         Ok(vm.into_result(bytecode, None))
     }
 
-    /// Verifier entry: runs external-root **bytecode**, decoding on demand
-    /// without materializing a `Vec<Instruction>`. The witness-free
-    /// counterpart of [`run`]. See ADR 0015.
-    pub(crate) fn run_bytecode<D: Delegate>(
+    /// Verifier entry: decodes external-root bytecode on demand using the
+    /// immutable body set committed by its initiating transaction.
+    pub(crate) fn run_bytecode_with_cells<D: Delegate>(
         header: TxHeader,
         bytecode: Vec<u8>,
         gas_limit: u64,
         delegate: &mut D,
+        cells: &BagOfCells,
     ) -> Result<TxResult, VMError> {
-        let mut frame = CallFrame::from_bytecode(
-            bytecode.clone(),
-            CallKind::ExternalRoot,
-            gas_limit,
-        );
+        let mut frame =
+            CallFrame::from_bytecode(bytecode.clone(), CallKind::ExternalRoot, gas_limit);
         frame.charge_gas(alloc_byte_gas(bytecode.len())?)?;
         frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
-        let mut vm = Self::new(header, frame);
+        let mut vm = Self::new(header, frame).with_cells(Arc::new(cells.clone()));
         while vm.step_external(delegate)? {}
         Ok(vm.into_result(bytecode, None))
     }
 
     /// Executes an internal transaction. On clean exit runs the tx-end
     /// self-destruct sweep against `registry`.
+    #[cfg(test)]
     pub fn execute_internal(
         header: TxHeader,
         message: Message,
         registry: &mut dyn ActorRegistry,
         block: &BlockContext,
     ) -> Result<TxResult, VMError> {
+        Self::execute_internal_with_cells(
+            header,
+            message,
+            registry,
+            block,
+            Arc::new(BagOfCells::new()),
+        )
+    }
+
+    pub fn execute_internal_with_cells(
+        header: TxHeader,
+        message: Message,
+        registry: &mut dyn ActorRegistry,
+        block: &BlockContext,
+        cells: Arc<BagOfCells>,
+    ) -> Result<TxResult, VMError> {
+        // Admission and MessageID/transport construction re-encode arguments.
+        // Price that work before cloning or traversing any of their Cell graphs.
+        let mut message_work = 0u64;
+        for value in message.payload() {
+            message_work = message_work
+                .checked_add(value.encoding_gas()?.checked_mul(4).ok_or(VMError::OutOfGas)?)
+                .and_then(|gas| gas.checked_add(value.clone_gas().saturating_mul(2)))
+                .ok_or(VMError::OutOfGas)?;
+        }
+        if let ActorID::Constructor(code) = &message.target {
+            message_work = message_work
+                .checked_add(alloc_byte_gas(code.len())?.saturating_mul(2))
+                .ok_or(VMError::OutOfGas)?;
+        }
+        if message_work > message.gas {
+            return Err(VMError::OutOfGas);
+        }
         registry.push_checkpoint();
         let target = message.target.clone();
         let message_bytes = message.encoded_size();
@@ -703,11 +791,9 @@ impl VM {
         let mut deployed_code = None;
         if !registry.exists(&message.target) {
             if let ActorID::Constructor(bytes) = &message.target {
-                if let Err(e) = registry.deploy(
-                    message.target.clone(),
-                    bytes.clone(),
-                    empty_state(),
-                ) {
+                if let Err(e) =
+                    registry.deploy(message.target.clone(), bytes.clone(), empty_state())
+                {
                     registry.pop_checkpoint_rollback();
                     return Err(e);
                 }
@@ -721,23 +807,40 @@ impl VM {
                 return Err(e);
             }
         };
-        let initial_gas = alloc_byte_gas(message_bytes)?
+        let initial_gas = message_work.saturating_add(alloc_byte_gas(message_bytes)?)
             .saturating_add(code_bytes.saturating_mul(GAS_PER_ALLOC_BYTE))
             .saturating_add(alloc_item_gas(message.payload().len())?);
         if initial_gas > message.gas {
             registry.pop_checkpoint_rollback();
             return Err(VMError::OutOfGas);
         }
-        let script = match registry.load_code(&message.target) {
+        let actor_cells = match registry.actor_cells(&message.target) {
+            Ok(cells) => cells,
+            Err(error) => {
+                registry.pop_checkpoint_rollback();
+                return Err(error);
+            }
+        };
+        let mut initial_gas = initial_gas;
+        let mut resolver = ExecutionCells {
+            external: &cells,
+            actor: &actor_cells,
+            gas_used: &mut initial_gas,
+            gas_limit: message.gas,
+        };
+        let script = match registry.load_code_with_cells(&message.target, &mut resolver) {
             Ok(script) => script,
             Err(e) => {
                 registry.pop_checkpoint_rollback();
-                return Err(e);
+                return Err(match e {
+                    VMError::Cell(CellError::ResourceExhausted) => VMError::OutOfGas,
+                    other => other,
+                });
             }
         };
         // MessageID is the canonical hash of the whole send (anchor,
         // target, caller, payload, gas, refund
-        // predicate) — analogous to CellID for Output. Capture
+        // predicate) — analogous to ContractID for Output. Capture
         // before the move below.
         let send_id = *message.id().as_bytes();
         let anchor = message.anchor;
@@ -748,12 +851,8 @@ impl VM {
             actor: target.clone(),
             caller,
         };
-        let mut frame = CallFrame::from_bytecode(
-            script,
-            kind,
-            gas,
-        )
-        .with_anchor(anchor);
+        let mut frame = CallFrame::from_bytecode(script, kind, gas).with_anchor(anchor);
+        frame.actor_cells = actor_cells;
         if let Err(e) = frame.charge_gas(initial_gas) {
             registry.pop_checkpoint_rollback();
             return Err(e);
@@ -765,7 +864,7 @@ impl VM {
         for v in payload {
             frame.stack.push(v);
         }
-        let mut vm = Self::new(header, frame);
+        let mut vm = Self::new(header, frame).with_cells(cells);
         vm.block_height = block.height;
         // Commit the triggering MessageID into the Internal TxID merkle
         // root. Symmetric with `op_input` for external txs: the first
@@ -809,7 +908,11 @@ impl VM {
 
     fn new(header: TxHeader, initial_call: CallFrame) -> Self {
         // Header is the first txlog entry so TxID binds to version + locktime.
-        let txlog = vec![TxEntry::Header(header)];
+        let cells = Arc::new(BagOfCells::new());
+        let mut txlog = vec![TxEntry::Header(header)];
+        if matches!(initial_call.kind, CallKind::ExternalRoot) {
+            txlog.push(TxEntry::CellWitness(cells.id()));
+        }
         // Seed last_anchor from the root frame's kind: ExternalRoot →
         // None (op_input must seed); InternalRoot → Some(Message.anchor)
         // (already unique from prior tx's op_send split).
@@ -817,6 +920,10 @@ impl VM {
         Self {
             header,
             block_height: 0,
+            cells,
+            contract_witnesses: BTreeMap::new(),
+            script_witnesses: BTreeMap::new(),
+            value_witnesses: BTreeMap::new(),
             last_anchor,
             current_call: initial_call,
             call_stack: Vec::new(),
@@ -827,9 +934,8 @@ impl VM {
         }
     }
 
-
     /// Splits `last_anchor`: returns the `left` half (to embed in
-    /// a fresh unique-anchored entity — cell, message), and writes
+    /// a fresh unique-anchored entity — contract, message), and writes
     /// the `right` half back. Hard-fails `AnchorMissing` if no
     /// anchor has been claimed yet.
     fn consume_anchor(&mut self) -> Result<Anchor, VMError> {
@@ -860,11 +966,7 @@ impl VM {
     }
 
     /// Drains the VM into a `TxResult`, computing TxID from the txlog.
-    fn into_result(
-        mut self,
-        bytecode: Vec<u8>,
-        proof: Option<R1CSProof>,
-    ) -> TxResult {
+    fn into_result(mut self, bytecode: Vec<u8>, proof: Option<R1CSProof>) -> TxResult {
         let txlog = mem::take(&mut self.txlog);
         let deferred_sigs = mem::take(&mut self.deferred_sigs);
         let txid = TxID::from_log(&txlog);
@@ -876,6 +978,7 @@ impl VM {
             gas_used: self.current_call.gas_used,
             multiplications: self.deferred_multiplications,
             bytecode,
+            cells: self.cells,
             proof,
             deferred_sigs,
         }
@@ -891,20 +994,19 @@ impl VM {
     }
 
     /// True iff CS-touching opcodes are permitted. `ExternalRoot` is
-    /// always external; `CellOpen` inherits the caller's snapshot.
+    /// always external; `ContractOpen` inherits the caller's snapshot.
     fn is_external(&self) -> bool {
         match self.current_call.kind {
             CallKind::ExternalRoot => true,
-            CallKind::CellOpen { external_context, .. } => external_context,
+            CallKind::ContractOpen {
+                external_context, ..
+            } => external_context,
             _ => false,
         }
     }
 
     /// External-context step.
-    pub(crate) fn step_external<D: Delegate>(
-        &mut self,
-        delegate: &mut D,
-    ) -> Result<bool, VMError> {
+    pub(crate) fn step_external<D: Delegate>(&mut self, delegate: &mut D) -> Result<bool, VMError> {
         self.step(delegate, None)
     }
 
@@ -948,7 +1050,16 @@ impl VM {
         // (one borrow live at a time — borrow checker requires the split).
         let (result, registry) = match registry {
             None => (self.step_inner(delegate, None), None),
-            Some(r) => (self.step_inner(delegate, Some(&mut *r)), Some(r)),
+            Some(r) => {
+                let prepared = if let Some(actor) = self.current_call.kind.actor() {
+                    r.actor_cells(actor)
+                        .map(|cells| self.current_call.actor_cells = cells)
+                } else {
+                    Ok(())
+                };
+                let result = prepared.and_then(|()| self.step_inner(delegate, Some(&mut *r)));
+                (result, Some(r))
+            }
         };
         self.post_step(delegate, registry, depth_before, result)
     }
@@ -985,6 +1096,10 @@ impl VM {
                 Ok(cont)
             }
             Err(e) => {
+                let e = match e {
+                    VMError::Cell(CellError::ResourceExhausted) => VMError::OutOfGas,
+                    other => other,
+                };
                 if self.call_stack.is_empty() {
                     return Err(e);
                 }
@@ -1024,12 +1139,12 @@ impl VM {
         };
         use Instruction as I;
         match instr {
-
             I::PushInt(i) => {
-                self.push_value(Value::Int253(i));
+                self.push_value(Value::Scalar(i));
                 Ok(())
             }
             I::PushStr(s) => {
+                s.check_len()?;
                 self.push_value(Value::String(s));
                 Ok(())
             }
@@ -1120,7 +1235,7 @@ impl VM {
             I::Type => self.op_type(),
 
             I::Input => self.op_input(),
-            I::Cell => self.op_cell(),
+            I::Contract => self.op_contract(),
             I::Output => self.op_output(),
             I::Open => self.op_open(),
             I::Send => self.op_send(),
@@ -1135,16 +1250,25 @@ impl VM {
 
             I::Timelock => self.op_timelock(),
             // version → tx header version (spec §version).
-            I::Version => { self.push_value(Value::Int253(Int253::from(self.header.version as u64))); Ok(()) }
+            I::Version => {
+                self.push_value(Value::Scalar(Scalar::from(self.header.version as u64)));
+                Ok(())
+            }
             I::Selfid => self.op_selfid(),
             I::Anchor => self.op_anchor(),
             I::Gas => self.op_gas(),
             I::Usage => self.op_usage(registry),
             I::Callerid => self.op_callerid(),
             // gaslimit → immutable frame budget.
-            I::Gaslimit => { self.push_value(Value::Int253(Int253::from(self.current_call.gas_limit))); Ok(()) }
+            I::Gaslimit => {
+                self.push_value(Value::Scalar(Scalar::from(self.current_call.gas_limit)));
+                Ok(())
+            }
             I::Capacity => self.op_capacity(registry),
-            I::Height => { self.push_value(Value::Int253(Int253::from(self.block_height))); Ok(()) }
+            I::Height => {
+                self.push_value(Value::Scalar(Scalar::from(self.block_height)));
+                Ok(())
+            }
 
             I::Ext(b) => Err(VMError::UnknownOpcode(b)),
         }?;
@@ -1161,10 +1285,7 @@ impl VM {
     /// (failure-path only). Order is load-bearing — identical in
     /// `finish_call` and `op_return`.
     fn clean_exit_to_parent(&mut self, leftover_gas: u64) {
-        self.current_call.gas_used = self
-            .current_call
-            .gas_used
-            .saturating_sub(leftover_gas);
+        self.current_call.gas_used = self.current_call.gas_used.saturating_sub(leftover_gas);
         if let Some(post) = self.current_call.post_call_anchor.take() {
             self.last_anchor = Some(post);
         }
@@ -1187,8 +1308,10 @@ impl VM {
             self.current_call = parent;
             self.clean_exit_to_parent(leftover_gas);
             // Success marker with k=0: stack += [count=0, success=1].
-            self.current_call.stack.push(Value::Int253(Int253::from(0u64)));
-            self.current_call.stack.push(Value::Int253(Int253::ONE));
+            self.current_call
+                .stack
+                .push(Value::Scalar(Scalar::from(0u64)));
+            self.current_call.stack.push(Value::Scalar(Scalar::ONE));
             return Ok(true);
         }
         // Outermost call returned: entire tx complete.
@@ -1227,7 +1350,8 @@ impl VM {
         // Roll back side effects via the snapshots taken at call
         // entry.
         self.txlog.truncate(self.current_call.snap_txlog_len);
-        self.deferred_sigs.truncate(self.current_call.snap_deferred_sigs_len);
+        self.deferred_sigs
+            .truncate(self.current_call.snap_deferred_sigs_len);
         self.deferred_multiplications = self.current_call.snap_deferred_multiplications;
         self.total_fee = self.current_call.snap_total_fee;
         // Restore actor registry state (F1).
@@ -1265,15 +1389,13 @@ impl VM {
 
     /// Failure shape shared by synchronous calls: restored entry values,
     /// the explicit argument count, then the zero status marker. A restored
-    /// Cell is contextual and is not included in `arg_count`.
+    /// Contract is contextual and is not included in `arg_count`.
     fn push_failed_values(&mut self, values: Vec<Value>, arg_count: usize) {
         self.current_call.stack.extend(values);
         self.current_call
             .stack
-            .push(Value::Int253(Int253::from(arg_count as u64)));
-        self.current_call
-            .stack
-            .push(Value::Int253(Int253::ZERO));
+            .push(Value::Scalar(Scalar::from(arg_count as u64)));
+        self.current_call.stack.push(Value::Scalar(Scalar::ZERO));
     }
 
     fn charge_clone_values(&mut self, values: &[Value]) -> Result<(), VMError> {
@@ -1281,6 +1403,14 @@ impl VM {
             .iter()
             .fold(0u64, |gas, value| gas.saturating_add(value.clone_gas()));
         self.current_call.charge_gas(gas)
+    }
+
+    /// Charge bounded serialization work before an opcode constructs Cell data.
+    /// Copies includes subsequent effect/identity encoding of an admitted value.
+    fn charge_value_encoding(&mut self, value: &Value, copies: u64) -> Result<(), VMError> {
+        self.current_call.charge_gas(
+            value.encoding_gas()?.checked_mul(copies).ok_or(VMError::OutOfGas)?,
+        )
     }
 
     fn charge_top_value_growth(&mut self, n: usize) -> Result<(), VMError> {
@@ -1299,8 +1429,8 @@ impl VM {
         self.current_call.stack.pop().ok_or(VMError::StackUnderflow)
     }
 
-    /// Converts a stack-popped `Int253` index into a `usize`.
-    fn int253_to_stack_index(&self, i: Int253) -> Result<usize, VMError> {
+    /// Converts a stack-popped `Scalar` index into a `usize`.
+    fn scalar_to_stack_index(&self, i: Scalar) -> Result<usize, VMError> {
         let v = i.to_u64().ok_or(VMError::IndexOutOfRange)?;
         let idx = usize::try_from(v).map_err(|_| VMError::IndexOutOfRange)?;
         if idx >= self.current_call.stack.len() {
@@ -1309,13 +1439,13 @@ impl VM {
         Ok(idx)
     }
 
-    /// `pushtoken` — `flv → token`. Pops an `Int253` flavor from
+    /// `pushtoken` — `flv → token`. Pops a `Scalar` flavor from
     /// the stack and pushes a zero-qty `ClearToken { qty: 0, flv }`. This
     /// is the canonical "empty bearer of a flavor" used as a starting
     /// point for issuance / borrow flows.
     fn op_pushtoken(&mut self) -> Result<(), VMError> {
-        let flv = self.pop_value()?.to_int253()?;
-        self.push_value(Value::ClearToken(ClearToken::new(Int253::ZERO, flv)));
+        let flv = self.pop_value()?.to_scalar()?;
+        self.push_value(Value::ClearToken(ClearToken::new(Scalar::ZERO, flv)));
         Ok(())
     }
 
@@ -1334,8 +1464,8 @@ impl VM {
     /// `dup` — pops `k`, then copies the now-`k`-th item from top
     /// onto the top.
     fn op_dup(&mut self) -> Result<(), VMError> {
-        let k = self.pop_value()?.to_int253()?;
-        self.op_dup_k(self.int253_to_stack_index(k)?)
+        let k = self.pop_value()?.to_scalar()?;
+        self.op_dup_k(self.scalar_to_stack_index(k)?)
     }
 
     /// `dup:k` — copies `stack[top - k]` onto the top.
@@ -1359,8 +1489,8 @@ impl VM {
     /// `roll` — pops `k`, then moves the `k`-th item from top to
     /// the top.
     fn op_roll(&mut self) -> Result<(), VMError> {
-        let k = self.pop_value()?.to_int253()?;
-        self.op_roll_k(self.int253_to_stack_index(k)?)
+        let k = self.pop_value()?.to_scalar()?;
+        self.op_roll_k(self.scalar_to_stack_index(k)?)
     }
 
     /// `roll:k` — removes `stack[top - k]` and pushes it
@@ -1392,7 +1522,10 @@ impl VM {
         let data = self.pop_value()?.to_string()?;
         let label = self.pop_value()?.to_string()?;
         self.charge_alloc_bytes(
-            label.len().checked_add(data.len()).ok_or(VMError::OutOfGas)?,
+            label
+                .len()
+                .checked_add(data.len())
+                .ok_or(VMError::OutOfGas)?,
         )?;
         let mut m = self.pop_value()?.to_merlin()?;
         m.write_bytes(&label.to_bytes(), &data.to_bytes());
@@ -1405,6 +1538,7 @@ impl VM {
     /// merlin back, then the new String.
     fn op_tread(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
+        String::check_length(n)?;
         self.charge_alloc_bytes(n)?;
         let label = self.pop_value()?.to_string()?;
         self.charge_alloc_bytes(label.len())?;
@@ -1420,7 +1554,8 @@ impl VM {
     /// (pre-FIPS Keccak, Ethereum-compatible).
     fn op_hash<H: sha2::Digest>(&mut self, block_bytes: usize) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
-        self.current_call.charge_gas(hash_gas(s.len(), block_bytes)?)?;
+        self.current_call
+            .charge_gas(hash_gas(s.len(), block_bytes)?)?;
         let digest = H::digest(s.to_bytes());
         self.push_value(Value::String(String::from(digest.to_vec())));
         Ok(())
@@ -1447,9 +1582,14 @@ impl VM {
         self.charge_alloc_items(n)?;
         let mut dict = Dict::new();
         for _ in 0..n {
-            let key = self.pop_value()?.to_int253()?;
+            let key = self.pop_value()?.to_scalar()?;
             let value = self.pop_value()?;
-            if dict.insert_strict(key, value).is_err() {
+            self.charge_value_encoding(&value, 1)?;
+            if dict
+                .insert_strict_resolved(key, value, &mut self.resolver())
+                .map_err(|(error, _value)| VMError::from(error))?
+                .is_err()
+            {
                 return Err(VMError::DictKeyOccupied);
             }
         }
@@ -1461,10 +1601,15 @@ impl VM {
     /// occupied key.
     fn op_put(&mut self) -> Result<(), VMError> {
         let v = self.pop_value()?;
-        let k = self.pop_value()?.to_int253()?;
+        let k = self.pop_value()?.to_scalar()?;
         let mut dict = self.pop_value()?.to_dict()?;
         self.charge_alloc_items(1)?;
-        if dict.insert_strict(k, v).is_err() {
+        self.charge_value_encoding(&v, 1)?;
+        if dict
+            .insert_strict_resolved(k, v, &mut self.resolver())
+            .map_err(|(error, _value)| VMError::from(error))?
+            .is_err()
+        {
             return Err(VMError::DictKeyOccupied);
         }
         self.push_value(Value::Dict(dict));
@@ -1476,18 +1621,24 @@ impl VM {
     /// Stack order matches `put`: `v` on top, `k` below.
     fn op_replace(&mut self) -> Result<(), VMError> {
         let v = self.pop_value()?;
-        let k = self.pop_value()?.to_int253()?;
+        let k = self.pop_value()?.to_scalar()?;
         let mut dict = self.pop_value()?.to_dict()?;
         self.charge_alloc_items(1)?;
-        let prev = dict.insert(k, v);
+        self.charge_value_encoding(&v, 1)?;
+        let prev = dict
+            .insert_resolved(k, v, &mut self.resolver())
+            .map_err(|(error, _value)| VMError::from(error))?;
+        let prev = prev
+            .map(|value| self.restore_private_value(value))
+            .transpose()?;
         self.push_value(Value::Dict(dict));
         match prev {
             Some(prev_v) => {
                 self.push_value(prev_v);
-                self.push_value(Value::Int253(Int253::from(1u64)));
+                self.push_value(Value::Scalar(Scalar::from(1u64)));
             }
             None => {
-                self.push_value(Value::Int253(Int253::ZERO));
+                self.push_value(Value::Scalar(Scalar::ZERO));
             }
         }
         Ok(())
@@ -1496,11 +1647,14 @@ impl VM {
     /// `get` — `dict k → dict' k v`. Removes and returns the
     /// value at `k`. Fails if the key is missing.
     fn op_get(&mut self) -> Result<(), VMError> {
-        let k = self.pop_value()?.to_int253()?;
+        let k = self.pop_value()?.to_scalar()?;
         let mut dict = self.pop_value()?.to_dict()?;
-        let v = dict.remove(&k).ok_or(VMError::DictKeyNotFound)?;
+        let v = dict
+            .remove_resolved(&k, &mut self.resolver())?
+            .ok_or(VMError::DictKeyNotFound)?;
+        let v = self.restore_private_value(v)?;
         self.push_value(Value::Dict(dict));
-        self.push_value(Value::Int253(k));
+        self.push_value(Value::Scalar(k));
         self.push_value(v);
         Ok(())
     }
@@ -1508,9 +1662,12 @@ impl VM {
     /// `getopt` — `dict k → dict' {v 1 | 0}`. Like `get`, but
     /// soft-fails (pushes `0`) when the key is missing.
     fn op_getopt(&mut self) -> Result<(), VMError> {
-        let k = self.pop_value()?.to_int253()?;
+        let k = self.pop_value()?.to_scalar()?;
         let mut dict = self.pop_value()?.to_dict()?;
-        let v = dict.remove(&k);
+        let v = dict.remove_resolved(&k, &mut self.resolver())?;
+        let v = v
+            .map(|value| self.restore_private_value(value))
+            .transpose()?;
         self.push_value(Value::Dict(dict));
         self.push_optional_value(v);
         Ok(())
@@ -1520,16 +1677,16 @@ impl VM {
     /// without consuming it. Soft-fails with `0` on missing key; hard
     /// errors if the value exists but isn't copyable.
     fn op_getdup(&mut self) -> Result<(), VMError> {
-        let k = self.pop_value()?.to_int253()?;
-        let dict = self.pop_value()?.to_dict()?;
-        let copied = match dict.get(&k) {
+        let k = self.pop_value()?.to_scalar()?;
+        let mut dict = self.pop_value()?.to_dict()?;
+        let copied = match dict.get_resolved(&k, &mut self.resolver())? {
             Some(v) => {
                 let bytes = match v {
                     Value::String(s) => s.len(),
                     _ => 0,
                 };
                 self.charge_alloc_bytes(bytes)?;
-                Some(v.try_clone()?)
+                Some(self.restore_private_value(v.try_clone()?)?)
             }
             None => None,
         };
@@ -1543,9 +1700,9 @@ impl VM {
         match v {
             Some(v) => {
                 self.push_value(v);
-                self.push_value(Value::Int253(Int253::from(1u64)));
+                self.push_value(Value::Scalar(Scalar::from(1u64)));
             }
-            None => self.push_value(Value::Int253(Int253::ZERO)),
+            None => self.push_value(Value::Scalar(Scalar::ZERO)),
         }
     }
 
@@ -1553,36 +1710,36 @@ impl VM {
     /// alongside a flag, or `0` if the dict is empty.
     fn op_first(&mut self) -> Result<(), VMError> {
         let dict = self.pop_value()?.to_dict()?;
-        let k = dict.first_key();
+        let k = dict.first_key_resolved(&mut self.resolver())?;
         self.push_value(Value::Dict(dict));
-        self.push_optional_value(k.map(Value::Int253));
+        self.push_optional_value(k.map(Value::Scalar));
         Ok(())
     }
 
     /// `last` — `dict → dict {k 1 | 0}`. Mirror of `first`.
     fn op_last(&mut self) -> Result<(), VMError> {
         let dict = self.pop_value()?.to_dict()?;
-        let k = dict.last_key();
+        let k = dict.last_key_resolved(&mut self.resolver())?;
         self.push_value(Value::Dict(dict));
-        self.push_optional_value(k.map(Value::Int253));
+        self.push_optional_value(k.map(Value::Scalar));
         Ok(())
     }
 
     /// `next` — `dict k → dict {k' 1 | 0}`. Smallest key strictly
     /// greater than `k`, or `0` if no such key exists.
     fn op_next(&mut self) -> Result<(), VMError> {
-        let k = self.pop_value()?.to_int253()?;
+        let k = self.pop_value()?.to_scalar()?;
         let dict = self.pop_value()?.to_dict()?;
-        let next_k = dict.next_key_after(&k);
+        let next_k = dict.next_key_after_resolved(&k, &mut self.resolver())?;
         self.push_value(Value::Dict(dict));
-        self.push_optional_value(next_k.map(Value::Int253));
+        self.push_optional_value(next_k.map(Value::Scalar));
         Ok(())
     }
 
     /// Helper: converts a stack-popped count into a `usize` ≤ `max`.
     /// Returns `IndexOutOfRange` on overflow or above `max`.
     fn pop_byte_count(&mut self, max: usize) -> Result<usize, VMError> {
-        let n_int = self.pop_value()?.to_int253()?;
+        let n_int = self.pop_value()?.to_scalar()?;
         let n_u64 = n_int.to_u64().ok_or(VMError::IndexOutOfRange)?;
         let n = usize::try_from(n_u64).map_err(|_| VMError::IndexOutOfRange)?;
         if n > max {
@@ -1591,19 +1748,19 @@ impl VM {
         Ok(n)
     }
 
-    /// Pushes a failure marker (`Int253(0)`) — used by `read*` opcodes
+    /// Pushes a failure marker (`Scalar(0)`) — used by `read*` opcodes
     /// when the source string is too short to satisfy the request. The
     /// original string is restored under the marker.
     fn push_read_failure(&mut self, original: String) {
         self.push_value(Value::String(original));
-        self.push_value(Value::Int253(Int253::ZERO));
+        self.push_value(Value::Scalar(Scalar::ZERO));
     }
 
     /// _s n_ **readbits** → _s' x 1_ | _s 0_
     ///
-    /// Reads `n ≤ 256` bits LSB-first into a fresh `Int253`. A negative or
-    /// greater-than-256 count hard-fails `IndexOutOfRange`; short input,
-    /// non-canonical magnitude, or negative zero soft-fails.
+    /// Reads `n ≤ 256` bits LSB-first into a fresh `Scalar`. A count outside
+    /// `[0, 256]` hard-fails `IndexOutOfRange`; short input or a value at
+    /// least the scalar modulus soft-fails.
     fn op_read_bits(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(256)?;
         let s = self.pop_value()?.to_string()?;
@@ -1624,9 +1781,8 @@ impl VM {
                 int_bytes[n_bytes - 1] &= (1u8 << tail_bits) - 1;
             }
         }
-        // `Int253::from_bytes` enforces both canonicality (magnitude < ℓ)
-        // and the negative-zero invariant. Either violation soft-fails.
-        let value = match Int253::from_bytes(int_bytes) {
+        // `Scalar::from_bytes` rejects non-canonical residues (values ≥ ℓ).
+        let value = match Scalar::from_bytes(int_bytes) {
             Some(v) => v,
             None => {
                 self.push_read_failure(String::from(bytes)); // bytes untouched
@@ -1634,15 +1790,15 @@ impl VM {
             }
         };
         self.push_value(Value::String(String::from(bytes[n_bytes..].to_vec())));
-        self.push_value(Value::Int253(value));
-        self.push_value(Value::Int253(Int253::from(1u64)));
+        self.push_value(Value::Scalar(value));
+        self.push_value(Value::Scalar(Scalar::from(1u64)));
         Ok(())
     }
 
     /// `readint` — `s → s' x 1 | s 0`. Reads the canonical
-    /// 32-byte `Int253` (bit 255 = sign, bits 0..254 = magnitude) from
+    /// 32-byte little-endian `Scalar` from
     /// the front of `s`. Equivalent to `readbits(s, 256)`. Soft-fails
-    /// on insufficient bytes, magnitude ≥ ℓ, or negative zero.
+    /// on insufficient bytes or a residue ≥ ℓ.
     fn op_read_int(&mut self) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
         if s.len() < 32 {
@@ -1653,7 +1809,7 @@ impl VM {
         let bytes = s.to_bytes();
         let mut int_bytes = [0u8; 32];
         int_bytes.copy_from_slice(&bytes[..32]);
-        let value = match Int253::from_bytes(int_bytes) {
+        let value = match Scalar::from_bytes(int_bytes) {
             Some(v) => v,
             None => {
                 self.push_read_failure(String::from(bytes));
@@ -1661,8 +1817,8 @@ impl VM {
             }
         };
         self.push_value(Value::String(String::from(bytes[32..].to_vec())));
-        self.push_value(Value::Int253(value));
-        self.push_value(Value::Int253(Int253::from(1u64)));
+        self.push_value(Value::Scalar(value));
+        self.push_value(Value::Scalar(Scalar::from(1u64)));
         Ok(())
     }
 
@@ -1679,7 +1835,7 @@ impl VM {
         let (remainder, consumed) = s.split_at(n).expect("length checked");
         self.push_value(Value::String(remainder));
         self.push_value(Value::String(consumed));
-        self.push_value(Value::Int253(Int253::from(1u64)));
+        self.push_value(Value::Scalar(Scalar::from(1u64)));
         Ok(())
     }
 
@@ -1699,43 +1855,40 @@ impl VM {
         let point = Point::from_bytes(arr);
         self.push_value(Value::String(String::from(bytes[32..].to_vec())));
         self.push_value(Value::Point(point));
-        self.push_value(Value::Int253(Int253::from(1u64)));
+        self.push_value(Value::Scalar(Scalar::from(1u64)));
         Ok(())
     }
 
     /// _s x n_ **writebits** → _s'_
     ///
     /// Appends the low `n` bits of `x` (LSB-first) to `s`. `n` must be
-    /// a multiple of 8 and ≤ 256. Sign bit included iff `n = 256`.
+    /// a multiple of 8 and ≤ 256. Bytes come from the canonical scalar encoding.
     fn op_write_bits(&mut self) -> Result<(), VMError> {
-        // Invalid signed/range counts fail through `pop_byte_count`; byte
+        // Out-of-range counts fail through `pop_byte_count`; byte
         // misalignment has the more specific error below.
         let n = self.pop_byte_count(256)?;
         if n % 8 != 0 {
             return Err(VMError::BitCountOutOfRange);
         }
         let n_bytes = n / 8;
-        let x = self.pop_value()?.to_int253()?;
+        let x = self.pop_value()?.to_scalar()?;
         let s = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(
-            s.len().checked_add(n_bytes).ok_or(VMError::OutOfGas)?,
-        )?;
-        // Raw 32-byte sign-magnitude form; low `n` bits = first `n_bytes`.
+        self.charge_alloc_bytes(s.appended_len(n_bytes)?)?;
+        // Canonical 32-byte scalar; low `n` bits = first `n_bytes`.
         let raw = x.to_bytes();
-        let appended = s.append_bytes(&raw[..n_bytes]);
+        let appended = s.append_bytes(&raw[..n_bytes])?;
         self.push_value(Value::String(appended));
         Ok(())
     }
 
     /// `writeint` — `s x → s'`. Appends the canonical 32-byte
-    /// `Int253` representation of `x` to `s` (bit 255 carries the sign;
-    /// bits 0..254 carry the magnitude). Equivalent to
-    /// `writebits(s, x, 256)`.
+    /// little-endian `Scalar` representation of `x` to `s`.
+    /// Equivalent to `writebits(s, x, 256)`.
     fn op_write_int(&mut self) -> Result<(), VMError> {
-        let x = self.pop_value()?.to_int253()?;
+        let x = self.pop_value()?.to_scalar()?;
         let s = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(s.len().checked_add(32).ok_or(VMError::OutOfGas)?)?;
-        let appended = s.append_bytes(&x.to_bytes());
+        self.charge_alloc_bytes(s.appended_len(32)?)?;
+        let appended = s.append_bytes(&x.to_bytes())?;
         self.push_value(Value::String(appended));
         Ok(())
     }
@@ -1744,10 +1897,8 @@ impl VM {
     fn op_append(&mut self) -> Result<(), VMError> {
         let s2 = self.pop_value()?.to_string()?;
         let s1 = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(
-            s1.len().checked_add(s2.len()).ok_or(VMError::OutOfGas)?,
-        )?;
-        self.push_value(Value::String(s1.append_bytes(&s2.to_bytes())));
+        self.charge_alloc_bytes(s1.appended_len(s2.len())?)?;
+        self.push_value(Value::String(s1.append_bytes(&s2.to_bytes())?));
         Ok(())
     }
 
@@ -1767,8 +1918,8 @@ impl VM {
     fn op_write_zeros(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
         let s = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(s.len().checked_add(n).ok_or(VMError::OutOfGas)?)?;
-        let appended = s.append_zeros(n);
+        self.charge_alloc_bytes(s.appended_len(n)?)?;
+        let appended = s.append_zeros(n)?;
         self.push_value(Value::String(appended));
         Ok(())
     }
@@ -1853,15 +2004,14 @@ impl VM {
         Ok(())
     }
 
-    /// `abs` — pops an `Int253`, pushes its magnitude (positive
-    /// `Int253`), then pushes the original sign as `Int253` (`0` for
-    /// non-negative, `1` for negative). Top of stack ends up holding
-    /// the sign bit.
+    /// `abs` — interprets a scalar in the centered interval `[-H, H]`,
+    /// where `H = (ℓ - 1) / 2`, and pushes its magnitude followed by
+    /// `0` for a non-negative value or `1` for a negative value.
     fn op_abs(&mut self) -> Result<(), VMError> {
-        let v = self.pop_value()?.to_int253()?;
-        let sign_bit = if v.is_negative() { 1u64 } else { 0u64 };
-        self.push_value(Value::Int253(v.abs()));
-        self.push_value(Value::Int253(Int253::from(sign_bit)));
+        let v = self.pop_value()?.to_scalar()?;
+        let sign = u64::from(v.is_centered_negative());
+        self.push_value(Value::Scalar(v.centered_abs()));
+        self.push_value(Value::Scalar(Scalar::from(sign)));
         Ok(())
     }
 
@@ -1872,26 +2022,30 @@ impl VM {
             return Err(VMError::StackUnderflow);
         }
         // CS-lift only when an operand is actually a CS type (Variable /
-        // Expression). A "non-Int253" test would wrongly route String /
+        // Expression). A "non-Scalar" test would wrongly route String /
         // Point comparisons (e.g. the `anchor … eq verify` binding idiom)
         // into `to_expression()` and hard-fail in external context.
-        let cs_involved = matches!(self.current_call.stack[n - 1], Value::Variable(_) | Value::Expression(_))
-            || matches!(self.current_call.stack[n - 2], Value::Variable(_) | Value::Expression(_));
+        let cs_involved = matches!(
+            self.current_call.stack[n - 1],
+            Value::Variable(_) | Value::Expression(_)
+        ) || matches!(
+            self.current_call.stack[n - 2],
+            Value::Variable(_) | Value::Expression(_)
+        );
         if self.is_external() && cs_involved {
             self.charge_top_value_growth(2)?;
             let b = self.pop_value()?.to_expression()?;
             let a = self.pop_value()?.to_expression()?;
             self.push_value(Value::Constraint(Constraint::eq(a, b)));
         } else {
-            let eq = self.current_call.stack[n - 1]
-                .try_eq(&self.current_call.stack[n - 2])?;
+            let eq = self.current_call.stack[n - 1].try_eq(&self.current_call.stack[n - 2])?;
             let bit = if eq { 1u64 } else { 0u64 };
-            self.push_value(Value::Int253(Int253::from(bit)));
+            self.push_value(Value::Scalar(Scalar::from(bit)));
         }
         Ok(())
     }
 
-    /// _x_ **neg** → _-x_  (Int253 cleartext or Expression LC negate)
+    /// _x_ **neg** → _-x_  (Scalar cleartext or Expression LC negate)
     fn op_neg<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
         self.charge_top_value_growth(1)?;
         let v = self.pop_value()?.neg()?;
@@ -1912,26 +2066,27 @@ impl VM {
     /// _x y_ **mul** → _z_  (cleartext modulo ℓ, MSM scalar-point lift,
     /// or CS multiplier)
     fn op_mul<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
-        use crate::msm::{int_to_scalar, MultiscalarMul};
+        use crate::msm::MultiscalarMul;
         self.charge_top_value_growth(2)?;
         let b = self.pop_value()?;
         let a = self.pop_value()?;
         match (a, b) {
-            (Value::Int253(x), Value::Int253(y)) => {
-                self.push_value(Value::Int253(x * y));
+            (Value::Scalar(x), Value::Scalar(y)) => {
+                self.push_value(Value::Scalar(x * y));
                 Ok(())
             }
             // scalar * point / point * scalar → MSM with one term.
-            (Value::Int253(s), Value::Point(p)) | (Value::Point(p), Value::Int253(s)) => {
-                self.push_value(Value::MultiscalarMul(
-                    MultiscalarMul::term(int_to_scalar(s), p.to_compressed()),
-                ));
+            (Value::Scalar(s), Value::Point(p)) | (Value::Point(p), Value::Scalar(s)) => {
+                self.push_value(Value::MultiscalarMul(MultiscalarMul::term(
+                    s.to_dalek(),
+                    p.to_compressed(),
+                )));
                 Ok(())
             }
             // scalar * MSM / MSM * scalar → scale coefficients.
-            (Value::Int253(s), Value::MultiscalarMul(m))
-            | (Value::MultiscalarMul(m), Value::Int253(s)) => {
-                self.push_value(Value::MultiscalarMul(m.scaled(int_to_scalar(s))));
+            (Value::Scalar(s), Value::MultiscalarMul(m))
+            | (Value::MultiscalarMul(m), Value::Scalar(s)) => {
+                self.push_value(Value::MultiscalarMul(m.scaled(s.to_dalek())));
                 Ok(())
             }
             // Quadratic group-element products are not defined in
@@ -1939,9 +2094,7 @@ impl VM {
             (Value::Point(_), Value::Point(_))
             | (Value::Point(_), Value::MultiscalarMul(_))
             | (Value::MultiscalarMul(_), Value::Point(_))
-            | (Value::MultiscalarMul(_), Value::MultiscalarMul(_)) => {
-                Err(VMError::TypeNotInt253)
-            }
+            | (Value::MultiscalarMul(_), Value::MultiscalarMul(_)) => Err(VMError::TypeNotScalar),
             (a, b) if self.is_external() => {
                 let aexpr = a.to_expression()?;
                 let bexpr = b.to_expression()?;
@@ -1954,24 +2107,25 @@ impl VM {
                 self.push_value(Value::Expression(product));
                 Ok(())
             }
-            _ => Err(VMError::TypeNotInt253),
+            _ => Err(VMError::TypeNotScalar),
         }
     }
 
-    /// `divmod` — `x z → d r`. Truncated division: `sign(d) =
-    /// sign(x) XOR sign(z)`, `sign(r) = sign(x)`. Errors on zero divisor.
+    /// `divmod` — `x z → d r`. Centered integer division, truncating
+    /// toward zero: `x = d*z + r` over integers, `|r| < |z|`, and a
+    /// nonzero remainder has the dividend's sign. Errors on zero divisor.
     fn op_divmod(&mut self) -> Result<(), VMError> {
-        let z = self.pop_value()?.to_int253()?;
-        let x = self.pop_value()?.to_int253()?;
+        let z = self.pop_value()?.to_scalar()?;
+        let x = self.pop_value()?.to_scalar()?;
         let (d, r) = x.div_rem(z).ok_or(VMError::DivByZero)?;
-        self.push_value(Value::Int253(d));
-        self.push_value(Value::Int253(r));
+        self.push_value(Value::Scalar(d));
+        self.push_value(Value::Scalar(r));
         Ok(())
     }
 
     /// `mod252` — pops a `String` of 0..=64 bytes, interprets it
     /// as a little-endian unsigned integer, reduces it modulo ℓ, and
-    /// pushes the result as a non-negative `Int253`.
+    /// pushes the canonical `Scalar` residue.
     fn op_mod252(&mut self) -> Result<(), VMError> {
         let s = self.pop_value()?.to_string()?;
         let bytes = s.to_bytes();
@@ -1980,12 +2134,12 @@ impl VM {
         }
         let mut buf = [0u8; 64];
         buf[..bytes.len()].copy_from_slice(&bytes);
-        let scalar = Scalar::from_bytes_mod_order_wide(&buf);
-        self.push_value(Value::Int253(Int253::from(scalar)));
+        let scalar = DalekScalar::from_bytes_mod_order_wide(&buf);
+        self.push_value(Value::Scalar(Scalar::from(scalar)));
         Ok(())
     }
 
-    /// _x_ **not** → _y_  (Int253 logical, or Constraint negation)
+    /// _x_ **not** → _y_  (Scalar logical, or Constraint negation)
     fn op_not<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
         self.charge_top_value_growth(1)?;
         let v = self.pop_value()?.not()?;
@@ -1993,7 +2147,7 @@ impl VM {
         Ok(())
     }
 
-    /// _a b_ **and** → _c_  (Int253 logical, or Constraint conjunction)
+    /// _a b_ **and** → _c_  (Scalar logical, or Constraint conjunction)
     fn op_and<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
         self.charge_top_value_growth(2)?;
         let b = self.pop_value()?;
@@ -2003,7 +2157,7 @@ impl VM {
         Ok(())
     }
 
-    /// _a b_ **or** → _c_  (Int253 logical, or Constraint disjunction)
+    /// _a b_ **or** → _c_  (Scalar logical, or Constraint disjunction)
     fn op_or<D: Delegate>(&mut self, _delegate: &mut D) -> Result<(), VMError> {
         self.charge_top_value_growth(2)?;
         let b = self.pop_value()?;
@@ -2014,7 +2168,7 @@ impl VM {
     }
 
     /// `size` — peeks the top value and pushes its length as an
-    /// `Int253` (String byte count, Dict entry count). Other types
+    /// `Scalar` (String byte count, Dict entry count). Other types
     /// error with `TypeHasNoLength`.
     fn op_size(&mut self) -> Result<(), VMError> {
         let top = self
@@ -2027,13 +2181,13 @@ impl VM {
             Value::Dict(d) => d.len(),
             _ => return Err(VMError::TypeHasNoLength),
         };
-        self.push_value(Value::Int253(Int253::from(len as u64)));
+        self.push_value(Value::Scalar(Scalar::from(len as u64)));
         Ok(())
     }
 
     /// `verify` — pop one and assert truthiness.
     ///
-    /// - `Int253`: errors `VerifyFailed` if zero, else pops.
+    /// - `Scalar`: errors `VerifyFailed` if zero, else pops.
     /// - `Constraint`: hands the constraint to the CS so the proof
     ///   commits to its truth. Requires external context.
     /// - `MultiscalarMul`: appends `sum(s_i · P_i) == identity` to
@@ -2042,7 +2196,7 @@ impl VM {
     fn op_verify<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         self.charge_top_value_growth(1)?;
         match self.pop_value()? {
-            Value::Int253(v) => {
+            Value::Scalar(v) => {
                 if v.is_zero() {
                     return Err(VMError::VerifyFailed);
                 }
@@ -2090,7 +2244,7 @@ impl VM {
             }
             other => {
                 self.push_value(other);
-                Err(VMError::TypeNotInt253)
+                Err(VMError::TypeNotScalar)
             }
         }
     }
@@ -2106,9 +2260,9 @@ impl VM {
         self.current_call.jump_to_label(n as usize)
     }
 
-    /// _x_ **jumpif:n** → ø — pop an Int253; jump to label `n` iff `x ≠ 0`.
+    /// _x_ **jumpif:n** → ø — pop an Scalar; jump to label `n` iff `x ≠ 0`.
     fn op_jumpif(&mut self, n: u32) -> Result<(), VMError> {
-        let x = self.pop_value()?.to_int253()?;
+        let x = self.pop_value()?.to_scalar()?;
         if x.is_zero() {
             Ok(())
         } else {
@@ -2123,7 +2277,7 @@ impl VM {
     /// Stack on parent after the call: `… values… k 1` (top = 1).
     /// Errors `ReturnAtRoot` at the outermost frame.
     fn op_return(&mut self) -> Result<(), VMError> {
-        let k_int = self.pop_value()?.to_int253()?;
+        let k_int = self.pop_value()?.to_scalar()?;
         let k_u64 = k_int.to_u64().ok_or(VMError::BadReturnArity)?;
         let k = usize::try_from(k_u64).map_err(|_| VMError::BadReturnArity)?;
 
@@ -2152,13 +2306,15 @@ impl VM {
         self.clean_exit_to_parent(leftover_gas);
         // Pour return values, then count, then success marker (1).
         self.current_call.stack.extend(return_values);
-        self.current_call.stack.push(Value::Int253(Int253::from(k as u64)));
-        self.current_call.stack.push(Value::Int253(Int253::ONE));
+        self.current_call
+            .stack
+            .push(Value::Scalar(Scalar::from(k as u64)));
+        self.current_call.stack.push(Value::Scalar(Scalar::ONE));
         Ok(())
     }
 
     /// `type` — peeks the top value and pushes its type code as an
-    /// `Int253`. The original value remains on the stack underneath.
+    /// `Scalar`. The original value remains on the stack underneath.
     fn op_type(&mut self) -> Result<(), VMError> {
         let code = self
             .current_call
@@ -2166,7 +2322,7 @@ impl VM {
             .last()
             .ok_or(VMError::StackUnderflow)?
             .type_code();
-        self.push_value(Value::Int253(Int253::from(code as u64)));
+        self.push_value(Value::Scalar(Scalar::from(code as u64)));
         Ok(())
     }
 
@@ -2175,20 +2331,25 @@ impl VM {
         array32(&s.to_bytes()).ok_or(VMError::MalformedAddress)
     }
 
-    /// Actor destinations accept the compact legacy 32-byte hash or an exact
-    /// canonical `ActorID` encoding. The latter preserves constructor code for
-    /// deploy-on-first-delivery.
+    /// Actor destinations accept a 32-byte hash or a canonical ActorID Cell
+    /// envelope, including constructor code for deploy-on-first-delivery.
     fn pop_actor_id(&mut self) -> Result<ActorID, VMError> {
         let bytes = self.pop_value()?.to_string()?.to_bytes_vec();
         if let Some(hash) = array32(&bytes) {
             return Ok(ActorID::Hash(hash));
         }
-        let mut reader = bytes.as_slice();
-        let actor = ActorID::decode(&mut reader).map_err(|_| VMError::MalformedAddress)?;
-        if !reader.is_empty() {
-            return Err(VMError::MalformedAddress);
-        }
-        Ok(actor)
+        let envelope = cells::CellEnvelope::decode(&bytes, bytes.len(), &mut self.current_call)?;
+        let root = envelope
+            .cells()
+            .get(&envelope.root())
+            .ok_or(VMError::MalformedAddress)?;
+        let mut resolver = ExecutionCells {
+            external: envelope.cells(),
+            actor: &self.current_call.actor_cells,
+            gas_limit: self.current_call.gas_limit,
+            gas_used: &mut self.current_call.gas_used,
+        };
+        ActorID::from_cell(&root, &mut resolver).map_err(VMError::from)
     }
 
     fn op_nop(&mut self) -> Result<(), VMError> {
@@ -2212,8 +2373,8 @@ impl VM {
                 let qty = t.qty();
                 let flv = t.flv();
                 self.push_value(Value::ClearToken(t));
-                self.push_value(Value::Int253(qty));
-                self.push_value(Value::Int253(flv));
+                self.push_value(Value::Scalar(qty));
+                self.push_value(Value::Scalar(flv));
                 Ok(())
             }
             Value::Token(t) => {
@@ -2231,22 +2392,22 @@ impl VM {
         }
     }
 
-    /// _qty:Int253 tag_ **issuepub** → _CT_
+    /// _qty:Scalar tag_ **issuepub** → _CT_
     ///
     /// Cleartext mint under the enclosing actor's identity. Requires
-    /// an internal actor frame; `ExternalRoot` and `CellOpen` error
+    /// an internal actor frame; `ExternalRoot` and `ContractOpen` error
     /// `OpcodeRequiresActorContext` (issuance domains are disjoint —
-    /// see spec.md §issuepub). Non-`Int253` qty hard-fails
-    /// `TypeNotInt253`; the confidential path lives in [`op_issuepriv`].
+    /// see spec.md §issuepub). Non-`Scalar` qty hard-fails
+    /// `TypeNotScalar`; the confidential path lives in [`op_issuepriv`].
     fn op_issuepub(&mut self) -> Result<(), VMError> {
         let actor = self.require_actor()?.clone();
         let tag = self.pop_value()?.to_string()?;
         let qty = match self.pop_value()? {
-            Value::Int253(i) => i,
-            _ => return Err(VMError::TypeNotInt253),
+            Value::Scalar(i) => i,
+            _ => return Err(VMError::TypeNotScalar),
         };
         let flv = flavor_from_actor(&actor, &tag);
-        // Cleartext qty + flv go straight into the txlog as `Int253`s —
+        // Cleartext qty + flv go straight into the txlog as `Scalar`s —
         // no commitment indirection. The `IssuePub` entry is publicly
         // auditable directly on the wire.
         self.txlog.push(TxEntry::IssuePub(qty, flv));
@@ -2257,7 +2418,7 @@ impl VM {
     /// _qty:Variable tag_ **issuepriv** → _T_
     ///
     /// Confidential mint under the enclosing predicate's identity.
-    /// Requires a `CallKind::CellOpen` frame (errors
+    /// Requires a `CallKind::ContractOpen` frame (errors
     /// `OpcodeRequiresPredicateContext` otherwise) AND external
     /// context (errors `ExternalOnly`; the CS lane is needed for the
     /// range proof and the qty commitment registration).
@@ -2265,7 +2426,7 @@ impl VM {
         // Snapshot the predicate before any pop, so a wrong frame
         // surfaces before we mutate the stack.
         let predicate = match &self.current_call.kind {
-            CallKind::CellOpen { predicate, .. } => predicate.clone(),
+            CallKind::ContractOpen { predicate, .. } => predicate.clone(),
             _ => return Err(VMError::OpcodeRequiresPredicateContext),
         };
         self.require_external()?;
@@ -2282,7 +2443,7 @@ impl VM {
         // 64-bit range proof on the qty commitment — `borrow`/`mix`
         // already enforce this for confidential token paths.
         let qty_assignment = match qty_var.commitment.assignment() {
-            Some(i) => Some(int253_to_signed_integer(i)?),
+            Some(i) => Some(scalar_to_signed_integer(i)?),
             None => None,
         };
         spacesuit::range_proof(
@@ -2301,10 +2462,7 @@ impl VM {
             qty_var.commitment.to_point(),
             flv_commit.to_point(),
         ));
-        self.push_value(Value::Token(Token::new(
-            qty_var.commitment,
-            flv_commit,
-        )));
+        self.push_value(Value::Token(Token::new(qty_var.commitment, flv_commit)));
         Ok(())
     }
 
@@ -2326,10 +2484,8 @@ impl VM {
                 Ok(())
             }
             Value::Token(t) => {
-                self.txlog.push(TxEntry::Retire(
-                    t.qty.to_point(),
-                    t.flv.to_point(),
-                ));
+                self.txlog
+                    .push(TxEntry::Retire(t.qty.to_point(), t.flv.to_point()));
                 Ok(())
             }
             other => {
@@ -2341,13 +2497,13 @@ impl VM {
 
     /// _qty flv_ **borrow** → _widetoken token_
     ///
-    /// Cleartext branch for `Int253` operands; encrypted (`Variable`)
+    /// Cleartext branch for `Scalar` operands; encrypted (`Variable`)
     /// branch for CS-bound operands.
     fn op_borrow<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         let flv_val = self.pop_value()?;
         let qty_v = self.pop_value()?;
         match (qty_v, flv_val) {
-            (Value::Int253(qty), Value::Int253(flv)) => {
+            (Value::Scalar(qty), Value::Scalar(flv)) => {
                 let pos = ClearToken::new(qty, flv);
                 let neg = pos.negated();
                 self.push_value(Value::ClearToken(neg));
@@ -2359,7 +2515,7 @@ impl VM {
                 self.op_borrow_encrypted_inner(qty, flv, delegate)
             }
             (Value::Point(_), _) | (_, Value::Point(_)) => Err(VMError::TokenRequiresCS),
-            _ => Err(VMError::TypeNotInt253),
+            _ => Err(VMError::TypeNotScalar),
         }
     }
 
@@ -2370,12 +2526,12 @@ impl VM {
         match a.merge_into(b) {
             Ok(c) => {
                 self.push_value(Value::ClearToken(c));
-                self.push_value(Value::Int253(Int253::from(1u64)));
+                self.push_value(Value::Scalar(Scalar::from(1u64)));
             }
             Err((a, b)) => {
                 self.push_value(Value::ClearToken(a));
                 self.push_value(Value::ClearToken(b));
-                self.push_value(Value::Int253(Int253::ZERO));
+                self.push_value(Value::Scalar(Scalar::ZERO));
             }
         }
         Ok(())
@@ -2383,7 +2539,7 @@ impl VM {
 
     /// _a q_ **split** → _a' b_
     fn op_split(&mut self) -> Result<(), VMError> {
-        let q = self.pop_value()?.to_int253()?;
+        let q = self.pop_value()?.to_scalar()?;
         let a = self.pop_value()?.to_clear_token()?;
         match a.split(q) {
             Some((remainder, new_token)) => {
@@ -2399,7 +2555,7 @@ impl VM {
     ///
     /// Consumer-side helper for `issuepub`: pops `tag` (String) and
     /// `cid` (String, exactly 32 bytes — an actor id), pushes
-    /// `flavor_from_actor(cid, tag)` as `Int253`. Pure helper: no CS,
+    /// `flavor_from_actor(cid, tag)` as `Scalar`. Pure helper: no CS,
     /// no txlog effect, no actor-context requirement. Use to
     /// recompute and verify a cleartext token's flavor without
     /// running the corresponding `issuepub`.
@@ -2408,7 +2564,7 @@ impl VM {
         let cid = self.pop_value()?.to_string()?;
         let bytes = array32(&cid.to_bytes()).ok_or(VMError::IndexOutOfRange)?;
         let flv = flavor_from_actor(&ActorID::Hash(bytes), &tag);
-        self.push_value(Value::Int253(flv));
+        self.push_value(Value::Scalar(flv));
         Ok(())
     }
 
@@ -2417,7 +2573,7 @@ impl VM {
     /// Consumer-side helper for `issuepriv`: pops `tag` (String) and
     /// `pred` (String, exactly 32 bytes — a compressed Ristretto
     /// predicate point), pushes `flavor_from_predicate(pred, tag)` as
-    /// `Int253`. Pure helper: no CS, no txlog effect, no
+    /// `Scalar`. Pure helper: no CS, no txlog effect, no
     /// predicate-context requirement. Use to recompute and verify a
     /// confidential token's flavor (the flv commitment is unblinded,
     /// so its point determines the scalar).
@@ -2425,11 +2581,9 @@ impl VM {
         let tag = self.pop_value()?.to_string()?;
         let pred = self.pop_value()?.to_string()?;
         let bytes = array32(&pred.to_bytes()).ok_or(VMError::IndexOutOfRange)?;
-        let predicate = Predicate::opaque(
-            curve25519_dalek::ristretto::CompressedRistretto(bytes),
-        );
+        let predicate = Predicate::opaque(curve25519_dalek::ristretto::CompressedRistretto(bytes));
         let flv = flavor_from_predicate(&predicate, &tag);
-        self.push_value(Value::Int253(flv));
+        self.push_value(Value::Scalar(flv));
         Ok(())
     }
 
@@ -2454,9 +2608,6 @@ impl VM {
         Ok(())
     }
 
-    // (TaprootProof is now constructed from distinct stack pieces; see
-    // `taproot_proof_from_stack_pieces` below `op_open`. The earlier packed
-    // bag-of-bytes layout was replaced per Architect's response on todo
     /// Merlin message for `signcall`: binds the signature to the
     /// program bytes only. Programs add further context (anchor,
     /// actor identity) via explicit checks inside their script.
@@ -2468,101 +2619,127 @@ impl VM {
         out
     }
 
-    /// _string_ **input** → _cell_
+    /// _contract-id:string32_ **input** → _contract_
     ///
-    /// External-only. The prover pushes a `StringWitness::Cell(c)` carrying
-    /// open commitments on Token payloads; the verifier pushes
-    /// `String::Opaque(cell_bytes)` and `to_cell()` decodes to closed
-    /// commitments. No separate witness operand — witnesses ride the
-    /// stack with the value.
+    /// The public body must resolve in the frozen transaction BoC. Private
+    /// witnesses may replace its typed values only after matching this identity.
     fn op_input(&mut self) -> Result<(), VMError> {
         self.require_external()?;
         let encoded = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(encoded.len())?;
-        let cell = encoded.to_cell()?;
-        // Seed the per-tx anchor from the input cell's id — the cell
-        // is a spend-once source on the wire, so its id is unique. Any
-        // prior `last_anchor` (e.g. unused residue from a previous
-        // input + outputs sequence) is replaced. See spec §Anchors.
-        self.last_anchor = Some(Anchor(cell.id()));
-        self.txlog.push(TxEntry::Input(cell.id()));
-        self.push_value(Value::Cell(Box::new(cell)));
+        let id = array32(&encoded.to_bytes()).ok_or(VMError::MalformedContractEncoding)?;
+        let cell = resolve_cell(&mut self.resolver(), &CellRef::pruned(id))?;
+        let public = Contract::from_trusted_cell(&cell, &mut self.resolver())?;
+        self.charge_value_encoding(public.payload(), 3)?;
+        if public.id() != id {
+            return Err(VMError::MalformedContractEncoding);
+        }
+        if let Some(witness) = self.contract_witnesses.get(&id) {
+            if witness.id() != id {
+                return Err(VMError::MalformedContractEncoding);
+            }
+            let mut pending = vec![witness.payload()];
+            while let Some(value) = pending.pop() {
+                match value {
+                    Value::Dict(dict) => pending.extend(dict.cached_values()),
+                    other => {
+                        self.value_witnesses
+                            .insert(other.to_cell()?.id(), other.clone());
+                    }
+                }
+            }
+        }
+        let predicate = public.predicate.clone();
+        let anchor = public.anchor;
+        let payload = self.restore_private_value(public.into_payload())?;
+        let contract = Contract::new(predicate, anchor, payload)?;
+        self.last_anchor = Some(Anchor(id));
+        self.txlog.push(TxEntry::Input(id));
+        self.push_value(Value::Contract(Box::new(contract)));
         Ok(())
     }
 
-    /// _args… k pred_ **cell** → _cell_
-    fn op_cell(&mut self) -> Result<(), VMError> {
+    /// Private leaf witnesses never materialize a Dict or bypass a public path.
+    fn restore_private_value(&mut self, public: Value) -> Result<Value, VMError> {
+        if matches!(public, Value::Dict(_)) || !public.is_portable() {
+            return Ok(public);
+        }
+        self.charge_value_encoding(&public, 1)?;
+        let id = public.to_cell()?.id();
+        Ok(self.value_witnesses.get(&id).cloned().unwrap_or(public))
+    }
+
+    /// _payload pred_ **contract** → _contract_
+    fn op_contract(&mut self) -> Result<(), VMError> {
         let pred = self.pop_value()?.to_point()?.to_predicate()?;
-        let k = self.pop_byte_count(usize::MAX)?;
-        let payload = self.pop_n_values(k)?;
+        let payload = self.pop_value()?;
+        self.charge_value_encoding(&payload, 2)?;
         let anchor = self.consume_anchor()?;
-        let cell = Cell::new(pred, anchor, payload)?;
-        self.push_value(Value::Cell(Box::new(cell)));
+        let contract = Contract::new(pred, anchor, payload)?;
+        self.push_value(Value::Contract(Box::new(contract)));
         Ok(())
     }
 
-    /// _args… k pred_ **output** → ø
+    /// _payload pred_ **output** → ø
     fn op_output(&mut self) -> Result<(), VMError> {
         let pred = self.pop_value()?.to_point()?.to_predicate()?;
-        let k = self.pop_byte_count(usize::MAX)?;
-        let payload = self.pop_n_values(k)?;
+        let payload = self.pop_value()?;
+        self.charge_value_encoding(&payload, 2)?;
         let anchor = self.consume_anchor()?;
-        let cell = Cell::new(pred, anchor, payload)?;
-        self.txlog.push(TxEntry::Output(cell));
+        let contract = Contract::new(pred, anchor, payload)?;
+        self.txlog.push(TxEntry::Output(contract));
         Ok(())
     }
 
-    /// _cell ik nbrs pos script gas portable-args… k_ **open** → _results… k'_
+    /// _contract ik root:string32 index gas portable-args… k_ **open** → _results… k'_
     ///
-    /// Verifies the taproot-proofs, then enters the unlocked script in an
-    /// isolated `CellOpen` frame via [`enter_cell_open_frame`].
+    /// Loads the selected program through the authenticated Cell Trie. The
+    /// isolated frame receives one payload Value, followed by explicit arguments.
     fn op_open(&mut self) -> Result<(), VMError> {
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
         Self::require_portable_call_args(&args)?;
         let gas = self.pop_gas_limit()?;
-        // The callee's budget comes out of the caller's: debit the full
-        // grant now; leftover is refunded on clean return, burned on
-        // failure.
         self.current_call.charge_gas(gas)?;
-        let prog = self.pop_value()?.to_string()?;
-        let position = self.pop_value()?.to_string()?;
-        let neighbors = self.pop_value()?.to_dict()?;
-        let internal_key = self.pop_value()?.to_point()?;
-        let cell = self.pop_value()?.to_cell()?;
-
-        let proof_bytes = neighbors
-            .len()
-            .checked_mul(32)
-            .and_then(|n| n.checked_add(position.len()))
-            .and_then(|n| n.checked_add(prog.len()))
-            .ok_or(VMError::OutOfGas)?;
-        self.charge_alloc_items(neighbors.len())?;
-        self.charge_alloc_bytes(proof_bytes)?;
+        let index = self
+            .pop_value()?
+            .to_scalar()?
+            .to_u64()
+            .ok_or(VMError::MalformedTaprootProof)?;
+        let root = array32(&self.pop_value()?.to_string()?.to_bytes())
+            .ok_or(VMError::MalformedTaprootProof)?;
+        let internal_key = self.pop_value()?.to_point()?.to_compressed();
+        let contract = self.pop_value()?.to_contract()?;
         self.current_call.charge_gas(GAS_POINT_DECOMPRESS)?;
-
-        let cp = Self::taproot_proof_from_stack_pieces(
+        let proof = TaprootProof {
             internal_key,
-            &neighbors,
-            &position,
-            &prog,
+            root,
+            index,
+        };
+        let bytes = contract.predicate.open_branch(
+            &proof,
+            &mut self.resolver(),
+            usize::try_from(gas).unwrap_or(usize::MAX),
         )?;
-        let _ = cell.predicate.verify_taproot_proof(&cp)?;
-        // `Script` keeps prover witnesses inline; `Opaque` streams bytes
-        // (no parse) on the verifier. See ADR 0015.
-        let code_bytes = prog.len();
-        let code = prog.into_script()?;
-        // Split parent's anchor for the callee + stash post-call.
+        let code_bytes = bytes.len();
+        let id = crate::script::script_cell(&bytes)?.id();
+        let code = if let Some(instructions) = self.script_witnesses.get(&id) {
+            if crate::string::compile_instructions(instructions) != bytes {
+                return Err(VMError::TaprootProofMismatch);
+            }
+            Script::Transparent(instructions.clone())
+        } else {
+            Script::Opaque(bytes)
+        };
         let child_anchor = self.split_anchor_for_call()?;
-        self.enter_cell_open_frame(cell, code, code_bytes, gas, args, child_anchor)?;
+        self.enter_contract_open_frame(contract, code, code_bytes, gas, args, child_anchor)?;
         Ok(())
     }
 
-    /// _cell script sig gas portable-args… m_ **signcall** → _results… k'_
+    /// _contract script sig gas portable-args… m_ **signcall** → _results… k'_
     ///
     /// Checks an Explicit signature over `script` immediately in internal
     /// execution, or defers it for external batch verification, then enters an
-    /// isolated `CellOpen` frame via [`enter_cell_open_frame`].
+    /// isolated `ContractOpen` frame via [`enter_contract_open_frame`].
     fn op_signcall(&mut self) -> Result<(), VMError> {
         let m = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(m)?;
@@ -2572,7 +2749,7 @@ impl VM {
         self.current_call.charge_gas(gas)?;
         let sig_bytes = self.pop_value()?.to_string()?.to_bytes();
         let prog_str = self.pop_value()?.to_string()?;
-        let cell = self.pop_value()?.to_cell()?;
+        let contract = self.pop_value()?.to_contract()?;
         if sig_bytes.len() != 64 {
             return Err(VMError::BadSignatureBytes);
         }
@@ -2587,11 +2764,11 @@ impl VM {
         let msg = Self::signcall_message(&prog_str.to_bytes_vec());
         let code_bytes = prog_str.len();
         let code = prog_str.into_script()?;
-        let verification_key = cell.predicate.verification_key();
+        let verification_key = contract.predicate.verification_key();
         let external = self.is_external();
         if !external {
-            let signature = musig::Signature::from_bytes(sig)
-                .map_err(|_| VMError::BadSignatureBytes)?;
+            let signature =
+                musig::Signature::from_bytes(sig).map_err(|_| VMError::BadSignatureBytes)?;
             let key = musig::VerificationKey::from_compressed(verification_key);
             signature
                 .verify(&mut signcall_verification_transcript(&msg), key)
@@ -2607,18 +2784,18 @@ impl VM {
                 signature: sig,
             });
         }
-        self.enter_cell_open_frame(cell, code, code_bytes, gas, args, child_anchor)?;
+        self.enter_contract_open_frame(contract, code, code_bytes, gas, args, child_anchor)?;
         Ok(())
     }
 
     /// Shared tail of `op_open` / `op_signcall`: build a new
-    /// `CellOpen` frame snapshotting the caller's CS context, pour
-    /// `cell.payload` then `args` onto the new stack, swap the
+    /// `ContractOpen` frame snapshotting the caller's CS context, pour
+    /// `contract.payload` then `args` onto the new stack, swap the
     /// parent out, and switch the active anchor to `child_anchor`
     /// (the `left` half of the parent's call-entry split).
-    fn enter_cell_open_frame(
+    fn enter_contract_open_frame(
         &mut self,
-        cell: Cell,
+        contract: Contract,
         code: Script,
         code_bytes: usize,
         gas: u64,
@@ -2630,23 +2807,23 @@ impl VM {
         }
         let failure_count = args.len().saturating_add(1);
         self.charge_alloc_items(failure_count)?;
-        let clone_gas = args.iter().fold(
-            1u64.saturating_add(cell.clone_gas()),
-            |gas, value| gas.saturating_add(value.clone_gas()),
-        );
+        let clone_gas = args
+            .iter()
+            .fold(1u64.saturating_add(contract.clone_gas()), |gas, value| {
+                gas.saturating_add(value.clone_gas())
+            });
         self.current_call.charge_gas(clone_gas)?;
         let mut failure_values = Vec::with_capacity(failure_count);
-        failure_values.push(Value::Cell(Box::new(cell.clone())));
+        failure_values.push(Value::Contract(Box::new(contract.clone())));
         failure_values.extend(args.iter().cloned());
         self.current_call.snap_failure_values = failure_values;
         self.current_call.snap_failure_arg_count = args.len();
         let external_context = self.is_external();
         let caller_id = self.current_call.kind.actor().map(ActorID::to_hash);
-        let payload_len = cell.payload().len();
         let mut frame = CallFrame::from_code(
             code,
-            CallKind::CellOpen {
-                predicate: cell.predicate.clone(),
+            CallKind::ContractOpen {
+                predicate: contract.predicate.clone(),
                 external_context,
                 caller_id,
             },
@@ -2654,10 +2831,8 @@ impl VM {
         )
         .with_anchor(child_anchor);
         frame.gas_used = alloc_byte_gas(code_bytes)?
-            .saturating_add(alloc_item_gas(payload_len.saturating_add(args.len()))?);
-        for v in cell.into_payload() {
-            frame.stack.push(v);
-        }
+            .saturating_add(alloc_item_gas(1usize.saturating_add(args.len()))?);
+        frame.stack.push(contract.into_payload());
         for v in args {
             frame.stack.push(v);
         }
@@ -2669,44 +2844,10 @@ impl VM {
 
     /// Pops the child gas grant as a non-negative `u64`.
     fn pop_gas_limit(&mut self) -> Result<u64, VMError> {
-        self
-            .pop_value()?
-            .to_int253()?
+        self.pop_value()?
+            .to_scalar()?
             .to_u64()
             .ok_or(VMError::InvalidBitrange)
-    }
-
-    /// Builds a `TaprootProof` from the four stack-popped pieces. `neighbors`
-    /// must be a list-style Dict of 32-byte Strings.
-    fn taproot_proof_from_stack_pieces(
-        internal_key: Point,
-        neighbors: &Dict,
-        position: &String,
-        program: &String,
-    ) -> Result<TaprootProof, VMError> {
-        let mut n_vec = Vec::with_capacity(neighbors.len());
-        for (i, (k, v)) in neighbors.entries().enumerate() {
-            if *k != Int253::from(i as u64) {
-                return Err(VMError::MalformedTaprootProof);
-            }
-            match v {
-                Value::String(s) => {
-                    if s.len() != 32 {
-                        return Err(VMError::MalformedTaprootProof);
-                    }
-                    let mut h = [0u8; 32];
-                    h.copy_from_slice(&s.to_bytes_vec());
-                    n_vec.push(h);
-                }
-                _ => return Err(VMError::MalformedTaprootProof),
-            }
-        }
-        Ok(TaprootProof {
-            internal_key: internal_key.to_compressed(),
-            neighbors: n_vec,
-            position: position.to_bytes_vec(),
-            program: program.to_bytes_vec(),
-        })
     }
 
     /// _args… k refund gas addr_ **send** → ø
@@ -2720,30 +2861,27 @@ impl VM {
         let target = self.pop_actor_id()?;
         let gas = self
             .pop_value()?
-            .to_int253()?
+            .to_scalar()?
             .to_u64()
             .ok_or(VMError::InvalidBitrange)?;
-        let refund_predicate = Predicate::opaque(
-            curve25519_dalek::ristretto::CompressedRistretto(self.pop_string_32()?),
-        );
+        let refund_predicate = Predicate::opaque(curve25519_dalek::ristretto::CompressedRistretto(
+            self.pop_string_32()?,
+        ));
         let k = self.pop_byte_count(usize::MAX)?;
         let args = self.pop_n_values(k)?;
 
+        for value in &args {
+            self.charge_value_encoding(value, 4)?;
+        }
+        self.charge_clone_values(&args)?;
         let anchor = self.consume_anchor()?;
         let caller = self.current_call.kind.actor().cloned();
         // Single source of truth: the full Message lives in the
         // TxLog as `TxEntry::Send(Message)` — symmetric with
-        // `TxEntry::Output(Cell)`. The block builder scans these
+        // `TxEntry::Output(Contract)`. The block builder scans these
         // entries to construct internal-tx deliveries; no separate
         // queue.
-        let message = Message::new(
-            target,
-            caller,
-            anchor,
-            args,
-            gas,
-            refund_predicate,
-        )?;
+        let message = Message::new(target, caller, anchor, args, gas, refund_predicate)?;
         // A send reserves future execution from the active frame. The grant is
         // intentionally not refunded: asynchronous execution has no live
         // caller to receive it, and descendants must divide an existing grant
@@ -2760,18 +2898,15 @@ impl VM {
     /// re-entry is permitted. There is no VM-level method operand
     /// (ADR 0020). Calls emit no txlog entry; a callee state mutation is
     /// recorded later by `op_save`.
-    fn op_call(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
-        // CellOpen caller attribution is not actor authority: only an actor
+    fn op_call(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
+        // ContractOpen caller attribution is not actor authority: only an actor
         // frame may originate a synchronous actor call.
         let caller = ActorID::Hash(self.require_actor()?.to_hash());
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let callee = self.pop_actor_id()?.to_canonical();
         let gas = self
             .pop_value()?
-            .to_int253()?
+            .to_scalar()?
             .to_u64()
             .ok_or(VMError::InvalidBitrange)?;
         // Debit the grant from the caller (see op_open). A caller that
@@ -2788,29 +2923,38 @@ impl VM {
         // re-entrant call into an actor that's mid-update lands here
         // too: its state is checked out, so `resolve_method` returns
         // `ActorEmpty` (ADR 0017 — the state is the re-entrancy lock).
-        let pre_frame: Result<(Vec<u8>, ActorID, u64), VMError> = (|| {
+        let pre_frame: Result<(Vec<u8>, ActorID, u64, Arc<BagOfCells>), VMError> = (|| {
             if self.call_stack.len() >= MAX_CALL_DEPTH {
                 return Err(VMError::CallDepthExceeded);
             }
             let code_bytes = registry.actor_code_bytes(&callee)?;
-            let initial_gas = code_bytes
+            let mut initial_gas = code_bytes
                 .saturating_mul(GAS_PER_ALLOC_BYTE)
                 .saturating_add(alloc_item_gas(args.len())?);
             if initial_gas > gas {
                 return Err(VMError::OutOfGas);
             }
-            let script = registry.load_code(&callee)?;
-            Ok((script, caller, initial_gas))
+            let actor_cells = registry.actor_cells(&callee)?;
+            let mut resolver = ExecutionCells {
+                external: &self.cells,
+                actor: &actor_cells,
+                gas_used: &mut initial_gas,
+                gas_limit: gas,
+            };
+            let script = registry.load_code_with_cells(&callee, &mut resolver)?;
+            Ok((script, caller, initial_gas, actor_cells))
         })();
-        let (script, caller, initial_gas) = match pre_frame {
+        let (script, caller, initial_gas, actor_cells) = match pre_frame {
             Ok(v) => v,
             Err(error) => {
                 // Pre-frame failure (reentrancy, missing actor, etc.):
                 // restore the moved arguments. Availability failures refund
                 // the grant; an insufficient child budget burns it.
-                if !matches!(error, VMError::OutOfGas) {
-                    self.current_call.gas_used =
-                        self.current_call.gas_used.saturating_sub(gas);
+                if !matches!(
+                    error,
+                    VMError::OutOfGas | VMError::Cell(CellError::ResourceExhausted)
+                ) {
+                    self.current_call.gas_used = self.current_call.gas_used.saturating_sub(gas);
                 }
                 let arg_count = args.len();
                 self.push_failed_values(args, arg_count);
@@ -2840,6 +2984,7 @@ impl VM {
         )
         .with_anchor(callee_anchor);
         frame.gas_used = initial_gas;
+        frame.actor_cells = actor_cells;
         for v in args {
             frame.stack.push(v);
         }
@@ -2862,16 +3007,13 @@ impl VM {
     /// before returning; leftover state fails the clean-stack rule and
     /// rolls back. State shape is not VM-enforced. Re-loading an
     /// already-checked-out actor errors `ActorEmpty`.
-    fn op_load(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_load(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = self.require_actor()?.clone();
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let state_bytes = registry.actor_state_bytes(&actor)?;
         self.current_call
             .charge_gas(state_bytes.saturating_mul(GAS_PER_ALLOC_BYTE))?;
-        let state = registry.load_state(&actor)?;
+        let state = registry.load_state_with_cells(&actor, &mut self.resolver())?;
         self.push_value(state);
         Ok(())
     }
@@ -2883,15 +3025,12 @@ impl VM {
     /// the current actor (which must be checked out by a prior `load` —
     /// else `SaveWithoutLoad`, since saving would clobber live state).
     /// Portability is the canonical storage gate — every inserted value
-    /// must be portable (`Int253`, `String`, `Point`, `Dict` of
+    /// must be portable (`Scalar`, `String`, `Point`, `Dict` of
     /// portable, non-negative `ClearToken`, `Token`). Non-portable
-    /// values (`Cell`, `Merlin`, `Variable`, `Expression`,
+    /// values (`Contract`, `Merlin`, `Variable`, `Expression`,
     /// `Constraint`, `MultiscalarMul`, `WideToken`, negative
     /// `ClearToken`) hard-fail `NonPortableInState`.
-    fn op_save(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_save(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let state = self.pop_value()?;
@@ -2902,6 +3041,7 @@ impl VM {
         if !state.is_portable() {
             return Err(VMError::NonPortableInState);
         }
+        self.charge_value_encoding(&state, 2)?;
         self.current_call.charge_gas(state.clone_gas())?;
         // Rust-level deep clone for the txlog entry. The registry
         // takes ownership of one copy; the txlog gets another.
@@ -2931,10 +3071,7 @@ impl VM {
     /// call this) is the author's, gated in the actor's own code via
     /// `callerid` — actors authenticate by identity, not signatures.
     /// See ADR 0018.
-    fn op_setcode(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_setcode(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let code_string = self.pop_value()?.to_string()?;
@@ -2949,22 +3086,19 @@ impl VM {
 
     /// _q_ **addstorage** → _debt 1 | 0_. Invalid market requests are
     /// soft failures; type, context, and host invariant errors are hard.
-    fn op_addstorage(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_addstorage(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
-        let request = self.pop_value()?.to_int253()?;
+        let request = self.pop_value()?.to_scalar()?;
         let Some(bytes) = request.to_u64() else {
-            self.push_value(Value::Int253(Int253::ZERO));
+            self.push_value(Value::Scalar(Scalar::ZERO));
             return Ok(());
         };
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let Some(purchase) = registry.purchase_storage(&actor, bytes, self.block_height)? else {
-            self.push_value(Value::Int253(Int253::ZERO));
+            self.push_value(Value::Scalar(Scalar::ZERO));
             return Ok(());
         };
-        if purchase.fee_sparks.is_zero() || purchase.fee_sparks.is_negative() {
+        if purchase.fee_sparks.is_zero() || purchase.fee_sparks.is_centered_negative() {
             return Err(VMError::StorageArithmeticOverflow);
         }
         self.txlog.push(TxEntry::StoragePurchase {
@@ -2977,54 +3111,50 @@ impl VM {
             -purchase.fee_sparks,
             FLAME_FLAVOR,
         )));
-        self.push_value(Value::Int253(Int253::ONE));
+        self.push_value(Value::Scalar(Scalar::ONE));
 
         Ok(())
     }
 
     /// _q_ **quotestorage** → _fee 1 | 0_. Read-only counterpart to
     /// [`Self::op_addstorage`].
-    fn op_quotestorage(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_quotestorage(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = self.require_actor()?.clone();
-        let request = self.pop_value()?.to_int253()?;
+        let request = self.pop_value()?.to_scalar()?;
         let Some(bytes) = request.to_u64() else {
-            self.push_value(Value::Int253(Int253::ZERO));
+            self.push_value(Value::Scalar(Scalar::ZERO));
             return Ok(());
         };
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         match registry.quote_storage(&actor, bytes, self.block_height)? {
-            Some(quote) if !quote.fee_sparks.is_zero() && !quote.fee_sparks.is_negative() => {
-                self.push_value(Value::Int253(quote.fee_sparks));
-                self.push_value(Value::Int253(Int253::ONE));
+            Some(quote)
+                if !quote.fee_sparks.is_zero() && !quote.fee_sparks.is_centered_negative() =>
+            {
+                self.push_value(Value::Scalar(quote.fee_sparks));
+                self.push_value(Value::Scalar(Scalar::ONE));
             }
             Some(_) => return Err(VMError::StorageArithmeticOverflow),
-            None => self.push_value(Value::Int253(Int253::ZERO)),
+            None => self.push_value(Value::Scalar(Scalar::ZERO)),
         }
         Ok(())
     }
 
-    /// _cell_ **signtx** → _items… k_
+    /// _contract_ **signtx** → _payload_
     ///
-    /// External-only. Defers a TxID-bound signature for the cell's predicate,
-    /// pours the cell's payload onto the stack, pushes `k`.
+    /// External-only. Defers a TxID-bound signature for the contract's predicate,
+    /// and returns its single payload Value.
     fn op_signtx(&mut self) -> Result<(), VMError> {
         self.require_external()?;
-        let cell = self.pop_value()?.to_cell()?;
-        // Each authorized cell contributes one key/message term to the final
+        let contract = self.pop_value()?.to_contract()?;
+        self.charge_value_encoding(contract.payload(), 1)?;
+        // Each authorized contract contributes one key/message term to the final
         // aggregate-signature verification.
         self.current_call.charge_gas(GAS_SIGNATURE_VERIFY)?;
-        let k = cell.payload().len();
         self.deferred_sigs.push(DeferredSig::TxBound {
-            verification_key: cell.predicate.verification_key(),
-            cell_id: cell.id(),
+            verification_key: contract.predicate.verification_key(),
+            contract_id: contract.id(),
         });
-        for v in cell.into_payload() {
-            self.push_value(v);
-        }
-        self.push_value(Value::Int253(Int253::from(k as u64)));
+        self.push_value(contract.into_payload());
         Ok(())
     }
 
@@ -3039,7 +3169,7 @@ impl VM {
     ///
     /// Pushes the tx's *current* anchor (the value the next consume
     /// site would split). Hard-fails `AnchorMissing` if no anchor
-    /// has been claimed yet — same rule as `cell` / `output` /
+    /// has been claimed yet — same rule as `contract` / `output` /
     /// `send`. Available in either context.
     fn op_anchor(&mut self) -> Result<(), VMError> {
         let a = self.last_anchor.ok_or(VMError::AnchorMissing)?;
@@ -3051,7 +3181,7 @@ impl VM {
     ///
     /// Pushes the direct caller actor id, or all-zero String when no
     /// authenticated actor directly invoked this frame. Available in actor
-    /// and CellOpen frames, but not ExternalRoot.
+    /// and ContractOpen frames, but not ExternalRoot.
     fn op_callerid(&mut self) -> Result<(), VMError> {
         if matches!(self.current_call.kind, CallKind::ExternalRoot) {
             return Err(VMError::OpcodeRequiresActorContext);
@@ -3061,7 +3191,6 @@ impl VM {
         Ok(())
     }
 
-
     /// **timelock** → _n {0|1}_
     ///
     /// Pushes the transaction's `locktime` and a unit flag
@@ -3070,9 +3199,13 @@ impl VM {
     /// (i.e. ≥ 500_000_000, approximately 1985-11-05 Unix time).
     fn op_timelock(&mut self) -> Result<(), VMError> {
         let lt = self.header.locktime as u64;
-        let flag: u64 = if lt >= LOCKTIME_TIMESTAMP_THRESHOLD as u64 { 1 } else { 0 };
-        self.push_value(Value::Int253(Int253::from(lt)));
-        self.push_value(Value::Int253(Int253::from(flag)));
+        let flag: u64 = if lt >= LOCKTIME_TIMESTAMP_THRESHOLD as u64 {
+            1
+        } else {
+            0
+        };
+        self.push_value(Value::Scalar(Scalar::from(lt)));
+        self.push_value(Value::Scalar(Scalar::from(flag)));
         Ok(())
     }
 
@@ -3082,31 +3215,25 @@ impl VM {
             .current_call
             .gas_limit
             .saturating_sub(self.current_call.gas_used);
-        self.push_value(Value::Int253(Int253::from(remaining)));
+        self.push_value(Value::Scalar(Scalar::from(remaining)));
         Ok(())
     }
 
     /// **usage** → _n_.
-    fn op_usage(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_usage(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = self.require_actor()?;
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let usage = registry.actor_usage(actor)?;
-        self.push_value(Value::Int253(Int253::from(usage)));
+        self.push_value(Value::Scalar(Scalar::from(usage)));
         Ok(())
     }
 
     /// _height_ **capacity** → _bytes_.
-    fn op_capacity(
-        &mut self,
-        registry: Option<&mut dyn ActorRegistry>,
-    ) -> Result<(), VMError> {
+    fn op_capacity(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = self.require_actor()?.clone();
         let height = self
             .pop_value()?
-            .to_int253()?
+            .to_scalar()?
             .to_u64()
             .ok_or(VMError::InvalidBitrange)?;
         if height < self.block_height {
@@ -3114,7 +3241,7 @@ impl VM {
         }
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
         let capacity = registry.actor_capacity(&actor, height)?;
-        self.push_value(Value::Int253(Int253::from(capacity)));
+        self.push_value(Value::Scalar(Scalar::from(capacity)));
         Ok(())
     }
 
@@ -3124,14 +3251,14 @@ impl VM {
     /// prover; `None` on the verifier.
     fn op_alloc<D: Delegate>(
         &mut self,
-        witness: Option<Int253>,
+        witness: Option<Scalar>,
         delegate: &mut D,
     ) -> Result<(), VMError> {
         self.require_external()?;
         self.charge_alloc_items(1)?;
         self.current_call.charge_gas(r1cs_gas(1)?)?;
         use bulletproofs::r1cs::ConstraintSystem;
-        let witness_scalar = witness.map(|i| i.to_scalar_mod_order());
+        let witness_scalar = witness.map(|i| i.to_dalek());
         let r1cs_var = delegate
             .cs()
             .allocate(witness_scalar)
@@ -3151,29 +3278,26 @@ impl VM {
         self.require_external()?;
         self.charge_alloc_items(1)?;
         self.current_call.charge_gas(r1cs_gas(1)?)?;
-        use curve25519_dalek::scalar::Scalar;
+        use curve25519_dalek::scalar::Scalar as DalekScalar;
         let var = self.pop_value()?.to_variable()?;
         let (_point, r1cs_var) = delegate.commit_variable(&var.commitment)?;
         let witness = var.commitment.assignment();
-        let expr = Expression::LinearCombination(
-            vec![(r1cs_var, Scalar::ONE)],
-            witness,
-        );
+        let expr = Expression::LinearCombination(vec![(r1cs_var, DalekScalar::ONE)], witness);
         self.push_value(Value::Expression(expr));
         Ok(())
     }
 
-    /// _expr n_ **range** → _expr_
+    /// _x n_ **range** → _x_
     ///
-    /// Pops the bit-count and Expression, adds an `n`-bit non-negativity
-    /// range proof, pushes the Expression back.
+    /// Checks a raw scalar in any context. In external execution only,
+    /// an Expression is checked or constrained to the same `[0, 2^n)` range.
+    /// The checked value is returned with its original type.
     fn op_range<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
-        self.require_external()?;
         use bulletproofs::r1cs::LinearCombination as LC;
         use spacesuit::BitRange;
 
-        // Pop n (bit-count) — must be a non-negative Int253 in [1, 64].
-        let n_int = self.pop_value()?.to_int253()?;
+        // Pop n (bit-count) — must be a scalar in [1, 64].
+        let n_int = self.pop_value()?.to_scalar()?;
         let n_u64 = n_int.to_u64().ok_or(VMError::BitCountOutOfRange)?;
         let n_usize = usize::try_from(n_u64).map_err(|_| VMError::BitCountOutOfRange)?;
         if n_usize == 0 {
@@ -3181,16 +3305,24 @@ impl VM {
         }
         let bit_range = BitRange::new(n_usize).ok_or(VMError::BitCountOutOfRange)?;
 
+        let value = self.pop_value()?;
+        if let Value::Scalar(scalar) = value {
+            if !scalar_fits_in_n_bits(scalar, n_usize) {
+                return Err(VMError::InvalidBitrange);
+            }
+            self.push_value(Value::Scalar(scalar));
+            return Ok(());
+        }
+
+        self.require_external()?;
         self.charge_alloc_items(n_usize)?;
 
-        let expr = self.pop_value()?.to_expression()?;
+        let expr = value.to_expression()?;
 
         match &expr {
             Expression::Constant(value) => {
-                // Cleartext: the value must fit in [0, 2^n). Negative
-                // or too-large constants are caught here without
-                // touching the CS.
-                if !int_fits_in_n_bits(*value, n_usize) {
+                // Public constants are checked without touching the CS.
+                if !scalar_fits_in_n_bits(*value, n_usize) {
                     return Err(VMError::InvalidBitrange);
                 }
                 self.push_value(Value::Expression(expr));
@@ -3200,12 +3332,12 @@ impl VM {
                 self.current_call.charge_gas(r1cs_gas(n_usize)?)?;
                 let lc: LC = terms.iter().cloned().collect();
                 // Convert the witness (if present) to spacesuit's
-                // SignedInteger. Non-negative Int253s up to u64::MAX
-                // map cleanly; anything else fails the prover at
+                // SignedInteger. Scalars in the u64 range map cleanly;
+                // other assignments fail the prover at
                 // gadget time via `to_u64() → None` inside
                 // spacesuit::range_proof.
                 let assignment_si = match assignment {
-                    Some(i) => Some(int253_to_signed_integer(*i)?),
+                    Some(i) => Some(scalar_to_signed_integer(*i)?),
                     None => None,
                 };
                 spacesuit::range_proof(delegate.cs(), lc, assignment_si, bit_range)
@@ -3217,9 +3349,9 @@ impl VM {
     }
 
     /// `scalar` — `string → expr`. Pops a String, downcasts to
-    /// `Int253` via `String::to_scalar`, pushes `Expression::Constant`.
+    /// `Scalar` via `String::to_scalar`, pushes `Expression::Constant`.
     /// For `String::Opaque(bytes)`, the bytes are parsed as a
-    /// canonical sign-magnitude Int253. For `StringWitness::Scalar(i)`, the
+    /// canonical scalar. For `StringWitness::Scalar(i)`, the
     /// witness is extracted directly.
     fn op_scalar(&mut self) -> Result<(), VMError> {
         self.require_external()?;
@@ -3262,10 +3394,10 @@ impl VM {
         // Witness assignments (prover only). Negative qty is a
         // protocol error here — borrow's +T is range-proven non-negative.
         let qty_assignment = match qty.commitment.assignment() {
-            Some(i) => Some(int253_to_signed_integer(i)?),
+            Some(i) => Some(scalar_to_signed_integer(i)?),
             None => None,
         };
-        let flv_assignment = flv.commitment.assignment().map(|i| i.to_scalar_mod_order());
+        let flv_assignment = flv.commitment.assignment().map(|i| i.to_dalek());
         // 64-bit range proof on the positive qty.
         spacesuit::range_proof(
             delegate.cs(),
@@ -3307,17 +3439,23 @@ impl VM {
         self.require_external()?;
         use bulletproofs::r1cs::ConstraintSystem;
         self.current_call.charge_gas(r1cs_gas(2)?)?;
-        let qty = self.pop_value()?.to_int253()?;
-        if qty.is_negative() {
+        let qty = self.pop_value()?.to_scalar()?;
+        if qty.is_centered_negative() {
             return Err(VMError::FeeQtyNegative);
         }
         let qty_u64 = qty.to_u64().ok_or(VMError::FeeTooHigh)?;
         self.total_fee.add(qty_u64)?;
         let qty_scalar: curve25519_dalek::scalar::Scalar = qty.into();
         let flv_scalar: curve25519_dalek::scalar::Scalar = FLAME_FLAVOR.into();
-        let q_var = delegate.cs().allocate(Some(-qty_scalar)).map_err(VMError::R1CSError)?;
+        let q_var = delegate
+            .cs()
+            .allocate(Some(-qty_scalar))
+            .map_err(VMError::R1CSError)?;
         delegate.cs().constrain(q_var + qty_scalar);
-        let f_var = delegate.cs().allocate(Some(flv_scalar)).map_err(VMError::R1CSError)?;
+        let f_var = delegate
+            .cs()
+            .allocate(Some(flv_scalar))
+            .map_err(VMError::R1CSError)?;
         delegate.cs().constrain(f_var - flv_scalar);
         let assignment = Some(Box::new(spacesuit::Value {
             q: -spacesuit::SignedInteger::from(qty_u64),
@@ -3352,10 +3490,10 @@ impl VM {
         let (_, qty_var) = delegate.commit_variable(&qty)?;
         let (_, flv_var) = delegate.commit_variable(&flv)?;
         let qty_assg = match qty.assignment() {
-            Some(i) => Some(int253_to_signed_integer(i)?),
+            Some(i) => Some(scalar_to_signed_integer(i)?),
             None => None,
         };
-        let flv_assg = flv.assignment().map(|i| i.to_scalar_mod_order());
+        let flv_assg = flv.assignment().map(|i| i.to_dalek());
         Ok(spacesuit::AllocatedValue {
             q: qty_var,
             f: flv_var,
@@ -3384,8 +3522,7 @@ impl VM {
         let mix_items = m.checked_add(n).ok_or(VMError::OutOfGas)?;
         let quadratic_work = mix_items.checked_mul(mix_items).ok_or(VMError::OutOfGas)?;
         self.charge_alloc_items(quadratic_work)?;
-        self.current_call
-            .charge_gas(r1cs_gas(quadratic_work)?)?;
+        self.current_call.charge_gas(r1cs_gas(quadratic_work)?)?;
         // Stack depth check: we'll pop 2n commitment Strings + m token values.
         let needed = m.saturating_add(n.saturating_mul(2));
         if needed > self.current_call.stack.len() {
@@ -3404,10 +3541,7 @@ impl VM {
             let qty_commit = qty_str.to_commitment()?;
             let token = Token::new(qty_commit, flv_commit);
             // Build the AllocatedValue against the CS.
-            let allocated = Self::value_to_allocated(
-                Value::Token(token.clone()),
-                delegate,
-            )?;
+            let allocated = Self::value_to_allocated(Value::Token(token.clone()), delegate)?;
             // Insert at front so the deepest output ends up at cloak_outs[0].
             output_tokens.insert(0, token);
             cloak_outs.insert(0, allocated);
@@ -3421,8 +3555,7 @@ impl VM {
         }
         // Run the cloak gadget. On constraint-system error, surface
         // as R1CSError; the verifier will reject the proof.
-        spacesuit::cloak(delegate.cs(), cloak_ins, cloak_outs)
-            .map_err(VMError::R1CSError)?;
+        spacesuit::cloak(delegate.cs(), cloak_ins, cloak_outs).map_err(VMError::R1CSError)?;
         // Push the output Tokens in the same order (deepest first).
         for token in output_tokens {
             self.push_value(Value::Token(token));
@@ -3440,15 +3573,15 @@ impl VM {
     /// checks both equations immediately because it has no deferred batch.
     ///
     /// All four scalar operands (`f`, `f'`, `q`, `q'`) are popped as
-    /// `Int253`. The Token is popped last (deepest on stack). The
+    /// `Scalar`. The Token is popped last (deepest on stack). The
     /// `ClearToken(q, f)` is pushed only after the applicable check is queued
     /// or completed.
     fn op_decrypt<D: Delegate>(&mut self, delegate: &mut D) -> Result<(), VMError> {
         use bulletproofs::PedersenGens;
-        let q_blind = self.pop_value()?.to_int253()?;
-        let q_value = self.pop_value()?.to_int253()?;
-        let f_blind = self.pop_value()?.to_int253()?;
-        let f_value = self.pop_value()?.to_int253()?;
+        let q_blind = self.pop_value()?.to_scalar()?;
+        let q_value = self.pop_value()?.to_scalar()?;
+        let f_blind = self.pop_value()?.to_scalar()?;
+        let f_value = self.pop_value()?.to_scalar()?;
         let token = match self.pop_value()? {
             Value::Token(t) => t,
             _ => return Err(VMError::TypeNotToken),
@@ -3456,37 +3589,32 @@ impl VM {
         // Two point decompressions and two two-term opening equations. The
         // charge is identical whether they are checked immediately or batched.
         let opening_gas = linear_gas(GAS_MSM_VERIFY_BASE, GAS_MSM_VERIFY_TERM, 2)?;
-        self.current_call.charge_gas(
-            opening_gas
-                .checked_mul(2)
-                .ok_or(VMError::OutOfGas)?,
-        )?;
+        self.current_call
+            .charge_gas(opening_gas.checked_mul(2).ok_or(VMError::OutOfGas)?)?;
         let gens = PedersenGens::default();
         let qty_point = token.qty.to_point().decompress();
         let flv_point = token.flv.to_point().decompress();
         if self.is_external() {
             // Each equation gets its own random batch factor, so it cannot
             // cancel another opening or an unrelated signature statement.
-            let neg_one = -Scalar::ONE;
+            let neg_one = -DalekScalar::ONE;
             musig::BatchVerification::append(
                 delegate.batch_verifier(),
-                q_value.to_scalar_mod_order(),
-                [q_blind.to_scalar_mod_order(), neg_one],
+                q_value.to_dalek(),
+                [q_blind.to_dalek(), neg_one],
                 [Some(gens.B_blinding), qty_point],
             );
             musig::BatchVerification::append(
                 delegate.batch_verifier(),
-                f_value.to_scalar_mod_order(),
-                [f_blind.to_scalar_mod_order(), neg_one],
+                f_value.to_dalek(),
+                [f_blind.to_dalek(), neg_one],
                 [Some(gens.B_blinding), flv_point],
             );
         } else {
             let qty_point = qty_point.ok_or(VMError::InvalidPoint)?;
             let flv_point = flv_point.ok_or(VMError::InvalidPoint)?;
-            let expected_qty = gens.B * q_value.to_scalar_mod_order()
-                + gens.B_blinding * q_blind.to_scalar_mod_order();
-            let expected_flv = gens.B * f_value.to_scalar_mod_order()
-                + gens.B_blinding * f_blind.to_scalar_mod_order();
+            let expected_qty = gens.B * q_value.to_dalek() + gens.B_blinding * q_blind.to_dalek();
+            let expected_flv = gens.B * f_value.to_dalek() + gens.B_blinding * f_blind.to_dalek();
             if expected_qty != qty_point || expected_flv != flv_point {
                 return Err(VMError::CommitmentOpeningMismatch);
             }
@@ -3496,16 +3624,10 @@ impl VM {
     }
 }
 
-/// Returns `true` iff `value` is non-negative and fits in `[0, 2^n)`.
-/// Used by `op_range` to short-circuit cleartext Expression::Constant
-/// arguments without touching the CS.
-fn int_fits_in_n_bits(value: Int253, n: usize) -> bool {
-    if value.is_negative() {
-        return false;
-    }
-    if n >= 64 {
-        // Any non-negative Int253 fits — but for n in [1, 64] this
-        // collapses to "fits in u64", which we check via to_u64().
+/// Checks a canonical residue against `[0, 2^n)` for `n` in `[1, 64]`.
+/// Used for raw scalars and public Expression constants, without R1CS.
+fn scalar_fits_in_n_bits(value: Scalar, n: usize) -> bool {
+    if n == 64 {
         return value.to_u64().is_some();
     }
     match value.to_u64() {
@@ -3514,10 +3636,8 @@ fn int_fits_in_n_bits(value: Int253, n: usize) -> bool {
     }
 }
 
-/// Converts an `Int253` to `spacesuit::SignedInteger` if it fits the
-/// `±2^64` range. Out-of-range values error `InvalidBitrange`.
-/// Converts a cleartext `Int253` witness to a `SignedInteger` for a
-/// range-proof assignment.
+/// Converts a scalar's centered value to a `spacesuit::SignedInteger`
+/// witness when its magnitude fits u64. Other values error `InvalidBitrange`.
 ///
 /// **Prover/verifier asymmetry (fail-closed, liveness-only).** Callers
 /// invoke this only on the *prover* side (`commitment.assignment()` is
@@ -3533,9 +3653,9 @@ fn int_fits_in_n_bits(value: Int253, n: usize) -> bool {
 /// tx), not a soundness break. Hardening (making such witness-gated
 /// failures tx-level/uncatchable so they never reach a marker) is a
 /// deliberate ZK-review item, not a drive-by change.
-fn int253_to_signed_integer(value: Int253) -> Result<spacesuit::SignedInteger, VMError> {
-    if value.is_negative() {
-        let mag = value.abs();
+fn scalar_to_signed_integer(value: Scalar) -> Result<spacesuit::SignedInteger, VMError> {
+    if value.is_centered_negative() {
+        let mag = value.centered_abs();
         let mag_u64 = mag.to_u64().ok_or(VMError::InvalidBitrange)?;
         Ok(-spacesuit::SignedInteger::from(mag_u64))
     } else {
@@ -3547,3 +3667,216 @@ fn int253_to_signed_integer(value: Int253) -> Result<spacesuit::SignedInteger, V
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod tests;
+
+#[cfg(test)]
+mod cell_execution_tests {
+    use super::*;
+    use crate::{PredicateTree, Prover, Verifier};
+    use bulletproofs::PedersenGens;
+
+    #[test]
+    fn wrapping_existing_dictionaries_prepays_growing_encoding_work() {
+        let frame = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 15_000);
+        let mut vm = VM::new(TxHeader { version: 1, locktime: 0 }, frame);
+        vm.push_value(Value::String(String::from(vec![7; 1000])));
+        let mut costs = Vec::new();
+        for _ in 0..20 {
+            vm.push_value(Value::Scalar(Scalar::ZERO));
+            vm.push_value(Value::Scalar(Scalar::ONE));
+            let before = vm.current_call.gas_used;
+            match vm.op_dict() {
+                Ok(()) => costs.push(vm.current_call.gas_used - before),
+                Err(VMError::OutOfGas) => {
+                    assert!(costs.len() >= 2);
+                    assert!(costs.windows(2).all(|pair| pair[1] > pair[0]));
+                    return;
+                }
+                Err(error) => panic!("unexpected error: {:?}", error),
+            }
+        }
+        panic!("nested serialization must exhaust the finite budget");
+    }
+
+    #[test]
+    fn dictionary_insertion_rejects_unpaid_large_value_encoding() {
+        let frame = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 100);
+        let mut vm = VM::new(TxHeader { version: 1, locktime: 0 }, frame);
+        vm.push_value(Value::Dict(Dict::new()));
+        vm.push_value(Value::Scalar(Scalar::ZERO));
+        vm.push_value(Value::String(String::from(vec![7; String::MAX_LEN])));
+        assert!(matches!(vm.op_put(), Err(VMError::OutOfGas)));
+    }
+
+    #[test]
+    fn input_dict_loads_only_the_requested_path_even_with_private_witnesses() {
+        struct Recording {
+            source: BagOfCells,
+            used: BagOfCells,
+        }
+        impl CellResolver for Recording {
+            fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
+                let cell = self.source.resolve(reference)?;
+                self.used.insert(Arc::clone(&cell))?;
+                Ok(cell)
+            }
+        }
+        let mut dict = Dict::new();
+        dict.insert(Scalar::ONE, Value::Scalar(Scalar::from(11u64)));
+        dict.insert(Scalar::from(2u64), Value::Scalar(Scalar::from(22u64)));
+        let contract = Contract::new(
+            Predicate::opaque(Predicate::unspendable_key()),
+            Anchor([3; 32]),
+            Value::Dict(dict),
+        )
+        .unwrap();
+        let id = contract.id();
+        let mut recording = Recording {
+            source: BagOfCells::collect(Arc::new(contract.to_cell().unwrap())).unwrap(),
+            used: BagOfCells::new(),
+        };
+        let root = resolve_cell(&mut recording, &CellRef::pruned(id)).unwrap();
+        let loaded = Contract::from_trusted_cell(&root, &mut recording).unwrap();
+        let mut dict = loaded.into_payload().to_dict().unwrap();
+        dict.get_resolved(&Scalar::ONE, &mut recording)
+            .unwrap()
+            .unwrap();
+        assert!(recording.used.len() < recording.source.len());
+        let cells = Arc::new(recording.used);
+
+        let mut costs = Vec::new();
+        for private_overlay in [false, true] {
+            let frame = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 1_000_000);
+            let mut vm = VM::new(
+                TxHeader {
+                    version: 1,
+                    locktime: 0,
+                },
+                frame,
+            )
+            .with_cells(Arc::clone(&cells));
+            if private_overlay {
+                vm.contract_witnesses.insert(id, contract.clone());
+            }
+            vm.push_value(Value::String(String::from(id.to_vec())));
+            vm.op_input()
+                .expect("input does not eagerly hydrate hidden branches");
+            vm.op_signtx().unwrap();
+            let Value::Dict(dict) = &vm.current_call.stack[0] else {
+                panic!("expected Dict")
+            };
+            assert_eq!(dict.cached_values().count(), 0);
+            for _ in 0..2 {
+                vm.push_value(Value::Scalar(Scalar::ONE));
+                let before = vm.current_call.gas_used;
+                vm.op_getdup().unwrap();
+                costs.push(vm.current_call.gas_used - before);
+                assert!(matches!(vm.pop_value().unwrap(), Value::Scalar(n) if n == Scalar::ONE));
+                assert!(
+                    matches!(vm.pop_value().unwrap(), Value::Scalar(n) if n == Scalar::from(11u64))
+                );
+            }
+            vm.push_value(Value::Scalar(Scalar::from(2u64)));
+            assert!(matches!(
+                vm.op_getdup(),
+                Err(VMError::Cell(CellError::MissingCell(_)))
+            ));
+        }
+        assert!(costs.iter().all(|cost| *cost == costs[0]));
+    }
+
+    #[test]
+    fn contract_and_branch_bodies_use_the_committed_bag_and_private_overlays() {
+        let branch = ScriptBuilder::new()
+            .drop_()
+            .alloc(Some(Scalar::from(9u64)))
+            .drop_()
+            .push_int(0u64)
+            .return_();
+        let tree = PredicateTree::scripts_only(vec![branch.to_bytecode()], [7; 32]).unwrap();
+        let (proof, cells) = tree.witness_for(0).unwrap();
+        let contract = Contract::new(
+            Predicate::tree(tree),
+            Anchor([1; 32]),
+            Value::Scalar(Scalar::ONE),
+        )
+        .unwrap();
+        let program = ScriptBuilder::new()
+            .with_cells(cells)
+            .with_script_witness(branch)
+            .unwrap()
+            .push_str(String::contract(contract))
+            .input()
+            .push_point(*proof.internal_key.as_bytes())
+            .push_str(String::from(proof.root.to_vec()))
+            .push_int(proof.index)
+            .push_int(100_000u64)
+            .push_int(0u64)
+            .open()
+            .verify()
+            .drop_();
+        let header = TxHeader {
+            version: 1,
+            locktime: 0,
+        };
+        let pc = PedersenGens::default();
+        let result = Prover::prove(&pc, program, header, 1_000_000).unwrap();
+        let proof = result.proof.as_ref().unwrap();
+        let verified = Verifier::verify_with_cells(
+            &pc,
+            result.bytecode.clone(),
+            proof,
+            header,
+            1_000_000,
+            None,
+            &result.cells,
+        )
+        .unwrap();
+        assert_eq!(result.txid, verified.txid);
+        assert_eq!(result.gas_used, verified.gas_used);
+        assert!(matches!(result.txlog[1], TxEntry::CellWitness(id) if id == result.cells.id()));
+        assert!(
+            Verifier::verify(&pc, result.bytecode.clone(), proof, header, 1_000_000, None).is_err()
+        );
+        let mut extended = result.cells.as_ref().clone();
+        extended
+            .insert(Arc::new(Cell::new(vec![99], vec![]).unwrap()))
+            .unwrap();
+        assert!(Verifier::verify_with_cells(
+            &pc,
+            result.bytecode,
+            proof,
+            header,
+            1_000_000,
+            None,
+            &extended
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn cell_resolution_has_identical_gas_for_ram_actor_storage_and_witnesses() {
+        let cell = Arc::new(Cell::new(vec![7; 128], vec![]).unwrap());
+        let bag = BagOfCells::collect(cell.clone()).unwrap();
+        let empty = BagOfCells::new();
+        let mut costs = Vec::new();
+        for (reference, actor, external) in [
+            (CellRef::Resident(cell.clone()), &empty, &empty),
+            (CellRef::Pruned(cell.id()), &bag, &empty),
+            (CellRef::Pruned(cell.id()), &empty, &bag),
+        ] {
+            let mut gas = 0;
+            let mut resolver = ExecutionCells {
+                external,
+                actor,
+                gas_used: &mut gas,
+                gas_limit: 1000,
+            };
+            assert_eq!(
+                resolve_cell(&mut resolver, &reference).unwrap().id(),
+                cell.id()
+            );
+            costs.push(gas);
+        }
+        assert_eq!(costs, vec![131; 3]);
+    }
+}

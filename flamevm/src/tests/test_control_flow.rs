@@ -24,12 +24,15 @@ fn verify_zero_fails() {
 
 #[test]
 fn verify_requires_int() {
-    // pushpoint, verify — top is Point not Int253.
-    let script = ScriptBuilder::new().push_point([0u8; 32]).verify().to_bytecode();
+    // pushpoint, verify — top is Point not Scalar.
+    let script = ScriptBuilder::new()
+        .push_point([0u8; 32])
+        .verify()
+        .to_bytecode();
     let mut vm = vm_with_script(script);
     assert!(matches!(
         run_to_end(&mut vm).unwrap_err(),
-        VMError::TypeNotInt253
+        VMError::TypeNotScalar
     ));
 }
 
@@ -39,7 +42,12 @@ fn verify_requires_int() {
 fn jumpif_taken_skips_forward() {
     // push:1, jumpif L0, push:5, label L0 — true cond jumps past push:5.
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_int(1u64).jumpif(0).push_int(5u64).label(0).to_bytecode(),
+        ScriptBuilder::new()
+            .push_int(1u64)
+            .jumpif(0)
+            .push_int(5u64)
+            .label(0)
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert!(vm.current_call.stack.is_empty());
@@ -49,18 +57,27 @@ fn jumpif_taken_skips_forward() {
 fn jumpif_not_taken_falls_through() {
     // push:0, jumpif L0, push:5, label L0 — false cond runs push:5.
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_int(0u64).jumpif(0).push_int(5u64).label(0).to_bytecode(),
+        ScriptBuilder::new()
+            .push_int(0u64)
+            .jumpif(0)
+            .push_int(5u64)
+            .label(0)
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(5u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(5u64));
 }
 
 #[test]
 fn jump_unconditional_skips_forward() {
     // jump L0, push:5, label L0 — push:5 never runs.
     let mut vm = vm_with_script(
-        ScriptBuilder::new().jump(0).push_int(5u64).label(0).to_bytecode(),
+        ScriptBuilder::new()
+            .jump(0)
+            .push_int(5u64)
+            .label(0)
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert!(vm.current_call.stack.is_empty());
@@ -113,17 +130,23 @@ fn loop_revisits_inner_label() {
 #[test]
 fn build_if_runs_then_when_true() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_int(1u64).build_if(|p| p.push_int(9u64)).to_bytecode(),
+        ScriptBuilder::new()
+            .push_int(1u64)
+            .build_if(|p| p.push_int(9u64))
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(9u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(9u64));
 }
 
 #[test]
 fn build_if_skips_then_when_false() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_int(0u64).build_if(|p| p.push_int(9u64)).to_bytecode(),
+        ScriptBuilder::new()
+            .push_int(0u64)
+            .build_if(|p| p.push_int(9u64))
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert!(vm.current_call.stack.is_empty());
@@ -139,7 +162,7 @@ fn build_if_else_picks_else_when_false() {
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(8u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(8u64));
 }
 
 #[test]
@@ -152,7 +175,7 @@ fn build_if_else_picks_then_when_true() {
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(9u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(9u64));
 }
 
 #[test]
@@ -172,11 +195,13 @@ fn build_while_counts_down_and_exits() {
 fn build_loop_break_runs_once() {
     // loop { push:7; break } — body runs once, break exits.
     let mut vm = vm_with_script(
-        ScriptBuilder::new().build_loop(|p| p.push_int(7u64).build_break()).to_bytecode(),
+        ScriptBuilder::new()
+            .build_loop(|p| p.push_int(7u64).build_break())
+            .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 1);
-    assert_int(&vm.current_call.stack[0], Int253::from(7u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(7u64));
 }
 
 #[test]
@@ -210,7 +235,12 @@ fn infinite_loop_exhausts_gas() {
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(ScriptBuilder::parse(&script).unwrap().into_instructions(), kind, 1_000).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(
+            ScriptBuilder::parse(&script).unwrap().into_instructions(),
+            kind,
+            1_000,
+        )
+        .with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
@@ -234,7 +264,12 @@ fn skip_scan_charges_gas() {
     };
     let mut vm = VM::new(
         dummy_header(),
-        CallFrame::new(ScriptBuilder::parse(&script).unwrap().into_instructions(), kind, 10).with_anchor(Anchor([0u8; 32])),
+        CallFrame::new(
+            ScriptBuilder::parse(&script).unwrap().into_instructions(),
+            kind,
+            10,
+        )
+        .with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
@@ -272,7 +307,8 @@ fn gas_bounds_cumulative_string_growth() {
             ScriptBuilder::parse(&script).unwrap().into_instructions(),
             kind,
             100,
-        ).with_anchor(Anchor([0u8; 32])),
+        )
+        .with_anchor(Anchor([0u8; 32])),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
@@ -294,17 +330,23 @@ fn allocation_gas_trips_on_pushstr_append_and_tread() {
                 ScriptBuilder::parse(&script).unwrap().into_instructions(),
                 kind,
                 gas,
-            ).with_anchor(Anchor([0u8; 32])),
+            )
+            .with_anchor(Anchor([0u8; 32])),
         );
         run_until_tx_done(&mut vm)
     };
 
     // pushstr: a 60-byte literal against a 50-byte cap.
     let s = run_metered(
-        ScriptBuilder::new().push_str(String::from(vec![7u8; 60])).to_bytecode(),
+        ScriptBuilder::new()
+            .push_str(String::from(vec![7u8; 60]))
+            .to_bytecode(),
         50,
     );
-    assert!(matches!(s.unwrap_err(), VMError::OutOfGas), "pushstr charges");
+    assert!(
+        matches!(s.unwrap_err(), VMError::OutOfGas),
+        "pushstr charges"
+    );
 
     // append: 40 + 40 literals fit a 100 cap (80), the 40-byte append
     // pushes the high-water to 120.
@@ -316,7 +358,10 @@ fn allocation_gas_trips_on_pushstr_append_and_tread() {
             .to_bytecode(),
         100,
     );
-    assert!(matches!(s.unwrap_err(), VMError::OutOfGas), "append charges");
+    assert!(
+        matches!(s.unwrap_err(), VMError::OutOfGas),
+        "append charges"
+    );
 
     // tread: a 200-byte challenge squeeze against a 100 cap.
     let s = run_metered(
@@ -349,7 +394,11 @@ fn return_zero_at_root_errors() {
 fn return_nonzero_at_root_errors() {
     // push:7, push:1, return — k=1 at root: nowhere for 7 to go.
     let mut vm = vm_with_script(
-        ScriptBuilder::new().push_int(7u64).push_int(1u64).return_().to_bytecode(),
+        ScriptBuilder::new()
+            .push_int(7u64)
+            .push_int(1u64)
+            .return_()
+            .to_bytecode(),
     );
     assert!(matches!(
         run_until_tx_done(&mut vm).unwrap_err(),
@@ -364,15 +413,19 @@ fn return_with_dirty_leftover_errors() {
     // to `[count=0, success=0]` on the parent.
     let mut vm = vm_with_nested_child_script(
         ScriptBuilder::new()
-            .push_int(9u64).push_int(7u64).push_int(1u64).return_()
+            .push_int(9u64)
+            .push_int(7u64)
+            .push_int(1u64)
+            .return_()
             .to_bytecode(),
     );
     while !vm.call_stack.is_empty() {
-        vm.step_internal().expect("step ok — error swallowed into marker");
+        vm.step_internal()
+            .expect("step ok — error swallowed into marker");
     }
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[0], Int253::ZERO);
-    assert_int(&vm.current_call.stack[1], Int253::ZERO);
+    assert_int(&vm.current_call.stack[0], Scalar::ZERO);
+    assert_int(&vm.current_call.stack[1], Scalar::ZERO);
 }
 
 #[test]
@@ -380,31 +433,37 @@ fn return_too_few_items_errors() {
     // Inside a child frame: push:5, return — k=5 popped, zero items
     // remain → BadReturnArity. The `step` wrapper catches the error,
     // unwinds the child, and pushes `[count=0, success=0]` onto the parent.
-    let mut vm = vm_with_nested_child_script(
-        ScriptBuilder::new().push_int(5u64).return_().to_bytecode(),
-    );
+    let mut vm =
+        vm_with_nested_child_script(ScriptBuilder::new().push_int(5u64).return_().to_bytecode());
     while !vm.call_stack.is_empty() {
-        vm.step_internal().expect("step ok — error swallowed into marker");
+        vm.step_internal()
+            .expect("step ok — error swallowed into marker");
     }
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[0], Int253::ZERO);
-    assert_int(&vm.current_call.stack[1], Int253::ZERO);
+    assert_int(&vm.current_call.stack[0], Scalar::ZERO);
+    assert_int(&vm.current_call.stack[1], Scalar::ZERO);
 }
 
 #[test]
 fn return_transfers_values_to_parent() {
     // Child script: push:7, push:1, return (k=1).
-    let child_script = ScriptBuilder::new().push_int(7u64).push_int(1u64).return_().to_bytecode();
-    let parent_frame =
-        CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500);
-    let child_kind = CallKind::CellOpen {
+    let child_script = ScriptBuilder::new()
+        .push_int(7u64)
+        .push_int(1u64)
+        .return_()
+        .to_bytecode();
+    let parent_frame = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500);
+    let child_kind = CallKind::ContractOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
         caller_id: None,
     };
     let child_frame = CallFrame::new(
-        ScriptBuilder::parse(&child_script).expect("parse").into_instructions(),
-        child_kind, 500,
+        ScriptBuilder::parse(&child_script)
+            .expect("parse")
+            .into_instructions(),
+        child_kind,
+        500,
     );
     let mut vm = VM::new(dummy_header(), parent_frame);
     let initial_parent = mem::replace(&mut vm.current_call, child_frame);
@@ -417,9 +476,9 @@ fn return_transfers_values_to_parent() {
 
     // Parent received the 7 then the count (1) then the success marker (1).
     assert_eq!(vm.current_call.stack.len(), 3);
-    assert_int(&vm.current_call.stack[0], Int253::from(7u64));
-    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
-    assert_int(&vm.current_call.stack[2], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(7u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(1u64));
+    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 }
 
 #[test]
@@ -434,18 +493,19 @@ fn return_allows_negative_cleartokens_upward() {
     let mut vm = vm_with_nested_child_script(child);
 
     while !vm.call_stack.is_empty() {
-        vm.step_internal().expect("return accepts non-portable results");
+        vm.step_internal()
+            .expect("return accepts non-portable results");
     }
 
     assert_eq!(vm.current_call.stack.len(), 4);
     assert!(matches!(
         &vm.current_call.stack[0],
         Value::ClearToken(token)
-            if token.qty() == Int253::from(-7i64) && token.flv() == FLAME_FLAVOR
+            if token.qty() == Scalar::from(-7i64) && token.flv() == FLAME_FLAVOR
     ));
     assert!(matches!(&vm.current_call.stack[1], Value::ClearToken(_)));
-    assert_int(&vm.current_call.stack[2], Int253::from(2u64));
-    assert_int(&vm.current_call.stack[3], Int253::ONE);
+    assert_int(&vm.current_call.stack[2], Scalar::from(2u64));
+    assert_int(&vm.current_call.stack[3], Scalar::ONE);
 }
 
 #[test]
@@ -467,23 +527,21 @@ fn return_allows_widetokens_upward() {
 
     assert_eq!(vm.current_call.stack.len(), 3);
     assert!(matches!(&vm.current_call.stack[0], Value::WideToken(_)));
-    assert_int(&vm.current_call.stack[1], Int253::ONE);
-    assert_int(&vm.current_call.stack[2], Int253::ONE);
+    assert_int(&vm.current_call.stack[1], Scalar::ONE);
+    assert_int(&vm.current_call.stack[2], Scalar::ONE);
 }
 
 // ── type ────────────────────────────────────────────────────
 
 #[test]
-fn type_pushes_int253_code() {
-    // push:5, type — top is type code (0 for Int253), then 5.
-    let mut vm = vm_with_script(
-        ScriptBuilder::new().push_int(5u64).type_().to_bytecode(),
-    );
+fn type_pushes_scalar_code() {
+    // push:5, type — top is type code (0 for Scalar), then 5.
+    let mut vm = vm_with_script(ScriptBuilder::new().push_int(5u64).type_().to_bytecode());
     vm.step_internal().unwrap(); // push:5
     vm.step_internal().unwrap(); // type
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[1], Int253::from(0u64));
-    assert_int(&vm.current_call.stack[0], Int253::from(5u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(5u64));
 }
 
 #[test]
@@ -492,7 +550,7 @@ fn type_pushes_string_code() {
     script.push(0xa5); // type
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(1u64));
 }
 
 #[test]

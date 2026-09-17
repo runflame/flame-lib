@@ -8,7 +8,7 @@
 
 // Tests are a descendant of `vm`, so `super::super::*` also
 // pulls in everything vm.rs imports privately
-// (CompressedRistretto, Scalar, Transcript, Cell, Commitment,
+// (CompressedRistretto, DalekScalar, Transcript, Contract, Commitment,
 // etc.). Don't re-import any of those below or you'll get
 // "defined multiple times".
 pub use super::super::*;
@@ -21,7 +21,115 @@ pub use crate::{
     FLAME_FLAVOR, MAX_FEE,
 };
 pub use bulletproofs::PedersenGens;
+pub use cells::{
+    BagOfCells, Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellRef,
+    CellSlice,
+};
 pub use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
+pub use std::sync::Arc;
+
+/// Public and prover-only witnesses travel with the test program, just as in a
+/// submitted transaction. Plain bytecode intentionally carries no witnesses.
+pub(crate) trait TestProgram {
+    fn into_program(self) -> ScriptBuilder;
+}
+
+impl TestProgram for ScriptBuilder {
+    fn into_program(self) -> ScriptBuilder {
+        self
+    }
+}
+
+impl TestProgram for Vec<u8> {
+    fn into_program(self) -> ScriptBuilder {
+        ScriptBuilder::parse(&self).expect("script parses")
+    }
+}
+
+pub(crate) fn fixture_vm(program: impl TestProgram, kind: CallKind) -> VM {
+    let program = program.into_program();
+    let cells = Arc::new(program.cell_witnesses().unwrap());
+    let contracts = program.contract_witnesses();
+    let scripts = program.script_witnesses().unwrap();
+    let mut vm = VM::new(
+        dummy_header(),
+        CallFrame::new(program.into_instructions(), kind, 1_000_000),
+    )
+    .with_cells(cells);
+    vm.contract_witnesses = contracts;
+    vm.script_witnesses = scripts;
+    vm
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TestTaprootProof {
+    pub proof: TaprootProof,
+    pub cells: BagOfCells,
+}
+
+impl std::ops::Deref for TestTaprootProof {
+    type Target = TaprootProof;
+    fn deref(&self) -> &Self::Target {
+        &self.proof
+    }
+}
+
+pub(crate) fn test_taproot_proof(
+    tree: &PredicateTree,
+    index: usize,
+) -> Result<TestTaprootProof, VMError> {
+    let (proof, cells) = tree.witness_for(index)?;
+    Ok(TestTaprootProof { proof, cells })
+}
+
+pub(crate) fn test_payload(values: Vec<Value>) -> Value {
+    if values.len() == 1 {
+        values.into_iter().next().unwrap()
+    } else {
+        Value::Dict(Dict::from_values(values))
+    }
+}
+
+pub(crate) fn open_with_test_inner(inner: ScriptBuilder, recover: bool) -> ScriptBuilder {
+    let mut branch = ScriptBuilder::new()
+        .drop_()
+        .with_cells(inner.cell_witnesses().unwrap());
+    for instruction in inner.instructions() {
+        branch.push_instr(instruction.clone());
+    }
+    let recovery = ScriptBuilder::new().drop_().push_int(0u64).return_();
+    let tree = PredicateTree::scripts_only(
+        vec![branch.to_bytecode(), recovery.to_bytecode()],
+        TEST_BLINDING_KEY,
+    )
+    .unwrap();
+    let cp = test_taproot_proof(&tree, 0).unwrap();
+    let recovery_cp = test_taproot_proof(&tree, 1).unwrap();
+    let contract = Contract::new(
+        Predicate::opaque(tree.point),
+        Anchor([0xa1; 32]),
+        test_payload(vec![]),
+    )
+    .unwrap();
+    let program = ScriptBuilder::new()
+        .push_str(String::contract(contract))
+        .input()
+        .with_script_witness(branch)
+        .unwrap();
+    let mut outer = push_taproot_proof_to_program(program, &cp)
+        .push_int(20_000u64)
+        .push_int(0u64)
+        .open();
+    if recover {
+        outer = push_taproot_proof_to_program(outer.drop_().drop_(), &recovery_cp)
+            .push_int(20_000u64)
+            .push_int(0u64)
+            .open()
+            .verify()
+            .drop_();
+    }
+    outer
+}
 
 /// Registry whose `load_code` always returns the same script.
 pub(crate) struct StubRegistry {
@@ -126,22 +234,14 @@ pub(crate) fn dummy_message(gas: u64) -> Message {
 }
 
 /// Builds a VM running `script` as the entry Run of an InternalRoot.
-pub(crate) fn vm_with_script(script: Vec<u8>) -> VM {
+pub(crate) fn vm_with_script(script: impl TestProgram) -> VM {
     let kind = CallKind::InternalRoot {
         actor: ActorID::Hash([0u8; 32]),
         caller: None,
     };
-    VM::new(
-        dummy_header(),
-        CallFrame::new(
-            ScriptBuilder::parse(&script)
-                .expect("script parses")
-                .into_instructions(),
-            kind,
-            1_000_000,
-        )
-        .with_anchor(Anchor([0u8; 32])),
-    )
+    let mut vm = fixture_vm(script, kind);
+    vm.last_anchor = Some(Anchor([0; 32]));
+    vm
 }
 
 /// Runs steps until the current Run is exhausted, *without* invoking
@@ -153,23 +253,23 @@ pub(crate) fn run_to_end(vm: &mut VM) -> Result<(), VMError> {
     Ok(())
 }
 
-pub(crate) fn assert_int(v: &Value, expected: Int253) {
+pub(crate) fn assert_int(v: &Value, expected: Scalar) {
     match v {
-        Value::Int253(i) => assert_eq!(*i, expected, "expected {:?}, got {:?}", expected, i),
-        other => panic!("expected Int253, got {:?}", value_kind(other)),
+        Value::Scalar(i) => assert_eq!(*i, expected, "expected {:?}, got {:?}", expected, i),
+        other => panic!("expected Scalar, got {:?}", value_kind(other)),
     }
 }
 
 pub(crate) fn value_kind(v: &Value) -> &'static str {
     match v {
-        Value::Int253(_) => "Int253",
+        Value::Scalar(_) => "Scalar",
         Value::String(_) => "String",
         Value::Dict(_) => "Dict",
         Value::Point(_) => "Point",
         Value::Token(_) => "Token",
         Value::WideToken(_) => "WideToken",
         Value::ClearToken(_) => "ClearToken",
-        Value::Cell(_) => "Cell",
+        Value::Contract(_) => "Contract",
         Value::Merlin(_) => "Merlin",
         Value::Variable(_) => "Variable",
         Value::Expression(_) => "Expression",
@@ -198,8 +298,8 @@ pub(crate) fn run_until_tx_done(vm: &mut VM) -> Result<(), VMError> {
 /// (`eq` is non-consuming, so its two int operands are dropped after the
 /// boolean is `verify`'d). The tx must finish cleanly, so this also
 /// asserts there is no extra residue. Use when every stack slot is an
-/// `Int253`. A mismatch fails `verify`.
-pub(crate) fn assert_stack(mut builder: ScriptBuilder, expected_top_first: &[Int253]) {
+/// `Scalar`. A mismatch fails `verify`.
+pub(crate) fn assert_stack(mut builder: ScriptBuilder, expected_top_first: &[Scalar]) {
     for &v in expected_top_first {
         builder = builder.push_int(v).eq().verify().drop_().drop_();
     }
@@ -209,9 +309,9 @@ pub(crate) fn assert_stack(mut builder: ScriptBuilder, expected_top_first: &[Int
 
 /// `i64` convenience over [`assert_stack`].
 pub(crate) fn assert_stack_ints(builder: ScriptBuilder, expected_top_first: &[i64]) {
-    let v: Vec<Int253> = expected_top_first
+    let v: Vec<Scalar> = expected_top_first
         .iter()
-        .map(|&x| Int253::from(x))
+        .map(|&x| Scalar::from(x))
         .collect();
     assert_stack(builder, &v);
 }
@@ -220,7 +320,7 @@ pub(crate) fn assert_stack_ints(builder: ScriptBuilder, expected_top_first: &[i6
 /// `expected`, via `push:expected; eq; verify`. Tolerant of residue
 /// below the top (e.g. an opcode's non-int operands), so use it when the
 /// full stack isn't all ints. A mismatch fails `verify`.
-pub(crate) fn assert_top(builder: ScriptBuilder, expected: impl Into<Int253>) {
+pub(crate) fn assert_top(builder: ScriptBuilder, expected: impl Into<Scalar>) {
     let mut vm = vm_with_script(builder.push_int(expected).eq().verify().to_bytecode());
     run_to_end(&mut vm).expect("top-of-stack self-check (eq; verify) passed");
 }
@@ -272,7 +372,7 @@ pub(crate) fn msg_with_sel(actor: ActorID, sel: u64) -> Message {
         actor,
         None,
         Anchor([0u8; 32]),
-        vec![Value::Int253(Int253::from(sel))],
+        vec![Value::Scalar(Scalar::from(sel))],
         1_000_000,
         Predicate::opaque(Predicate::unspendable_key()),
     )
@@ -350,14 +450,14 @@ pub(crate) fn dispatch_code(arms: &[(u64, Vec<u8>)]) -> Vec<u8> {
     p.label(n).to_bytecode()
 }
 
-/// Helper: builds a VM with a child CellOpen frame as `current_call`
+/// Helper: builds a VM with a child ContractOpen frame as `current_call`
 /// and a placeholder ExternalRoot on `call_stack`. Used by the arity
 /// / clean-stack `return` tests which need a non-root frame to
 /// exercise the inner checks (root frame would short-circuit with
 /// `ReturnAtRoot`).
 pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
     let parent = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 500);
-    let child_kind = CallKind::CellOpen {
+    let child_kind = CallKind::ContractOpen {
         predicate: Predicate::opaque(CompressedRistretto([0u8; 32])),
         external_context: true,
         caller_id: None,
@@ -382,9 +482,9 @@ pub(crate) fn assert_str(v: &Value, expected: &[u8]) {
     }
 }
 
-/// Helper: encodes `value` (non-negative `Int253`) as a low-`n_bits`
+/// Helper: encodes `value` (non-negative `Scalar`) as a low-`n_bits`
 /// LSB-first byte sequence (writebits-compatible).
-pub(crate) fn writebits_bytes(value: &Int253, n_bits: usize) -> Vec<u8> {
+pub(crate) fn writebits_bytes(value: &Scalar, n_bits: usize) -> Vec<u8> {
     assert!(n_bits <= 256);
     let int_bytes = value.to_bytes();
     let n_bytes = n_bits.div_ceil(8);
@@ -397,10 +497,10 @@ pub(crate) fn writebits_bytes(value: &Int253, n_bits: usize) -> Vec<u8> {
     out
 }
 
-pub(crate) fn assert_dict_keys(v: &Value, expected: &[Int253]) {
+pub(crate) fn assert_dict_keys(v: &Value, expected: &[Scalar]) {
     match v {
         Value::Dict(d) => {
-            let keys: Vec<Int253> = d.entries().map(|(k, _)| *k).collect();
+            let keys: Vec<Scalar> = d.entries().map(|(k, _)| *k).collect();
             assert_eq!(keys, expected);
         }
         other => panic!("expected Dict, got {}", value_kind(other)),
@@ -423,8 +523,8 @@ pub(crate) const TEST_BLINDING_KEY: [u8; 32] = [0u8; 32];
 pub(crate) fn build_predicate_with_program(
     program: &[u8],
     internal_secret: u64,
-) -> (PredicateTree, TaprootProof) {
-    let secret = Scalar::from(internal_secret);
+) -> (PredicateTree, TestTaprootProof) {
+    let secret = DalekScalar::from(internal_secret);
     let x_point = RISTRETTO_BASEPOINT_TABLE * &secret;
     let internal_key = x_point.compress();
     let tree = PredicateTree::new(
@@ -433,7 +533,7 @@ pub(crate) fn build_predicate_with_program(
         TEST_BLINDING_KEY,
     )
     .unwrap();
-    let cp = tree.taproot_proof_for(0).unwrap();
+    let cp = test_taproot_proof(&tree, 0).unwrap();
     (tree, cp)
 }
 
@@ -443,12 +543,12 @@ pub(crate) fn build_multi_leaf_predicate(
     programs: Vec<Vec<u8>>,
     program_index: usize,
     internal_secret: u64,
-) -> (PredicateTree, TaprootProof) {
-    let secret = Scalar::from(internal_secret);
+) -> (PredicateTree, TestTaprootProof) {
+    let secret = DalekScalar::from(internal_secret);
     let x_point = RISTRETTO_BASEPOINT_TABLE * &secret;
     let internal_key = x_point.compress();
     let tree = PredicateTree::new(Some(internal_key), programs, TEST_BLINDING_KEY).unwrap();
-    let cp = tree.taproot_proof_for(program_index).unwrap();
+    let cp = test_taproot_proof(&tree, program_index).unwrap();
     (tree, cp)
 }
 
@@ -456,8 +556,7 @@ pub use crate::token::flavor_from_actor as test_flavor_from_actor;
 
 /// Convenience: builds a Token via the cleartext constructor for tests.
 pub(crate) fn make_cleartext_token(qty: u64, flv: u64) -> Token {
-    Token::cleartext(Int253::from(qty), Int253::from(flv))
-        .expect("u64 quantity is in range")
+    Token::cleartext(Scalar::from(qty), Scalar::from(flv)).expect("u64 quantity is in range")
 }
 
 /// Builds a VM running `script` under InternalRoot with a specific
@@ -497,46 +596,41 @@ pub(crate) fn drive_external(vm: &mut VM, delegate: &mut StubDelegate) -> Result
 
 /// Builds a VM running `script` under `ExternalRoot`. Mirror of
 /// `vm_with_script` for the external-context opcode tests.
-pub(crate) fn vm_external_with_script(script: Vec<u8>) -> VM {
-    VM::new(
-        dummy_header(),
-        CallFrame::new(
-            ScriptBuilder::parse(&script)
-                .expect("script parses")
-                .into_instructions(),
-            CallKind::ExternalRoot,
-            1_000_000,
-        ),
-    )
+pub(crate) fn vm_external_with_script(script: impl TestProgram) -> VM {
+    fixture_vm(script, CallKind::ExternalRoot)
 }
 
-/// Builds a wire-encoded cell as a `Vec<u8>` so tests can feed it
+/// Builds a wire-encoded contract as a `Vec<u8>` so tests can feed it
 /// to the `input` opcode (which pops a `String` and decodes it).
-pub(crate) fn encode_cell_to_bytes(cell: &Cell) -> Vec<u8> {
-    let mut buf = Vec::new();
-    cell.encode(&mut buf).expect("cell encodes");
-    buf
+pub(crate) fn encode_contract_to_bytes(contract: &Contract) -> Vec<u8> {
+    contract.to_envelope().unwrap().encode()
 }
 
-/// Builds a non-trivial test cell — opaque predicate, fixed anchor,
+pub(crate) fn decode_envelope<T: CellDecode>(bytes: &[u8]) -> Result<T, CellError> {
+    let mut gas = u64::MAX;
+    let mut envelope = CellEnvelope::decode(bytes, bytes.len(), &mut gas)?;
+    let root = envelope.cells().get(&envelope.root()).unwrap();
+    T::from_cell(&root, &mut envelope)
+}
+
+/// Builds a non-trivial test contract — opaque predicate, fixed anchor,
 /// two-item portable payload. Used by both the round-trip and the
 /// `input` opcode tests.
-pub(crate) fn fixture_cell() -> Cell {
+pub(crate) fn fixture_contract() -> Contract {
     let predicate = Predicate::opaque(CompressedRistretto([0xaa; 32]));
     let anchor = Anchor([0x42; 32]);
     let payload = vec![
-        Value::Int253(Int253::from(7u64)),
+        Value::Scalar(Scalar::from(7u64)),
         Value::String(String::from(b"hello".to_vec())),
     ];
-    Cell::new(predicate, anchor, payload).expect("fixture payload is portable")
+    Contract::new(predicate, anchor, Value::Dict(Dict::from_values(payload)))
+        .expect("fixture payload is portable")
 }
 
-/// Helper: decode and discard a Cell so tests can use a simple
+/// Helper: decode and discard a Contract so tests can use a simple
 /// `Result<(), VMError>` assertion shape.
-pub(crate) fn decode_cell_dropping_ok(bytes: &[u8]) -> Result<(), VMError> {
-    let mut r: &[u8] = bytes;
-    <Cell as readerwriter::Decodable>::decode(&mut r)
-        .map_err(|_| VMError::MalformedCellEncoding)?;
+pub(crate) fn decode_contract_dropping_ok(bytes: &[u8]) -> Result<(), VMError> {
+    decode_envelope::<Contract>(bytes).map_err(|_| VMError::MalformedContractEncoding)?;
     Ok(())
 }
 
@@ -545,23 +639,14 @@ pub(crate) fn decode_cell_dropping_ok(bytes: &[u8]) -> Result<(), VMError> {
 // — input → authorize → output — and drive them through the full
 // `step_external` dispatch loop plus `Delegate::finalize`. They are
 // the first tests that exercise the VM's external-context API as a
-// unit and serve as ground truth for the Phase-10 cell life-cycle.
+// unit and serve as ground truth for the Phase-10 contract life-cycle.
 
 /// Drives `script` through `step_external` to completion using a
 /// `StubDelegate`, returns the resulting VM (so the test can inspect
 /// txlog, deferred_sigs, last_anchor, etc.). Mirrors the body of
 /// `VM::execute_external` minus the `into_result()` consumption.
-pub(crate) fn run_external_workflow(script: Vec<u8>) -> VM {
-    let mut vm = VM::new(
-        dummy_header(),
-        CallFrame::new(
-            ScriptBuilder::parse(&script)
-                .expect("script parses")
-                .into_instructions(),
-            CallKind::ExternalRoot,
-            1_000_000,
-        ),
-    );
+pub(crate) fn run_external_workflow(script: impl TestProgram) -> VM {
+    let mut vm = fixture_vm(script, CallKind::ExternalRoot);
     let mut delegate = StubDelegate::new();
     while vm.step_external(&mut delegate).expect("step_external ok") {}
     vm
@@ -632,37 +717,37 @@ pub(crate) fn run_external_steps<'g>(
 /// Helper: turn a scalar secret into a `(CompressedRistretto, sk)`
 /// pair. The CompressedRistretto is the verification key; the
 /// scalar is the signing key.
-pub(crate) fn signing_keypair(secret: u64) -> (CompressedRistretto, Scalar) {
+pub(crate) fn signing_keypair(secret: u64) -> (CompressedRistretto, DalekScalar) {
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
-    let sk = Scalar::from(secret);
+    let sk = DalekScalar::from(secret);
     let vk = (RISTRETTO_BASEPOINT_TABLE * &sk).compress();
     (vk, sk)
 }
 
-/// Helper: build a script that consumes one cell via input+signtx
-/// and then no-ops the popped payload + count. Returns the script
-/// bytes and the consumed cell's id.
-pub(crate) fn make_signtx_script_with_cell(vk: CompressedRistretto) -> (Vec<u8>, CellID) {
-    let cell = Cell::new(
+/// Helper: build a script that consumes one contract via input+signtx
+/// and then drops the single payload. Returns the script
+/// builder (including witnesses) and the consumed contract's id.
+pub(crate) fn make_signtx_script_with_contract(
+    vk: CompressedRistretto,
+) -> (ScriptBuilder, ContractID) {
+    let contract = Contract::new(
         Predicate::opaque(vk),
         Anchor([0x42; 32]),
-        vec![Value::Int253(Int253::from(0u64))], // single Int253 payload
+        Value::Scalar(Scalar::ZERO),
     )
     .expect("payload is portable");
-    let cell_id = cell.id();
+    let contract_id = contract.id();
     let script = ScriptBuilder::new()
-        .push_str(String::from(encode_cell_to_bytes(&cell)))
+        .push_str(String::contract(contract))
         .input()
-        .signtx() // pushes 1 Int253 (payload) + count 1
-        .drop_() // drop count
-        .drop_() // drop payload Int253
-        .to_bytecode();
-    (script, cell_id)
+        .signtx()
+        .drop_(); // drop the single payload
+    (script, contract_id)
 }
 
 /// Helper: build a Token with `Commitment::Open` quantity and
-/// flavor (witness-bearing). The token can be embedded in a Cell
-/// and pushed via `String::cell(c)` so witnesses survive the trip
+/// flavor (witness-bearing). The token can be embedded in a Contract
+/// and pushed via `String::contract(c)` so witnesses survive the trip
 /// through `op_input` and into the downstream `mix` gadget.
 pub(crate) fn make_open_token(
     qty_value: u64,
@@ -670,29 +755,30 @@ pub(crate) fn make_open_token(
     qty_blind: u64,
     flv_blind: u64,
 ) -> Token {
-    let q = Commitment::blinded_with_factor(Int253::from(qty_value), Scalar::from(qty_blind));
-    let f = Commitment::blinded_with_factor(Int253::from(flv_value), Scalar::from(flv_blind));
+    let q = Commitment::blinded_with_factor(Scalar::from(qty_value), DalekScalar::from(qty_blind));
+    let f = Commitment::blinded_with_factor(Scalar::from(flv_value), DalekScalar::from(flv_blind));
     Token::new(q, f)
 }
 
 //
-// The whole point of the VM: take N input cells whose Token
+// The whole point of the VM: take N input contracts whose Token
 // payloads are confidential (Pedersen-committed qty + flv), run
-// them through `mix` to balance against M new output cells
+// them through `mix` to balance against M new output contracts
 // (also confidential), and produce a single ZK proof that the
 // verifier accepts.
 //
 // The script shape:
 //
-//   ┌── per input cell i ───────────────────────────────────┐
-//   │  pushstr <cell_bytes_i>                                │
-//   │  input  (with InputWitnesses_i, prover-side)           │
+//   ┌── per input contract i ───────────────────────────────────┐
+//   │  pushstr <contract_id_i>                               │
+//   │  input  (Contract body from the transaction BoC)       │
 //   │  pushpoint <internal_key_i>                            │
-//   │  <neighbors dict — empty for single-leaf trees>        │
-//   │  pushstr <position_i>                                  │
-//   │  pushstr <program_i (= empty)>                         │
+//   │  pushstr <program_trie_root_i>                         │
+//   │  push:<program_index_i>                                │
+//   │  push:<gas>                                           │
 //   │  push:0  (k = 0 args)                                  │
-//   │  open   (unlocked Run is empty → payload stays)        │
+//   │  open   (branch loaded from BoC returns the Token)     │
+//   │  verify; drop  (consume success and return count)      │
 //   └────────────────────────────────────────────────────────┘
 //   ↓  stack now: [Token_0, Token_1, …, Token_{N-1}]
 //
@@ -708,11 +794,10 @@ pub(crate) fn make_open_token(
 //   ↓  stack: [out_Token_0, out_Token_1, …, out_Token_{M-1}]
 //
 //   For each output j (in stack order):
-//   ┌── wrap into output cell ──────────────────────────────┐
-//   │  push:1            (k = 1, the Token below is payload) │
+//   ┌── wrap into output contract ──────────────────────────────┐
 //   │  pushpoint <pred_j>                                    │
 //   │  output            (emits TxEntry::Output, pops Token  │
-//   │                     + count + pred)                    │
+//   │                     + pred)                           │
 //   └────────────────────────────────────────────────────────┘
 //   ↓  stack: empty → finish_call accepts.
 
@@ -725,10 +810,10 @@ pub(crate) struct NMInputSpec {
     pub qty_blind: u64,
     /// Blinding factor for the flv commitment.
     pub flv_blind: u64,
-    /// Anchor bytes for the input cell — must be unique per
-    /// cell so cell-ids don't collide. Cell identity also
+    /// Anchor bytes for the input contract — must be unique per
+    /// contract so contract-ids don't collide. Contract identity also
     /// commits the predicate and payload, but anchor uniqueness
-    /// is the simplest way to keep distinct cells distinct.
+    /// is the simplest way to keep distinct contracts distinct.
     pub anchor: [u8; 32],
 }
 
@@ -782,11 +867,11 @@ pub(crate) fn build_confidential_nm_program(
 
     //                    taproot_proof pieces + push:0 + open. ──
     for inp in inputs {
-        let (cell, cp) = build_input_cell(inp);
-        // pushstr String::cell(c) — prover-side witness carrier
+        let (contract, cp) = build_input_contract(inp);
+        // pushstr String::contract(c) — prover-side witness carrier
         // (Token's open commitments ride along into op_input).
-        // The verifier-side equivalent is `String::from(cell.to_bytes())`.
-        program = program.push_str(String::cell(cell));
+        // The verifier-side equivalent is `String::from(contract.to_bytes())`.
+        program = program.push_str(String::contract(contract));
         program = program.input();
         // taproot_proof pieces.
         program = push_taproot_proof_to_program(program, &cp);
@@ -837,7 +922,6 @@ pub(crate) fn build_confidential_nm_program(
             program = program.roll_k(k as u8);
         }
         program = program
-            .push_int(1u64)
             .push_point(*output_predicate_point(outputs[i].predicate_tag).as_bytes())
             .output();
     }
@@ -846,71 +930,67 @@ pub(crate) fn build_confidential_nm_program(
 
 /// Build the Open `(qty, flv)` commitments for an input spec.
 pub(crate) fn open_commitments(inp: &NMInputSpec) -> (Commitment, Commitment) {
-    let q = Commitment::blinded_with_factor(Int253::from(inp.qty), Scalar::from(inp.qty_blind));
-    let f = Commitment::blinded_with_factor(Int253::from(inp.flv), Scalar::from(inp.flv_blind));
+    let q =
+        Commitment::blinded_with_factor(Scalar::from(inp.qty), DalekScalar::from(inp.qty_blind));
+    let f =
+        Commitment::blinded_with_factor(Scalar::from(inp.flv), DalekScalar::from(inp.flv_blind));
     (q, f)
 }
 
 /// Build the Open `(qty, flv)` commitments for an output spec.
 pub(crate) fn open_commitments_for_output(out: &NMOutputSpec) -> (Commitment, Commitment) {
-    let q = Commitment::blinded_with_factor(Int253::from(out.qty), Scalar::from(out.qty_blind));
-    let f = Commitment::blinded_with_factor(Int253::from(out.flv), Scalar::from(out.flv_blind));
+    let q =
+        Commitment::blinded_with_factor(Scalar::from(out.qty), DalekScalar::from(out.qty_blind));
+    let f =
+        Commitment::blinded_with_factor(Scalar::from(out.flv), DalekScalar::from(out.flv_blind));
     (q, f)
 }
 
 /// Like `push_taproot_proof_pieces` but emits Instructions into a
 /// ScriptBuilder (so the prover keeps witness-bearing variants).
 pub(crate) fn push_taproot_proof_to_program(
-    mut program: ScriptBuilder,
-    cp: &TaprootProof,
+    program: ScriptBuilder,
+    cp: &TestTaprootProof,
 ) -> ScriptBuilder {
-    program = program.push_point(*cp.internal_key.as_bytes());
-    // Neighbors as a list-style Dict: for each neighbor, push
-    // (val, key); then push n, dict.
-    for (i, h) in cp.neighbors.iter().enumerate() {
-        program = program
-            .push_str(String::from(h.to_vec()))
-            .push_int(i as u64);
-    }
-    program = program.push_int(cp.neighbors.len() as u64).dict();
-    program = program
-        .push_str(String::from(cp.position.clone()))
-        .push_str(String::from(cp.program.clone()));
     program
+        .with_cells(cp.cells.clone())
+        .push_point(*cp.internal_key.as_bytes())
+        .push_str(String::from(cp.root.to_vec()))
+        .push_int(cp.index)
 }
 
-/// Build the input cell + the matching `TaprootProof` for an input
+/// Build the input contract + the matching `TaprootProof` for an input
 /// spec. Used by both `build_confidential_nm_program` (to
-/// produce the cell bytes pushed onto the stack) and
-/// `assert_nm_txlog` (to compute the expected `cell_id` for the
+/// produce the contract bytes pushed onto the stack) and
+/// `assert_nm_txlog` (to compute the expected `contract_id` for the
 /// `TxEntry::Input` assertion).
 ///
 /// Uses `PredicateTree::scripts_only` (NUMS-unspendable
-/// internal key) so the cell is openable only by the empty
+/// internal key) so the contract is openable only by the empty
 /// script leaf — never key-path. We derive the tree's blinding
-/// key from `inp.anchor`, so every input cell carries a
-/// *distinct* predicate point. Without per-cell variation the
+/// key from `inp.anchor`, so every input contract carries a
+/// *distinct* predicate point. Without per-contract variation the
 /// harness would only exercise the "all inputs locked under
 /// the same predicate" shape, which doesn't match real
 /// transactions where each input comes from its own keypair.
-pub(crate) fn build_input_cell(inp: &NMInputSpec) -> (Cell, TaprootProof) {
+pub(crate) fn build_input_contract(inp: &NMInputSpec) -> (Contract, TestTaprootProof) {
     let (q_open, f_open) = open_commitments(inp);
     let token = Token::new(q_open, f_open);
-    // Leaf script `push:1, return` — under ADR 0013 the opened cell
+    // Leaf script `push:1, return` — under ADR 0013 the opened contract
     // runs in an isolated frame, so the leaf must explicitly return
     // its single-Token payload to the caller.
     let leaf = vec![0x01, 0xa4];
     let tree = PredicateTree::scripts_only(vec![leaf], input_blinding_for(inp))
         .expect("scripts_only tree builds");
-    let cp = tree.taproot_proof_for(0).expect("taproot_proof for leaf 0");
+    let cp = test_taproot_proof(&tree, 0).expect("taproot_proof for leaf 0");
     let pred_point = tree.point;
-    let cell = Cell::new(
+    let contract = Contract::new(
         Predicate::opaque(pred_point),
         Anchor(inp.anchor),
-        vec![Value::Token(token)],
+        Value::Token(token),
     )
     .expect("payload is portable");
-    (cell, cp)
+    (contract, cp)
 }
 
 /// Derive a per-input PredicateTree blinding key from
@@ -919,7 +999,7 @@ pub(crate) fn build_input_cell(inp: &NMInputSpec) -> (Cell, TaprootProof) {
 /// tree without exposing a new field on `NMInputSpec`. The
 /// blinding key is consensus-irrelevant to the test (it only
 /// affects predicate-point determinism); we just need *some*
-/// per-cell variation.
+/// per-contract variation.
 pub(crate) fn input_blinding_for(inp: &NMInputSpec) -> [u8; 32] {
     let mut k = TEST_BLINDING_KEY;
     for (i, byte) in k.iter_mut().enumerate() {
@@ -929,7 +1009,7 @@ pub(crate) fn input_blinding_for(inp: &NMInputSpec) -> [u8; 32] {
 }
 
 /// Strong txlog assertion: every `TxEntry::Input` matches the
-/// corresponding input cell's `id()`, every `TxEntry::Output`
+/// corresponding input contract's `id()`, every `TxEntry::Output`
 /// has the predicate point + Token qty/flv commitment points
 /// the spec asked for. Catches the predicate/token-pairing
 /// inversion that a naive `txlog.len()` check would miss.
@@ -938,37 +1018,43 @@ pub(crate) fn assert_nm_txlog(result: &TxResult, inputs: &[NMInputSpec], outputs
     // bugs (wrong count) before walking entry-by-entry.
     assert_eq!(
         result.txlog.len(),
-        1 + inputs.len() + outputs.len(),
-        "txlog length must be Header + N inputs + M outputs"
+        2 + inputs.len() + outputs.len(),
+        "txlog length must be Header + CellWitness + N inputs + M outputs"
     );
     // Header at index 0.
     assert!(matches!(result.txlog[0], TxEntry::Header(_)));
-    // Inputs at [1..=N], in spec order. The cell_id check is
+    assert!(matches!(result.txlog[1], TxEntry::CellWitness(_)));
+    // Inputs at [2..2+N], in spec order. The contract_id check is
     // load-bearing — it pins down predicate + anchor + payload
     // bytes all at once.
     for (i, inp) in inputs.iter().enumerate() {
-        let expected_id = build_input_cell(inp).0.id();
-        match &result.txlog[1 + i] {
+        let expected_id = build_input_contract(inp).0.id();
+        match &result.txlog[2 + i] {
             TxEntry::Input(id) => {
-                assert_eq!(*id, expected_id, "txlog[{}] input cell_id mismatch", 1 + i)
+                assert_eq!(
+                    *id,
+                    expected_id,
+                    "txlog[{}] input contract_id mismatch",
+                    2 + i
+                )
             }
-            _ => panic!("txlog[{}] must be Input", 1 + i),
+            _ => panic!("txlog[{}] must be Input", 2 + i),
         }
     }
-    // Outputs at [1+N .. 1+N+M], in spec order. We verify:
+    // Outputs at [2+N .. 2+N+M], in spec order. We verify:
     //
     //   - predicate point             (catches pairing inversion)
     //   - Token qty/flv commitment points
-    //   - cell anchor                 (catches anchor-chain bugs)
+    //   - contract anchor                 (catches anchor-chain bugs)
     //
     // The anchor chain seeds at the LAST input's ratcheted
     // anchor (op_input overwrites `last_anchor` on each input,
     // so after the N-th input it equals `inputs[N-1].to_anchor()`).
-    // Each output's anchor is the *previous cell*'s ratcheted
+    // Each output's anchor is the *previous contract*'s ratcheted
     // anchor; we walk forward as we go.
     //
-    // The cell_id is hash(predicate, anchor, payload), so
-    // asserting all three pins down the cell_id without
+    // The contract_id is hash(predicate, anchor, payload), so
+    // asserting all three pins down the contract_id without
     // recomputing it.
     //
     // Anchor chain (split-at-every-call design): after each input's
@@ -977,14 +1063,14 @@ pub(crate) fn assert_nm_txlog(result: &TxResult, inputs: &[NMInputSpec], outputs
     // running anchor is `Anchor(last_input.id()).split().1`. Each
     // output then splits it again: left → output.anchor, right →
     // next iteration's parent.
-    let last_input_id = build_input_cell(inputs.last().expect("at least one input"))
+    let last_input_id = build_input_contract(inputs.last().expect("at least one input"))
         .0
         .id();
     let (_, mut expected_anchor) = Anchor(last_input_id).split();
     for (j, out) in outputs.iter().enumerate() {
         let expected_pred = output_predicate_point(out.predicate_tag);
         let (q_open, f_open) = open_commitments_for_output(out);
-        let idx = 1 + inputs.len() + j;
+        let idx = 2 + inputs.len() + j;
         match &result.txlog[idx] {
             TxEntry::Output(c) => {
                 assert_eq!(
@@ -1004,13 +1090,7 @@ pub(crate) fn assert_nm_txlog(result: &TxResult, inputs: &[NMInputSpec], outputs
                     j, idx
                 );
                 expected_anchor = split_right;
-                assert_eq!(
-                    c.payload().len(),
-                    1,
-                    "output[{}] payload must contain exactly 1 Token",
-                    j
-                );
-                match &c.payload()[0] {
+                match c.payload() {
                     Value::Token(t) => {
                         assert_eq!(
                             t.qty.to_point(),
@@ -1048,7 +1128,7 @@ pub(crate) fn assert_nm_txlog(result: &TxResult, inputs: &[NMInputSpec], outputs
 
 /// Drive the full prove-then-verify round trip for an N→M
 /// confidential transaction and assert the full txlog shape +
-/// per-cell contents. Single entry point for every positive
+/// per-contract contents. Single entry point for every positive
 /// matrix test.
 ///
 /// `mem_limit = 0` keeps this test helper unmetered. Production zero-limit
@@ -1064,17 +1144,21 @@ pub(crate) fn run_confidential_nm(inputs: &[NMInputSpec], outputs: &[NMOutputSpe
     // verifier views is independently visible.
     assert_nm_txlog(&prover_result, inputs, outputs);
     let TxResult {
-        bytecode, proof, ..
+        bytecode,
+        proof,
+        cells,
+        ..
     } = prover_result;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    let result = Verifier::verify(
+    let result = Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify ok");
     assert_eq!(result.txid, txid_p, "prover/verifier TxID agree");

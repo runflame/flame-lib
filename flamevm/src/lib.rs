@@ -1,18 +1,18 @@
 mod actor;
 mod address;
-mod cell;
-mod message;
 mod constraints;
-mod encoding;
+mod contract;
 mod crypto;
 mod dict;
+mod encoding;
 mod errors;
 mod fees;
-mod int253;
+mod message;
 mod msm;
 mod ops;
-mod script;
 mod prover;
+mod scalar;
+mod script;
 mod string;
 mod token;
 mod tx;
@@ -24,35 +24,32 @@ pub use actor::{
     code_root, code_state_bytes, empty_state, state_root, ActorID, ActorRegistry, StoragePurchase,
 };
 pub use address::Address;
-pub use message::{Message, MessageID};
-pub use cell::{CellID, TaprootProof, Cell, Predicate, PredicateTree};
 pub use constraints::{
     Commitment, CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,
 };
+pub use contract::{Contract, ContractID, Predicate, PredicateTree, TaprootProof};
 pub use crypto::{Merlin, Point};
 pub use dict::Dict;
 pub use errors::VMError;
 pub use fees::{CheckedFee, MAX_FEE};
-pub use int253::Int253;
+pub use message::{Message, MessageID};
 pub use msm::MultiscalarMul;
 pub use ops::Instruction;
-pub use script::{ScriptBuilder, Script};
 pub use prover::Prover;
+pub use scalar::Scalar;
+pub use script::{Script, ScriptBuilder};
 pub use string::{String, StringWitness};
-pub use token::{flavor_from_actor, ClearToken, FLAME_FLAVOR, Token, WideToken};
+pub use token::{flavor_from_actor, ClearToken, Token, WideToken, FLAME_FLAVOR};
 pub use value::Value;
 pub use verifier::Verifier;
 
 pub use tx::{
-    ExternalTx, InternalTx, Limits, SigningInstructions, TxEntry, TxHeader, TxID,
-    TxLog, TxMetrics, UnsignedTx,
+    ExternalTx, InternalTx, Limits, SigningInstructions, TxEntry, TxHeader, TxID, TxLog, TxMetrics,
+    UnsignedTx,
 };
 pub use vm::{Anchor, BlockContext};
 
-// Re-export the wire-format traits so downstream crates don't need
-// a direct `readerwriter` dep. Most flamevm types implement these
-// (ActorID, Anchor, Predicate, Cell, Message, Address, Instruction).
-pub use readerwriter::{
-    Codable, Decodable, Encodable, ExactSizeEncodable,
-    ReadError, Reader, WriteError, Writer,
+pub use cells::{
+    BagOfCells, Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellID,
+    CellRef, CellResolver, CellSlice, Trie,
 };

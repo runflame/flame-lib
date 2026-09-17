@@ -1,17 +1,16 @@
-//! Variable-length binary string; carries optional prover-side witness payloads.
+//! Single-Cell binary string; carries optional prover-side witness payloads.
 
 use crate::constraints::Commitment;
 use crate::crypto::Point;
 use crate::errors::VMError;
-use crate::int253::Int253;
-use readerwriter::{Encodable, SizeWriter};
+use crate::scalar::Scalar;
 
+use crate::contract::{Contract, Predicate};
 use crate::ops::Instruction;
-use crate::cell::{Cell, Predicate};
 use crate::script::{Script, ScriptBuilder};
 
-/// Variable-length binary string with optional witness-bearing
-/// variants. See module docs for the design.
+/// Binary string of at most [`String::MAX_LEN`] bytes, with optional prover
+/// witnesses. Host-built literals are checked at VM and encoding boundaries.
 #[derive(Clone, Debug)]
 pub enum String {
     /// Plain byte buffer — the verifier's view.
@@ -29,21 +28,18 @@ pub enum StringWitness {
     /// the canonical 32-byte compressed point regardless of variant;
     /// see [`Point`].
     Point(Point),
-    /// Scalar witness (cleartext `Int253`); encodes to 32 bytes.
-    Scalar(Int253),
+    /// Scalar witness; encodes to 32 canonical bytes.
+    Scalar(Scalar),
     /// Prover-side sub-script: a decoded instruction stream with
     /// witness slots intact. Encodes to the compiled bytecode.
-    /// Consumed by `op_open` / `op_signcall` via
-    /// [`String::to_instructions`] — verifier sees `Opaque(bytes)`
-    /// and parses, prover keeps witnesses inline.
+    /// Consumed by `signcall` — verifier sees `Opaque(bytes)` and parses,
+    /// prover keeps witnesses inline. Taproot `open` loads code from Cells.
     Script(Vec<Instruction>),
-    /// Prover-side cell with witness-bearing `Commitment::Open`
+    /// Prover-side contract with witness-bearing `Commitment::Open`
     /// quantities/flavors on its Token payloads. Encodes to the
-    /// canonical cell bytes — verifier sees `Opaque(bytes)` and
-    /// decodes via `Cell::decode` to closed commitments. Consumed
-    /// by `op_input` via [`String::to_cell`], which moves the cell out
-    /// of the enclosing witness box.
-    Cell(Cell),
+    /// 32-byte Contract ID. The body is collected into the transaction BoC;
+    /// `input` resolves it there before applying this private witness overlay.
+    Contract(Contract),
 }
 
 impl StringWitness {
@@ -52,38 +48,52 @@ impl StringWitness {
             Self::Point(p) => p.to_bytes().to_vec(),
             Self::Scalar(s) => s.to_bytes().to_vec(),
             Self::Script(instrs) => compile_instructions(instrs),
-            Self::Cell(c) => c.to_bytes(),
+            Self::Contract(c) => c.id().to_vec(),
         }
     }
 
     fn len(&self) -> usize {
         match self {
-            Self::Point(_) | Self::Scalar(_) => 32,
-            Self::Script(instrs) => {
-                let mut size = SizeWriter::new();
-                for instr in instrs {
-                    instr.encode(&mut size).expect("size writer has capacity");
-                }
-                size.len()
-            }
-            Self::Cell(c) => {
-                let mut size = SizeWriter::new();
-                c.encode(&mut size).expect("admitted cell is encodable");
-                size.len()
-            }
+            Self::Point(_) | Self::Scalar(_) | Self::Contract(_) => 32,
+            Self::Script(instrs) => instrs.iter().map(Instruction::encoded_size).sum(),
         }
     }
 
     fn is_empty(&self) -> bool {
         match self {
             Self::Script(instrs) => instrs.is_empty(),
-            // Point / Scalar are 32 bytes; Cell has a non-empty header.
+            // Point, Scalar, and Contract ID are 32 bytes.
             _ => false,
         }
     }
 }
 
 impl String {
+    /// Temporary VM String limit: one payload-only Cell, with no continuation.
+    pub const MAX_LEN: usize = cells::MAX_CELL_PAYLOAD;
+
+    /// Validates host-built literals/witnesses before VM use or byte allocation.
+    pub fn check_len(&self) -> Result<(), VMError> {
+        Self::check_length(self.len())
+    }
+
+    pub(crate) fn check_length(len: usize) -> Result<(), VMError> {
+        if len > Self::MAX_LEN {
+            return Err(VMError::StringTooLong);
+        }
+        Ok(())
+    }
+
+    /// Checks bounded growth before serializing a witness or allocating bytes.
+    pub(crate) fn appended_len(&self, extra: usize) -> Result<usize, VMError> {
+        let len = self
+            .len()
+            .checked_add(extra)
+            .ok_or(VMError::StringTooLong)?;
+        Self::check_length(len)?;
+        Ok(len)
+    }
+
     // ── Construction ────────────────────────────────────────────
 
     /// Constructs a witness-bearing Point-String.
@@ -97,7 +107,7 @@ impl String {
     }
 
     /// Constructs a witness-bearing Scalar-String.
-    pub fn scalar<T: Into<Int253>>(s: T) -> String {
+    pub fn scalar<T: Into<Scalar>>(s: T) -> String {
         String::Witness(Box::new(StringWitness::Scalar(s.into())))
     }
 
@@ -114,12 +124,13 @@ impl String {
         String::Witness(Box::new(StringWitness::Script(instructions)))
     }
 
-    /// Constructs a witness-bearing Cell-String. Used by the prover
-    /// before `op_input` to push a cell whose Token payloads still
+    /// Constructs a witness-bearing Contract-String. Used by the prover
+    /// before `op_input` to push a contract whose Token payloads still
     /// carry `Commitment::Open` quantities/flavors. The verifier-side
-    /// equivalent is `String::Opaque(cell.to_bytes())`.
-    pub fn cell(c: Cell) -> String {
-        String::Witness(Box::new(StringWitness::Cell(c)))
+    /// equivalent is `String::Opaque(contract.id().to_vec())`, with the
+    /// output Cell and required children supplied in the same transaction BoC.
+    pub fn contract(c: Contract) -> String {
+        String::Witness(Box::new(StringWitness::Contract(c)))
     }
 
     // ── Byte views ──────────────────────────────────────────────
@@ -154,9 +165,8 @@ impl String {
         }
     }
 
-    /// Length in canonical wire bytes. 32 bytes for Point/Scalar,
-    /// compiled bytecode length for Script, serialized cell length
-    /// for Cell.
+    /// Length in canonical bytes: 32 for Point/Scalar/Contract ID,
+    /// compiled bytecode length for Script.
     pub fn len(&self) -> usize {
         match self {
             String::Opaque(d) => d.len(),
@@ -192,18 +202,18 @@ impl String {
         }
     }
 
-    /// Downcasts to an `Int253`. For `Opaque`, parses the bytes as a
-    /// canonical 32-byte sign-magnitude `Int253`. For
+    /// Downcasts to a `Scalar`. For `Opaque`, parses a canonical
+    /// 32-byte little-endian residue strictly below the group order. For
     /// `StringWitness::Scalar(i)`, returns the witness directly.
-    pub fn to_scalar(self) -> Result<Int253, VMError> {
+    pub fn to_scalar(self) -> Result<Scalar, VMError> {
         match self {
             String::Witness(w) => match *w {
                 StringWitness::Scalar(i) => Ok(i),
-                _ => Err(VMError::InvalidInt253Encoding),
+                _ => Err(VMError::InvalidScalarEncoding),
             },
             String::Opaque(data) => {
-                let bytes = array32(&data).ok_or(VMError::InvalidInt253Encoding)?;
-                Int253::from_bytes(bytes).ok_or(VMError::InvalidInt253Encoding)
+                let bytes = array32(&data).ok_or(VMError::InvalidScalarEncoding)?;
+                Scalar::from_bytes(bytes).ok_or(VMError::InvalidScalarEncoding)
             }
         }
     }
@@ -213,24 +223,21 @@ impl String {
     /// `Opaque` parses via `ScriptBuilder::parse` (verifier side); 32-byte
     /// point/scalar variants are not executable bytecode and error.
     ///
-    /// Used by `op_open` / `op_signcall` to enter a predicate
-    /// sub-script — letting the prover keep witnesses inline
-    /// across the isolated call frame.
+    /// Preserves prover witnesses when converting a short embedded script.
+    /// Taproot branches are loaded separately through the Cell resolver.
     pub fn to_instructions(self) -> Result<Vec<Instruction>, VMError> {
         match self {
             String::Witness(w) => match *w {
                 StringWitness::Script(instrs) => Ok(instrs),
                 _ => Err(VMError::TypeNotString),
             },
-            String::Opaque(data) => Ok(
-                ScriptBuilder::parse(&data)?.into_instructions(),
-            ),
+            String::Opaque(data) => Ok(ScriptBuilder::parse(&data)?.into_instructions()),
         }
     }
 
     /// Like [`to_instructions`], but returns the executable [`Script`]:
     /// `Transparent` keeps prover witnesses inline; `Opaque` becomes raw
-    /// bytecode the verifier decodes on demand (no parse). See ADR 0015.
+    /// bytecode the verifier decodes on demand (no parse).
     pub(crate) fn into_script(self) -> Result<Script, VMError> {
         match self {
             String::Witness(w) => match *w {
@@ -259,29 +266,16 @@ impl String {
         }
     }
 
-    /// Downcasts to a `Cell`. For `StringWitness::Cell(c)`, returns the
-    /// witness-bearing cell directly (Token payloads keep their
-    /// `Commitment::Open` quantities/flavors). For `Opaque`, decodes
-    /// the canonical wire bytes via `Cell::decode` (yields
-    /// `Commitment::Closed`). Hard-fails `MalformedCellEncoding` on
-    /// malformed bytes, trailing data, or any non-decodable variant.
-    ///
-    /// Used by `op_input`.
-    pub fn to_cell(self) -> Result<Cell, VMError> {
+    /// Downcasts to a `Contract`. For `StringWitness::Contract(c)`, returns the
+    /// witness-bearing contract directly. An opaque ID cannot be decoded without
+    /// the transaction's resolver; the VM owns that authenticated lookup.
+    pub fn to_contract(self) -> Result<Contract, VMError> {
         match self {
             String::Witness(w) => match *w {
-                StringWitness::Cell(cell) => Ok(cell),
-                _ => Err(VMError::MalformedCellEncoding),
+                StringWitness::Contract(contract) => Ok(contract),
+                _ => Err(VMError::MalformedContractEncoding),
             },
-            String::Opaque(data) => {
-                let mut reader: &[u8] = &data;
-                let cell = <Cell as readerwriter::Decodable>::decode(&mut reader)
-                    .map_err(|_| VMError::MalformedCellEncoding)?;
-                if !reader.is_empty() {
-                    return Err(VMError::MalformedCellEncoding);
-                }
-                Ok(cell)
-            }
+            String::Opaque(_) => Err(VMError::MalformedContractEncoding),
         }
     }
 
@@ -293,18 +287,20 @@ impl String {
 
     /// Returns `self || bytes`. Used by `0x46 append`, `0x44 writebits`,
     /// `0x45 writeint`, `0x47 writezeros`.
-    pub fn append_bytes(self, bytes: &[u8]) -> String {
+    pub fn append_bytes(self, bytes: &[u8]) -> Result<String, VMError> {
+        self.appended_len(bytes.len())?;
         let mut out = self.to_bytes();
         out.extend_from_slice(bytes);
-        String::Opaque(out)
+        Ok(String::Opaque(out))
     }
 
     /// Returns `self` followed by `n` zero bytes without allocating a
     /// temporary zero buffer.
-    pub fn append_zeros(self, n: usize) -> String {
+    pub fn append_zeros(self, n: usize) -> Result<String, VMError> {
+        let len = self.appended_len(n)?;
         let mut out = self.to_bytes();
-        out.resize(out.len().saturating_add(n), 0);
-        String::Opaque(out)
+        out.resize(len, 0);
+        Ok(String::Opaque(out))
     }
 
     /// Splits off the first `n` bytes. Returns `(remainder, head)` on
@@ -417,10 +413,10 @@ impl From<Vec<u8>> for String {
 // canonical bytecode (the same bytes the verifier would see). Used
 // by `to_bytes_vec` and `len` for `StringWitness::Script`. ──────
 
-fn compile_instructions(instrs: &[Instruction]) -> Vec<u8> {
+pub(crate) fn compile_instructions(instrs: &[Instruction]) -> Vec<u8> {
     let mut out = Vec::new();
     for instr in instrs {
-        instr.encode(&mut out).expect("Vec writer never fails");
+        instr.encode(&mut out);
     }
     out
 }

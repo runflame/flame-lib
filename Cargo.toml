@@ -2,9 +2,11 @@
 resolver = "2"
 
 members = [
+    "cells",
     "readerwriter",
     "merkle",
     "starsig",
+    "flamekd",
     "musig",
     "spacesuit",
     "flamevm",

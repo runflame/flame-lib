@@ -19,7 +19,7 @@ fn shared_bp_gens() -> &'static BulletproofGens {
 use crate::constraints::Commitment;
 use crate::errors::VMError;
 use crate::tx::TxHeader;
-use crate::vm::{signcall_verification_transcript, Delegate, DeferredSig, TxResult, VM};
+use crate::vm::{signcall_verification_transcript, DeferredSig, Delegate, TxResult, VM};
 
 /// Phase-11 R1CS proof verifier. Wraps `bulletproofs::r1cs::Verifier`.
 /// The verifier never sees prover witnesses — its `next_alloc_witness`
@@ -45,11 +45,7 @@ impl Verifier {
     /// Verifies the provided proof against the constraint system the
     /// VM accumulated, consuming `self`. Errors `InvalidR1CSProof` on
     /// any failure (tampered proof, mismatched CS, …).
-    pub fn verify_proof(
-        self,
-        proof: &R1CSProof,
-        pc_gens: &PedersenGens,
-    ) -> Result<(), VMError> {
+    pub fn verify_proof(self, proof: &R1CSProof, pc_gens: &PedersenGens) -> Result<(), VMError> {
         self.cs
             .verify(proof, pc_gens, shared_bp_gens())
             .map_err(|_| VMError::InvalidR1CSProof)
@@ -77,15 +73,33 @@ impl Verifier {
         gas_limit: u64,
         txbound_signature: Option<musig::Signature>,
     ) -> Result<TxResult, VMError> {
+        Self::verify_with_cells(
+            pc_gens,
+            bytecode,
+            proof,
+            header,
+            gas_limit,
+            txbound_signature,
+            &cells::BagOfCells::new(),
+        )
+    }
+
+    /// Verifies using exactly the public witness set committed by this external
+    /// transaction. Callers must pass the same set to all induced actor work.
+    pub fn verify_with_cells(
+        pc_gens: &PedersenGens,
+        bytecode: Vec<u8>,
+        proof: &R1CSProof,
+        header: TxHeader,
+        gas_limit: u64,
+        txbound_signature: Option<musig::Signature>,
+        cells: &cells::BagOfCells,
+    ) -> Result<TxResult, VMError> {
         let mut verifier = Verifier::new();
         // Verifier-side: stream the wire bytecode directly — decode one
         // instruction at a time, no `Vec<Instruction>`. See ADR 0015.
-        let mut result = VM::run_bytecode(
-            header,
-            bytecode,
-            gas_limit,
-            &mut verifier,
-        )?;
+        let mut result =
+            VM::run_bytecode_with_cells(header, bytecode, gas_limit, &mut verifier, cells)?;
         result.multiplications = result
             .multiplications
             .saturating_add(verifier.cs.metrics().multipliers);
@@ -125,18 +139,17 @@ impl Verifier {
             .filter_map(|s| match s {
                 DeferredSig::TxBound {
                     verification_key,
-                    cell_id,
+                    contract_id,
                 } => Some((
                     musig::VerificationKey::from_compressed(*verification_key),
-                    *cell_id,
+                    *contract_id,
                 )),
                 _ => None,
             })
             .collect();
         if !txbound_items.is_empty() {
             use musig::Multisignature;
-            let signature = txbound_signature
-                .ok_or(VMError::MissingTxBoundSignature)?;
+            let signature = txbound_signature.ok_or(VMError::MissingTxBoundSignature)?;
             let mut t = merlin::Transcript::new(b"flamevm.signtx");
             t.append_message(b"txid", &txid.0);
             signature.verify_multi_batched(&mut t, txbound_items, &mut verifier.batch);
@@ -193,5 +206,4 @@ impl Delegate for Verifier {
         let var = self.cs.commit(point);
         Ok((point, var))
     }
-
 }

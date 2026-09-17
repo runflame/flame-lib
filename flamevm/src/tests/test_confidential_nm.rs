@@ -448,7 +448,7 @@ fn confidential_2_to_3_two_flavors() {
 ///
 /// Script shape (single flavor 0):
 ///
-///   pushstr <cell>; input(w); <taproot_proof>; push:0; open
+///   pushstr <contract>; input(w); <taproot_proof>; push:0; open
 ///       → stack: [Token(10, 0)]
 ///   push:3; push:0; fee
 ///       → stack: [Token(10, 0), WideToken(-3, 0)]
@@ -472,8 +472,8 @@ fn confidential_1_to_1_with_fee() {
         flv_blind: 13,
         anchor: [0xa1; 32],
     };
-    let (cell, cp) = build_input_cell(&inp);
-    let expected_input_id = cell.id();
+    let (contract, cp) = build_input_contract(&inp);
+    let expected_input_id = contract.id();
 
     let out = NMOutputSpec {
         qty: 7,
@@ -485,18 +485,18 @@ fn confidential_1_to_1_with_fee() {
     let (q_out, f_out) = open_commitments_for_output(&out);
 
     let mut program = ScriptBuilder::new();
-    // Consume the input cell — push the witness-bearing StringWitness::Cell
+    // Consume the input contract — push the witness-bearing StringWitness::Contract
     // so the Token's open commitments survive into the CS.
-    program = program.push_str(String::cell(cell));
+    program = program.push_str(String::contract(contract));
     program = program.input();
     program = push_taproot_proof_to_program(program, &cp);
     program = program
         .push_int(1024u64) // gas
-        .push_int(0u64)    // k args
+        .push_int(0u64) // k args
         .open()
-        .verify()          // assert success marker
-        .drop_();          // discard count
-    // Fee opcode: pushes WideToken(-3, FLAME_FLAVOR).
+        .verify() // assert success marker
+        .drop_(); // discard count
+                  // Fee opcode: pushes WideToken(-3, FLAME_FLAVOR).
     program = program.push_int(3u64).fee();
     // Output commitment Strings (witness-bearing prover-side).
     // Clone so the post-prove assertion can still read the
@@ -506,59 +506,59 @@ fn confidential_1_to_1_with_fee() {
         .push_str(String::commitment(f_out.clone()));
     // mix: m=2 (real Token + fee WideToken), n=1 (output).
     program = program.push_int(2u64).push_int(1u64).mix();
-    // Emit the output cell.
+    // Emit the output contract.
     let out_pred = output_predicate_point(out.predicate_tag);
-    program = program
-        .push_int(1u64)
-        .push_point(*out_pred.as_bytes())
-        .output();
+    program = program.push_point(*out_pred.as_bytes()).output();
 
     let prover_result =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
-            .expect("prove ok");
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove ok");
 
     // total_fee picked up the cleartext amount.
     assert_eq!(prover_result.total_fee, 3);
 
     // Txlog layout: Header, Input, Fee(3), Output.
-    assert_eq!(prover_result.txlog.len(), 4);
-    assert!(matches!(
-        prover_result.txlog[0],
-        TxEntry::Header(_)
-    ));
-    match &prover_result.txlog[1] {
-        TxEntry::Input(id) => assert_eq!(*id, expected_input_id),
-        _ => panic!("txlog[1] must be Input"),
-    }
+    assert_eq!(prover_result.txlog.len(), 5);
+    assert!(matches!(prover_result.txlog[0], TxEntry::Header(_)));
+    assert!(matches!(prover_result.txlog[1], TxEntry::CellWitness(_)));
     match &prover_result.txlog[2] {
-        TxEntry::Fee(q) => assert_eq!(*q, 3),
-        _ => panic!("txlog[2] must be Fee(3)"),
+        TxEntry::Input(id) => assert_eq!(*id, expected_input_id),
+        _ => panic!("txlog[2] must be Input"),
     }
     match &prover_result.txlog[3] {
+        TxEntry::Fee(q) => assert_eq!(*q, 3),
+        _ => panic!("txlog[3] must be Fee(3)"),
+    }
+    match &prover_result.txlog[4] {
         TxEntry::Output(c) => {
             assert_eq!(c.predicate.to_point(), out_pred);
-            let token = match &c.payload()[0] {
+            let token = match c.payload() {
                 Value::Token(t) => t,
                 _ => panic!("output payload[0] must be Token"),
             };
             assert_eq!(token.qty.to_point(), q_out.to_point());
             assert_eq!(token.flv.to_point(), f_out.to_point());
         }
-        _ => panic!("txlog[3] must be Output"),
+        _ => panic!("txlog[4] must be Output"),
     }
 
     // Verifier round-trip.
     let txid_p = prover_result.txid;
-    let TxResult { bytecode, proof, .. } = prover_result;
+    let TxResult {
+        bytecode,
+        proof,
+        cells,
+        ..
+    } = prover_result;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    let v = Verifier::verify(
+    let v = Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify ok");
     assert_eq!(v.txid, txid_p);
@@ -588,25 +588,26 @@ fn confidential_unbalanced_inputs_rejected() {
         predicate_tag: 0xb1,
     }];
     let program = build_confidential_nm_program(&inputs, &outputs);
-    let prove_attempt = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-    );
+    let prove_attempt = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000);
     match prove_attempt {
         Err(_) => { /* prover refused — good */ }
         Ok(result) => {
-            let TxResult { bytecode, proof, .. } = result;
+            let TxResult {
+                bytecode,
+                proof,
+                cells,
+                ..
+            } = result;
             let proof = proof.expect("proof set");
             let pc_gens_v = PedersenGens::default();
-            let err = Verifier::verify(
+            let err = Verifier::verify_with_cells(
                 &pc_gens_v,
                 bytecode,
                 &proof,
                 dummy_header(),
                 1_000_000,
                 None,
+                &cells,
             )
             .expect_err("verifier must reject imbalance");
             assert!(matches!(err, VMError::InvalidR1CSProof));
@@ -635,25 +636,26 @@ fn confidential_flavor_mismatch_rejected() {
         predicate_tag: 0xb1,
     }];
     let program = build_confidential_nm_program(&inputs, &outputs);
-    let prove_attempt = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-    );
+    let prove_attempt = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000);
     match prove_attempt {
         Err(_) => { /* prover refused — good */ }
         Ok(result) => {
-            let TxResult { bytecode, proof, .. } = result;
+            let TxResult {
+                bytecode,
+                proof,
+                cells,
+                ..
+            } = result;
             let proof = proof.expect("proof set");
             let pc_gens_v = PedersenGens::default();
-            let err = Verifier::verify(
+            let err = Verifier::verify_with_cells(
                 &pc_gens_v,
                 bytecode,
                 &proof,
                 dummy_header(),
                 1_000_000,
                 None,
+                &cells,
             )
             .expect_err("verifier must reject flavor mismatch");
             assert!(matches!(err, VMError::InvalidR1CSProof));
@@ -680,7 +682,7 @@ fn confidential_with_fee_undersupply_rejected() {
         flv_blind: 13,
         anchor: [0xa1; 32],
     };
-    let (cell, cp) = build_input_cell(&inp);
+    let (contract, cp) = build_input_contract(&inp);
 
     // Output qty = 10 (NOT 7) — fee is unfunded.
     let out = NMOutputSpec {
@@ -696,7 +698,7 @@ fn confidential_with_fee_undersupply_rejected() {
     // the unbalanced output qty.
     let out_pred = output_predicate_point(out.predicate_tag);
     let mut program = ScriptBuilder::new();
-    program = program.push_str(String::cell(cell));
+    program = program.push_str(String::contract(contract));
     program = program.input();
     program = push_taproot_proof_to_program(program, &cp);
     program = program
@@ -710,30 +712,28 @@ fn confidential_with_fee_undersupply_rejected() {
         .push_str(String::commitment(q_out))
         .push_str(String::commitment(f_out));
     program = program.push_int(2u64).push_int(1u64).mix();
-    program = program
-        .push_int(1u64)
-        .push_point(*out_pred.as_bytes())
-        .output();
+    program = program.push_point(*out_pred.as_bytes()).output();
 
-    let prove_attempt = Prover::prove(
-        &pc_gens,
-        program,
-        dummy_header(),
-        1_000_000,
-    );
+    let prove_attempt = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000);
     match prove_attempt {
         Err(_) => { /* prover refused the bad witness — good */ }
         Ok(result) => {
-            let TxResult { bytecode, proof, .. } = result;
+            let TxResult {
+                bytecode,
+                proof,
+                cells,
+                ..
+            } = result;
             let proof = proof.expect("proof set");
             let pc_gens_v = PedersenGens::default();
-            let err = Verifier::verify(
+            let err = Verifier::verify_with_cells(
                 &pc_gens_v,
                 bytecode,
                 &proof,
                 dummy_header(),
                 1_000_000,
                 None,
+                &cells,
             )
             .expect_err("verifier must reject fee undersupply");
             assert!(matches!(err, VMError::InvalidR1CSProof));

@@ -1,10 +1,10 @@
 //! Tests for actor identity, charged usage, and registry atomicity.
 
-use readerwriter::{Decodable, ReadError};
+use cells::{Cell, CellDecode, CellError};
 
 use super::mem_registry::MemRegistry;
 use crate::{
-    code_state_bytes, empty_state, state_root, ActorID, ActorRegistry, Dict, Int253, String,
+    code_state_bytes, empty_state, state_root, ActorID, ActorRegistry, Dict, Scalar, String,
     VMError, Value,
 };
 
@@ -19,7 +19,7 @@ fn fixture_id(seed: u8) -> ActorID {
 fn state_with(entries: &[(u64, u64)]) -> Value {
     let mut state = Dict::new();
     for (key, value) in entries {
-        state.insert(Int253::from(*key), Value::Int253(Int253::from(*value)));
+        state.insert(Scalar::from(*key), Value::Scalar(Scalar::from(*value)));
     }
     Value::Dict(state)
 }
@@ -73,10 +73,10 @@ fn actorid_forms_share_one_registry_key() {
 
 #[test]
 fn actorid_decode_rejects_unknown_tag() {
-    let mut bytes = [0x42u8].as_slice();
+    let cell = Cell::new(vec![0x42u8], vec![]).unwrap();
     assert!(matches!(
-        ActorID::decode(&mut bytes),
-        Err(ReadError::InvalidFormat)
+        ActorID::from_cell(&cell, &mut ()),
+        Err(CellError::InvalidFormat)
     ));
 }
 
@@ -98,7 +98,7 @@ fn charged_usage_counts_state_and_code() {
     let code = fixture_code();
     let small = empty_state();
     let mut large = Dict::new();
-    large.insert(Int253::ZERO, Value::String(String::from(vec![0u8; 100])));
+    large.insert(Scalar::ZERO, Value::String(String::from(vec![0u8; 100])));
     let large = Value::Dict(large);
     let small_usage = code_state_bytes(&code, &small).unwrap();
     let large_usage = code_state_bytes(&code, &large).unwrap();

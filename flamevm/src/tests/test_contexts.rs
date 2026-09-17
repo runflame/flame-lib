@@ -7,16 +7,16 @@ enum Context {
     ExternalRoot,
     InternalRoot,
     ActorCall,
-    ExternalCellOpen,
-    InternalCellOpen,
+    ExternalContractOpen,
+    InternalContractOpen,
 }
 
 const CONTEXTS: [Context; 5] = [
     Context::ExternalRoot,
     Context::InternalRoot,
     Context::ActorCall,
-    Context::ExternalCellOpen,
-    Context::InternalCellOpen,
+    Context::ExternalContractOpen,
+    Context::InternalContractOpen,
 ];
 
 #[derive(Clone, Copy)]
@@ -36,12 +36,12 @@ fn kind(context: Context) -> CallKind {
             caller: Some(caller),
         },
         Context::ActorCall => CallKind::ActorCall { actor, caller },
-        Context::ExternalCellOpen => CallKind::CellOpen {
+        Context::ExternalContractOpen => CallKind::ContractOpen {
             predicate: Predicate::opaque(Predicate::unspendable_key()),
             external_context: true,
             caller_id: None,
         },
-        Context::InternalCellOpen => CallKind::CellOpen {
+        Context::InternalContractOpen => CallKind::ContractOpen {
             predicate: Predicate::opaque(Predicate::unspendable_key()),
             external_context: false,
             caller_id: Some([0x22; 32]),
@@ -50,7 +50,10 @@ fn kind(context: Context) -> CallKind {
 }
 
 fn is_external(context: Context) -> bool {
-    matches!(context, Context::ExternalRoot | Context::ExternalCellOpen)
+    matches!(
+        context,
+        Context::ExternalRoot | Context::ExternalContractOpen
+    )
 }
 
 fn is_actor(context: Context) -> bool {
@@ -73,7 +76,7 @@ fn assert_gate(name: &str, instruction: Instruction, gate: Gate) {
         let allowed = match gate {
             Gate::External => is_external(context),
             Gate::Actor => is_actor(context),
-            Gate::ExternalPredicate => matches!(context, Context::ExternalCellOpen),
+            Gate::ExternalPredicate => matches!(context, Context::ExternalContractOpen),
         };
         let result = step(context, instruction.clone());
         if allowed {
@@ -98,7 +101,7 @@ fn assert_gate(name: &str, instruction: Instruction, gate: Gate) {
         let expected = match gate {
             Gate::External => matches!(error, VMError::ExternalOnly),
             Gate::Actor => matches!(error, VMError::OpcodeRequiresActorContext),
-            Gate::ExternalPredicate if matches!(context, Context::InternalCellOpen) => {
+            Gate::ExternalPredicate if matches!(context, Context::InternalContractOpen) => {
                 matches!(error, VMError::ExternalOnly)
             }
             Gate::ExternalPredicate => {
@@ -120,7 +123,6 @@ fn restricted_opcode_context_matrix() {
         ("commit", Instruction::Commit),
         ("alloc", Instruction::Alloc(None)),
         ("expr", Instruction::Expr),
-        ("range", Instruction::Range),
         ("input", Instruction::Input),
         ("signtx", Instruction::Signtx),
         ("mix", Instruction::Mix),
@@ -148,12 +150,78 @@ fn restricted_opcode_context_matrix() {
 }
 
 #[test]
+fn raw_scalar_range_checks_in_every_context_and_preserves_type() {
+    let cases = [
+        (Scalar::ZERO, 1u64, None),
+        (Scalar::ONE, 1, None),
+        (Scalar::from(255u64), 8, None),
+        (Scalar::from(u64::MAX), 64, None),
+        (Scalar::from(256u64), 8, Some(VMError::InvalidBitrange)),
+        (
+            Scalar::from(1u128 << 64),
+            64,
+            Some(VMError::InvalidBitrange),
+        ),
+        (-Scalar::ONE, 64, Some(VMError::InvalidBitrange)),
+        (Scalar::ZERO, 0, Some(VMError::BitCountOutOfRange)),
+        (Scalar::ZERO, 65, Some(VMError::BitCountOutOfRange)),
+    ];
+    for context in CONTEXTS {
+        for (value, bits, expected_error) in &cases {
+            let frame = CallFrame::new(vec![Instruction::Range], kind(context), 1_000_000);
+            let mut vm = VM::new(dummy_header(), frame);
+            vm.push_value(Value::Scalar(*value));
+            vm.push_value(Value::Scalar(Scalar::from(*bits)));
+            let result = if is_external(context) {
+                vm.step_external(&mut make_stub_delegate())
+            } else {
+                vm.step_internal_with_registry(&mut MemRegistry::new())
+            };
+            match expected_error {
+                Some(error) => assert_eq!(
+                    core::mem::discriminant(&result.unwrap_err()),
+                    core::mem::discriminant(error),
+                    "range({value:?}, {bits}) in {context:?}",
+                ),
+                None => {
+                    result.unwrap();
+                    assert_eq!(vm.current_call.stack.len(), 1);
+                    assert_int(&vm.current_call.stack[0], *value);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn range_expression_context_matrix() {
+    for context in CONTEXTS {
+        let frame = CallFrame::new(vec![Instruction::Range], kind(context), 1_000_000);
+        let mut vm = VM::new(dummy_header(), frame);
+        vm.push_value(Value::Expression(Expression::Constant(Scalar::ONE)));
+        vm.push_value(Value::Scalar(Scalar::from(64u64)));
+        if is_external(context) {
+            vm.step_external(&mut make_stub_delegate()).unwrap();
+            assert!(matches!(
+                vm.current_call.stack.as_slice(),
+                [Value::Expression(Expression::Constant(value))] if *value == Scalar::ONE
+            ));
+        } else {
+            let error = vm
+                .step_internal_with_registry(&mut MemRegistry::new())
+                .unwrap_err();
+            assert!(matches!(error, VMError::ExternalOnly));
+        }
+    }
+}
+
+#[test]
 fn callerid_reports_attribution_without_granting_actor_context() {
     for (context, expected) in [
         (Context::InternalRoot, [0x22; 32]),
         (Context::ActorCall, [0x22; 32]),
-        (Context::ExternalCellOpen, [0; 32]),
-        (Context::InternalCellOpen, [0x22; 32]),
+        (Context::ExternalContractOpen, [0; 32]),
+        (Context::InternalContractOpen, [0x22; 32]),
     ] {
         let frame = CallFrame::new(vec![Instruction::Callerid], kind(context), 100);
         let mut vm = VM::new(dummy_header(), frame);
@@ -173,7 +241,7 @@ fn callerid_reports_attribution_without_granting_actor_context() {
 }
 
 #[test]
-fn nested_cellopen_does_not_transitively_inherit_actor_identity() {
+fn nested_contractopen_does_not_transitively_inherit_actor_identity() {
     let constructor = ActorID::Constructor(vec![1, 2, 3]);
     let expected = constructor.to_hash();
     let frame = CallFrame::new(
@@ -185,17 +253,17 @@ fn nested_cellopen_does_not_transitively_inherit_actor_identity() {
         1_000,
     );
     let mut vm = VM::new(dummy_header(), frame);
-    let make_cell = || {
-        Cell::new(
+    let make_contract = || {
+        Contract::new(
             Predicate::opaque(Predicate::unspendable_key()),
             Anchor([0x44; 32]),
-            Vec::new(),
+            test_payload(Vec::new()),
         )
         .unwrap()
     };
 
-    vm.enter_cell_open_frame(
-        make_cell(),
+    vm.enter_contract_open_frame(
+        make_contract(),
         Script::Transparent(Vec::new()),
         0,
         100,
@@ -205,14 +273,14 @@ fn nested_cellopen_does_not_transitively_inherit_actor_identity() {
     .unwrap();
     assert!(matches!(
         vm.current_call.kind,
-        CallKind::CellOpen {
+        CallKind::ContractOpen {
             caller_id: Some(id),
             ..
         } if id == expected
     ));
 
-    vm.enter_cell_open_frame(
-        make_cell(),
+    vm.enter_contract_open_frame(
+        make_contract(),
         Script::Transparent(Vec::new()),
         0,
         50,
@@ -222,7 +290,7 @@ fn nested_cellopen_does_not_transitively_inherit_actor_identity() {
     .unwrap();
     assert!(matches!(
         vm.current_call.kind,
-        CallKind::CellOpen {
+        CallKind::ContractOpen {
             caller_id: None,
             ..
         }
@@ -230,10 +298,10 @@ fn nested_cellopen_does_not_transitively_inherit_actor_identity() {
 }
 
 #[test]
-fn cellopen_call_rejects_before_consuming_operands() {
+fn contractopen_call_rejects_before_consuming_operands() {
     let frame = CallFrame::new(
         vec![Instruction::Call],
-        CallKind::CellOpen {
+        CallKind::ContractOpen {
             predicate: Predicate::opaque(Predicate::unspendable_key()),
             external_context: false,
             caller_id: Some([0x22; 32]),
@@ -242,9 +310,9 @@ fn cellopen_call_rejects_before_consuming_operands() {
     );
     let mut vm = VM::new(dummy_header(), frame);
     vm.current_call.stack = vec![
-        Value::Int253(Int253::from(7u64)),
-        Value::Int253(Int253::ONE),
-        Value::Int253(Int253::from(100u64)),
+        Value::Scalar(Scalar::from(7u64)),
+        Value::Scalar(Scalar::ONE),
+        Value::Scalar(Scalar::from(100u64)),
         Value::String(String::from(vec![0x44; 32])),
     ];
 
@@ -253,7 +321,7 @@ fn cellopen_call_rejects_before_consuming_operands() {
         Err(VMError::OpcodeRequiresActorContext)
     ));
     assert_eq!(vm.current_call.stack.len(), 4);
-    assert_int(&vm.current_call.stack[0], Int253::from(7u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(7u64));
 }
 
 #[test]
@@ -284,7 +352,7 @@ fn issuepub_is_available_in_actorcall() {
 }
 
 #[test]
-fn send_is_available_everywhere_but_cellopen_never_delegates_its_caller() {
+fn send_is_available_everywhere_but_contractopen_never_delegates_its_caller() {
     let script = ScriptBuilder::new()
         .push_int(0u64)
         .push_str(String::from(vec![0; 32]))
@@ -318,7 +386,9 @@ fn send_is_available_everywhere_but_cellopen_never_delegates_its_caller() {
             Context::InternalRoot | Context::ActorCall => {
                 assert_eq!(caller.flatten().map(ActorID::to_hash), Some([0x11; 32]));
             }
-            Context::ExternalRoot | Context::ExternalCellOpen | Context::InternalCellOpen => {
+            Context::ExternalRoot
+            | Context::ExternalContractOpen
+            | Context::InternalContractOpen => {
                 assert_eq!(caller, Some(None))
             }
         }

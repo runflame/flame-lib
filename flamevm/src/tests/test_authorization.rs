@@ -16,10 +16,8 @@ fn run_external_to_end(vm: &mut VM) -> Result<(), VMError> {
 fn signcall_signature(program: &[u8], secret: u64) -> (CompressedRistretto, [u8; 64]) {
     let (verification_key, signing_key) = signing_keypair(secret);
     let message = VM::signcall_message(program);
-    let signature = musig::Signature::sign(
-        &mut signcall_verification_transcript(&message),
-        signing_key,
-    );
+    let signature =
+        musig::Signature::sign(&mut signcall_verification_transcript(&message), signing_key);
     (verification_key, signature.to_bytes())
 }
 
@@ -30,8 +28,9 @@ fn internal_signcall_code(
 ) -> Vec<u8> {
     ScriptBuilder::new()
         .push_int(0u64)
+        .dict()
         .push_point(*verification_key.as_bytes())
-        .cell()
+        .contract()
         .push_str(String::from(program))
         .push_str(String::from(signature.to_vec()))
         .push_int(10_000u64)
@@ -44,26 +43,30 @@ fn internal_signcall_code(
 
 #[test]
 fn signtx_pours_payload_and_records_txbound_sig() {
-    // Build cell with payload [5, 7], then signtx.
+    // Build one Dict payload with two entries, then unlock that single Value.
     let script = ScriptBuilder::new()
         .push_int(5u64)
+        .push_int(0u64)
         .push_int(7u64)
-        .push_int(2u64)                       // payload count
+        .push_int(1u64)
+        .push_int(2u64)
+        .dict()
         .push_point([0xaa; 32])
-        .cell()
+        .contract()
         .signtx()
         .to_bytecode();
     let mut vm = vm_external_with_script(script);
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_external_to_end(&mut vm).unwrap();
-    // Stack now has [5, 7, count=2].
-    assert_eq!(vm.current_call.stack.len(), 3);
-    assert_int(&vm.current_call.stack[2], Int253::from(2u64));
+    assert_eq!(vm.current_call.stack.len(), 1);
+    assert_dict_keys(&vm.current_call.stack[0], &[Scalar::ZERO, Scalar::ONE]);
     // Exactly one TxBound deferred sig recorded. No message, no sig
     // bytes — those come from the tx envelope at finalize.
     assert_eq!(vm.deferred_sigs.len(), 1);
     match &vm.deferred_sigs[0] {
-        DeferredSig::TxBound { verification_key, .. } => {
+        DeferredSig::TxBound {
+            verification_key, ..
+        } => {
             assert_eq!(verification_key.as_bytes(), &[0xaa; 32]);
         }
         DeferredSig::Explicit { .. } => panic!("expected TxBound, got Explicit"),
@@ -72,23 +75,26 @@ fn signtx_pours_payload_and_records_txbound_sig() {
 
 #[test]
 fn signtx_prepays_aggregate_signature_work() {
-    let cell = Cell::new(
+    let contract = Contract::new(
         Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x41; 32]),
-        Vec::new(),
+        test_payload(Vec::new()),
     )
     .unwrap();
-    let expected = GAS_PER_INSTRUCTION + GAS_SIGNATURE_VERIFY;
+    let expected =
+        GAS_PER_INSTRUCTION + GAS_SIGNATURE_VERIFY + contract.payload().encoding_gas().unwrap();
 
     let mut vm = vm_external_with_script(ScriptBuilder::new().signtx().to_bytecode());
-    vm.current_call.stack = vec![Value::Cell(Box::new(cell.clone()))];
+    vm.current_call.stack = vec![Value::Contract(Box::new(contract.clone()))];
     vm.current_call.gas_limit = expected;
     let mut delegate = make_stub_delegate();
-    assert!(vm.step_external(&mut delegate).expect("exact budget succeeds"));
+    assert!(vm
+        .step_external(&mut delegate)
+        .expect("exact budget succeeds"));
     assert_eq!(vm.current_call.gas_used, expected);
 
     let mut short = vm_external_with_script(ScriptBuilder::new().signtx().to_bytecode());
-    short.current_call.stack = vec![Value::Cell(Box::new(cell))];
+    short.current_call.stack = vec![Value::Contract(Box::new(contract))];
     short.current_call.gas_limit = expected - 1;
     let mut delegate = make_stub_delegate();
     assert!(matches!(
@@ -101,19 +107,22 @@ fn signtx_prepays_aggregate_signature_work() {
 #[test]
 fn signcall_records_explicit_sig_and_runs_program() {
     // Inner script `drop, push:0, return` drains the payload and
-    // exits the isolated CellOpen frame (ADR 0013).
-    let prog = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
+    // exits the isolated ContractOpen frame (ADR 0013).
+    let prog = ScriptBuilder::new()
+        .drop_()
+        .push_int(0u64)
+        .return_()
+        .to_bytecode();
     let sig_bytes = [0u8; 64];
 
     let script = ScriptBuilder::new()
-        .push_int(5u64)                                  // payload [5]
-        .push_int(1u64)                                  // payload count
+        .push_int(5u64) // payload [5]
         .push_point([0xaa; 32])
-        .cell()
-        .push_str(String::from(prog))                    // inner script
-        .push_str(String::from(sig_bytes.to_vec()))      // 64-byte sig
-        .push_int(1024u64)                               // gas
-        .push_int(0u64)                                  // m = 0 args
+        .contract()
+        .push_str(String::from(prog)) // inner script
+        .push_str(String::from(sig_bytes.to_vec())) // 64-byte sig
+        .push_int(1024u64) // gas
+        .push_int(0u64) // m = 0 args
         .signcall()
         .to_bytecode();
     let mut vm = vm_external_with_script(script);
@@ -121,8 +130,8 @@ fn signcall_records_explicit_sig_and_runs_program() {
     run_external_to_end(&mut vm).unwrap();
     // Parent stack: [count=0, success=1] from the child's clean return.
     assert_eq!(vm.current_call.stack.len(), 2);
-    assert_int(&vm.current_call.stack[0], Int253::from(0u64));
-    assert_int(&vm.current_call.stack[1], Int253::from(1u64));
+    assert_int(&vm.current_call.stack[0], Scalar::from(0u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(1u64));
     assert_eq!(vm.deferred_sigs.len(), 1);
     match &vm.deferred_sigs[0] {
         DeferredSig::Explicit {
@@ -140,27 +149,27 @@ fn signcall_records_explicit_sig_and_runs_program() {
 }
 
 #[test]
-fn failed_signcall_restores_cell_and_argument_and_signature_checkpoint() {
+fn failed_signcall_restores_contract_and_argument_and_signature_checkpoint() {
     let program = ScriptBuilder::new().push_int(0u64).verify().to_bytecode();
     let (verification_key, signature) = signcall_signature(&program, 44);
-    let cell = Cell::new(
+    let contract = Contract::new(
         Predicate::opaque(verification_key),
         Anchor([0x44; 32]),
-        Vec::new(),
+        test_payload(Vec::new()),
     )
     .expect("empty payload is portable");
-    let cell_id = cell.id();
-    let token = Token::cleartext(Int253::from(43u64), FLAME_FLAVOR).unwrap();
+    let contract_id = contract.id();
+    let token = Token::cleartext(Scalar::from(43u64), FLAME_FLAVOR).unwrap();
 
     let mut vm = vm_external_with_script(ScriptBuilder::new().signcall().to_bytecode());
     vm.last_anchor = Some(Anchor([0x42; 32]));
     vm.current_call.stack = vec![
-        Value::Cell(Box::new(cell)),
+        Value::Contract(Box::new(contract)),
         Value::String(String::from(program)),
         Value::String(String::from(signature.to_vec())),
-        Value::Int253(Int253::from(10_000u64)),
+        Value::Scalar(Scalar::from(10_000u64)),
         Value::Token(token.clone()),
-        Value::Int253(Int253::ONE),
+        Value::Scalar(Scalar::ONE),
     ];
 
     run_external_to_end(&mut vm).unwrap();
@@ -169,29 +178,32 @@ fn failed_signcall_restores_cell_and_argument_and_signature_checkpoint() {
     assert_eq!(vm.current_call.stack.len(), 4);
     assert!(matches!(
         &vm.current_call.stack[0],
-        Value::Cell(cell) if cell.id() == cell_id
+        Value::Contract(contract) if contract.id() == contract_id
     ));
     assert!(matches!(
         &vm.current_call.stack[1],
         Value::Token(restored) if restored.qty() == token.qty() && restored.flv() == token.flv()
     ));
-    assert_int(&vm.current_call.stack[2], Int253::ONE);
-    assert_int(&vm.current_call.stack[3], Int253::ZERO);
+    assert_int(&vm.current_call.stack[2], Scalar::ONE);
+    assert_int(&vm.current_call.stack[3], Scalar::ZERO);
 }
 
 #[test]
-fn signcall_message_binds_only_to_program_not_to_cell() {
-    // Two different cells running the same program produce
+fn signcall_message_binds_only_to_program_not_to_contract() {
+    // Two different contracts running the same program produce
     // identical deferred-sig messages — confirms architect's
     // intent that signcall binds only to the program.
     fn run_signcall(predicate_byte: u8) -> DeferredSig {
-        let prog = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
+        let prog = ScriptBuilder::new()
+            .drop_()
+            .push_int(0u64)
+            .return_()
+            .to_bytecode();
         let sig = [0u8; 64];
         let script = ScriptBuilder::new()
             .push_int(5u64)
-            .push_int(1u64)
             .push_point([predicate_byte; 32])
-            .cell()
+            .contract()
             .push_str(String::from(prog))
             .push_str(String::from(sig.to_vec()))
             .push_int(1024u64)
@@ -206,10 +218,9 @@ fn signcall_message_binds_only_to_program_not_to_cell() {
     let s1 = run_signcall(0xaa);
     let s2 = run_signcall(0xbb);
     let (m1, m2) = match (&s1, &s2) {
-        (
-            DeferredSig::Explicit { message: m1, .. },
-            DeferredSig::Explicit { message: m2, .. },
-        ) => (m1.clone(), m2.clone()),
+        (DeferredSig::Explicit { message: m1, .. }, DeferredSig::Explicit { message: m2, .. }) => {
+            (m1.clone(), m2.clone())
+        }
         _ => panic!("expected Explicit on both"),
     };
     assert_eq!(m1, m2, "signcall message must be program-only");
@@ -217,16 +228,19 @@ fn signcall_message_binds_only_to_program_not_to_cell() {
 
 #[test]
 fn signcall_rejects_wrong_signature_length() {
-    // payload(5), count(1), predicate, cell, prog, bad-sig, gas,
+    // payload(5), predicate, contract, prog, bad-sig, gas,
     // m=0, signcall. signcall pops bad sig and errors before frame.
-    let prog = ScriptBuilder::new().drop_().push_int(0u64).return_().to_bytecode();
+    let prog = ScriptBuilder::new()
+        .drop_()
+        .push_int(0u64)
+        .return_()
+        .to_bytecode();
     let script = ScriptBuilder::new()
         .push_int(5u64)
-        .push_int(1u64)
         .push_point([0xaa; 32])
-        .cell()
+        .contract()
         .push_str(String::from(prog))
-        .push_str(String::from(vec![0u8; 63]))           // bad: 63-byte sig
+        .push_str(String::from(vec![0u8; 63])) // bad: 63-byte sig
         .push_int(1024u64)
         .push_int(0u64)
         .signcall()
@@ -240,25 +254,31 @@ fn signcall_rejects_wrong_signature_length() {
 }
 
 #[test]
-fn internal_signtx_rejects_before_consuming_cell() {
-    let cell = Cell::new(
+fn internal_signtx_rejects_before_consuming_contract() {
+    let contract = Contract::new(
         Predicate::opaque(CompressedRistretto([0xaa; 32])),
         Anchor([0x42; 32]),
-        Vec::new(),
+        test_payload(Vec::new()),
     )
     .expect("empty payload is portable");
     let mut vm = vm_with_script(ScriptBuilder::new().signtx().to_bytecode());
-    vm.current_call.stack.push(Value::Cell(Box::new(cell)));
+    vm.current_call
+        .stack
+        .push(Value::Contract(Box::new(contract)));
 
     assert!(matches!(vm.step_internal(), Err(VMError::ExternalOnly)));
     assert_eq!(vm.current_call.stack.len(), 1);
-    assert!(matches!(vm.current_call.stack[0], Value::Cell(_)));
+    assert!(matches!(vm.current_call.stack[0], Value::Contract(_)));
     assert!(vm.deferred_sigs.is_empty());
 }
 
 #[test]
 fn internal_signcall_verifies_valid_signature_immediately() {
-    let program = ScriptBuilder::new().push_int(0u64).return_().to_bytecode();
+    let program = ScriptBuilder::new()
+        .drop_()
+        .push_int(0u64)
+        .return_()
+        .to_bytecode();
     let (verification_key, signature) = signcall_signature(&program, 42);
     let mut registry = MemRegistry::new();
     let actor = deploy_actor(
@@ -272,7 +292,11 @@ fn internal_signcall_verifies_valid_signature_immediately() {
 
 #[test]
 fn internal_signcall_rejects_invalid_signature_immediately() {
-    let program = ScriptBuilder::new().push_int(0u64).return_().to_bytecode();
+    let program = ScriptBuilder::new()
+        .drop_()
+        .push_int(0u64)
+        .return_()
+        .to_bytecode();
     let (verification_key, _) = signcall_signature(&program, 42);
     let (_, wrong_signature) = signcall_signature(&program, 43);
     let mut registry = MemRegistry::new();
@@ -292,8 +316,9 @@ fn internal_signcall_rejects_invalid_signature_immediately() {
 fn signcall_rejects_widetoken_argument() {
     let script = ScriptBuilder::new()
         .push_int(0u64)
+        .dict()
         .push_point([0xaa; 32])
-        .cell()
+        .contract()
         .push_str(String::from(Vec::new()))
         .push_str(String::from(vec![0u8; 64]))
         .push_int(1_024u64)
@@ -327,8 +352,8 @@ fn signcall_explicit_sig_batch_verifies_correctly() {
     // (Full prove+verify-via-script path is covered by
     // `test_proof_pipeline`; this test isolates the batch check.)
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
-    use curve25519_dalek::scalar::Scalar;
-    let sk = Scalar::from(42u64);
+    use curve25519_dalek::scalar::Scalar as DalekScalar;
+    let sk = DalekScalar::from(42u64);
     let vk_point = (RISTRETTO_BASEPOINT_TABLE * &sk).compress();
     // Build the message exactly as `op_signcall`'s
     // `signcall_message(program)` helper does.
@@ -356,8 +381,8 @@ fn signcall_tampered_sig_batch_rejects() {
     // Verify that a tampered sig fails the batch check (the same
     // path that Verifier::verify uses for Explicit sigs).
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
-    use curve25519_dalek::scalar::Scalar;
-    let sk = Scalar::from(42u64);
+    use curve25519_dalek::scalar::Scalar as DalekScalar;
+    let sk = DalekScalar::from(42u64);
     let vk_point = (RISTRETTO_BASEPOINT_TABLE * &sk).compress();
     let inner_prog = vec![0x1c];
     let mut prog_t = merlin::Transcript::new(b"flamevm.signcall");
@@ -377,7 +402,7 @@ fn signcall_tampered_sig_batch_rejects() {
             // If from_bytes rejects (non-canonical scalar), build by hand.
             Ok::<_, ()>(musig::Signature {
                 R: sig.R,
-                s: sig.s + Scalar::ONE,
+                s: sig.s + DalekScalar::ONE,
             })
         })
         .unwrap();
@@ -389,46 +414,52 @@ fn signcall_tampered_sig_batch_rejects() {
 }
 
 /// Single-TxBound happy path: build a tx with one `signtx`,
-/// externally sign the multi-message `(vk, cell_id)` against a
+/// externally sign the multi-message `(vk, contract_id)` against a
 /// transcript bound to TxID, pass to Verifier::verify → accepts.
 #[test]
 fn phase20_single_txbound_verifies_with_multisig() {
     use musig::Multisignature;
     let pc_gens = PedersenGens::default();
     let (vk, sk) = signing_keypair(101);
-    let (script, cell_id) = make_signtx_script_with_cell(vk);
-    let program = ScriptBuilder::parse(&script).expect("decode");
+    let (script, contract_id) = make_signtx_script_with_contract(vk);
+    let program = script;
     let prover_result =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
-            .expect("prove ok");
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove ok");
     let txid = prover_result.txid;
-    // Sanity: deferred_sigs has one TxBound with the expected cell_id.
+    // Sanity: deferred_sigs has one TxBound with the expected contract_id.
     assert_eq!(prover_result.deferred_sigs.len(), 1);
     match &prover_result.deferred_sigs[0] {
-        DeferredSig::TxBound { verification_key, cell_id: cid } => {
+        DeferredSig::TxBound {
+            verification_key,
+            contract_id: cid,
+        } => {
             assert_eq!(verification_key, &vk);
-            assert_eq!(*cid, cell_id);
+            assert_eq!(*cid, contract_id);
         }
         _ => panic!("expected TxBound"),
     }
-    let TxResult { bytecode, proof, .. } = prover_result;
+    let TxResult {
+        bytecode,
+        proof,
+        cells,
+        ..
+    } = prover_result;
     let proof = proof.expect("proof set");
     // Sign multi-message context bound to TxID.
     let mut t = merlin::Transcript::new(b"flamevm.signtx");
     t.append_message(b"txid", &txid.0);
-    let items =
-        vec![(musig::VerificationKey::from_compressed(vk), cell_id)];
-    let sig = musig::Signature::sign_multi(vec![sk], items, &mut t)
-        .expect("sign_multi");
+    let items = vec![(musig::VerificationKey::from_compressed(vk), contract_id)];
+    let sig = musig::Signature::sign_multi(vec![sk], items, &mut t).expect("sign_multi");
     // Verifier accepts.
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(
+    Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         Some(sig),
+        &cells,
     )
     .expect("verify ok");
 }
@@ -441,11 +472,12 @@ fn phase20_single_txbound_verifies_with_multisig() {
 fn facade_build_sign_verify_roundtrip() {
     use musig::Multisignature;
     let (vk, sk) = signing_keypair(101);
-    let (script, _cid) = make_signtx_script_with_cell(vk);
-    let program = ScriptBuilder::parse(&script).expect("decode");
+    let (script, _cid) = make_signtx_script_with_contract(vk);
+    let program = script;
     let limits = Limits { gas: 1_000_000 };
 
     let unsigned = program.build_tx(dummy_header(), limits).expect("build_tx");
+    let witness_id = unsigned.witnesses().id();
     let si = unsigned.signing_instructions();
     assert_eq!(si.items.len(), 1, "one signtx authorization");
 
@@ -461,17 +493,29 @@ fn facade_build_sign_verify_roundtrip() {
 
     // Outer-API coverage: metrics and log are populated by the build.
     let m = unsigned.metrics();
-    assert!(m.gas_used > 0, "per-instruction metering reported via TxMetrics");
-    assert!(!unsigned.log().entries().is_empty(), "log readable via outer API");
+    assert!(
+        m.gas_used > 0,
+        "per-instruction metering reported via TxMetrics"
+    );
+    assert!(
+        !unsigned.log().entries().is_empty(),
+        "log readable via outer API"
+    );
 
     let tx = unsigned.sign(sig);
+    assert_eq!(tx.witnesses().id(), witness_id);
+    let bytes = tx.to_envelope().unwrap().encode();
+    let tx =
+        crate::ExternalTx::from_bytes_bounded(&bytes, 1, tx.script.len(), tx.proof_bytes().len())
+            .unwrap();
+    assert_eq!(tx.witnesses().id(), witness_id);
     let txlog = tx.verify(limits).expect("verify ok");
     assert_eq!(txlog.txid(), si.txid, "verified txlog matches the built tx");
 }
 
-/// Two-key multi-sig: build a tx that consumes TWO cells via
+/// Two-key multi-sig: build a tx that consumes TWO contracts via
 /// signtx, each under its own key. The aggregate `sign_multi`
-/// over `[(vk1, cell1_id), (vk2, cell2_id)]` produces a single
+/// over `[(vk1, contract1_id), (vk2, contract2_id)]` produces a single
 /// signature accepted by Verifier::verify.
 #[test]
 fn phase20_two_txbound_verifies_with_multisig() {
@@ -480,64 +524,64 @@ fn phase20_two_txbound_verifies_with_multisig() {
     let (vk1, sk1) = signing_keypair(11);
     let (vk2, sk2) = signing_keypair(22);
 
-    let cell1 = Cell::new(
+    let contract1 = Contract::new(
         Predicate::opaque(vk1),
         Anchor([0xa1; 32]),
-        vec![Value::Int253(Int253::from(0u64))],
+        test_payload(vec![Value::Scalar(Scalar::from(0u64))]),
     )
     .expect("payload is portable");
-    let cell1_id = cell1.id();
-    let cell1_bytes = encode_cell_to_bytes(&cell1);
+    let contract1_id = contract1.id();
 
-    let cell2 = Cell::new(
+    let contract2 = Contract::new(
         Predicate::opaque(vk2),
         Anchor([0xa2; 32]),
-        vec![Value::Int253(Int253::from(0u64))],
+        test_payload(vec![Value::Scalar(Scalar::from(0u64))]),
     )
     .expect("payload is portable");
-    let cell2_id = cell2.id();
-    let cell2_bytes = encode_cell_to_bytes(&cell2);
+    let contract2_id = contract2.id();
 
-    // Script: input cell1, signtx (drop payload+count), input cell2,
-    // signtx (drop payload+count).
+    // Script: input contract1, signtx (drop payload), input contract2,
+    // signtx (drop payload).
     let program = ScriptBuilder::new()
-        .push_str(String::from(cell1_bytes))
+        .push_str(String::contract(contract1))
         .input()
         .signtx()
         .drop_()
-        .drop_()
-        .push_str(String::from(cell2_bytes))
+        .push_str(String::contract(contract2))
         .input()
         .signtx()
-        .drop_()
         .drop_();
     let prover_result =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
-            .expect("prove ok");
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove ok");
     assert_eq!(prover_result.deferred_sigs.len(), 2);
     let txid = prover_result.txid;
-    let TxResult { bytecode, proof, .. } = prover_result;
+    let TxResult {
+        bytecode,
+        proof,
+        cells,
+        ..
+    } = prover_result;
     let proof = proof.expect("proof set");
 
-    // Build the (vk, cell_id) list IN THE SAME ORDER the VM recorded
+    // Build the (vk, contract_id) list IN THE SAME ORDER the VM recorded
     // them — the multisig context order is consensus-fixed.
     let items = vec![
-        (musig::VerificationKey::from_compressed(vk1), cell1_id),
-        (musig::VerificationKey::from_compressed(vk2), cell2_id),
+        (musig::VerificationKey::from_compressed(vk1), contract1_id),
+        (musig::VerificationKey::from_compressed(vk2), contract2_id),
     ];
     let mut t = merlin::Transcript::new(b"flamevm.signtx");
     t.append_message(b"txid", &txid.0);
-    let sig = musig::Signature::sign_multi(vec![sk1, sk2], items, &mut t)
-        .expect("sign_multi");
+    let sig = musig::Signature::sign_multi(vec![sk1, sk2], items, &mut t).expect("sign_multi");
 
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(
+    Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         Some(sig),
+        &cells,
     )
     .expect("verify ok");
 }
@@ -548,20 +592,25 @@ fn phase20_two_txbound_verifies_with_multisig() {
 fn phase20_missing_signature_when_txbound_present() {
     let pc_gens = PedersenGens::default();
     let (vk, _sk) = signing_keypair(7);
-    let (script, _cell_id) = make_signtx_script_with_cell(vk);
-    let program = ScriptBuilder::parse(&script).expect("decode");
-    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
-            .expect("prove ok");
-    let TxResult { bytecode, proof, .. } = _pp;
+    let (script, _contract_id) = make_signtx_script_with_contract(vk);
+    let program = script;
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove ok");
+    let TxResult {
+        bytecode,
+        proof,
+        cells,
+        ..
+    } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    let err = Verifier::verify(
+    let err = Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .unwrap_err();
     assert!(matches!(err, VMError::MissingTxBoundSignature));
@@ -576,31 +625,36 @@ fn phase20_spurious_signature_when_no_txbound() {
     // Trivial program: alloc + alloc + add + alloc + eq + verify
     // — no input, no signtx, no TxBound deferred sigs.
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(10u64)))
+        .alloc(Some(Scalar::from(10u64)))
         .eq()
         .verify();
-    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
-            .expect("prove ok");
-    let TxResult { bytecode, proof, .. } = _pp;
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove ok");
+    let TxResult {
+        bytecode,
+        proof,
+        cells,
+        ..
+    } = _pp;
     let proof = proof.expect("proof set");
     // Hand a real-looking signature anyway. Even a syntactically
     // valid signature must be rejected when the VM emitted no
     // TxBound items.
     let sig = musig::Signature {
         R: curve25519_dalek::ristretto::CompressedRistretto([0u8; 32]),
-        s: Scalar::from(0u64),
+        s: DalekScalar::from(0u64),
     };
     let pc_gens_v = PedersenGens::default();
-    let err = Verifier::verify(
+    let err = Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         Some(sig),
+        &cells,
     )
     .unwrap_err();
     assert!(matches!(err, VMError::SpuriousTxBoundSignature));
@@ -616,30 +670,32 @@ fn phase20_tampered_signature_rejected() {
     let pc_gens = PedersenGens::default();
     let (vk, _sk_real) = signing_keypair(101);
     // Sign with a *different* secret — vk doesn't correspond.
-    let sk_wrong = Scalar::from(999u64);
-    let (script, cell_id) = make_signtx_script_with_cell(vk);
-    let program = ScriptBuilder::parse(&script).expect("decode");
+    let sk_wrong = DalekScalar::from(999u64);
+    let (script, contract_id) = make_signtx_script_with_contract(vk);
+    let program = script;
     let prover_result =
-        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
-            .expect("prove ok");
+        Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove ok");
     let txid = prover_result.txid;
-    let TxResult { bytecode, proof, .. } = prover_result;
+    let TxResult {
+        bytecode,
+        proof,
+        cells,
+        ..
+    } = prover_result;
     let proof = proof.expect("proof set");
-    let items =
-        vec![(musig::VerificationKey::from_compressed(vk), cell_id)];
+    let items = vec![(musig::VerificationKey::from_compressed(vk), contract_id)];
     let mut t = merlin::Transcript::new(b"flamevm.signtx");
     t.append_message(b"txid", &txid.0);
-    let sig =
-        musig::Signature::sign_multi(vec![sk_wrong], items, &mut t)
-            .expect("sign_multi");
+    let sig = musig::Signature::sign_multi(vec![sk_wrong], items, &mut t).expect("sign_multi");
     let pc_gens_v = PedersenGens::default();
-    let err = Verifier::verify(
+    let err = Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         Some(sig),
+        &cells,
     )
     .unwrap_err();
     assert!(matches!(err, VMError::BatchSignatureVerificationFailed));
@@ -653,24 +709,29 @@ fn phase20_tampered_signature_rejected() {
 fn phase20_no_txbound_no_signature_roundtrip() {
     let pc_gens = PedersenGens::default();
     let program = ScriptBuilder::new()
-        .alloc(Some(Int253::from(7u64)))
-        .alloc(Some(Int253::from(3u64)))
+        .alloc(Some(Scalar::from(7u64)))
+        .alloc(Some(Scalar::from(3u64)))
         .add()
-        .alloc(Some(Int253::from(10u64)))
+        .alloc(Some(Scalar::from(10u64)))
         .eq()
         .verify();
-    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000)
-            .expect("prove ok");
-    let TxResult { bytecode, proof, .. } = _pp;
+    let _pp = Prover::prove(&pc_gens, program, dummy_header(), 1_000_000).expect("prove ok");
+    let TxResult {
+        bytecode,
+        proof,
+        cells,
+        ..
+    } = _pp;
     let proof = proof.expect("proof set");
     let pc_gens_v = PedersenGens::default();
-    Verifier::verify(
+    Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         dummy_header(),
         1_000_000,
         None,
+        &cells,
     )
     .expect("verify ok with None signature");
 }
@@ -683,30 +744,36 @@ fn phase20_signature_over_wrong_txid_rejected() {
     use musig::Multisignature;
     let pc_gens = PedersenGens::default();
     let (vk, sk) = signing_keypair(101);
-    let (script, cell_id) = make_signtx_script_with_cell(vk);
-    let program = ScriptBuilder::parse(&script).expect("decode");
-    let header_prove = TxHeader { version: 1, locktime: 0 };
+    let (script, contract_id) = make_signtx_script_with_contract(vk);
+    let program = script;
+    let header_prove = TxHeader {
+        version: 1,
+        locktime: 0,
+    };
     let prover_result =
-        Prover::prove(&pc_gens, program, header_prove, 1_000_000)
-            .expect("prove ok");
-    let TxResult { bytecode, proof, .. } = prover_result;
+        Prover::prove(&pc_gens, program, header_prove, 1_000_000).expect("prove ok");
+    let TxResult {
+        bytecode,
+        proof,
+        cells,
+        ..
+    } = prover_result;
     let proof = proof.expect("proof set");
     // Sign against a *different* TxID (some random 32 bytes).
     let wrong_txid = [0x99u8; 32];
-    let items =
-        vec![(musig::VerificationKey::from_compressed(vk), cell_id)];
+    let items = vec![(musig::VerificationKey::from_compressed(vk), contract_id)];
     let mut t = merlin::Transcript::new(b"flamevm.signtx");
     t.append_message(b"txid", &wrong_txid);
-    let sig = musig::Signature::sign_multi(vec![sk], items, &mut t)
-        .expect("sign_multi");
+    let sig = musig::Signature::sign_multi(vec![sk], items, &mut t).expect("sign_multi");
     let pc_gens_v = PedersenGens::default();
-    let err = Verifier::verify(
+    let err = Verifier::verify_with_cells(
         &pc_gens_v,
         bytecode,
         &proof,
         header_prove,
         1_000_000,
         Some(sig),
+        &cells,
     )
     .unwrap_err();
     assert!(matches!(err, VMError::BatchSignatureVerificationFailed));
@@ -715,16 +782,15 @@ fn phase20_signature_over_wrong_txid_rejected() {
 /// `op_signcall` creates an isolated CallFrame with no actor identity,
 /// same as `op_open` (ADR 0013). Inside the signed leaf, `op_selfid`
 /// errors `OpcodeRequiresActorContext`; the parent recovers the locked
-/// Cell followed by `count=0, success=0`; the contextual Cell is not counted.
+/// Contract followed by `count=0, success=0`; the contextual Contract is not counted.
 #[test]
 fn signcall_selfid_errors_no_actor_context() {
     let prog = ScriptBuilder::new().selfid().to_bytecode();
     let sig_bytes = [0u8; 64];
     let script = ScriptBuilder::new()
         .push_int(5u64)
-        .push_int(1u64)
         .push_point([0xaa; 32])
-        .cell()
+        .contract()
         .push_str(String::from(prog))
         .push_str(String::from(sig_bytes.to_vec()))
         .push_int(1024u64)
@@ -735,8 +801,8 @@ fn signcall_selfid_errors_no_actor_context() {
     vm.last_anchor = Some(Anchor([0x42; 32]));
     run_external_to_end(&mut vm).unwrap();
     assert_eq!(vm.current_call.stack.len(), 3);
-    assert!(matches!(vm.current_call.stack[0], Value::Cell(_)));
-    assert_int(&vm.current_call.stack[1], Int253::ZERO);
-    assert_int(&vm.current_call.stack[2], Int253::ZERO);
+    assert!(matches!(vm.current_call.stack[0], Value::Contract(_)));
+    assert_int(&vm.current_call.stack[1], Scalar::ZERO);
+    assert_int(&vm.current_call.stack[2], Scalar::ZERO);
     assert!(vm.deferred_sigs.is_empty());
 }

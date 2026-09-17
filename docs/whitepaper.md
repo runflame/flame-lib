@@ -1,15 +1,11 @@
 # Flame: market-driven expansion of Bitcoin
 
 
-**Abstract.** A purely peer-to-peer version of electronic cash would allow online
-payments to be sent directly from one party to another without going through a
-financial institution. Bitcoin provides part of the solution as a proven
-peer-to-peer store of value, but the main benefits are lost if trusted third parties
-are still required to execute financial contracts, fast payments or provide confidentiality to transfers.
-We propose a solution based on Bitcoin peer-to-peer network as a consensus layer.
-The expanded network continuously burns bitcoins as a means to timestamp blocks of transactions in the expansion network.
-The network offers confidential transactions, powerful infrastructure for smart contracts, higher throughput and low latency.
-As an incentive, network issues a new electronic currency _flame_.
+**Abstract.** Flame is an electronic cash network based on Bitcoin. 
+Flame offers modern features such as confidentiality, powerful programming environment,
+low latency and higher throughput based on a decentralized proof-of-burn consensus.
+The network continuously burns bitcoins as a means to timestamp blocks of transactions.
+As an incentive, network issues a new currency: _flames_.
 
 ## Introduction
 
@@ -35,7 +31,7 @@ FlameVM supports confidential transactions with zero-knowledge proofs, custom cr
 
 In an open network proof-of-work is the only known solution to a variation of Byzantine Generals’ Problem: how the network of arbitrary participants agrees on a single history of transactions Proof-of-work consensus solves the problem by assuming the majority of nodes are honest and they channel their resources into a single history, making it impossible for dishonest nodes to outrun them and double-spend the coins.
 
-Flame follows the principle of proof-of-work standing on top of Bitcoin. Burning bitcoins is a “first derivative“ of mining: while *miners* burn electricity to allocate *bitcoins*, Flame *minters* burn bitcoins to allocate *flames* issued at a fixed rate as an incentive for running the network. Just like in proof-of-work, the input resource is committed irrevocably: bitcoins are permanently removed from circulation in a provable and irreversible way via sending to an unspendable address. There is no two-way bridge, and no trusted parties or complicated cross-chain protocols that allow withdrawing bitcoins back.
+Flame follows the principle of proof-of-work standing on top of Bitcoin. Burning bitcoins is a “first derivative“ of mining: while *miners* burn electricity to allocate *bitcoins*, Flame *minters* burn bitcoins to collect *flames* issued at a fixed rate as an incentive for running the network. Just like in proof-of-work, the input resource is committed irrevocably: bitcoins are permanently removed from circulation in a provable and irreversible way via sending to an unspendable address. There is no two-way bridge, and no trusted parties or complicated cross-chain protocols that allow withdrawing bitcoins back.
 
 Each Bitcoin block, Flame minters participate in an open auction: they publicly vote for the agreed-on block of Flame transactions by sending bitcoins to an unspendable address that points to that block. The block with the most bitcoins burnt is considered part of the main chain and all minters split the allocated incentive in proportion to their sacrificed bitcoins.
 

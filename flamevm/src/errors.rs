@@ -5,6 +5,10 @@ use thiserror::Error;
 /// Represents an error in proof creation, verification, or parsing.
 #[derive(Error, Debug)]
 pub enum VMError {
+    /// A Cell was missing, malformed, or exceeded the execution budget.
+    #[error(transparent)]
+    Cell(#[from] cells::CellError),
+
     /// This error occurs when VM is left with some items on the stack at the end of a frame.
     #[error("Stack is not cleared by the script")]
     StackNotClean,
@@ -29,13 +33,13 @@ pub enum VMError {
     #[error("Unexpected end of script")]
     UnexpectedEndOfScript,
 
-    /// This error occurs when an instruction requires an Int253.
-    #[error("Item is not an Int253")]
-    TypeNotInt253,
+    /// This error occurs when an instruction requires an Scalar.
+    #[error("Item is not an Scalar")]
+    TypeNotScalar,
 
-    /// This error occurs when 32 bytes do not encode a canonical Int253.
-    #[error("Invalid Int253 encoding")]
-    InvalidInt253Encoding,
+    /// This error occurs when 32 bytes do not encode a canonical Scalar.
+    #[error("Invalid Scalar encoding")]
+    InvalidScalarEncoding,
 
     /// This error occurs when an index is out of range for the addressed stack or buffer.
     #[error("Index out of range")]
@@ -56,6 +60,10 @@ pub enum VMError {
     /// This error occurs when an instruction requires a String.
     #[error("Item is not a String")]
     TypeNotString,
+
+    /// A VM String must fit in one Cell payload, without snake continuations.
+    #[error("String exceeds the single-Cell payload limit")]
+    StringTooLong,
 
     /// This error occurs when `verify` sees a zero value on top of the stack.
     #[error("verify failed: zero value")]
@@ -118,20 +126,20 @@ pub enum VMError {
     #[error("Item is not a Merlin transcript")]
     TypeNotMerlin,
 
-    /// This error occurs when an instruction requires a Cell.
-    #[error("Item is not a Cell")]
-    TypeNotCell,
+    /// This error occurs when an instruction requires a Contract.
+    #[error("Item is not a Contract")]
+    TypeNotContract,
 
-    /// This error occurs when a TaprootProof does not verify against the cell's predicate.
-    #[error("TaprootProof does not match the cell's predicate")]
+    /// This error occurs when a TaprootProof does not verify against the contract's predicate.
+    #[error("TaprootProof does not match the contract's predicate")]
     TaprootProofMismatch,
 
-    /// This error occurs when `cell` or `output` is invoked without a seeded anchor.
+    /// This error occurs when `contract` or `output` is invoked without a seeded anchor.
     #[error("No anchor available — input or seed required first")]
     AnchorMissing,
 
-    /// This error occurs when a non-portable item lands in a cell payload.
-    #[error("Non-portable item in cell payload")]
+    /// This error occurs when a non-portable item lands in a contract payload.
+    #[error("Non-portable item in contract payload")]
     NonPortableInOutput,
 
     /// `signcall` received the wrong byte length or a malformed signature
@@ -171,9 +179,9 @@ pub enum VMError {
     #[error("Opcode is external-context only")]
     ExternalOnly,
 
-    /// This error occurs when `input` bytes do not decode as a canonical wire-encoded Cell.
-    #[error("Malformed cell encoding")]
-    MalformedCellEncoding,
+    /// This error occurs when `input` bytes do not decode as a canonical wire-encoded Contract.
+    #[error("Malformed contract encoding")]
+    MalformedContractEncoding,
 
     /// This error occurs when an actor-state Value can't be encoded
     /// to its canonical wire form (a value variant without an
@@ -256,7 +264,7 @@ pub enum VMError {
     #[error("Opcode requires actor context")]
     OpcodeRequiresActorContext,
 
-    /// This error occurs when an opcode requires a predicate (CellOpen) context but the frame has none.
+    /// This error occurs when an opcode requires a predicate (ContractOpen) context but the frame has none.
     #[error("Opcode requires predicate context")]
     OpcodeRequiresPredicateContext,
 
@@ -314,8 +322,8 @@ pub enum VMError {
     #[error("Item is not a Constraint")]
     TypeNotConstraint,
 
-    /// This error occurs when a value is outside the bit-range for a rangeproof.
-    #[error("Value out of bit-range for rangeproof")]
+    /// A scalar or R1CS assignment is outside the requested bit range.
+    #[error("Value outside the requested bit range")]
     InvalidBitrange,
 
     /// This error occurs when a false cleartext constraint is verified.

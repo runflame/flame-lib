@@ -1,21 +1,30 @@
 //! Fluent `ScriptBuilder` + the compiled `Script` value it produces.
 
-use std::collections::VecDeque;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 
-use readerwriter::Encodable;
+use cells::{
+    BagOfCells, CellBuilder, CellDecode, CellEncode, CellError, CellID, CellResolver, CellSlice,
+};
 
+use crate::contract::{Contract, ContractID, PredicateTree};
 use crate::crypto::Point;
 use crate::errors::VMError;
-use crate::int253::Int253;
 use crate::ops::Instruction;
-use crate::string::String;
+use crate::scalar::Scalar;
+use crate::string::{compile_instructions, String, StringWitness};
 
 /// A program is a list of [`Instruction`]s. Build with the fluent
-/// methods (`alloc`, `add`, `eq`, `verify`, …) and call `to_bytecode()`
-/// / `to_witnesses()` to derive the prover/verifier views.
+/// methods (`alloc`, `add`, `eq`, `verify`, …) and call `build_tx` to package
+/// bytecode, proof, and the public witness BoC for the verifier. `to_bytecode`
+/// alone deliberately omits witnesses and is not a standalone transaction.
 #[derive(Clone, Debug, Default)]
 pub struct ScriptBuilder {
     instructions: Vec<Instruction>,
+    cells: Vec<BagOfCells>,
+    scripts: BTreeMap<CellID, Vec<Instruction>>,
     /// Build-time only: active loop scopes for `build_break` /
     /// `build_continue`. Balanced (pushed/popped) by `build_loop` /
     /// `build_while`, so any finished program leaves this empty.
@@ -34,7 +43,85 @@ struct LoopScope {
 impl ScriptBuilder {
     /// Constructs an empty program.
     pub fn new() -> Self {
-        Self { instructions: Vec::new(), loop_scopes: Vec::new() }
+        Self {
+            instructions: Vec::new(),
+            loop_scopes: Vec::new(),
+            cells: Vec::new(),
+            scripts: BTreeMap::new(),
+        }
+    }
+
+    /// Adds public witness bodies before the transaction freezes its BoC.
+    pub fn with_cells(mut self, cells: BagOfCells) -> Self {
+        self.cells.push(cells);
+        self
+    }
+
+    /// Attaches prover-only instructions for a branch opened from authenticated
+    /// Cells. The key is the canonical snake-code Cell ID, not a caller label.
+    pub fn with_script_witness(mut self, script: ScriptBuilder) -> Result<Self, CellError> {
+        let id = script_cell(&script.to_bytecode())?.id();
+        self.cells.extend(script.cells);
+        self.scripts.extend(script.scripts);
+        self.scripts.insert(id, script.instructions);
+        Ok(self)
+    }
+
+    /// Public bodies only. Secret commitment/assignment witnesses never enter
+    /// this bag. Nested scripts contribute their embedded Contract witnesses;
+    /// their bytecode already lives in literals or selected predicate leaves.
+    pub fn cell_witnesses(&self) -> Result<BagOfCells, CellError> {
+        let mut bag = BagOfCells::new();
+        for cells in &self.cells {
+            bag.extend(cells)?;
+        }
+        for witness in self.witnesses() {
+            if let StringWitness::Contract(contract) = witness {
+                bag.extend(&BagOfCells::collect(Arc::new(contract.to_cell()?))?)?;
+            }
+        }
+        Ok(bag)
+    }
+
+    /// Private Contract witnesses indexed by their public output Cell identity.
+    pub fn contract_witnesses(&self) -> BTreeMap<ContractID, Contract> {
+        self.witnesses()
+            .into_iter()
+            .filter_map(|witness| match witness {
+                StringWitness::Contract(contract) => Some((contract.id(), contract.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Private script overlays; execution must compare their canonical bytecode
+    /// with the authenticated program before using any contained witnesses.
+    pub fn script_witnesses(&self) -> Result<BTreeMap<CellID, Vec<Instruction>>, CellError> {
+        let mut scripts = self.scripts.clone();
+        for witness in self.witnesses() {
+            if let StringWitness::Script(instructions) = witness {
+                let id = script_cell(&compile_instructions(instructions))?.id();
+                scripts.insert(id, instructions.clone());
+            }
+        }
+        Ok(scripts)
+    }
+
+    fn witnesses(&self) -> Vec<&StringWitness> {
+        let mut pending = vec![self.instructions.as_slice()];
+        pending.extend(self.scripts.values().map(Vec::as_slice));
+        let mut witnesses = Vec::new();
+        while let Some(instructions) = pending.pop() {
+            for instruction in instructions {
+                if let Instruction::PushStr(String::Witness(witness)) = instruction {
+                    witnesses.push(witness.as_ref());
+                    if let StringWitness::Script(nested) = witness.as_ref() {
+                        pending.push(nested);
+                    }
+                }
+            }
+        }
+        witnesses
     }
 
     /// Parses a bytecode slice into a ScriptBuilder. Witness-bearing
@@ -94,7 +181,7 @@ impl ScriptBuilder {
         let mut out = Vec::new();
         for instr in &self.instructions {
             // `Vec<u8>` writer is infallible.
-            instr.encode(&mut out).expect("Vec writer never fails");
+            instr.encode(&mut out);
         }
         out
     }
@@ -102,15 +189,18 @@ impl ScriptBuilder {
     /// Builds the witness queue in opcode order. Each witness-bearing
     /// instruction (currently only `Alloc`) contributes exactly one
     /// queue entry; other instructions contribute none.
-    pub fn to_witnesses(&self) -> VecDeque<Option<Int253>> {
-        self.instructions.iter().filter_map(|i| i.witness()).collect()
+    pub fn to_witnesses(&self) -> VecDeque<Option<Scalar>> {
+        self.instructions
+            .iter()
+            .filter_map(|i| i.witness())
+            .collect()
     }
 
     // ── stack literals & manipulation ───────────────────
 
     /// `push:k` / `pushint{8,16,64,128}` / `pushint` — encoder picks
     /// the narrowest opcode width.
-    pub fn push_int<T: Into<Int253>>(mut self, v: T) -> Self {
+    pub fn push_int<T: Into<Scalar>>(mut self, v: T) -> Self {
         self.instructions.push(Instruction::PushInt(v.into()));
         self
     }
@@ -129,9 +219,10 @@ impl ScriptBuilder {
     /// the compiled bytes of `inner.to_bytecode()`, so both sides
     /// see the same wire form.
     pub fn push_script(mut self, inner: ScriptBuilder) -> Self {
-        self.instructions.push(Instruction::PushStr(String::script(
-            inner.into_instructions(),
-        )));
+        self.cells.extend(inner.cells);
+        self.scripts.extend(inner.scripts);
+        self.instructions
+            .push(Instruction::PushStr(String::script(inner.instructions)));
         self
     }
 
@@ -153,13 +244,22 @@ impl ScriptBuilder {
     }
 
     /// `pushtoken` (0x1b).
-    pub fn pushtoken(mut self) -> Self { self.instructions.push(Instruction::PushToken); self }
+    pub fn pushtoken(mut self) -> Self {
+        self.instructions.push(Instruction::PushToken);
+        self
+    }
 
     /// `drop` (0x1c).
-    pub fn drop_(mut self) -> Self { self.instructions.push(Instruction::Drop); self }
+    pub fn drop_(mut self) -> Self {
+        self.instructions.push(Instruction::Drop);
+        self
+    }
 
     /// `nop` (0x1d).
-    pub fn nop(mut self) -> Self { self.instructions.push(Instruction::Nop); self }
+    pub fn nop(mut self) -> Self {
+        self.instructions.push(Instruction::Nop);
+        self
+    }
 
     /// `dup` (0x1e) — pops `k` from the stack.
     pub fn dup(mut self) -> Self {
@@ -168,7 +268,10 @@ impl ScriptBuilder {
     }
 
     /// `roll` (0x1f).
-    pub fn roll(mut self) -> Self { self.instructions.push(Instruction::Roll); self }
+    pub fn roll(mut self) -> Self {
+        self.instructions.push(Instruction::Roll);
+        self
+    }
 
     /// `dup:k` (0x20..=0x2f) — `k ≤ 15`.
     pub fn dup_k(mut self, k: u8) -> Self {
@@ -184,60 +287,138 @@ impl ScriptBuilder {
 
     // ── String ops ──────────────────────────────────────
 
-    pub fn read_bits(mut self) -> Self { self.instructions.push(Instruction::ReadBits); self }
-    pub fn read_int(mut self) -> Self { self.instructions.push(Instruction::ReadInt); self }
-    pub fn read_str(mut self) -> Self { self.instructions.push(Instruction::ReadStr); self }
-    pub fn read_point(mut self) -> Self { self.instructions.push(Instruction::ReadPoint); self }
-    pub fn write_bits(mut self) -> Self { self.instructions.push(Instruction::WriteBits); self }
-    pub fn write_int(mut self) -> Self { self.instructions.push(Instruction::WriteInt); self }
-    pub fn append(mut self) -> Self { self.instructions.push(Instruction::Append); self }
-    pub fn write_zeros(mut self) -> Self { self.instructions.push(Instruction::WriteZeros); self }
-    pub fn bit_not(mut self) -> Self { self.instructions.push(Instruction::BitNot); self }
-    pub fn bit_or(mut self) -> Self { self.instructions.push(Instruction::BitOr); self }
-    pub fn bit_and(mut self) -> Self { self.instructions.push(Instruction::BitAnd); self }
-    pub fn bit_xor(mut self) -> Self { self.instructions.push(Instruction::BitXor); self }
-    pub fn shift_left(mut self) -> Self { self.instructions.push(Instruction::ShiftLeft); self }
-    pub fn shift_right(mut self) -> Self { self.instructions.push(Instruction::ShiftRight); self }
+    pub fn read_bits(mut self) -> Self {
+        self.instructions.push(Instruction::ReadBits);
+        self
+    }
+    pub fn read_int(mut self) -> Self {
+        self.instructions.push(Instruction::ReadInt);
+        self
+    }
+    pub fn read_str(mut self) -> Self {
+        self.instructions.push(Instruction::ReadStr);
+        self
+    }
+    pub fn read_point(mut self) -> Self {
+        self.instructions.push(Instruction::ReadPoint);
+        self
+    }
+    pub fn write_bits(mut self) -> Self {
+        self.instructions.push(Instruction::WriteBits);
+        self
+    }
+    pub fn write_int(mut self) -> Self {
+        self.instructions.push(Instruction::WriteInt);
+        self
+    }
+    pub fn append(mut self) -> Self {
+        self.instructions.push(Instruction::Append);
+        self
+    }
+    pub fn write_zeros(mut self) -> Self {
+        self.instructions.push(Instruction::WriteZeros);
+        self
+    }
+    pub fn bit_not(mut self) -> Self {
+        self.instructions.push(Instruction::BitNot);
+        self
+    }
+    pub fn bit_or(mut self) -> Self {
+        self.instructions.push(Instruction::BitOr);
+        self
+    }
+    pub fn bit_and(mut self) -> Self {
+        self.instructions.push(Instruction::BitAnd);
+        self
+    }
+    pub fn bit_xor(mut self) -> Self {
+        self.instructions.push(Instruction::BitXor);
+        self
+    }
+    pub fn shift_left(mut self) -> Self {
+        self.instructions.push(Instruction::ShiftLeft);
+        self
+    }
+    pub fn shift_right(mut self) -> Self {
+        self.instructions.push(Instruction::ShiftRight);
+        self
+    }
 
-    // ── Int253 arithmetic ───────────────────────────────
+    // ── Scalar arithmetic ───────────────────────────────
 
-    pub fn abs(mut self) -> Self { self.instructions.push(Instruction::Abs); self }
-    pub fn eq(mut self) -> Self { self.instructions.push(Instruction::Eq); self }
+    pub fn abs(mut self) -> Self {
+        self.instructions.push(Instruction::Abs);
+        self
+    }
+    pub fn eq(mut self) -> Self {
+        self.instructions.push(Instruction::Eq);
+        self
+    }
     #[allow(clippy::should_implement_trait)]
-    pub fn neg(mut self) -> Self { self.instructions.push(Instruction::Neg); self }
-    pub fn add(mut self) -> Self { self.instructions.push(Instruction::Add); self }
-    pub fn mul(mut self) -> Self { self.instructions.push(Instruction::Mul); self }
-    pub fn divmod(mut self) -> Self { self.instructions.push(Instruction::DivMod); self }
-    pub fn mod252(mut self) -> Self { self.instructions.push(Instruction::Mod252); self }
+    pub fn neg(mut self) -> Self {
+        self.instructions.push(Instruction::Neg);
+        self
+    }
+    pub fn add(mut self) -> Self {
+        self.instructions.push(Instruction::Add);
+        self
+    }
+    pub fn mul(mut self) -> Self {
+        self.instructions.push(Instruction::Mul);
+        self
+    }
+    pub fn divmod(mut self) -> Self {
+        self.instructions.push(Instruction::DivMod);
+        self
+    }
+    pub fn mod252(mut self) -> Self {
+        self.instructions.push(Instruction::Mod252);
+        self
+    }
     #[allow(clippy::should_implement_trait)]
-    pub fn not(mut self) -> Self { self.instructions.push(Instruction::Not); self }
-    pub fn and(mut self) -> Self { self.instructions.push(Instruction::And); self }
-    pub fn or(mut self) -> Self { self.instructions.push(Instruction::Or); self }
-    pub fn size(mut self) -> Self { self.instructions.push(Instruction::Size); self }
+    pub fn not(mut self) -> Self {
+        self.instructions.push(Instruction::Not);
+        self
+    }
+    pub fn and(mut self) -> Self {
+        self.instructions.push(Instruction::And);
+        self
+    }
+    pub fn or(mut self) -> Self {
+        self.instructions.push(Instruction::Or);
+        self
+    }
+    pub fn size(mut self) -> Self {
+        self.instructions.push(Instruction::Size);
+        self
+    }
 
     // ── CS opcodes ─────────────────────────────────────
 
     /// `alloc` (0x5c) — allocates a low-level R1CS variable. `witness`
     /// = `Some(int)` on the prover side (fills the cleartext value
     /// the constraint system uses), `None` on the verifier side.
-    pub fn alloc(mut self, witness: Option<Int253>) -> Self {
+    pub fn alloc(mut self, witness: Option<Scalar>) -> Self {
         self.instructions.push(Instruction::Alloc(witness));
         self
     }
 
     /// `expr` (0x5d).
-    pub fn expr(mut self) -> Self { self.instructions.push(Instruction::Expr); self }
+    pub fn expr(mut self) -> Self {
+        self.instructions.push(Instruction::Expr);
+        self
+    }
 
-    /// `range` (0x5e) — `expr n → expr`. Adds an n-bit range proof
-    /// (n ∈ [1, 64]; popped as `Int253` from the stack). The
-    /// Expression is consumed and pushed back unchanged.
+    /// `range` (0x64) — `x n → x`. Checks `0 ≤ x < 2^n`, with `n` in
+    /// `[1, 64]`. Raw scalars work in every context; R1CS expressions
+    /// are supported only in external execution. Preserves the value's type.
     pub fn range(mut self) -> Self {
         self.instructions.push(Instruction::Range);
         self
     }
 
     /// `scalar` (0x5a) — `string → expr`. Lifts a 32-byte String
-    /// (parsed as `Int253`) into a constant Expression.
+    /// (parsed as `Scalar`) into a constant Expression.
     pub fn scalar(mut self) -> Self {
         self.instructions.push(Instruction::Scalar);
         self
@@ -252,64 +433,154 @@ impl ScriptBuilder {
 
     // ── Dict ops ────────────────────────────────────────
 
-    pub fn dict(mut self) -> Self { self.instructions.push(Instruction::Dict); self }
-    pub fn put(mut self) -> Self { self.instructions.push(Instruction::Put); self }
-    pub fn replace(mut self) -> Self { self.instructions.push(Instruction::Replace); self }
-    pub fn get(mut self) -> Self { self.instructions.push(Instruction::Get); self }
-    pub fn get_opt(mut self) -> Self { self.instructions.push(Instruction::GetOpt); self }
-    pub fn get_dup(mut self) -> Self { self.instructions.push(Instruction::GetDup); self }
-    pub fn first(mut self) -> Self { self.instructions.push(Instruction::First); self }
-    pub fn last(mut self) -> Self { self.instructions.push(Instruction::Last); self }
-    pub fn next(mut self) -> Self { self.instructions.push(Instruction::Next); self }
+    pub fn dict(mut self) -> Self {
+        self.instructions.push(Instruction::Dict);
+        self
+    }
+    pub fn put(mut self) -> Self {
+        self.instructions.push(Instruction::Put);
+        self
+    }
+    pub fn replace(mut self) -> Self {
+        self.instructions.push(Instruction::Replace);
+        self
+    }
+    pub fn get(mut self) -> Self {
+        self.instructions.push(Instruction::Get);
+        self
+    }
+    pub fn get_opt(mut self) -> Self {
+        self.instructions.push(Instruction::GetOpt);
+        self
+    }
+    pub fn get_dup(mut self) -> Self {
+        self.instructions.push(Instruction::GetDup);
+        self
+    }
+    pub fn first(mut self) -> Self {
+        self.instructions.push(Instruction::First);
+        self
+    }
+    pub fn last(mut self) -> Self {
+        self.instructions.push(Instruction::Last);
+        self
+    }
+    pub fn next(mut self) -> Self {
+        self.instructions.push(Instruction::Next);
+        self
+    }
 
     // ── Cryptography ────────────────────────────────────
 
     /// `transcript` (0x80) — open a fresh Merlin transcript.
-    pub fn transcript(mut self) -> Self { self.instructions.push(Instruction::Transcript); self }
+    pub fn transcript(mut self) -> Self {
+        self.instructions.push(Instruction::Transcript);
+        self
+    }
     /// `twrite` (0x81) — absorb `(label, data)` into the transcript.
-    pub fn twrite(mut self) -> Self { self.instructions.push(Instruction::TWrite); self }
+    pub fn twrite(mut self) -> Self {
+        self.instructions.push(Instruction::TWrite);
+        self
+    }
     /// `tread` (0x82) — squeeze `n` challenge bytes under `label`.
-    pub fn tread(mut self) -> Self { self.instructions.push(Instruction::TRead); self }
-    pub fn sha256(mut self) -> Self { self.instructions.push(Instruction::Sha256); self }
-    pub fn sha512(mut self) -> Self { self.instructions.push(Instruction::Sha512); self }
-    pub fn sha3(mut self) -> Self { self.instructions.push(Instruction::Sha3); self }
-    pub fn keccak256(mut self) -> Self { self.instructions.push(Instruction::Keccak256); self }
+    pub fn tread(mut self) -> Self {
+        self.instructions.push(Instruction::TRead);
+        self
+    }
+    pub fn sha256(mut self) -> Self {
+        self.instructions.push(Instruction::Sha256);
+        self
+    }
+    pub fn sha512(mut self) -> Self {
+        self.instructions.push(Instruction::Sha512);
+        self
+    }
+    pub fn sha3(mut self) -> Self {
+        self.instructions.push(Instruction::Sha3);
+        self
+    }
+    pub fn keccak256(mut self) -> Self {
+        self.instructions.push(Instruction::Keccak256);
+        self
+    }
 
     /// `log` (0x87) — see [`Instruction::Log`].
-    pub fn log(mut self) -> Self { self.instructions.push(Instruction::Log); self }
+    pub fn log(mut self) -> Self {
+        self.instructions.push(Instruction::Log);
+        self
+    }
 
     // ── Tokens ──────────────────────────────────────────
 
-    pub fn amount(mut self) -> Self { self.instructions.push(Instruction::Amount); self }
+    pub fn amount(mut self) -> Self {
+        self.instructions.push(Instruction::Amount);
+        self
+    }
     /// `issuepriv` (0x91) — confidential mint under the enclosing
     /// predicate. See [`Instruction::IssuePriv`].
-    pub fn issuepriv(mut self) -> Self { self.instructions.push(Instruction::IssuePriv); self }
+    pub fn issuepriv(mut self) -> Self {
+        self.instructions.push(Instruction::IssuePriv);
+        self
+    }
     /// `issueprivflv` (0x92) — consumer-side flavor helper for
     /// `issuepriv`. See [`Instruction::IssuePrivFlv`].
-    pub fn issueprivflv(mut self) -> Self { self.instructions.push(Instruction::IssuePrivFlv); self }
+    pub fn issueprivflv(mut self) -> Self {
+        self.instructions.push(Instruction::IssuePrivFlv);
+        self
+    }
     /// `issuepub` (0x93) — cleartext mint under the enclosing actor.
     /// See [`Instruction::IssuePub`].
-    pub fn issuepub(mut self) -> Self { self.instructions.push(Instruction::IssuePub); self }
+    pub fn issuepub(mut self) -> Self {
+        self.instructions.push(Instruction::IssuePub);
+        self
+    }
     /// `issuepubflv` (0x94) — consumer-side flavor helper for
     /// `issuepub` (renamed from `issueflv`). See [`Instruction::IssuePubFlv`].
-    pub fn issuepubflv(mut self) -> Self { self.instructions.push(Instruction::IssuePubFlv); self }
-    pub fn retire(mut self) -> Self { self.instructions.push(Instruction::Retire); self }
-    pub fn borrow(mut self) -> Self { self.instructions.push(Instruction::Borrow); self }
-    pub fn merge(mut self) -> Self { self.instructions.push(Instruction::Merge); self }
-    pub fn split(mut self) -> Self { self.instructions.push(Instruction::Split); self }
+    pub fn issuepubflv(mut self) -> Self {
+        self.instructions.push(Instruction::IssuePubFlv);
+        self
+    }
+    pub fn retire(mut self) -> Self {
+        self.instructions.push(Instruction::Retire);
+        self
+    }
+    pub fn borrow(mut self) -> Self {
+        self.instructions.push(Instruction::Borrow);
+        self
+    }
+    pub fn merge(mut self) -> Self {
+        self.instructions.push(Instruction::Merge);
+        self
+    }
+    pub fn split(mut self) -> Self {
+        self.instructions.push(Instruction::Split);
+        self
+    }
 
     /// `mix` (0x99) — see [`Instruction::Mix`].
-    pub fn mix(mut self) -> Self { self.instructions.push(Instruction::Mix); self }
+    pub fn mix(mut self) -> Self {
+        self.instructions.push(Instruction::Mix);
+        self
+    }
 
     /// `decrypt` (0x9a) — see [`Instruction::Decrypt`].
-    pub fn decrypt(mut self) -> Self { self.instructions.push(Instruction::Decrypt); self }
+    pub fn decrypt(mut self) -> Self {
+        self.instructions.push(Instruction::Decrypt);
+        self
+    }
 
     // ── control flow ────────────────────────────────────
 
-    pub fn verify(mut self) -> Self { self.instructions.push(Instruction::Verify); self }
+    pub fn verify(mut self) -> Self {
+        self.instructions.push(Instruction::Verify);
+        self
+    }
 
     /// `fee` (0x9b) — external-only.
-    pub fn fee(mut self) -> Self { self.instructions.push(Instruction::Fee); self }
+    pub fn fee(mut self) -> Self {
+        self.instructions.push(Instruction::Fee);
+        self
+    }
 
     /// `label:n` (0xa1) — low-level marker. Prefer the `build_*`
     /// combinators, which number labels in appearance order for you.
@@ -324,16 +595,22 @@ impl ScriptBuilder {
         self
     }
 
-    /// `jumpif:n` (0xa3) — pop an Int253; jump to label `n` iff non-zero.
+    /// `jumpif:n` (0xa3) — pop an Scalar; jump to label `n` iff non-zero.
     pub fn jumpif(mut self, n: u32) -> Self {
         self.instructions.push(Instruction::JumpIf(n));
         self
     }
 
     /// `return` (0xa4). Method named `return_` because `return` is a Rust keyword.
-    pub fn return_(mut self) -> Self { self.instructions.push(Instruction::Return); self }
+    pub fn return_(mut self) -> Self {
+        self.instructions.push(Instruction::Return);
+        self
+    }
 
-    pub fn type_(mut self) -> Self { self.instructions.push(Instruction::Type); self }
+    pub fn type_(mut self) -> Self {
+        self.instructions.push(Instruction::Type);
+        self
+    }
 
     // ── structured control-flow combinators (ADR 0015) ──────
     // Emit `label`/`jump`/`jumpif` with appearance-order label numbers
@@ -387,7 +664,7 @@ impl ScriptBuilder {
     }
 
     /// `if (cond) { then }` — `cond` is whatever the preceding builder
-    /// calls left on the stack (Int253; non-zero = true).
+    /// calls left on the stack (Scalar; non-zero = true).
     pub fn build_if(self, then: impl FnOnce(Self) -> Self) -> Self {
         self.build_if_else(then, |p| p)
     }
@@ -420,11 +697,18 @@ impl ScriptBuilder {
         body: impl FnOnce(Self) -> Self,
     ) -> Self {
         let top = self.emit_label();
-        self.loop_scopes.push(LoopScope { top, end_jumps: Vec::new() });
+        self.loop_scopes.push(LoopScope {
+            top,
+            end_jumps: Vec::new(),
+        });
         self = cond(self);
         let j_body = self.push_jump_placeholder(true);
         let j_end = self.push_jump_placeholder(false);
-        self.loop_scopes.last_mut().expect("while scope").end_jumps.push(j_end);
+        self.loop_scopes
+            .last_mut()
+            .expect("while scope")
+            .end_jumps
+            .push(j_end);
         let n_body = self.emit_label();
         self.backpatch(j_body, n_body);
         self = body(self);
@@ -437,7 +721,10 @@ impl ScriptBuilder {
     /// `label TOP; <body>; jump TOP; label END`.
     pub fn build_loop(mut self, body: impl FnOnce(Self) -> Self) -> Self {
         let top = self.emit_label();
-        self.loop_scopes.push(LoopScope { top, end_jumps: Vec::new() });
+        self.loop_scopes.push(LoopScope {
+            top,
+            end_jumps: Vec::new(),
+        });
         self = body(self);
         self = self.jump(top);
         self.close_loop_scope();
@@ -457,48 +744,142 @@ impl ScriptBuilder {
 
     /// `continue` — jump to the innermost enclosing loop's top.
     pub fn build_continue(self) -> Self {
-        let top = self.loop_scopes.last().expect("build_continue outside a loop").top;
+        let top = self
+            .loop_scopes
+            .last()
+            .expect("build_continue outside a loop")
+            .top;
         self.jump(top)
     }
 
-    // ── Cell + I/O ───────────────────────────────────
+    // ── Contract + I/O ───────────────────────────────────
 
-    /// `input` (0x90). Witness data (open commitments on Token
+    /// `input`. Witness data (open commitments on Token
     /// payloads) rides on the pushed String value — call
-    /// `push_str(String::cell(c))` before this on the prover side;
-    /// verifiers push `String::Opaque(cell.to_bytes())`.
+    /// `push_str(String::contract(c))` before this on the prover side;
+    /// verifiers push `String::Opaque(contract.id().to_vec())` and resolve
+    /// the body from the transaction's public witness BoC.
     pub fn input(mut self) -> Self {
         self.instructions.push(Instruction::Input);
         self
     }
-    pub fn cell(mut self) -> Self { self.instructions.push(Instruction::Cell); self }
-    pub fn output(mut self) -> Self { self.instructions.push(Instruction::Output); self }
-    pub fn open(mut self) -> Self { self.instructions.push(Instruction::Open); self }
-    pub fn signtx(mut self) -> Self { self.instructions.push(Instruction::Signtx); self }
-    pub fn signcall(mut self) -> Self { self.instructions.push(Instruction::Signcall); self }
 
-    // ── Actor invocation + state (0x94..=0x97) ─────────
+    /// Pushes `internal_key root_id index` and embeds the selected public Cell
+    /// path into this program. For a tree made with `PredicateTree::from_scripts`,
+    /// also retains that program's assignments and nested witnesses. No caller
+    /// assembly of a separate witness bag is needed before `build_tx`.
+    ///
+    /// `program_index` selects a program in logical input order, not a blinded
+    /// Trie position. Push the gas grant, arguments, and count before `open`.
+    pub fn push_taproot_proof(
+        mut self,
+        tree: &PredicateTree,
+        program_index: usize,
+    ) -> Result<Self, VMError> {
+        let (proof, cells) = tree.witness_for(program_index)?;
+        self.cells.push(cells);
+        if let Some(script) = tree.script_witness(program_index) {
+            self = self.with_script_witness(script.clone())?;
+        }
+        Ok(self
+            .push_point(*proof.internal_key.as_bytes())
+            .push_str(String::from(proof.root.to_vec()))
+            .push_int(proof.index))
+    }
+    pub fn contract(mut self) -> Self {
+        self.instructions.push(Instruction::Contract);
+        self
+    }
+    pub fn output(mut self) -> Self {
+        self.instructions.push(Instruction::Output);
+        self
+    }
+    pub fn open(mut self) -> Self {
+        self.instructions.push(Instruction::Open);
+        self
+    }
+    pub fn signtx(mut self) -> Self {
+        self.instructions.push(Instruction::Signtx);
+        self
+    }
+    pub fn signcall(mut self) -> Self {
+        self.instructions.push(Instruction::Signcall);
+        self
+    }
 
-    pub fn send(mut self) -> Self { self.instructions.push(Instruction::Send); self }
-    pub fn call(mut self) -> Self { self.instructions.push(Instruction::Call); self }
-    pub fn load(mut self) -> Self { self.instructions.push(Instruction::Load); self }
-    pub fn save(mut self) -> Self { self.instructions.push(Instruction::Save); self }
-    pub fn setcode(mut self) -> Self { self.instructions.push(Instruction::Setcode); self }
-    pub fn addstorage(mut self) -> Self { self.instructions.push(Instruction::AddStorage); self }
-    pub fn quotestorage(mut self) -> Self { self.instructions.push(Instruction::QuoteStorage); self }
+    // ── Actor invocation + state ─────────
 
-    // ── Tx-level & frame introspection (0xe0..=0xf1) ───
+    pub fn send(mut self) -> Self {
+        self.instructions.push(Instruction::Send);
+        self
+    }
+    pub fn call(mut self) -> Self {
+        self.instructions.push(Instruction::Call);
+        self
+    }
+    pub fn load(mut self) -> Self {
+        self.instructions.push(Instruction::Load);
+        self
+    }
+    pub fn save(mut self) -> Self {
+        self.instructions.push(Instruction::Save);
+        self
+    }
+    pub fn setcode(mut self) -> Self {
+        self.instructions.push(Instruction::Setcode);
+        self
+    }
+    pub fn addstorage(mut self) -> Self {
+        self.instructions.push(Instruction::AddStorage);
+        self
+    }
+    pub fn quotestorage(mut self) -> Self {
+        self.instructions.push(Instruction::QuoteStorage);
+        self
+    }
 
-    pub fn timelock(mut self) -> Self { self.instructions.push(Instruction::Timelock); self }
-    pub fn version(mut self) -> Self { self.instructions.push(Instruction::Version); self }
-    pub fn selfid(mut self) -> Self { self.instructions.push(Instruction::Selfid); self }
-    pub fn anchor(mut self) -> Self { self.instructions.push(Instruction::Anchor); self }
-    pub fn gas(mut self) -> Self { self.instructions.push(Instruction::Gas); self }
-    pub fn usage(mut self) -> Self { self.instructions.push(Instruction::Usage); self }
-    pub fn callerid(mut self) -> Self { self.instructions.push(Instruction::Callerid); self }
-    pub fn gaslimit(mut self) -> Self { self.instructions.push(Instruction::Gaslimit); self }
-    pub fn capacity(mut self) -> Self { self.instructions.push(Instruction::Capacity); self }
-    pub fn height(mut self) -> Self { self.instructions.push(Instruction::Height); self }
+    // ── Tx-level & frame introspection ───
+
+    pub fn timelock(mut self) -> Self {
+        self.instructions.push(Instruction::Timelock);
+        self
+    }
+    pub fn version(mut self) -> Self {
+        self.instructions.push(Instruction::Version);
+        self
+    }
+    pub fn selfid(mut self) -> Self {
+        self.instructions.push(Instruction::Selfid);
+        self
+    }
+    pub fn anchor(mut self) -> Self {
+        self.instructions.push(Instruction::Anchor);
+        self
+    }
+    pub fn gas(mut self) -> Self {
+        self.instructions.push(Instruction::Gas);
+        self
+    }
+    pub fn usage(mut self) -> Self {
+        self.instructions.push(Instruction::Usage);
+        self
+    }
+    pub fn callerid(mut self) -> Self {
+        self.instructions.push(Instruction::Callerid);
+        self
+    }
+    pub fn gaslimit(mut self) -> Self {
+        self.instructions.push(Instruction::Gaslimit);
+        self
+    }
+    pub fn capacity(mut self) -> Self {
+        self.instructions.push(Instruction::Capacity);
+        self
+    }
+    pub fn height(mut self) -> Self {
+        self.instructions.push(Instruction::Height);
+        self
+    }
 }
 
 // ── Script ──────────────────────────────────────────────────────────
@@ -530,7 +911,7 @@ impl Script {
             Script::Transparent(instrs) => {
                 let mut out = Vec::new();
                 for instr in instrs {
-                    instr.encode(&mut out).expect("Vec writer never fails");
+                    instr.encode(&mut out);
                 }
                 out
             }
@@ -544,5 +925,75 @@ impl Script {
             Script::Transparent(instrs) => Ok(instrs),
             Script::Opaque(b) => Ok(ScriptBuilder::parse(&b)?.into_instructions()),
         }
+    }
+}
+
+impl CellEncode for Script {
+    fn encode(&self, builder: &mut CellBuilder) -> Result<(), CellError> {
+        builder.store_snake(&self.to_bytecode())?;
+        Ok(())
+    }
+}
+
+impl CellDecode for Script {
+    fn decode<R: CellResolver + ?Sized>(
+        slice: &mut CellSlice<'_>,
+        cells: &mut R,
+    ) -> Result<Self, CellError> {
+        Ok(Self::Opaque(slice.load_snake(cells, u32::MAX as usize)?))
+    }
+}
+
+/// Canonical code identity shared by scripts and prover overlays.
+pub(crate) fn script_cell(bytecode: &[u8]) -> Result<cells::Cell, CellError> {
+    let mut builder = CellBuilder::new();
+    builder.store_snake(bytecode)?;
+    Ok(builder.build())
+}
+
+#[cfg(test)]
+mod witness_tests {
+    use super::*;
+    use crate::{vm::Anchor, Predicate, Value};
+
+    #[test]
+    fn nested_witnesses_are_collected_separately_from_bytecode() {
+        let contract = Contract::new(
+            Predicate::opaque(Predicate::unspendable_key()),
+            Anchor([5; 32]),
+            Value::Scalar(Scalar::ONE),
+        )
+        .unwrap();
+        let id = contract.id();
+        let reference = String::contract(contract);
+        assert_eq!(reference.to_bytes_vec(), id);
+        assert_eq!(reference.len(), 32);
+        assert!(String::from(id.to_vec()).to_contract().is_err());
+
+        let branch = ScriptBuilder::new()
+            .push_str(reference)
+            .input()
+            .alloc(Some(Scalar::from(9u64)));
+        let branch_id = script_cell(&branch.to_bytecode()).unwrap().id();
+        let program = ScriptBuilder::new()
+            .push_script(branch.clone())
+            .with_script_witness(branch)
+            .unwrap();
+        let bag = program.cell_witnesses().unwrap();
+        assert!(bag.contains(&id));
+        assert!(
+            !bag.contains(&branch_id),
+            "inline bytecode needs no duplicate code Cell"
+        );
+        assert_eq!(program.contract_witnesses()[&id].id(), id);
+        let scripts = program.script_witnesses().unwrap();
+        assert!(
+            matches!(scripts[&branch_id].last(), Some(Instruction::Alloc(Some(value))) if *value == Scalar::from(9u64))
+        );
+        let bytecode = program.to_bytecode();
+        let public = ScriptBuilder::parse(&bytecode).unwrap();
+        assert_eq!(public.to_bytecode(), bytecode);
+        assert!(public.contract_witnesses().is_empty());
+        assert!(public.script_witnesses().unwrap().is_empty());
     }
 }
