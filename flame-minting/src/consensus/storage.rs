@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::future::Future;
 
-use crate::consensus::{DoubleSign, IncludedAcquisition, WeightedVote};
+use crate::consensus::{
+    DoubleSign, IncludedAcquisition, MintingProtocolParams, WeightedBlockHeader, WeightedVote,
+};
 use btc_integration::{BtcBlockTip, MinterP2wsh};
-use flamechain::CoreFlameHeight;
+use flamechain::{BlockTip, CoreFlameHeight};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MinterAcquisitions {
@@ -13,6 +15,11 @@ pub struct MinterAcquisitions {
 
 pub trait ConsensusStorage {
     type Error;
+
+    fn get_cumulative_weight(
+        &self,
+        tip: BlockTip,
+    ) -> impl Future<Output = Result<Option<WeightedBlockHeader>, Self::Error>> + Send;
 
     fn store_acquisition(
         &self,
@@ -26,6 +33,25 @@ pub trait ConsensusStorage {
         &self,
         btc_height: u64,
     ) -> impl Future<Output = Result<HashMap<MinterP2wsh, MinterAcquisitions>, Self::Error>> + Send;
+
+    fn get_active_acquisitions_at_target_height(
+        &self,
+        target_btc_height: u64,
+        params: &MintingProtocolParams,
+    ) -> impl Future<Output = Result<HashMap<MinterP2wsh, MinterAcquisitions>, Self::Error>> + Send
+    {
+        let acquisitions = self.get_acquisitions_by_minters(target_btc_height);
+        async move {
+            let mut minters = acquisitions.await?;
+            minters.retain(|_, minter| {
+                minter
+                    .acquisitions
+                    .retain(|acquisition| acquisition.is_active_at(target_btc_height, params));
+                !minter.acquisitions.is_empty()
+            });
+            Ok(minters)
+        }
+    }
 
     fn store_vote(
         &self,

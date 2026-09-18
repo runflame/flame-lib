@@ -17,7 +17,7 @@ use merlin::Transcript;
 
 use crate::storage::{ActorStore, RegistryUndo, StorageError, StorageParams, StoredActor};
 use crate::utreexo::{self, Catchup, Forest, Proof, UtreexoError};
-use crate::{BlockHash, CoreFlameHeight};
+use crate::{BlockHash, BlockTip, CoreFlameHeight};
 
 /// Consensus resource bounds. Networks can select smaller values through
 /// [`ChainParams`] without changing the transition algorithm.
@@ -247,6 +247,13 @@ impl BlockHeader {
 
     pub fn id(&self) -> BlockHash {
         BlockHash::new(self.to_cell().expect("bounded block header").id())
+    }
+
+    pub fn block_tip(&self) -> BlockTip {
+        BlockTip {
+            hash: self.id(),
+            height: self.height.into(),
+        }
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, CellError> {
@@ -1484,6 +1491,19 @@ mod tests {
             BlockTx::from_bytes_bounded(&tx_bytes, 1, limits),
             Err(CellError::InvalidFormat)
         ));
+    }
+
+    #[test]
+    fn block_tip_preserves_full_u64_height() {
+        let mut header = Blockchain::new(ChainParams::default()).unwrap().header;
+        for height in [0, u64::from(u32::MAX) + 1, u64::MAX] {
+            header.height = height;
+            let decoded = BlockHeader::from_bytes_bounded(&header.to_bytes().unwrap(), 1).unwrap();
+            let tip = decoded.block_tip();
+            assert_eq!(tip.hash, header.id());
+            assert_eq!(tip.height.as_u64(), height);
+            assert_eq!(u64::from(tip.height), height);
+        }
     }
 
     #[test]

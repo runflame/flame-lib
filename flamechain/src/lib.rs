@@ -63,27 +63,27 @@ impl fmt::Display for InvalidFlameNetwork {
 impl std::error::Error for InvalidFlameNetwork {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FlameHeight(u32);
+pub struct FlameHeight(u64);
 
 impl FlameHeight {
-    pub const fn new(height: u32) -> Self {
+    pub const fn new(height: u64) -> Self {
         Self(height)
     }
 
-    pub const fn as_u32(self) -> u32 {
+    pub const fn as_u64(self) -> u64 {
         self.0
     }
 }
 
-impl From<u32> for FlameHeight {
-    fn from(height: u32) -> Self {
+impl From<u64> for FlameHeight {
+    fn from(height: u64) -> Self {
         Self::new(height)
     }
 }
 
-impl From<FlameHeight> for u32 {
+impl From<FlameHeight> for u64 {
     fn from(height: FlameHeight) -> Self {
-        height.as_u32()
+        height.as_u64()
     }
 }
 

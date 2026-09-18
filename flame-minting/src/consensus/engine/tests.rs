@@ -1,5 +1,7 @@
 use super::*;
-use crate::consensus::{DoubleSign, IncludedVote, MinterAcquisitions, WeightedVote};
+use crate::consensus::{
+    DoubleSign, IncludedVote, MinterAcquisitions, WeightedBlockHeader, WeightedVote,
+};
 use btc_integration::{
     Acquisition, AcquisitionData, AuthenticatedMintingVote, BtcBlockTip, MinterP2wsh,
     MintingVoteValidator, UncheckedMintingVote, protocol::minter_witness_script,
@@ -18,6 +20,11 @@ use std::sync::Mutex;
 #[derive(Default)]
 struct Storage {
     votes: Vec<WeightedVote>,
+    acquisitions: HashMap<MinterP2wsh, MinterAcquisitions>,
+    acquisition_reads: Mutex<Vec<u64>>,
+    cummulative_weights: HashMap<BlockTip, WeightedBlockHeader>,
+    weight_reads: Mutex<Vec<BlockTip>>,
+    children_reads: Mutex<Vec<BlockTip>>,
     blocks: HashMap<BlockHash, BlockHeader>,
     fail_blocks: bool,
     double_signs: Vec<DoubleSign>,
@@ -29,6 +36,17 @@ struct Storage {
 impl ConsensusStorage for Storage {
     type Error = &'static str;
 
+    async fn get_cumulative_weight(
+        &self,
+        tip: BlockTip,
+    ) -> Result<Option<WeightedBlockHeader>, Self::Error> {
+        self.weight_reads.lock().unwrap().push(tip);
+        if self.fail {
+            return Err("storage unavailable");
+        }
+        Ok(self.cummulative_weights.get(&tip).cloned())
+    }
+
     async fn store_acquisition(
         &self,
         _: BtcBlockTip,
@@ -39,9 +57,19 @@ impl ConsensusStorage for Storage {
 
     async fn get_acquisitions_by_minters(
         &self,
-        _: u64,
+        btc_height: u64,
     ) -> Result<HashMap<MinterP2wsh, MinterAcquisitions>, Self::Error> {
-        unreachable!()
+        self.acquisition_reads.lock().unwrap().push(btc_height);
+        if self.fail {
+            return Err("storage unavailable");
+        }
+        let mut minters = self.acquisitions.clone();
+        for minter in minters.values_mut() {
+            minter
+                .acquisitions
+                .retain(|acquisition| acquisition.btc_block.height <= btc_height);
+        }
+        Ok(minters)
     }
 
     async fn store_vote(&self, _: BtcBlockTip, _: &WeightedVote) -> Result<(), Self::Error> {
@@ -108,7 +136,7 @@ impl ChainStorage for Storage {
         Ok(self
             .blocks
             .get(&tip.hash)
-            .filter(|header| header.height == u64::from(tip.height.as_u32()))
+            .filter(|header| header.height == tip.height.as_u64())
             .map(|header| Block {
                 header: header.clone(),
                 transactions: vec![],
@@ -128,6 +156,48 @@ impl ChainStorage for Storage {
             .and_then(|header| header.core_block.as_ref())
             .filter(|core| core.height == tip.height)
             .cloned())
+    }
+
+    async fn get_block_header(
+        &self,
+        tip: CoreBlockTip,
+    ) -> Result<Option<BlockHeader>, Self::Error> {
+        if self.fail_blocks {
+            return Err("chain storage unavailable");
+        }
+        Ok(self
+            .blocks
+            .get(&tip.hash)
+            .filter(|header| {
+                header
+                    .core_block
+                    .as_ref()
+                    .is_some_and(|core| core.height == tip.height)
+            })
+            .cloned())
+    }
+
+    async fn get_block_header_with_children(
+        &self,
+        tip: BlockTip,
+    ) -> Result<Option<(BlockHeader, Vec<BlockHeader>)>, Self::Error> {
+        self.children_reads.lock().unwrap().push(tip);
+        let Some(block) = self.get_block(tip).await? else {
+            return Ok(None);
+        };
+        let mut children = Vec::new();
+        let mut parents = vec![tip.hash];
+        while let Some(parent) = parents.pop() {
+            for header in self
+                .blocks
+                .values()
+                .filter(|header| header.parent == parent)
+            {
+                parents.push(header.id());
+                children.push(header.clone());
+            }
+        }
+        Ok(Some((block.header, children)))
     }
 }
 
@@ -152,14 +222,24 @@ fn btc_tip(height: u64) -> BtcBlockTip {
 }
 
 fn vote(minter: u8, height: u32, hash: u8) -> AuthenticatedMintingVote {
+    vote_for_tip(
+        minter,
+        CoreBlockTip {
+            height: height.into(),
+            hash: BlockHash::new([hash; 32]),
+        },
+    )
+}
+
+fn vote_for_tip(minter: u8, tip: CoreBlockTip) -> AuthenticatedMintingVote {
     let witness_script = minter_witness_script::build_with_authorization(
         &Predicate::opaque(Predicate::unspendable_key()),
         Script::from_bytes(&[minter]),
     );
     let mut payload = b"FLMB".to_vec();
     payload.push(1);
-    payload.extend_from_slice(&height.to_le_bytes());
-    payload.extend_from_slice(&[hash; 32]);
+    payload.extend_from_slice(&tip.height.as_u32().to_le_bytes());
+    payload.extend_from_slice(tip.hash.as_bytes());
     let tx = Transaction {
         version: transaction::Version::TWO,
         lock_time: absolute::LockTime::ZERO,
@@ -255,6 +335,10 @@ fn acquisition(duration: Option<u16>) -> Acquisition {
 }
 
 fn acquisition_for_minter(minter: MinterP2wsh, duration: Option<u16>) -> Acquisition {
+    acquisition_with_amount(minter, duration, 1)
+}
+
+fn acquisition_with_amount(minter: MinterP2wsh, duration: Option<u16>, amount: u64) -> Acquisition {
     let mut data = AcquisitionData::new(
         minter,
         Predicate::opaque(Predicate::unspendable_key()),
@@ -266,7 +350,7 @@ fn acquisition_for_minter(minter: MinterP2wsh, duration: Option<u16>) -> Acquisi
         lock_time: absolute::LockTime::ZERO,
         input: vec![],
         output: vec![TxOut {
-            value: Amount::from_sat(1),
+            value: Amount::from_sat(amount),
             script_pubkey: data.to_script(),
         }],
     };
@@ -1087,3 +1171,7 @@ async fn preserves_double_sign_evidence_at_multiple_heights() {
         assert_ne!(sign.votes[0].block_hash(), sign.votes[1].block_hash());
     }
 }
+
+mod outcome;
+mod vote_weight;
+mod weighter;

@@ -5,11 +5,11 @@ use flame_storage::ChainStorage;
 use flamechain::CoreFlameHeight;
 
 use crate::consensus::{
-    ConsensusStorage, DoubleSign, IncludedAcquisition, IncludedVote, MinterAcquisitions,
-    MintingProtocolParams, WeightedVote,
+    ConsensusStorage, DoubleSign, IncludedVote, MinterAcquisitions, MintingProtocolParams,
+    WeightedVote,
 };
 
-pub(in crate::consensus) struct VoteValidator<'a, C, H> {
+pub struct VoteValidator<'a, C, H> {
     pub new_block: &'a IndexedBlock,
     pub protocol_params: &'a MintingProtocolParams,
     pub consensus_storage: &'a C,
@@ -87,31 +87,13 @@ impl<C: ConsensusStorage, H: ChainStorage> VoteValidator<'_, C, H> {
             || !minter
                 .acquisitions
                 .iter()
-                .any(|acquisition| is_acquisition_active(acquisition, target, self.protocol_params))
+                .any(|acquisition| acquisition.is_active_at(target, self.protocol_params))
         {
             return Ok(VoteEligibility::Rejected);
         }
 
         Ok(VoteEligibility::Eligible(included))
     }
-}
-
-fn is_acquisition_active(
-    acquisition: &IncludedAcquisition,
-    target_btc_height: u64,
-    params: &MintingProtocolParams,
-) -> bool {
-    let duration = acquisition
-        .acquisition
-        .data()
-        .duration
-        .unwrap_or(params.default_acquisition_duration.get());
-
-    // X + maturity <= target < X + maturity + duration, without overflowing.
-    target_btc_height
-        .checked_sub(acquisition.btc_block.height)
-        .and_then(|age| age.checked_sub(u64::from(params.acquisition_maturity)))
-        .is_some_and(|active_age| active_age < u64::from(duration))
 }
 
 enum VoteEligibility {

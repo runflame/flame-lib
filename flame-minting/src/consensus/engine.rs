@@ -5,9 +5,10 @@ use super::{
 use crate::rewards::RewardsEngine;
 use btc_integration::{IndexedBlock, MinterP2wsh};
 use flame_storage::{CanonicalStorage, ChainStorage};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, hash_map::Entry};
 use std::sync::Arc;
 use vote_validation::{VoteValidationError, VoteValidationResult, VoteValidator};
+use weighter::{Weighter, WeighterError};
 
 pub struct MintingEngine<C: ConsensusStorage, H: ChainStorage, S: CanonicalStorage> {
     pub new_block: Arc<IndexedBlock>,
@@ -36,18 +37,69 @@ impl<C: ConsensusStorage, H: ChainStorage, S: CanonicalStorage> MintingEngine<C,
         }
     }
 
-    pub async fn get_minting_outcome(&self) -> MintingOutcome {
-        return MintingOutcome {
-            accepted_votes: vec![],
-            accepted_acquisitions: vec![],
-            double_signs: vec![],
-            pending_votes: Default::default(),
+    pub async fn get_minting_outcome(
+        &self,
+    ) -> Result<MintingOutcome, MintingEngineError<C::Error, H::Error>> {
+        let accepted_acquisitions = self.validate_acquisitions();
+        let mut acquisitions = self
+            .consensus_storage
+            .get_acquisitions_by_minters(self.new_block.btc_block_tip.height)
+            .await
+            .map_err(MintingEngineError::ConsensusStorage)?;
+        for acquisition in &accepted_acquisitions {
+            let minter = acquisition.acquisition.data().minter_p2wsh;
+            let record = match acquisitions.entry(minter) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let is_double_signed = self
+                        .consensus_storage
+                        .is_minter_double_signed(&minter)
+                        .await
+                        .map_err(MintingEngineError::ConsensusStorage)?;
+                    entry.insert(MinterAcquisitions {
+                        is_double_signed,
+                        acquisitions: vec![],
+                    })
+                }
+            };
+            record.acquisitions.push(acquisition.clone());
+        }
+        let validated = self
+            .validate_votes(&acquisitions)
+            .await
+            .map_err(|error| match error {
+                VoteValidationError::ConsensusStorage(error) => {
+                    MintingEngineError::ConsensusStorage(error)
+                }
+                VoteValidationError::ChainStorage(error) => MintingEngineError::ChainStorage(error),
+            })?;
+        let weighted = Weighter {
+            votes: &validated.valid_votes,
+            removed_votes: &validated.removed_votes,
+            new_acquisitions: &accepted_acquisitions,
+            consensus_storage: self.consensus_storage.as_ref(),
+            chain_storage: self.chain_storage.as_ref(),
+            protocol_params: &self.protocol_params,
+        }
+        .weigh()
+        .await
+        .map_err(MintingEngineError::Weighter)?;
+        let mut pending_votes = BTreeMap::new();
+        for vote in validated.pending_votes {
+            pending_votes
+                .entry(vote.vote.block_tip())
+                .or_insert_with(Vec::new)
+                .push(vote);
+        }
+        Ok(MintingOutcome {
+            accepted_votes: weighted.weighted_votes,
+            removed_votes: validated.removed_votes,
+            weighted_blocks: weighted.weighted_blocks,
+            accepted_acquisitions,
+            double_signs: validated.double_signs,
+            pending_votes,
             next_btc_cursor: self.new_block.btc_block_tip,
-            expected_canonical_tip: None,
-            selected_tip: None,
-            detach: vec![],
-            attach: vec![],
-        };
+        })
     }
 
     fn validate_acquisitions(&self) -> Vec<IncludedAcquisition> {
@@ -84,6 +136,15 @@ impl<C: ConsensusStorage, H: ChainStorage, S: CanonicalStorage> MintingEngine<C,
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum MintingEngineError<C, H> {
+    ConsensusStorage(C),
+    ChainStorage(H),
+    Weighter(WeighterError<C, H>),
+}
+
 #[cfg(test)]
 mod tests;
 mod vote_validation;
+mod vote_weight;
+pub mod weighter;

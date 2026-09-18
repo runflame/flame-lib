@@ -1,13 +1,19 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use btc_integration::{Acquisition, AuthenticatedMintingVote, BtcBlockTip, MinterP2wsh};
 use flamechain::{BlockHash, BlockTip, CoreBlockTip, CoreFlameHeight};
+
+use super::{MintingProtocolParams, WeightedBlockHeader};
 
 /// Outcome for 1 new BTC block
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MintingOutcome {
     /// New valid votes.
     pub accepted_votes: Vec<WeightedVote>,
+    /// Previously counted votes invalidated by double signing.
+    pub removed_votes: Vec<WeightedVote>,
+    /// Updated weight state for voted blocks and their affected descendants.
+    pub weighted_blocks: HashMap<BlockTip, WeightedBlockHeader>,
     /// New valid acquisitions.
     pub accepted_acquisitions: Vec<IncludedAcquisition>,
     /// Double votes.
@@ -16,13 +22,6 @@ pub struct MintingOutcome {
     pub pending_votes: BTreeMap<CoreBlockTip, PendingVotes>,
     /// The processed cursor.
     pub next_btc_cursor: BtcBlockTip,
-    /// Canonical Flame tip against which this plan was calculated.
-    pub expected_canonical_tip: Option<BlockTip>,
-    pub selected_tip: Option<BlockTip>,
-    /// Old tip first, excluding the common ancestor.
-    pub detach: Vec<BlockTip>,
-    /// New tip first, excluding the common ancestor.
-    pub attach: Vec<BlockTip>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +50,23 @@ pub struct WeightedVote {
 pub struct IncludedAcquisition {
     pub btc_block: BtcBlockTip,
     pub acquisition: Acquisition,
+}
+
+impl IncludedAcquisition {
+    pub fn duration(&self, params: &MintingProtocolParams) -> u16 {
+        self.acquisition
+            .data()
+            .duration
+            .unwrap_or(params.default_acquisition_duration.get())
+    }
+
+    pub fn is_active_at(&self, target_btc_height: u64, params: &MintingProtocolParams) -> bool {
+        // X + maturity <= target < X + maturity + duration, without overflowing.
+        target_btc_height
+            .checked_sub(self.btc_block.height)
+            .and_then(|age| age.checked_sub(u64::from(params.acquisition_maturity)))
+            .is_some_and(|active_age| active_age < u64::from(self.duration(params)))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
