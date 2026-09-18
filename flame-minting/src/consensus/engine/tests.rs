@@ -1,5 +1,5 @@
 use super::*;
-use crate::consensus::MinterAcquisitions;
+use crate::consensus::{DoubleSign, IncludedVote, MinterAcquisitions, WeightedVote};
 use btc_integration::{
     Acquisition, AcquisitionData, AuthenticatedMintingVote, BtcBlockTip, MinterP2wsh,
     MintingVoteValidator, UncheckedMintingVote, protocol::minter_witness_script,
@@ -9,7 +9,8 @@ use corepc_client::bitcoin::{
     transaction,
 };
 use flamechain::{
-    Block, BlockHash, BlockHeader, BlockTip, Blockchain, ChainParams, CoreBlockHeader, CoreBlockTip,
+    Block, BlockHash, BlockHeader, BlockTip, Blockchain, ChainParams, CoreBlockHeader,
+    CoreBlockTip, CoreFlameHeight,
 };
 use flamevm::Predicate;
 use std::sync::Mutex;
