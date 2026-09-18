@@ -1,4 +1,5 @@
 use super::*;
+use crate::consensus::MinterAcquisitions;
 use btc_integration::{
     Acquisition, AcquisitionData, AuthenticatedMintingVote, BtcBlockTip, MinterP2wsh,
     MintingVoteValidator, UncheckedMintingVote, protocol::minter_witness_script,
@@ -31,6 +32,13 @@ impl ConsensusStorage for Storage {
         unreachable!()
     }
 
+    async fn get_active_acquisitions_by_minters(
+        &self,
+        _: u64,
+    ) -> Result<HashMap<MinterP2wsh, MinterAcquisitions>, Self::Error> {
+        unreachable!()
+    }
+
     async fn store_vote(&self, _: BtcBlockTip, _: &WeightedVote) -> Result<(), Self::Error> {
         unreachable!()
     }
@@ -52,6 +60,13 @@ impl ConsensusStorage for Storage {
             .iter()
             .find(|sign| sign.minter == *minter && sign.target_flame_height == height)
             .cloned())
+    }
+
+    async fn is_minter_double_signed(&self, minter: &MinterP2wsh) -> Result<bool, Self::Error> {
+        if self.fail_double_sign {
+            return Err("double sign storage unavailable");
+        }
+        Ok(self.double_signs.iter().any(|sign| sign.minter == *minter))
     }
 
     async fn get_minter_vote_for_height(

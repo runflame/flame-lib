@@ -10,4 +10,4 @@ pub use outcome::{
     DoubleSign, IncludedAcquisition, IncludedVote, MintingOutcome, PendingVotes, WeightedVote,
 };
 pub use params::MintingProtocolParams;
-pub use storage::ConsensusStorage;
+pub use storage::{ConsensusStorage, MinterAcquisitions};
