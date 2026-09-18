@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use btc_integration::{Acquisition, AuthenticatedMintingVote, BtcBlockTip, MinterP2wsh};
-use flamechain::{BlockHash, BlockTip, CoreFlameHeight};
+use flamechain::{BlockHash, BlockTip, CoreBlockTip, CoreFlameHeight};
 
 /// Outcome for 1 new BTC block
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -13,7 +13,7 @@ pub struct MintingOutcome {
     /// Double votes.
     pub double_signs: Vec<DoubleSign>,
     /// Votes for the blocks that node doesn't yet have.
-    pub pending_votes: BTreeMap<BlockTip, PendingVotes>,
+    pub pending_votes: BTreeMap<CoreBlockTip, PendingVotes>,
     /// The processed cursor.
     pub next_btc_cursor: BtcBlockTip,
     /// Canonical Flame tip against which this plan was calculated.
@@ -32,7 +32,7 @@ pub struct IncludedVote {
 }
 
 impl IncludedVote {
-    pub fn block_height(&self) -> u32 {
+    pub fn block_height(&self) -> CoreFlameHeight {
         self.vote.output().data.block_height()
     }
 

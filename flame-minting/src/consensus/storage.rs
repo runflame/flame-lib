@@ -20,9 +20,9 @@ pub trait ConsensusStorage {
         acquisition: &IncludedAcquisition,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Returns active acquisitions and double-sign status, grouped by minter.
-    /// For delayed votes, this is the target height, not the vote's inclusion height.
-    fn get_active_acquisitions_by_minters(
+    /// Returns acquisitions recorded through `btc_height`, including immature and expired ones.
+    /// Acquisition activity is evaluated by consensus at each vote's target Bitcoin height.
+    fn get_acquisitions_by_minters(
         &self,
         btc_height: u64,
     ) -> impl Future<Output = Result<HashMap<MinterP2wsh, MinterAcquisitions>, Self::Error>> + Send;

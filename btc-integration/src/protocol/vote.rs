@@ -3,7 +3,7 @@ use crate::protocol::consts::{
 };
 use crate::protocol::minter_identity::MinterIdentity;
 use corepc_client::bitcoin::{OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid};
-use flamechain::BlockHash;
+use flamechain::{BlockHash, CoreFlameHeight};
 use readerwriter::{ReadError, Reader};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,11 +116,11 @@ pub enum MintingVoteData {
 }
 
 impl MintingVoteData {
-    pub fn block_height(&self) -> u32 {
+    pub fn block_height(&self) -> CoreFlameHeight {
         match self {
             Self::V1 {
                 flame_block_height, ..
-            } => *flame_block_height,
+            } => CoreFlameHeight::new(*flame_block_height),
         }
     }
 

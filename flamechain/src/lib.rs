@@ -119,7 +119,13 @@ pub struct BlockHash([u8; 32]);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockTip {
     pub hash: BlockHash,
-    pub height: u64,
+    pub height: FlameHeight,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CoreBlockTip {
+    pub hash: BlockHash,
+    pub height: CoreFlameHeight,
 }
 
 impl BlockHash {
