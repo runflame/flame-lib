@@ -290,13 +290,20 @@ the transaction-sequence CellID. An execution record is
 `kind:u8 | TxID:32` (0 external, 1 internal, 2 failed/bounced internal);
 the effects root is the execution-record-sequence CellID.
 
-The BlockHeader is 212 payload bytes, with no references:
+The BlockHeader has 213 payload bytes for a regular block or 221 for a Core block,
+with no references:
 
 ```text
-version:u32 | height:u64 | core_block_hash:32 | parent:32
+version:u32 | height:u64 | core_block_tag:u8
+[core_height:u32 | target_btc_height:u32]
+core_block_hash:32 | parent:32
 | witness_root:32 | effects_root:32 | Utreexo_root:32 | actor_root:32
 | available_storage_units:u64
 ```
+
+`core_block_tag` is `0` for `None` or `1` for `Some(CoreBlockHeader)`; other values
+are invalid. The two bracketed fields are present only for tag `1`. `core_height`
+is the Core-block sequence height, separate from the ordinary Flame `height`.
 
 BlockHash is its CellID. Each external transaction immediately drains its
 FIFO actor-message closure before the next external transaction, reusing
