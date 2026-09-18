@@ -43,8 +43,8 @@ Participation in BFT is not required to produce or mint a valid Flame block.
    Minting Power. Minter burns Bitcoins and gaining Minting Power proportional to the burnt coins.
 2. BFT produces Core Block and distributed it in the network. Minters vote for the block by sending special transactions
    in the Bitcoin network.
-3. After votes are settled in the Bitcoin Chain, main chain is selected. Main chain is a chain with the most cumulative
-   Voting Power.
+3. After votes are settled in the Bitcoin Chain, main chain is selected. Main chain is a chain with the greatest cumulative
+   Core Block weight.
 
 BFT can produce blocks between Bitcoin blocks. However, it is not required, and system can achieve finality without
 intermediate non-Core blocks.
@@ -320,15 +320,19 @@ and may be useful for Minters that intend to participate for longer periods with
 ## 5. Chain Selection
 
 Minting may produce votes for multiple competing Core Blocks. Chain Selection determines which valid Flame
-chain is considered canonical based on the cumulative Effective Minting Power supporting each chain.
+chain is considered canonical based on the cumulative weight of its Core Blocks.
 
 ### Core Block Weight
 
-The weight of a Core Block is the sum of Effective Minting Power of all valid votes for that block:
+The weight of a Core Block is the base-2 logarithm of the sum of Effective Minting Power of all valid votes for that
+block, rounded down. If the sum is zero, the block weight is zero:
 
 ```text
+TotalEffectiveMintingPower(B) = Σ EffectiveMintingPower(v)
+
 BlockWeight(B) =
-    Σ EffectiveMintingPower(v)
+    if TotalEffectiveMintingPower(B) == 0 then 0
+    else floor(log2(TotalEffectiveMintingPower(B)))
 ```
 
 where `v` is a valid Minting vote for Core Block `B`.
@@ -343,7 +347,7 @@ ChainWeight = Σ BlockWeight
 
 ### Canonical Chain
 
-The canonical Flame chain is the valid chain with the greatest cumulative Minting Power according to the rules above.
+The canonical Flame chain is the valid chain with the greatest Chain Weight according to the rules above.
 
 Chain Selection is reevaluated whenever new information affecting chain weight becomes available, including:
 
