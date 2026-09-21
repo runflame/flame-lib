@@ -3,6 +3,9 @@ name = "flamechain"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+devnet = []
+
 [dependencies]
 cells = { path = "../cells" }
 flamevm = { path = "../flamevm" }
