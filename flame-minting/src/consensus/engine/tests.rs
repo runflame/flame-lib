@@ -26,7 +26,8 @@ struct Storage {
     active_acquisition_reads: Mutex<Vec<(MinterP2wsh, u64)>>,
     cummulative_weights: HashMap<BlockTip, WeightedBlockHeader>,
     weight_reads: Mutex<Vec<BlockTip>>,
-    children_reads: Mutex<Vec<BlockTip>>,
+    header_reads: Mutex<Vec<CoreBlockTip>>,
+    descendants_reads: Mutex<Vec<CoreBlockTip>>,
     blocks: HashMap<BlockHash, BlockHeader>,
     fail_blocks: bool,
     double_signs: Vec<DoubleSign>,
@@ -193,6 +194,7 @@ impl ChainStorage for Storage {
         &self,
         tip: CoreBlockTip,
     ) -> Result<Option<BlockHeader>, Self::Error> {
+        self.header_reads.lock().unwrap().push(tip);
         if self.fail_blocks {
             return Err("chain storage unavailable");
         }
@@ -208,15 +210,15 @@ impl ChainStorage for Storage {
             .cloned())
     }
 
-    async fn get_block_header_with_children(
+    async fn get_core_block_header_with_core_descendants(
         &self,
-        tip: BlockTip,
+        tip: CoreBlockTip,
     ) -> Result<Option<(BlockHeader, Vec<BlockHeader>)>, Self::Error> {
-        self.children_reads.lock().unwrap().push(tip);
-        let Some(block) = self.get_block(tip).await? else {
+        self.descendants_reads.lock().unwrap().push(tip);
+        let Some(block_header) = self.get_block_header(tip).await? else {
             return Ok(None);
         };
-        let mut children = Vec::new();
+        let mut descendants = Vec::new();
         let mut parents = vec![tip.hash];
         while let Some(parent) = parents.pop() {
             for header in self
@@ -225,10 +227,10 @@ impl ChainStorage for Storage {
                 .filter(|header| header.parent == parent)
             {
                 parents.push(header.id());
-                children.push(header.clone());
+                descendants.push(header.clone());
             }
         }
-        Ok(Some((block.header, children)))
+        Ok(Some((block_header, descendants)))
     }
 }
 

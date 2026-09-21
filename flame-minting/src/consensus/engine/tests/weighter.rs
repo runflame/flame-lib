@@ -207,12 +207,17 @@ async fn includes_all_descendants_and_forks_without_double_counting_overlapping_
     let mut reads = storage.acquisition_reads.lock().unwrap().clone();
     reads.sort();
     assert_eq!(reads, vec![100, 100, 101, 101]);
-    let mut children_reads = storage.children_reads.lock().unwrap().clone();
-    children_reads.sort();
-    let mut expected_children_reads =
-        vec![tip(&root), tip(&grandchild), tip(&root), tip(&grandchild)];
-    expected_children_reads.sort();
-    assert_eq!(children_reads, expected_children_reads);
+    let mut descendants_reads = storage.descendants_reads.lock().unwrap().clone();
+    descendants_reads.sort();
+    let mut expected_reads: Vec<_> = votes
+        .iter()
+        .flat_map(|vote| [vote.vote.block_tip(); 2])
+        .collect();
+    expected_reads.sort();
+    assert_eq!(descendants_reads, expected_reads);
+    let mut header_reads = storage.header_reads.lock().unwrap().clone();
+    header_reads.sort();
+    assert_eq!(header_reads, expected_reads);
     let mut weight_reads = storage.weight_reads.lock().unwrap().clone();
     weight_reads.sort();
     let mut expected_weight_reads: Vec<_> = [&root, &child, &grandchild, &fork, &leaf]
@@ -231,6 +236,41 @@ async fn empty_input_does_not_read_storage() {
         ..Storage::default()
     };
     assert!(weigh(&storage, &[]).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn includes_unchanged_descendants_when_power_changes_without_changing_weight() {
+    let root = header(10, Some((3, 100)), BlockHash::new([0; 32]), 1);
+    let child = header(11, None, root.id(), 2);
+    let leaf = header(12, Some((4, 101)), child.id(), 3);
+    let mut storage = Storage::default();
+    add_block(&mut storage, &root, 10, 4);
+    add_block(&mut storage, &child, 12, 0);
+    add_block(&mut storage, &leaf, 12, 2);
+    add_acquisition(&mut storage, 1, 98, 15, 5);
+    let added = included(1, &root, 100);
+
+    let result = weigh_changes(&storage, &[added.clone()], &[])
+        .await
+        .unwrap();
+
+    assert_eq!(result.weighted_blocks.len(), 3);
+    assert_eq!(result.weighted_blocks[&tip(&root)].effective_power, 7);
+    assert_eq!(result.weighted_blocks[&tip(&root)].parent_weight, 10);
+    for descendant in [&child, &leaf] {
+        assert_eq!(
+            result.weighted_blocks[&tip(descendant)],
+            storage.cummulative_weights[&tip(descendant)],
+        );
+    }
+    assert_eq!(
+        result.weighted_votes,
+        vec![WeightedVote {
+            original: added,
+            effective_minting_power: 3,
+        }],
+    );
+    assert_eq!(storage.cummulative_weights[&tip(&root)].effective_power, 4);
 }
 
 #[tokio::test]
@@ -257,6 +297,32 @@ async fn reports_missing_blocks_and_weight_records_and_storage_errors() {
         weigh(&storage, &votes).await,
         Err(WeighterError::ChainStorage("chain storage unavailable"))
     );
+}
+
+#[tokio::test]
+async fn rejects_votes_without_a_matching_core_header() {
+    let core = header(10, Some((3, 100)), BlockHash::new([0; 32]), 1);
+    let non_core = header(11, None, core.id(), 2);
+    let mut storage = Storage::default();
+    add_block(&mut storage, &core, 10, 4);
+    add_block(&mut storage, &non_core, 12, 0);
+
+    for block in [&core, &non_core] {
+        let core_tip = CoreBlockTip {
+            hash: block.id(),
+            height: (block.height as u32).into(),
+        };
+        let vote = IncludedVote {
+            btc_block: btc_tip(100),
+            vote: vote_for_tip(1, core_tip),
+        };
+        assert_eq!(
+            weigh(&storage, &[vote]).await,
+            Err(WeighterError::MissingVotedBlock(core_tip)),
+        );
+    }
+    assert!(storage.weight_reads.lock().unwrap().is_empty());
+    assert!(storage.acquisition_reads.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
