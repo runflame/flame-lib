@@ -1,12 +1,9 @@
-use super::{
-    ConsensusStorage, IncludedAcquisition, MinterAcquisitions, MintingOutcome,
-    MintingProtocolParams,
-};
+use super::{ConsensusStorage, IncludedAcquisition, MintingOutcome, MintingProtocolParams};
 use crate::rewards::RewardsEngine;
 use acquisition_provider::AcquisitionProvider;
-use btc_integration::{IndexedBlock, MinterP2wsh};
+use btc_integration::IndexedBlock;
 use flame_storage::{CanonicalStorage, ChainStorage};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use vote_validation::{VoteValidationError, VoteValidationResult, VoteValidator};
 use weighter::{Weighter, WeighterError};
@@ -47,12 +44,8 @@ impl<C: ConsensusStorage, H: ChainStorage, S: CanonicalStorage> MintingEngine<C,
             new_acquisitions: &accepted_acquisitions,
             params: &self.protocol_params,
         };
-        let acquisitions = acquisition_provider
-            .load_through(self.new_block.btc_block_tip.height)
-            .await
-            .map_err(MintingEngineError::ConsensusStorage)?;
         let validated = self
-            .validate_votes(&acquisitions)
+            .validate_votes(&accepted_acquisitions)
             .await
             .map_err(|error| match error {
                 VoteValidationError::ConsensusStorage(error) => {
@@ -109,14 +102,14 @@ impl<C: ConsensusStorage, H: ChainStorage, S: CanonicalStorage> MintingEngine<C,
 
     async fn validate_votes(
         &self,
-        acquisitions: &HashMap<MinterP2wsh, MinterAcquisitions>,
+        new_acquisitions: &[IncludedAcquisition],
     ) -> Result<VoteValidationResult, VoteValidationError<C::Error, H::Error>> {
         VoteValidator {
             new_block: &self.new_block,
             protocol_params: &self.protocol_params,
             consensus_storage: self.consensus_storage.as_ref(),
             chain_storage: self.chain_storage.as_ref(),
-            acquisitions,
+            new_acquisitions,
         }
         .validate()
         .await

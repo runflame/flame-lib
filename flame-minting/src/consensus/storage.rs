@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::future::Future;
 
-use crate::consensus::{DoubleSign, IncludedAcquisition, WeightedBlockHeader, WeightedVote};
+use crate::consensus::{
+    DoubleSign, IncludedAcquisition, MintingProtocolParams, WeightedBlockHeader, WeightedVote,
+};
 use btc_integration::{BtcBlockTip, MinterP2wsh};
 use flamechain::{BlockTip, CoreFlameHeight};
 
@@ -31,6 +33,17 @@ pub trait ConsensusStorage {
         &self,
         btc_height: u64,
     ) -> impl Future<Output = Result<HashMap<MinterP2wsh, MinterAcquisitions>, Self::Error>> + Send;
+
+    /// Returns this minter's acquisitions active at the vote's target Bitcoin height.
+    /// An unknown minter or one without active acquisitions has an empty list.
+    /// Double-sign status is taken from the current storage snapshot, even when
+    /// the requested height is in the past or the acquisition list is empty.
+    fn get_active_minter_acquisitions_at_height(
+        &self,
+        minter: &MinterP2wsh,
+        btc_height: u64,
+        params: &MintingProtocolParams,
+    ) -> impl Future<Output = Result<MinterAcquisitions, Self::Error>> + Send;
 
     fn store_vote(
         &self,

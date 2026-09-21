@@ -148,8 +148,15 @@ async fn counts_current_block_acquisitions_when_maturity_is_zero() {
 }
 
 #[tokio::test]
-async fn returns_empty_outcome_for_an_empty_block() {
-    let engine = outcome_engine(Storage::default(), vec![], vec![]);
+async fn returns_empty_outcome_without_reading_storage() {
+    let engine = outcome_engine(
+        Storage {
+            fail: true,
+            ..Storage::default()
+        },
+        vec![],
+        vec![],
+    );
     let outcome = engine.get_minting_outcome().await.unwrap();
     assert_eq!(
         outcome,
@@ -167,19 +174,20 @@ async fn returns_empty_outcome_for_an_empty_block() {
 
 #[tokio::test]
 async fn propagates_storage_validation_and_weighter_errors() {
+    let root = header(10, Some((3, 100)), BlockHash::new([0; 32]), 1);
     let engine = outcome_engine(
         Storage {
             fail: true,
+            blocks: HashMap::from([(root.id(), root.clone())]),
             ..Storage::default()
         },
-        vec![],
+        vec![included(1, &root, 100).vote],
         vec![],
     );
     assert_eq!(
         engine.get_minting_outcome().await,
         Err(MintingEngineError::ConsensusStorage("storage unavailable"))
     );
-    let root = header(10, Some((3, 100)), BlockHash::new([0; 32]), 1);
     let mut storage = Storage::default();
     storage.blocks.insert(root.id(), root.clone());
     add_acquisition(&mut storage, 1, 98, 40, 5);

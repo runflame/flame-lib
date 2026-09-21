@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use btc_integration::{AuthenticatedMintingVote, IndexedBlock, MinterIdentity, MinterP2wsh};
+use btc_integration::{AuthenticatedMintingVote, IndexedBlock, MinterIdentity};
 use flame_storage::ChainStorage;
 use flamechain::CoreFlameHeight;
 
 use crate::consensus::{
-    ConsensusStorage, DoubleSign, IncludedVote, MinterAcquisitions, MintingProtocolParams,
+    ConsensusStorage, DoubleSign, IncludedAcquisition, IncludedVote, MintingProtocolParams,
     WeightedVote,
 };
 
@@ -14,7 +14,7 @@ pub struct VoteValidator<'a, C, H> {
     pub protocol_params: &'a MintingProtocolParams,
     pub consensus_storage: &'a C,
     pub chain_storage: &'a H,
-    pub acquisitions: &'a HashMap<MinterP2wsh, MinterAcquisitions>,
+    pub new_acquisitions: &'a [IncludedAcquisition],
 }
 
 impl<C: ConsensusStorage, H: ChainStorage> VoteValidator<'_, C, H> {
@@ -24,11 +24,7 @@ impl<C: ConsensusStorage, H: ChainStorage> VoteValidator<'_, C, H> {
         let mut minters: HashMap<MinterIdentity, MinterVotes> = HashMap::new();
 
         for vote in &self.new_block.votes {
-            match self
-                .check_eligibility(vote)
-                .await
-                .map_err(VoteValidationError::ChainStorage)?
-            {
+            match self.check_eligibility(vote).await? {
                 VoteEligibility::Rejected => {}
                 VoteEligibility::Pending(vote) => {
                     minters
@@ -63,14 +59,8 @@ impl<C: ConsensusStorage, H: ChainStorage> VoteValidator<'_, C, H> {
     async fn check_eligibility(
         &self,
         vote: &AuthenticatedMintingVote,
-    ) -> Result<VoteEligibility, H::Error> {
-        let Some(minter) = self.acquisitions.get(&vote.auth().minter().p2wsh()) else {
-            return Ok(VoteEligibility::Rejected);
-        };
-        if minter.is_double_signed || minter.acquisitions.is_empty() {
-            return Ok(VoteEligibility::Rejected);
-        }
-
+    ) -> Result<VoteEligibility, VoteValidationError<C::Error, H::Error>> {
+        let minter = vote.auth().minter().p2wsh();
         let included = IncludedVote {
             btc_block: self.new_block.btc_block_tip,
             vote: vote.clone(),
@@ -78,17 +68,36 @@ impl<C: ConsensusStorage, H: ChainStorage> VoteValidator<'_, C, H> {
         let Some(core) = self
             .chain_storage
             .get_core_block_header(vote.block_tip())
-            .await?
+            .await
+            .map_err(VoteValidationError::ChainStorage)?
         else {
+            if self
+                .consensus_storage
+                .is_minter_double_signed(&minter)
+                .await
+                .map_err(VoteValidationError::ConsensusStorage)?
+            {
+                return Ok(VoteEligibility::Rejected);
+            }
             return Ok(VoteEligibility::Pending(included));
         };
         let target = u64::from(core.target_btc_height);
-        if included.btc_block.height < target
-            || !minter
-                .acquisitions
-                .iter()
-                .any(|acquisition| acquisition.is_active_at(target, self.protocol_params))
-        {
+        if included.btc_block.height < target {
+            return Ok(VoteEligibility::Rejected);
+        }
+        let active = self
+            .consensus_storage
+            .get_active_minter_acquisitions_at_height(&minter, target, self.protocol_params)
+            .await
+            .map_err(VoteValidationError::ConsensusStorage)?;
+        if active.is_double_signed {
+            return Ok(VoteEligibility::Rejected);
+        }
+        let has_new_active_acquisition = self.new_acquisitions.iter().any(|acquisition| {
+            acquisition.acquisition.data().minter_p2wsh == minter
+                && acquisition.is_active_at(target, self.protocol_params)
+        });
+        if active.acquisitions.is_empty() && !has_new_active_acquisition {
             return Ok(VoteEligibility::Rejected);
         }
 
