@@ -100,13 +100,19 @@ async fn weigh_changes(
     votes: &[IncludedVote],
     removed_votes: &[WeightedVote],
 ) -> Result<WeighterResult, WeighterError<&'static str, &'static str>> {
+    let params = params();
+    let acquisitions = AcquisitionProvider {
+        storage,
+        new_acquisitions: &[],
+        params: &params,
+    };
     Weighter {
         votes,
         removed_votes,
-        new_acquisitions: &[],
+        acquisitions: &acquisitions,
         consensus_storage: storage,
         chain_storage: storage,
-        protocol_params: &params(),
+        protocol_params: &params,
     }
     .weigh()
     .await

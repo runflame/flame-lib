@@ -1,7 +1,7 @@
 use super::*;
 use crate::consensus::engine::vote_weight::{VoteWeightError, weight_vote};
 
-fn params() -> MintingProtocolParams {
+pub(super) fn params() -> MintingProtocolParams {
     MintingProtocolParams {
         acquisition_maturity: 2,
         default_acquisition_duration: 5.try_into().unwrap(),
@@ -17,7 +17,7 @@ fn included_vote(inclusion_height: u64) -> IncludedVote {
     }
 }
 
-fn included_acquisition(
+pub(super) fn included_acquisition(
     minter: u8,
     height: u64,
     amount: u64,
@@ -117,76 +117,5 @@ fn reports_minting_power_overflow() {
     assert_eq!(
         weight_vote(included_vote(100), 100, &acquisitions, &params()),
         Err(VoteWeightError::MintingPowerOverflow)
-    );
-}
-
-#[tokio::test]
-async fn storage_selects_acquisitions_for_each_blocks_target_height() {
-    let first = included_acquisition(0x51, 98, 15, Some(3)); // Active: 100..103.
-    let second = included_acquisition(0x51, 101, 25, None); // Active: 103..108.
-    let other = included_acquisition(0x52, 99, 10, Some(1)); // Active: 101..102.
-    let minter = first.acquisition.data().minter_p2wsh;
-    let other_minter = other.acquisition.data().minter_p2wsh;
-    let storage = Storage {
-        acquisitions: HashMap::from([
-            (
-                minter,
-                MinterAcquisitions {
-                    is_double_signed: false,
-                    acquisitions: vec![first.clone(), second.clone()],
-                },
-            ),
-            (
-                other_minter,
-                MinterAcquisitions {
-                    is_double_signed: true,
-                    acquisitions: vec![other.clone()],
-                },
-            ),
-        ]),
-        ..Storage::default()
-    };
-    for (target, expected) in [
-        (99, vec![]),
-        (100, vec![first.clone()]),
-        (101, vec![first]),
-        (103, vec![second]),
-        (108, vec![]),
-    ] {
-        let active = storage
-            .get_active_acquisitions_at_target_height(target, &params())
-            .await
-            .unwrap();
-        assert_eq!(
-            active
-                .get(&minter)
-                .map(|minter| minter.acquisitions.clone())
-                .unwrap_or_default(),
-            expected
-        );
-        if target == 101 {
-            assert_eq!(active[&other_minter].acquisitions, vec![other.clone()]);
-            assert!(active[&other_minter].is_double_signed);
-        } else {
-            assert!(!active.contains_key(&other_minter));
-        }
-    }
-    assert_eq!(
-        *storage.acquisition_reads.lock().unwrap(),
-        vec![99, 100, 101, 103, 108]
-    );
-}
-
-#[tokio::test]
-async fn active_acquisition_query_propagates_storage_errors() {
-    let storage = Storage {
-        fail: true,
-        ..Storage::default()
-    };
-    assert_eq!(
-        storage
-            .get_active_acquisitions_at_target_height(100, &params())
-            .await,
-        Err("storage unavailable")
     );
 }

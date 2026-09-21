@@ -3,9 +3,10 @@ use super::{
     MintingProtocolParams,
 };
 use crate::rewards::RewardsEngine;
+use acquisition_provider::AcquisitionProvider;
 use btc_integration::{IndexedBlock, MinterP2wsh};
 use flame_storage::{CanonicalStorage, ChainStorage};
-use std::collections::{BTreeMap, HashMap, hash_map::Entry};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use vote_validation::{VoteValidationError, VoteValidationResult, VoteValidator};
 use weighter::{Weighter, WeighterError};
@@ -41,29 +42,15 @@ impl<C: ConsensusStorage, H: ChainStorage, S: CanonicalStorage> MintingEngine<C,
         &self,
     ) -> Result<MintingOutcome, MintingEngineError<C::Error, H::Error>> {
         let accepted_acquisitions = self.validate_acquisitions();
-        let mut acquisitions = self
-            .consensus_storage
-            .get_acquisitions_by_minters(self.new_block.btc_block_tip.height)
+        let acquisition_provider = AcquisitionProvider {
+            storage: self.consensus_storage.as_ref(),
+            new_acquisitions: &accepted_acquisitions,
+            params: &self.protocol_params,
+        };
+        let acquisitions = acquisition_provider
+            .load_through(self.new_block.btc_block_tip.height)
             .await
             .map_err(MintingEngineError::ConsensusStorage)?;
-        for acquisition in &accepted_acquisitions {
-            let minter = acquisition.acquisition.data().minter_p2wsh;
-            let record = match acquisitions.entry(minter) {
-                Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => {
-                    let is_double_signed = self
-                        .consensus_storage
-                        .is_minter_double_signed(&minter)
-                        .await
-                        .map_err(MintingEngineError::ConsensusStorage)?;
-                    entry.insert(MinterAcquisitions {
-                        is_double_signed,
-                        acquisitions: vec![],
-                    })
-                }
-            };
-            record.acquisitions.push(acquisition.clone());
-        }
         let validated = self
             .validate_votes(&acquisitions)
             .await
@@ -76,7 +63,7 @@ impl<C: ConsensusStorage, H: ChainStorage, S: CanonicalStorage> MintingEngine<C,
         let weighted = Weighter {
             votes: &validated.valid_votes,
             removed_votes: &validated.removed_votes,
-            new_acquisitions: &accepted_acquisitions,
+            acquisitions: &acquisition_provider,
             consensus_storage: self.consensus_storage.as_ref(),
             chain_storage: self.chain_storage.as_ref(),
             protocol_params: &self.protocol_params,
@@ -143,6 +130,7 @@ pub enum MintingEngineError<C, H> {
     Weighter(WeighterError<C, H>),
 }
 
+pub mod acquisition_provider;
 #[cfg(test)]
 mod tests;
 mod vote_validation;

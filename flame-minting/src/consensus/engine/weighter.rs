@@ -4,17 +4,17 @@ use flame_storage::ChainStorage;
 use flamechain::{BlockTip, CoreBlockTip};
 
 use crate::consensus::{
-    ConsensusStorage, IncludedAcquisition, IncludedVote, MinterAcquisitions, MintingProtocolParams,
-    WeightedBlockHeader, WeightedVote,
+    ConsensusStorage, IncludedVote, MintingProtocolParams, WeightedBlockHeader, WeightedVote,
 };
 
+use super::acquisition_provider::AcquisitionProvider;
 pub use super::vote_weight::VoteWeightError;
 use super::vote_weight::weight_vote;
 
 pub struct Weighter<'a, C, H> {
     pub votes: &'a [IncludedVote],
     pub removed_votes: &'a [WeightedVote],
-    pub new_acquisitions: &'a [IncludedAcquisition],
+    pub acquisitions: &'a AcquisitionProvider<'a, C>,
     pub consensus_storage: &'a C,
     pub chain_storage: &'a H,
     pub protocol_params: &'a MintingProtocolParams,
@@ -70,28 +70,14 @@ impl<C: ConsensusStorage, H: ChainStorage> Weighter<'_, C, H> {
                     .checked_sub(vote.effective_minting_power)
                     .ok_or(WeighterError::EffectivePowerUnderflow(tip))?;
             }
-            let mut acquisitions = if votes.added.is_empty() {
+            let acquisitions = if votes.added.is_empty() {
                 HashMap::new()
             } else {
-                self.consensus_storage
-                    .get_active_acquisitions_at_target_height(target, self.protocol_params)
+                self.acquisitions
+                    .active_at(target)
                     .await
                     .map_err(WeighterError::ConsensusStorage)?
             };
-            for acquisition in self
-                .new_acquisitions
-                .iter()
-                .filter(|acquisition| acquisition.is_active_at(target, self.protocol_params))
-            {
-                acquisitions
-                    .entry(acquisition.acquisition.data().minter_p2wsh)
-                    .or_insert_with(|| MinterAcquisitions {
-                        is_double_signed: false,
-                        acquisitions: vec![],
-                    })
-                    .acquisitions
-                    .push(acquisition.clone());
-            }
             for vote in votes.added {
                 let minter = vote.vote.auth().minter().p2wsh();
                 let active = acquisitions

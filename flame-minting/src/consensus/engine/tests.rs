@@ -1172,6 +1172,7 @@ async fn preserves_double_sign_evidence_at_multiple_heights() {
     }
 }
 
+mod acquisition_provider;
 mod outcome;
 mod vote_weight;
 mod weighter;
