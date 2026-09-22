@@ -8,9 +8,10 @@ btc-integration = { path = "../btc-integration" }
 flame-chain-service = { path = "../flame-chain-service" }
 flamechain = { path = "../flamechain" }
 flame-storage = { path = "../flame-storage" }
+tokio = { version = "1.53.1", features = ["macros", "rt", "sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 corepc-client = { version = "0.16.0", features = ["client-sync"] }
 ed25519-dalek = "2"
 flamevm = { path = "../flamevm" }
-tokio = { version = "1.53.1", features = ["macros", "rt"] }

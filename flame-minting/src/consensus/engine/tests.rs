@@ -265,10 +265,6 @@ impl CanonicalStorage for Storage {
         unreachable!()
     }
 
-    async fn store_btc_cursor(&self, _: BtcBlockTip) -> Result<(), Self::Error> {
-        unreachable!()
-    }
-
     async fn get_state(&self) -> Result<Option<(BlockHash, Blockchain)>, Self::Error> {
         unreachable!()
     }

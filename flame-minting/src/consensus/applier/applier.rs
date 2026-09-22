@@ -21,7 +21,6 @@ enum ApplyIntent {
     StoreDoubleSigns = 5,
     StorePendingVotes = 6,
     ApplyChainPath = 7,
-    StoreBtcCursor = 8,
 }
 
 pub struct MintingOutcomeApplier<
@@ -112,13 +111,6 @@ impl<C: ConsensusStorage, H: ChainAccess, J: MintingJournal, S: CanonicalStorage
         })
         .await?;
 
-        self.with_intent(ApplyIntent::StoreBtcCursor as u64, || async {
-            self.canonical_storage
-                .store_btc_cursor(outcome.next_btc_cursor)
-                .await
-                .map_err(MintingOutcomeApplierError::CanonicalStorage)
-        })
-        .await?;
         self.journal
             .mark_outcome_applied(outcome.next_btc_cursor)
             .await
@@ -351,10 +343,6 @@ mod tests {
         type Error = &'static str;
 
         async fn get_tip(&self) -> Result<Option<BlockTip>, Self::Error> {
-            unreachable!()
-        }
-
-        async fn store_btc_cursor(&self, _: BtcBlockTip) -> Result<(), Self::Error> {
             unreachable!()
         }
 
