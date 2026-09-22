@@ -1,10 +1,18 @@
 use std::future::Future;
 
-use flamechain::BlockHash;
+use btc_integration::BtcBlockTip;
+use flamechain::{BlockHash, BlockTip};
 
 pub trait CanonicalStorage {
     type State;
     type Error;
+
+    fn get_tip(&self) -> impl Future<Output = Result<Option<BlockTip>, Self::Error>> + Send;
+
+    fn store_btc_cursor(
+        &self,
+        cursor: BtcBlockTip,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     fn get_state(
         &self,

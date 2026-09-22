@@ -1,11 +1,17 @@
 use std::future::Future;
 
-use flamechain::{Block, BlockHash};
+use flamechain::{Block, BlockHash, BlockTip};
 
-use crate::chain::{ChangesOutcome, ImportOutcome};
+use crate::chain::{ChainPath, ChangesOutcome, ImportOutcome};
 
 pub trait ChainAccess {
     type Error;
+
+    fn get_chain_path(
+        &self,
+        from: BlockTip,
+        to: BlockTip,
+    ) -> impl Future<Output = Result<ChainPath, Self::Error>> + Send;
 
     fn import_block(
         &mut self,

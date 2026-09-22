@@ -40,6 +40,10 @@ struct Storage {
 impl ConsensusStorage for Storage {
     type Error = &'static str;
 
+    async fn get_block_tip_with_most_weight(&self) -> Result<Option<BlockTip>, Self::Error> {
+        unreachable!()
+    }
+
     async fn get_active_minter_acquisitions_at_height(
         &self,
         minter: &MinterP2wsh,
@@ -79,6 +83,14 @@ impl ConsensusStorage for Storage {
         Ok(self.cummulative_weights.get(&tip).cloned())
     }
 
+    async fn store_cumulative_weight(
+        &self,
+        _: BlockTip,
+        _: &WeightedBlockHeader,
+    ) -> Result<(), Self::Error> {
+        unreachable!()
+    }
+
     async fn store_acquisition(
         &self,
         _: BtcBlockTip,
@@ -105,6 +117,18 @@ impl ConsensusStorage for Storage {
     }
 
     async fn store_vote(&self, _: BtcBlockTip, _: &WeightedVote) -> Result<(), Self::Error> {
+        unreachable!()
+    }
+
+    async fn remove_vote(&self, _: &WeightedVote) -> Result<(), Self::Error> {
+        unreachable!()
+    }
+
+    async fn store_pending_vote(
+        &self,
+        _: CoreBlockTip,
+        _: &IncludedVote,
+    ) -> Result<(), Self::Error> {
         unreachable!()
     }
 
@@ -237,6 +261,14 @@ impl ChainStorage for Storage {
 impl CanonicalStorage for Storage {
     type State = ();
     type Error = &'static str;
+
+    async fn get_tip(&self) -> Result<Option<BlockTip>, Self::Error> {
+        unreachable!()
+    }
+
+    async fn store_btc_cursor(&self, _: BtcBlockTip) -> Result<(), Self::Error> {
+        unreachable!()
+    }
 
     async fn get_state(&self) -> Result<Option<(BlockHash, ())>, Self::Error> {
         unreachable!()

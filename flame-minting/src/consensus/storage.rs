@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use crate::consensus::{
-    DoubleSign, IncludedAcquisition, MintingProtocolParams, WeightedBlockHeader, WeightedVote,
+    DoubleSign, IncludedAcquisition, IncludedVote, MintingProtocolParams, WeightedBlockHeader,
+    WeightedVote,
 };
 use btc_integration::{BtcBlockTip, MinterP2wsh};
-use flamechain::{BlockTip, CoreFlameHeight};
+use flamechain::{BlockTip, CoreBlockTip, CoreFlameHeight};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MinterAcquisitions {
@@ -16,10 +17,20 @@ pub struct MinterAcquisitions {
 pub trait ConsensusStorage {
     type Error;
 
+    fn get_block_tip_with_most_weight(
+        &self,
+    ) -> impl Future<Output = Result<Option<BlockTip>, Self::Error>> + Send;
+
     fn get_cumulative_weight(
         &self,
         tip: BlockTip,
     ) -> impl Future<Output = Result<Option<WeightedBlockHeader>, Self::Error>> + Send;
+
+    fn store_cumulative_weight(
+        &self,
+        tip: BlockTip,
+        weighted_block: &WeightedBlockHeader,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     fn store_acquisition(
         &self,
@@ -49,6 +60,17 @@ pub trait ConsensusStorage {
         &self,
         btc_block: BtcBlockTip,
         vote: &WeightedVote,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    fn remove_vote(
+        &self,
+        vote: &WeightedVote,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    fn store_pending_vote(
+        &self,
+        tip: CoreBlockTip,
+        vote: &IncludedVote,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     fn get_minter_vote_for_height(
