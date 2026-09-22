@@ -13,6 +13,8 @@ members = [
     "btc-integration",
     "flamechain",
     "flamewallet",
+    "flamed-rpc",
+    "flamed",
 ]
 
 # Use the runflame fork of merlin to enable its `dynamic-labels`

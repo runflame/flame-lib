@@ -1,0 +1,8 @@
+# One node's local policy. Neither the block interval nor the fee floor is
+# consensus: the block header carries no timestamp, and the fee floor is
+# this node's own opinion about what is worth relaying.
+data_dir = "./data"
+genesis = "./genesis.json"
+rpc_bind = "127.0.0.1:8545"
+block_interval_secs = 15
+minimum_fee = 0
