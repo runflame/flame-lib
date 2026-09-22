@@ -259,7 +259,6 @@ impl ChainStorage for Storage {
 }
 
 impl CanonicalStorage for Storage {
-    type State = ();
     type Error = &'static str;
 
     async fn get_tip(&self) -> Result<Option<BlockTip>, Self::Error> {
@@ -270,11 +269,11 @@ impl CanonicalStorage for Storage {
         unreachable!()
     }
 
-    async fn get_state(&self) -> Result<Option<(BlockHash, ())>, Self::Error> {
+    async fn get_state(&self) -> Result<Option<(BlockHash, Blockchain)>, Self::Error> {
         unreachable!()
     }
 
-    async fn commit_state(&self, _: BlockHash, _: &()) -> Result<(), Self::Error> {
+    async fn commit_state(&self, _: BlockHash, _: &Blockchain) -> Result<(), Self::Error> {
         unreachable!()
     }
 }

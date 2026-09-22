@@ -7,6 +7,17 @@ use crate::chain::{ChainPath, ChangesOutcome, ImportOutcome};
 pub trait ChainAccess {
     type Error;
 
+    fn set_as_child(
+        &self,
+        parent: BlockTip,
+        child: BlockTip,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    fn get_block(
+        &self,
+        tip: BlockTip,
+    ) -> impl Future<Output = Result<Option<Block>, Self::Error>> + Send;
+
     fn get_chain_path(
         &self,
         from: BlockTip,

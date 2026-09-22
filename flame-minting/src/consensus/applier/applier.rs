@@ -10,7 +10,7 @@ use crate::consensus::{
     WeightedBlockHeader, WeightedVote,
 };
 
-use super::{BlockAttacher, BlockDetacher, MintingJournal};
+use super::{BlockAttacher, BlockAttacherError, BlockDetacher, MintingJournal};
 
 #[repr(u64)]
 enum ApplyIntent {
@@ -108,8 +108,7 @@ impl<C: ConsensusStorage, H: ChainAccess, J: MintingJournal, S: CanonicalStorage
         .await?;
         self.with_intent(ApplyIntent::ApplyChainPath as u64, || async {
             let path = self.get_chain_path().await?;
-            self.apply_chain_path(&path);
-            Ok(())
+            self.apply_chain_path(&path).await
         })
         .await?;
 
@@ -161,16 +160,27 @@ impl<C: ConsensusStorage, H: ChainAccess, J: MintingJournal, S: CanonicalStorage
             .map_err(MintingOutcomeApplierError::Journal)
     }
 
-    fn apply_chain_path(&self, path: &ChainPath) {
+    async fn apply_chain_path(
+        &self,
+        path: &ChainPath,
+    ) -> Result<(), MintingOutcomeApplierError<C::Error, J::Error, S::Error, H::Error>> {
         let detacher = BlockDetacher;
         for &block_tip in &path.detach {
             detacher.detach_block(block_tip);
         }
 
-        let attacher = BlockAttacher;
+        let attacher = BlockAttacher {
+            canonical_storage: &self.canonical_storage,
+            chain: &self.chain,
+        };
         for &block_tip in &path.attach {
-            attacher.attach_block(block_tip);
+            attacher
+                .attach_block(block_tip)
+                .await
+                .map_err(MintingOutcomeApplierError::BlockAttacher)?;
         }
+
+        Ok(())
     }
 
     async fn remove_votes(&self, votes: &[WeightedVote]) -> Result<(), C::Error> {
@@ -261,12 +271,13 @@ impl<C: ConsensusStorage, H: ChainAccess, J: MintingJournal, S: CanonicalStorage
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum MintingOutcomeApplierError<C, J, S, H> {
     ConsensusStorage(C),
     Journal(J),
     CanonicalStorage(S),
     ChainAccess(H),
+    BlockAttacher(BlockAttacherError<S, H>),
     MissingStateTip,
     MissingConsensusTip,
 }
@@ -278,7 +289,7 @@ mod tests {
 
     use btc_integration::{BtcBlockTip, MinterP2wsh};
     use flame_chain_service::{ChangesOutcome, ImportOutcome};
-    use flamechain::{Block, BlockHash, CoreFlameHeight};
+    use flamechain::{Block, BlockHash, Blockchain, CoreFlameHeight};
 
     use crate::consensus::{IncludedVote, MinterAcquisitions, MintingProtocolParams};
 
@@ -337,7 +348,6 @@ mod tests {
     struct Storage;
 
     impl CanonicalStorage for Storage {
-        type State = ();
         type Error = &'static str;
 
         async fn get_tip(&self) -> Result<Option<BlockTip>, Self::Error> {
@@ -348,11 +358,11 @@ mod tests {
             unreachable!()
         }
 
-        async fn get_state(&self) -> Result<Option<(BlockHash, ())>, Self::Error> {
+        async fn get_state(&self) -> Result<Option<(BlockHash, Blockchain)>, Self::Error> {
             unreachable!()
         }
 
-        async fn commit_state(&self, _: BlockHash, _: &()) -> Result<(), Self::Error> {
+        async fn commit_state(&self, _: BlockHash, _: &Blockchain) -> Result<(), Self::Error> {
             unreachable!()
         }
     }
@@ -449,6 +459,14 @@ mod tests {
     impl ChainAccess for Chain {
         type Error = &'static str;
 
+        async fn set_as_child(&self, _: BlockTip, _: BlockTip) -> Result<(), Self::Error> {
+            unreachable!()
+        }
+
+        async fn get_block(&self, _: BlockTip) -> Result<Option<Block>, Self::Error> {
+            unreachable!()
+        }
+
         async fn get_chain_path(&self, _: BlockTip, _: BlockTip) -> Result<ChainPath, Self::Error> {
             unreachable!()
         }
@@ -508,10 +526,10 @@ mod tests {
                 panic!("unrecorded step called")
             })
             .await;
-        assert_eq!(
+        assert!(matches!(
             result,
             Err(MintingOutcomeApplierError::Journal("intent write failed"))
-        );
+        ));
         assert_eq!(applier.journal.get_intent().await.unwrap(), None);
     }
 
@@ -523,10 +541,10 @@ mod tests {
                 Err(MintingOutcomeApplierError::ConsensusStorage("step failed"))
             })
             .await;
-        assert_eq!(
+        assert!(matches!(
             result,
             Err(MintingOutcomeApplierError::ConsensusStorage("step failed"))
-        );
+        ));
         assert_eq!(
             applier.journal.get_intent().await.unwrap(),
             Some((3, false))
@@ -546,10 +564,10 @@ mod tests {
                 Ok(())
             })
             .await;
-        assert_eq!(
+        assert!(matches!(
             result,
             Err(MintingOutcomeApplierError::Journal("intent write failed"))
-        );
+        ));
         assert_eq!(value, Some(42));
         assert_eq!(
             applier.journal.get_intent().await.unwrap(),
