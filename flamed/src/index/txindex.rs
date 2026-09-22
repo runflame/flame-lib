@@ -1,0 +1,62 @@
+//! Transactions by id.
+
+use std::collections::BTreeMap;
+
+use flamechain::BlockHash;
+use flamevm::TxID;
+
+/// Where a transaction landed, and what it did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TxRecord {
+    /// The height of the block that carried it.
+    pub height: u64,
+    /// That block's hash.
+    pub block: BlockHash,
+    /// Its effect log, as a `CellEnvelope`.
+    pub log: Vec<u8>,
+}
+
+/// Confirmed transactions, by id.
+#[derive(Debug, Default)]
+pub struct TxIndex {
+    // Keyed on the raw bytes: `TxID` is `Eq` but not `Ord`, the same reason
+    // upstream's own mempool keeps a `BTreeSet<[u8; 32]>`.
+    txs: BTreeMap<[u8; 32], TxRecord>,
+    by_height: BTreeMap<u64, Vec<TxID>>,
+}
+
+impl TxIndex {
+    /// An empty index.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records one confirmed transaction.
+    pub fn insert(&mut self, txid: TxID, record: TxRecord) {
+        self.by_height.entry(record.height).or_default().push(txid);
+        self.txs.insert(txid.0, record);
+    }
+
+    /// What the node knows about one transaction.
+    pub fn get(&self, txid: &TxID) -> Option<&TxRecord> {
+        self.txs.get(&txid.0)
+    }
+
+    /// Every transaction confirmed at one height, in block order.
+    pub fn at_height(&self, height: u64) -> &[TxID] {
+        self.by_height
+            .get(&height)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// How many transactions have confirmed.
+    pub fn len(&self) -> usize {
+        self.txs.len()
+    }
+
+    /// Whether any have.
+    pub fn is_empty(&self) -> bool {
+        self.txs.is_empty()
+    }
+}
