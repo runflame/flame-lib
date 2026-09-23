@@ -3,7 +3,7 @@ use std::future::Future;
 
 use flame_chain_service::{ChainAccess, ChainPath};
 use flame_storage::CanonicalStorage;
-use flamechain::{BlockTip, CoreBlockTip};
+use flamechain::{BlockHeader, BlockTip, CoreBlockTip};
 
 use crate::consensus::{
     ConsensusStorage, DoubleSign, IncludedAcquisition, MintingOutcome, PendingVotes,
@@ -41,7 +41,8 @@ impl<C: ConsensusStorage, H: ChainAccess, J: MintingJournal, S: CanonicalStorage
     pub async fn apply(
         &mut self,
         outcome: &MintingOutcome,
-    ) -> Result<(), MintingOutcomeApplierError<C::Error, J::Error, S::Error, H::Error>> {
+    ) -> Result<Vec<BlockHeader>, MintingOutcomeApplierError<C::Error, J::Error, S::Error, H::Error>>
+    {
         self.journal
             .write_pending_outcome(outcome)
             .await
@@ -68,7 +69,8 @@ impl<C: ConsensusStorage, H: ChainAccess, J: MintingJournal, S: CanonicalStorage
     async fn apply_outcome(
         &self,
         outcome: &MintingOutcome,
-    ) -> Result<(), MintingOutcomeApplierError<C::Error, J::Error, S::Error, H::Error>> {
+    ) -> Result<Vec<BlockHeader>, MintingOutcomeApplierError<C::Error, J::Error, S::Error, H::Error>>
+    {
         self.with_intent(ApplyIntent::RemoveVotes as u64, || async {
             self.remove_votes(&outcome.removed_votes)
                 .await
@@ -105,9 +107,11 @@ impl<C: ConsensusStorage, H: ChainAccess, J: MintingJournal, S: CanonicalStorage
                 .map_err(MintingOutcomeApplierError::ConsensusStorage)
         })
         .await?;
+        let mut attached_core_headers = Vec::new();
         self.with_intent(ApplyIntent::ApplyChainPath as u64, || async {
             let path = self.get_chain_path().await?;
-            self.apply_chain_path(&path).await
+            attached_core_headers = self.apply_chain_path(&path).await?;
+            Ok(())
         })
         .await?;
 
@@ -116,7 +120,7 @@ impl<C: ConsensusStorage, H: ChainAccess, J: MintingJournal, S: CanonicalStorage
             .await
             .map_err(MintingOutcomeApplierError::Journal)?;
 
-        Ok(())
+        Ok(attached_core_headers)
     }
 
     async fn with_intent<F, Fut>(
@@ -155,7 +159,8 @@ impl<C: ConsensusStorage, H: ChainAccess, J: MintingJournal, S: CanonicalStorage
     async fn apply_chain_path(
         &self,
         path: &ChainPath,
-    ) -> Result<(), MintingOutcomeApplierError<C::Error, J::Error, S::Error, H::Error>> {
+    ) -> Result<Vec<BlockHeader>, MintingOutcomeApplierError<C::Error, J::Error, S::Error, H::Error>>
+    {
         let detacher = BlockDetacher;
         for &block_tip in &path.detach {
             detacher.detach_block(block_tip);
@@ -165,14 +170,18 @@ impl<C: ConsensusStorage, H: ChainAccess, J: MintingJournal, S: CanonicalStorage
             canonical_storage: &self.canonical_storage,
             chain: &self.chain,
         };
+        let mut attached_core_headers = Vec::new();
         for &block_tip in &path.attach {
-            attacher
+            let header = attacher
                 .attach_block(block_tip)
                 .await
                 .map_err(MintingOutcomeApplierError::BlockAttacher)?;
+            if header.core_block.is_some() {
+                attached_core_headers.push(header);
+            }
         }
 
-        Ok(())
+        Ok(attached_core_headers)
     }
 
     async fn remove_votes(&self, votes: &[WeightedVote]) -> Result<(), C::Error> {
@@ -402,6 +411,13 @@ mod tests {
         }
 
         async fn store_vote(&self, _: BtcBlockTip, _: &WeightedVote) -> Result<(), Self::Error> {
+            unreachable!()
+        }
+
+        async fn get_votes_for_block(
+            &self,
+            _: CoreBlockTip,
+        ) -> Result<Vec<WeightedVote>, Self::Error> {
             unreachable!()
         }
 

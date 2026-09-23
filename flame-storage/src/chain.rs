@@ -17,6 +17,11 @@ pub trait ChainStorage {
         tip: CoreBlockTip,
     ) -> impl Future<Output = Result<Option<CoreBlockHeader>, Self::Error>> + Send;
 
+    fn get_block_header_by_block_tip(
+        &self,
+        tip: BlockTip,
+    ) -> impl Future<Output = Result<Option<BlockHeader>, Self::Error>> + Send;
+
     fn get_block_header(
         &self,
         tip: CoreBlockTip,

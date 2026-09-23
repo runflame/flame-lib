@@ -6,6 +6,7 @@ use btc_integration::{
 };
 use flame_chain_service::ChainAccess;
 use flame_storage::{CanonicalStorage, ChainStorage};
+use flamechain::BlockHeader;
 use tokio::sync::watch;
 
 use crate::consensus::{
@@ -94,7 +95,7 @@ pub trait ConsensusApplier: Send + 'static {
     fn apply(
         &mut self,
         outcome: &MintingOutcome,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Vec<BlockHeader>, Self::Error>> + Send;
 }
 
 impl<C, H, J, S> ConsensusApplier for MintingOutcomeApplier<C, H, J, S>
@@ -110,7 +111,7 @@ where
 {
     type Error = MintingOutcomeApplierError<C::Error, J::Error, S::Error, H::Error>;
 
-    async fn apply(&mut self, outcome: &MintingOutcome) -> Result<(), Self::Error> {
+    async fn apply(&mut self, outcome: &MintingOutcome) -> Result<Vec<BlockHeader>, Self::Error> {
         self.apply(outcome).await
     }
 }

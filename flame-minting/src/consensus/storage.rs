@@ -62,6 +62,11 @@ pub trait ConsensusStorage {
         vote: &WeightedVote,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
+    fn get_votes_for_block(
+        &self,
+        tip: CoreBlockTip,
+    ) -> impl Future<Output = Result<Vec<WeightedVote>, Self::Error>> + Send;
+
     fn remove_vote(
         &self,
         vote: &WeightedVote,

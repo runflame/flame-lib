@@ -1,5 +1,4 @@
 use super::{ConsensusStorage, IncludedAcquisition, MintingOutcome, MintingProtocolParams};
-use crate::rewards::RewardsEngine;
 use acquisition_provider::AcquisitionProvider;
 use btc_integration::IndexedBlock;
 use flame_storage::{CanonicalStorage, ChainStorage};
@@ -14,7 +13,6 @@ pub struct MintingEngine<C: ConsensusStorage, H: ChainStorage, S: CanonicalStora
     pub consensus_storage: Arc<C>,
     pub chain_storage: Arc<H>,
     pub canonical_storage: Arc<S>,
-    pub rewards_engine: RewardsEngine,
 }
 
 impl<C: ConsensusStorage, H: ChainStorage, S: CanonicalStorage> MintingEngine<C, H, S> {
@@ -31,7 +29,6 @@ impl<C: ConsensusStorage, H: ChainStorage, S: CanonicalStorage> MintingEngine<C,
             consensus_storage,
             chain_storage,
             canonical_storage,
-            rewards_engine: RewardsEngine,
         }
     }
 
@@ -125,7 +122,7 @@ pub enum MintingEngineError<C, H> {
 
 pub mod acquisition_provider;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod vote_validation;
 mod vote_weight;
 pub mod weighter;

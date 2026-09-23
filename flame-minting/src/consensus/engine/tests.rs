@@ -19,11 +19,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 #[derive(Default)]
-struct Storage {
-    votes: Vec<WeightedVote>,
-    acquisitions: HashMap<MinterP2wsh, MinterAcquisitions>,
+pub(crate) struct Storage {
+    pub(crate) votes: Vec<WeightedVote>,
+    pub(crate) acquisitions: HashMap<MinterP2wsh, MinterAcquisitions>,
     acquisition_reads: Mutex<Vec<u64>>,
-    active_acquisition_reads: Mutex<Vec<(MinterP2wsh, u64)>>,
+    pub(crate) active_acquisition_reads: Mutex<Vec<(MinterP2wsh, u64)>>,
     cummulative_weights: HashMap<BlockTip, WeightedBlockHeader>,
     weight_reads: Mutex<Vec<BlockTip>>,
     header_reads: Mutex<Vec<CoreBlockTip>>,
@@ -32,7 +32,8 @@ struct Storage {
     fail_blocks: bool,
     double_signs: Vec<DoubleSign>,
     fail: bool,
-    fail_vote_reads: bool,
+    pub(crate) fail_vote_reads: bool,
+    pub(crate) fail_active_acquisition_reads: bool,
     fail_double_sign: bool,
     reads: Mutex<Vec<(MinterP2wsh, CoreFlameHeight)>>,
 }
@@ -54,7 +55,7 @@ impl ConsensusStorage for Storage {
             .lock()
             .unwrap()
             .push((*minter, btc_height));
-        if self.fail {
+        if self.fail || self.fail_active_acquisition_reads {
             return Err("storage unavailable");
         }
         let mut active = self
@@ -118,6 +119,21 @@ impl ConsensusStorage for Storage {
 
     async fn store_vote(&self, _: BtcBlockTip, _: &WeightedVote) -> Result<(), Self::Error> {
         unreachable!()
+    }
+
+    async fn get_votes_for_block(
+        &self,
+        tip: CoreBlockTip,
+    ) -> Result<Vec<WeightedVote>, Self::Error> {
+        if self.fail || self.fail_vote_reads {
+            return Err("storage unavailable");
+        }
+        Ok(self
+            .votes
+            .iter()
+            .filter(|vote| vote.original.vote.block_tip() == tip)
+            .cloned()
+            .collect())
     }
 
     async fn remove_vote(&self, _: &WeightedVote) -> Result<(), Self::Error> {
@@ -197,6 +213,20 @@ impl ChainStorage for Storage {
                 header: header.clone(),
                 transactions: vec![],
             }))
+    }
+
+    async fn get_block_header_by_block_tip(
+        &self,
+        tip: BlockTip,
+    ) -> Result<Option<BlockHeader>, Self::Error> {
+        if self.fail_blocks {
+            return Err("chain storage unavailable");
+        }
+        Ok(self
+            .blocks
+            .get(&tip.hash)
+            .filter(|header| header.height == tip.height.as_u64())
+            .cloned())
     }
 
     async fn get_core_block_header(
@@ -291,7 +321,7 @@ fn vote(minter: u8, height: u32, hash: u8) -> AuthenticatedMintingVote {
     )
 }
 
-fn vote_for_tip(minter: u8, tip: CoreBlockTip) -> AuthenticatedMintingVote {
+pub(crate) fn vote_for_tip(minter: u8, tip: CoreBlockTip) -> AuthenticatedMintingVote {
     let witness_script = minter_witness_script::build_with_authorization(
         &Predicate::opaque(Predicate::unspendable_key()),
         Script::from_bytes(&[minter]),

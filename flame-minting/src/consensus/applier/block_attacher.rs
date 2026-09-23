@@ -1,6 +1,6 @@
 use flame_chain_service::ChainAccess;
 use flame_storage::CanonicalStorage;
-use flamechain::{BlockHash, BlockTip, ChainError};
+use flamechain::{BlockHash, BlockHeader, BlockTip, ChainError};
 
 pub struct BlockAttacher<'a, S: CanonicalStorage, H: ChainAccess> {
     pub canonical_storage: &'a S,
@@ -11,7 +11,7 @@ impl<S: CanonicalStorage, H: ChainAccess> BlockAttacher<'_, S, H> {
     pub async fn attach_block(
         &self,
         block_tip: BlockTip,
-    ) -> Result<(), BlockAttacherError<S::Error, H::Error>> {
+    ) -> Result<BlockHeader, BlockAttacherError<S::Error, H::Error>> {
         let (_stored_state_tip, mut state) = self
             .canonical_storage
             .get_state()
@@ -55,12 +55,16 @@ impl<S: CanonicalStorage, H: ChainAccess> BlockAttacher<'_, S, H> {
             .await
             .map_err(BlockAttacherError::ChainAccess)?;
 
-        state.connect(&block).map_err(BlockAttacherError::Blockchain)?;
+        state
+            .connect(&block)
+            .map_err(BlockAttacherError::Blockchain)?;
 
         self.canonical_storage
             .commit_state(state.tip(), &state)
             .await
-            .map_err(BlockAttacherError::CanonicalStorage)
+            .map_err(BlockAttacherError::CanonicalStorage)?;
+
+        Ok(block.header)
     }
 }
 
