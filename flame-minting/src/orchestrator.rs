@@ -3,6 +3,9 @@ use flame_storage::ChainStorage;
 
 use crate::consensus::ConsensusStorage;
 use crate::core_block_notifier::CoreBlockNotifier;
+use crate::minter::manager::{
+    ShutdownError as MinterShutdownError, StartupError as MinterStartupError,
+};
 use crate::rewards::RewardsStorage;
 
 pub use btc_integration::HistoryUpdate as BtcEvent;
@@ -10,6 +13,16 @@ pub use btc_integration::HistoryUpdate as BtcEvent;
 pub mod consensus;
 pub mod cursor_storage;
 pub mod ports;
+
+#[derive(Debug)]
+pub enum OrchestratorError<C> {
+    Consensus(C),
+    MinterStartup(MinterStartupError),
+    MinterShutdown(MinterShutdownError),
+}
+
+type OrchestratorResult<E, A, K, R, C, D> =
+    Result<(), OrchestratorError<consensus::ConsensusLoopError<E, A, K, R, C, D>>>;
 
 pub struct MintingOrchestrator<S, I, C, M, H: ChainAccess, N: CoreBlockNotifier> {
     pub btc_sender: S,
@@ -33,26 +46,33 @@ where
     C::Error: Send + 'static,
     D: ConsensusStorage + Send + Sync + 'static,
     D::Error: Send + 'static,
+    M: ports::MinterLifecycle,
     H: ChainAccess,
     N: CoreBlockNotifier,
 {
     pub async fn startup(
         &self,
-    ) -> Result<
-        (),
-        consensus::ConsensusLoopError<E::Error, A::Error, K::Error, R::Error, C::Error, D::Error>,
-    > {
+    ) -> OrchestratorResult<E::Error, A::Error, K::Error, R::Error, C::Error, D::Error> {
         self.consensus_manager
             .startup(self.btc_indexer.clone())
             .await
+            .map_err(OrchestratorError::Consensus)?;
+        self.minter_manager
+            .startup(self.btc_indexer.subscribe())
+            .await
+            .map_err(OrchestratorError::MinterStartup)
     }
 
     pub async fn shutdown(
         &self,
-    ) -> Result<
-        (),
-        consensus::ConsensusLoopError<E::Error, A::Error, K::Error, R::Error, C::Error, D::Error>,
-    > {
-        self.consensus_manager.shutdown().await
+    ) -> OrchestratorResult<E::Error, A::Error, K::Error, R::Error, C::Error, D::Error> {
+        self.minter_manager
+            .shutdown()
+            .await
+            .map_err(OrchestratorError::MinterShutdown)?;
+        self.consensus_manager
+            .shutdown()
+            .await
+            .map_err(OrchestratorError::Consensus)
     }
 }

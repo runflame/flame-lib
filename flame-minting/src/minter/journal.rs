@@ -2,6 +2,12 @@ use std::future::Future;
 
 use btc_integration::{AuthenticatedMintingVote, MintingVoteData};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoteReservation {
+    Reserved,
+    AlreadyReserved,
+}
+
 pub trait MinterJournal {
     type Error;
     type TransactionId;
@@ -9,7 +15,7 @@ pub trait MinterJournal {
     fn write_reserve_vote(
         &self,
         vote: &MintingVoteData,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    ) -> impl Future<Output = Result<VoteReservation, Self::Error>> + Send;
 
     fn write_sent_vote(
         &self,

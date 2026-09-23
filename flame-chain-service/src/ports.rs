@@ -40,7 +40,7 @@ pub trait CoreBlockSource {
 
     fn get_core_block(
         &self,
-        height: u64,
+        target_height: u64,
     ) -> impl Future<Output = Result<Option<Block>, Self::Error>> + Send;
 
     fn wait_core_block(

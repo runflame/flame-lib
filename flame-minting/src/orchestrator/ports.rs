@@ -1,10 +1,10 @@
-use std::{future::Future, num::NonZeroUsize, sync::Arc};
+use std::{fmt::Debug, future::Future, num::NonZeroUsize, sync::Arc};
 
 use btc_integration::{
     BtcBlockTip, HistoryError, HistoryUpdate, IndexedBlock, ProtocolIndexer, ShutdownError,
     StartupError, btc::rpc::RpcApi,
 };
-use flame_chain_service::ChainAccess;
+use flame_chain_service::{ChainAccess, CoreBlockSource};
 use flame_storage::{CanonicalStorage, ChainStorage};
 use flamechain::BlockHeader;
 use tokio::sync::watch;
@@ -13,6 +13,41 @@ use crate::consensus::{
     ConsensusStorage, MintingEngine, MintingEngineError, MintingJournal, MintingOutcome,
     MintingOutcomeApplier, MintingOutcomeApplierError, MintingProtocolParams,
 };
+use crate::minter::{
+    MinterJournal, MinterManager,
+    manager::{ShutdownError as MinterShutdownError, StartupError as MinterStartupError},
+    ports::VoteSender,
+};
+
+pub trait MinterLifecycle {
+    fn startup(
+        &self,
+        subscription: watch::Receiver<Option<BtcBlockTip>>,
+    ) -> impl Future<Output = Result<(), MinterStartupError>> + Send;
+
+    fn shutdown(&self) -> impl Future<Output = Result<(), MinterShutdownError>> + Send;
+}
+
+impl<C, S, J> MinterLifecycle for MinterManager<C, S, J>
+where
+    C: CoreBlockSource + Send + Sync + 'static,
+    C::Error: Debug + Send,
+    S: VoteSender,
+    S::Error: Debug,
+    J: MinterJournal<TransactionId = S::TransactionId> + Send + Sync + 'static,
+    J::Error: Debug + Send,
+{
+    async fn startup(
+        &self,
+        subscription: watch::Receiver<Option<BtcBlockTip>>,
+    ) -> Result<(), MinterStartupError> {
+        self.startup(subscription).await
+    }
+
+    async fn shutdown(&self) -> Result<(), MinterShutdownError> {
+        self.shutdown().await
+    }
+}
 
 pub trait ConsensusIndexer: Send + Sync + 'static {
     fn startup(&self) -> impl Future<Output = Result<(), StartupError>> + Send;
