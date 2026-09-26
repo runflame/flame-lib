@@ -47,7 +47,8 @@ pub trait FlamedApi {
     async fn tx_status(&self, txid: TxId) -> RpcResult<TxStatusResult>;
 
     /// Every contract created at `since_height` or later under one of these
-    /// predicates. `LIMIT_EXCEEDED` past `MAX_SCAN_PREDICATES`.
+    /// predicates, each with the note that followed it in its log.
+    /// `LIMIT_EXCEEDED` past `MAX_SCAN_PREDICATES`.
     #[method(name = "scan")]
     async fn scan(
         &self,

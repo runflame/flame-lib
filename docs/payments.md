@@ -11,10 +11,9 @@ for wallets and nodes that interoperate. None of them is a consensus rule; see
 
 ## Status
 
-Proposed; not implemented. Today `flamepayments::build_transfer` takes
-caller-chosen blinding factors and emits no note, and `flamed`'s `scan`
-returns a contract's bytes without the entry that follows it. This document
-is the target for both.
+Implemented. `flamepayments` sends and receives: `build_transfer` seals a
+note for every output it creates, and `open_note` opens one. `flamed` keeps
+the note that follows each output and returns it from `scan`.
 
 The protocol follows the requirements `flamekd.md` sets for token encryption;
 [Compliance with flamekd](#compliance-with-flamekd) maps each of them to the

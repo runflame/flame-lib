@@ -1,9 +1,14 @@
 # flamepayments
 
-The wallet side of Flame payments: keys and transfers. The crate does two
-things: it turns a flamekd seed into the addresses and keys a wallet hands
-out, and it builds, signs and packages a transfer. It holds nothing on disk,
-encrypts nothing, and knows nothing about scanning the chain.
+The wallet side of Flame payments: keys, transfers, and the notes that
+travel with them. The crate turns a flamekd seed into the addresses and keys
+a wallet hands out. It builds, signs and packages a transfer, and seals an
+encrypted note for every output it creates. It opens the note of an output
+it receives, which gives the recipient everything it needs to spend that
+output. It implements [Confidential payments](../docs/payments.md).
+
+It holds nothing on disk and talks to no node. The caller fetches what the
+crate opens.
 
 ## An account
 
@@ -45,15 +50,24 @@ problem; this crate needs none.
 ## A transfer
 
 A transfer spends `InputSpec`s and creates `OutputSpec`s, with an optional
-fee. The script it emits:
+fee. An `OutputSpec` names a Receiving Address, a quantity, a flavor and a
+memo; the builder derives the predicate, both blinding factors and the note
+from them. The script it emits:
 
 ```text
 per input:    push_str(String::contract(contract))  input  signtx
 fee > 0:      push_int(fee)  fee                     one more mix input
 per output:   push_str(commitment(qty))  push_str(commitment(flv))
               push_int(m)  push_int(n)  mix
-per output i: roll_k(n-1-i) if > 0;  push_point(predicate)  output
+per output i: roll_k(n-1-i) if > 0;  push_point(S_i)  output
+              push_str(note_i)  log
 ```
+
+The outputs are sorted by their quantity commitment, compared as bytes,
+before any of this is emitted, and the commitments, the predicates and the
+notes all follow that one order. Under a fresh blinding factor the order
+says nothing about which output is the change. A caller finds an output by
+its predicate, never by its position.
 
 `signtx` pushes the contract's single payload Value and no count, so with a
 bare token payload there is nothing left on the stack to drop. `mix` balances
@@ -62,8 +76,36 @@ fee, when there is one, is a negative debt that counts as one more input. A
 zero fee emits no `fee` opcode at all.
 
 The roll before each `output` is not decoration. `mix` leaves the output
-tokens in spec order and `output` pops from the top, so without it every
-multi-output transfer would pair the first recipient with the last amount.
+tokens in the order their commitments were pushed and `output` pops from the
+top, so without it every multi-output transfer would pair the first
+predicate and note with the last amount. `push_str(note) log` leaves the
+stack as it found it, so the notes change no roll depth.
+
+## Notes
+
+Every output a transfer creates carries its note in the `Data` entry right
+after it: the quantity, the flavor and the memo, encrypted to the address's
+viewing key. [Confidential payments](../docs/payments.md) specifies the
+derivations, the note layout and the receiving procedure. This crate
+follows it and does not restate it.
+
+- `build_transfer` seals the notes. It draws each output's one-time scalar
+  `r` from the caller's generator through a Merlin transcript that binds the
+  transfer's header, inputs, fee and outputs and is rekeyed with the inputs'
+  signing keys. A weak generator then still gives different transfers
+  different `r`. A memo longer than `MEMO_MAX`, 8102 bytes, is
+  `BuilderError::MemoTooLong`.
+- `outputs_with_notes(log)` pairs every output of a log with the entry
+  right after it.
+- `open_note(contract, note, address, v)` runs the receiving procedure. It
+  returns a `ReceivedNote`: the `Opening` that `InputSpec::confidential`
+  spends the output with, and the memo. Every other result is a
+  `NoteError`.
+
+No function of the `note` module returns the shared point `X`, the note key
+or a blinding factor on its own. A blinding factor leaves the crate only
+inside an `Opening`, which is what
+[Disclosure](../docs/payments.md#disclosure) hands to a third party.
 
 ## Why inputs travel as witnesses
 
@@ -127,6 +169,7 @@ splitting into many outputs should expect the proving ceiling first.
 
 ## What is not here
 
-Notes and their encryption, which [Confidential payments](../docs/payments.md)
-specifies. Address discovery and chain scanning. Anything on disk, and any
-command line. Issued tokens. Each belongs to a later phase.
+A lookahead policy: `owns` takes the gap as an argument, and how far past
+its last used index a wallet looks is the wallet's choice. Talking to a
+node. Anything on disk, and any command line. Issued tokens. Each belongs to
+a later phase.

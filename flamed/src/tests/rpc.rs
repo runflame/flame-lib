@@ -1,7 +1,8 @@
 //! Every method, over real HTTP, through the generated client.
 //!
 //! The point of this round trip is the wire: the same seven calls a wallet
-//! will make, and one error code for every method that has one.
+//! will make, one error code for every method that has one, and a note that
+//! crosses HTTP inside a `scan` and still opens.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -11,7 +12,8 @@ use flamed_rpc::{
     PredicatePoint, ProofResult, TxId, TxStatusResult, MAX_SCAN_PREDICATES,
 };
 use flamekd::util::{CHANGE, RECEIVING};
-use flamepayments::InputSpec;
+use flamepayments::{open_note, InputSpec};
+use rand::rngs::StdRng;
 use tempfile::TempDir;
 
 use super::*;
@@ -25,6 +27,9 @@ struct Fixture {
     b_predicate: [u8; 32],
     /// A transaction carrying a proof that block 2 invalidated.
     stale: Vec<u8>,
+    /// The generator every transfer so far drew from, handed on so the
+    /// test's own transfer does not draw an `r` the fixture already used.
+    rng: StdRng,
     _dir: TempDir,
 }
 
@@ -34,6 +39,7 @@ fn fixture() -> Fixture {
     let dir = TempDir::new().expect("temp dir");
     let a = account(&SEED_A);
     let b = account(&SEED_B);
+    let mut rng = rng(60);
     let (genesis, cfg) = devnet(dir.path(), &a);
     let mut node = Node::open(&genesis, &cfg).expect("open");
 
@@ -47,15 +53,17 @@ fn fixture() -> Fixture {
         a.spending_key_at(RECEIVING, 0).expect("key"),
     )
     .expect("clear input");
-    let (to_b, b_opening) = output(&b, RECEIVING, 0, payment, 0);
-    let (to_change, a_change_opening) = output(&a, CHANGE, 0, change, 1);
-    let (packaged, contracts) = signed_transfer(vec![input], &[to_b, to_change], FEE);
-    let b_id = contracts[0].id();
-    let a_change_id = contracts[1].id();
+    let to_b = output(&b, RECEIVING, 0, payment);
+    let to_change = output(&a, CHANGE, 0, change);
+    let (packaged, contracts) = signed_transfer(vec![input], &[to_b, to_change], FEE, &mut rng);
+    let b_id = paying(&contracts, &b, RECEIVING, 0).id();
+    let a_change_id = paying(&contracts, &a, CHANGE, 0).id();
     node.submit(&submitted(&packaged)).expect("A's payment");
     node.mint_block().expect("block 1");
 
     let b_proof_at_1 = live(&node, &b_id);
+    let (_, b_opening) = received(&node, &b, RECEIVING, 0);
+    let (_, a_change_opening) = received(&node, &a, CHANGE, 0);
 
     // Block 2 deletes a leaf and inserts one, which moves B's path.
     let input = InputSpec::confidential(
@@ -65,8 +73,8 @@ fn fixture() -> Fixture {
         a.spending_key_at(CHANGE, 0).expect("key"),
     )
     .expect("confidential input");
-    let (to_a, _) = output(&a, RECEIVING, 1, change - FEE, 2);
-    let (packaged, _) = signed_transfer(vec![input], &[to_a], FEE);
+    let to_a = output(&a, RECEIVING, 1, change - FEE);
+    let (packaged, _) = signed_transfer(vec![input], &[to_a], FEE, &mut rng);
     node.submit(&submitted(&packaged)).expect("A's sweep");
     node.mint_block().expect("block 2");
 
@@ -77,9 +85,9 @@ fn fixture() -> Fixture {
         b.spending_key_at(RECEIVING, 0).expect("key"),
     )
     .expect("confidential input");
-    let (to_a, _) = output(&a, RECEIVING, 2, 100 * FLAME, 3);
-    let (to_b_change, _) = output(&b, CHANGE, 0, payment - 100 * FLAME - FEE, 4);
-    let (stale, _) = signed_transfer(vec![stale_input], &[to_a, to_b_change], FEE);
+    let to_a = output(&a, RECEIVING, 2, 100 * FLAME);
+    let to_b_change = output(&b, CHANGE, 0, payment - 100 * FLAME - FEE);
+    let (stale, _) = signed_transfer(vec![stale_input], &[to_a, to_b_change], FEE, &mut rng);
 
     Fixture {
         b_predicate: b
@@ -90,6 +98,7 @@ fn fixture() -> Fixture {
         genesis_id,
         b_id,
         stale: submitted(&stale),
+        rng,
         node: Arc::new(Mutex::new(node)),
         _dir: dir,
     }
@@ -105,7 +114,7 @@ fn code_of(error: ClientError) -> i32 {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_method_over_http() {
-    let fixture = fixture();
+    let mut fixture = fixture();
     let (addr, handle) = crate::rpc::serve(
         Arc::clone(&fixture.node),
         "127.0.0.1:0".parse().expect("a literal socket address"),
@@ -195,6 +204,25 @@ async fn every_method_over_http() {
     assert_eq!(scan.outputs[0].id, ContractId(fixture.b_id));
     assert!(scan.outputs[0].spent.is_none());
 
+    // The note crossed HTTP with the contract, and it opens: this is all B
+    // needs to spend what A sent.
+    let b = account(&SEED_B);
+    let b_contract = crate::cells::contract_from_bytes(&scan.outputs[0].bytes.0).expect("decode");
+    let b_note = open_note(
+        &b_contract,
+        Some(
+            &scan.outputs[0]
+                .note
+                .as_ref()
+                .expect("scan returns the note")
+                .0,
+        ),
+        &b.address_at(RECEIVING, 0).expect("address"),
+        &b.viewing_key_at(RECEIVING, 0).expect("viewing key"),
+    )
+    .expect("the note from the wire opens");
+    assert_eq!(b_note.opening.qty, 400 * FLAME);
+
     // submit_tx, and the txid it reports, and the status that follows
     let txid = client
         .submit_tx(BlockTxEnvelope(fixture.stale.clone()))
@@ -230,20 +258,18 @@ async fn every_method_over_http() {
     let accepted = {
         let node = fixture.node.lock().expect("not poisoned");
         let a = account(&SEED_A);
-        let b = account(&SEED_B);
-        // The same opening the fixture handed B, rebuilt from the same
-        // output index — a recipient keeps it, it is not on the wire.
-        let (_, opening) = output(&b, RECEIVING, 0, 400 * FLAME, 0);
+        // The opening B just read from the note `scan` returned over HTTP.
         let input = InputSpec::confidential(
-            &contract_of(&node, &fixture.b_id),
-            &opening,
+            &b_contract,
+            &b_note.opening,
             live(&node, &fixture.b_id),
             b.spending_key_at(RECEIVING, 0).expect("key"),
         )
         .expect("confidential input");
-        let (to_a, _) = output(&a, RECEIVING, 3, 100 * FLAME, 5);
-        let (to_b_change, _) = output(&b, CHANGE, 1, 400 * FLAME - 100 * FLAME - FEE, 6);
-        let (packaged, _) = signed_transfer(vec![input], &[to_a, to_b_change], FEE);
+        let to_a = output(&a, RECEIVING, 3, 100 * FLAME);
+        let to_b_change = output(&b, CHANGE, 1, 400 * FLAME - 100 * FLAME - FEE);
+        let (packaged, _) =
+            signed_transfer(vec![input], &[to_a, to_b_change], FEE, &mut fixture.rng);
         submitted(&packaged)
     };
     let txid = client

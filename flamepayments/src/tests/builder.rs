@@ -1,15 +1,13 @@
 //! The transfer builder: a cleartext spend, a confidential spend, the
 //! opening checks, and the wire test that is this phase's whole point.
 
-use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar as DalekScalar;
 use flamechain::utreexo::Proof;
 use flamekd::{util, Network};
-use flamevm::{
-    Anchor, ClearToken, Commitment, Contract, ContractID, Scalar, TxLog, Value, FLAME_FLAVOR,
-};
+use flamevm::{Anchor, ClearToken, Contract, ContractID, Scalar, TxLog, Value, FLAME_FLAVOR};
+use rand::rngs::StdRng;
 
-use super::{fees, header, inputs, limits, native_output, outputs, publish};
+use super::{fees, header, inputs, limits, native_output, outputs, publish, receive, rng};
 use crate::builder::{
     build_transfer, sign, BuilderError, InputSpec, Opening, OutputSpec, MAX_OUTPUTS,
 };
@@ -43,14 +41,6 @@ fn genesis_contract(account: &Account, qty: u64) -> Contract {
     clear_contract(account, 3, 0x07, qty)
 }
 
-/// The quantity commitment an output contract published.
-fn published_qty_point(contract: &Contract) -> CompressedRistretto {
-    match contract.payload() {
-        Value::Token(token) => token.qty().to_point(),
-        other => panic!("an output of a transfer must hold a Token, got {other:?}"),
-    }
-}
-
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
@@ -58,7 +48,8 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 /// One cleartext payment: the whole genesis contract to `RECEIVING/4`, with
-/// `fee` taken out of the single output.
+/// `fee` taken out of the single output. The opening is the one the
+/// recipient reads from the output's note.
 struct Payment {
     bytes: Vec<u8>,
     log: TxLog,
@@ -67,34 +58,39 @@ struct Payment {
     opening: Opening,
 }
 
-fn cleartext_payment(account: &Account, fee: u64) -> Payment {
+fn cleartext_payment(account: &Account, fee: u64, rng: &mut StdRng) -> Payment {
     let genesis = genesis_contract(account, GENESIS_QTY);
     let genesis_id = genesis.id();
     let spend_key = account
         .spending_key_at(util::RECEIVING, 3)
         .expect("spending key");
     let input = InputSpec::clear(genesis, Proof::Transient, spend_key).expect("clear input");
-    let (output, opening) = native_output(
-        account.predicate_at(util::RECEIVING, 4).expect("predicate"),
+    let output = native_output(
+        account.address_at(util::RECEIVING, 4).expect("address"),
         GENESIS_QTY - fee,
-        0,
     );
 
-    let unsigned = build_transfer(&[input], &[output], fee, header(), limits()).expect("build");
+    let unsigned =
+        build_transfer(&[input], &[output], fee, header(), limits(), rng).expect("build");
     let tx = sign(unsigned, &[spend_key]).expect("sign");
     let (bytes, log) = publish(&tx);
-    let received = outputs(&log).pop().expect("one output");
+    let (received, note) = receive(&log, account, util::RECEIVING, 4);
     Payment {
         bytes,
         log,
         genesis_id,
         received,
-        opening,
+        opening: note.opening,
     }
 }
 
 /// The recipient of `payment` spends it on, paying `fee`.
-fn confidential_spend(account: &Account, payment: &Payment, fee: u64) -> (Vec<u8>, TxLog) {
+fn confidential_spend(
+    account: &Account,
+    payment: &Payment,
+    fee: u64,
+    rng: &mut StdRng,
+) -> (Vec<u8>, TxLog) {
     let spend_key = account
         .spending_key_at(util::RECEIVING, 4)
         .expect("spending key");
@@ -105,13 +101,13 @@ fn confidential_spend(account: &Account, payment: &Payment, fee: u64) -> (Vec<u8
         spend_key,
     )
     .expect("confidential input");
-    let (output, _) = native_output(
-        account.predicate_at(util::RECEIVING, 5).expect("predicate"),
+    let output = native_output(
+        account.address_at(util::RECEIVING, 5).expect("address"),
         payment.opening.qty - fee,
-        1,
     );
 
-    let unsigned = build_transfer(&[input], &[output], fee, header(), limits()).expect("build");
+    let unsigned =
+        build_transfer(&[input], &[output], fee, header(), limits(), rng).expect("build");
     let tx = sign(unsigned, &[spend_key]).expect("sign");
     publish(&tx)
 }
@@ -119,7 +115,7 @@ fn confidential_spend(account: &Account, payment: &Payment, fee: u64) -> (Vec<u8
 #[test]
 fn a_cleartext_contract_pays_one_output_with_no_fee() {
     let account = account();
-    let payment = cleartext_payment(&account, 0);
+    let payment = cleartext_payment(&account, 0, &mut rng(1));
 
     assert_eq!(inputs(&payment.log), vec![payment.genesis_id]);
     assert_eq!(outputs(&payment.log).len(), 1);
@@ -139,7 +135,7 @@ fn a_cleartext_contract_pays_one_output_with_no_fee() {
 #[test]
 fn a_cleartext_contract_pays_one_output_with_a_fee() {
     let account = account();
-    let payment = cleartext_payment(&account, 1_000);
+    let payment = cleartext_payment(&account, 1_000, &mut rng(2));
 
     assert_eq!(inputs(&payment.log), vec![payment.genesis_id]);
     assert_eq!(outputs(&payment.log).len(), 1);
@@ -148,14 +144,15 @@ fn a_cleartext_contract_pays_one_output_with_a_fee() {
 }
 
 /// A cleartext contract spends to one confidential output; the recipient
-/// then spends that output back through the opening the sender kept. The
+/// then spends that output back through the opening its note carried. The
 /// second half is the path no upstream test exercises end to end.
 #[test]
 fn a_confidential_output_is_spent_through_its_opening() {
     let account = account();
-    let payment = cleartext_payment(&account, 0);
+    let mut rng = rng(3);
+    let payment = cleartext_payment(&account, 0, &mut rng);
     let received_id = payment.received.id();
-    let (_, log) = confidential_spend(&account, &payment, 1_000);
+    let (_, log) = confidential_spend(&account, &payment, 1_000, &mut rng);
 
     assert_eq!(inputs(&log), vec![received_id], "the confidential input");
     assert_eq!(outputs(&log).len(), 1);
@@ -167,7 +164,8 @@ fn a_confidential_output_is_spent_through_its_opening() {
 #[test]
 fn a_confidential_spend_publishes_no_amounts() {
     let account = account();
-    let payment = cleartext_payment(&account, 0);
+    let mut rng = rng(4);
+    let payment = cleartext_payment(&account, 0, &mut rng);
     let opening = payment.opening;
 
     // The payment that created the contract spends the cleartext genesis
@@ -185,7 +183,7 @@ fn a_confidential_spend_publishes_no_amounts() {
     // The spend is where the leak lived. Nothing about the spent amount may
     // appear: not the quantity as eight little-endian bytes, not the same
     // quantity as a 32-byte scalar, not either blinding factor.
-    let (bytes, _) = confidential_spend(&account, &payment, 1_000);
+    let (bytes, _) = confidential_spend(&account, &payment, 1_000, &mut rng);
     assert!(
         !contains(&bytes, &opening.qty.to_le_bytes()),
         "the spent quantity must not appear as 8 little-endian bytes"
@@ -207,7 +205,7 @@ fn a_confidential_spend_publishes_no_amounts() {
 #[test]
 fn confidential_refuses_a_wrong_blinding_factor() {
     let account = account();
-    let payment = cleartext_payment(&account, 0);
+    let payment = cleartext_payment(&account, 0, &mut rng(5));
     let wrong = Opening {
         qty_blinding: payment.opening.qty_blinding + DalekScalar::ONE,
         ..payment.opening
@@ -230,7 +228,7 @@ fn confidential_refuses_a_wrong_blinding_factor() {
 #[test]
 fn confidential_refuses_a_cleartext_payload() {
     let account = account();
-    let payment = cleartext_payment(&account, 0);
+    let payment = cleartext_payment(&account, 0, &mut rng(6));
 
     let Err(error) = InputSpec::confidential(
         &genesis_contract(&account, GENESIS_QTY),
@@ -249,7 +247,7 @@ fn confidential_refuses_a_cleartext_payload() {
 #[test]
 fn clear_refuses_a_confidential_payload() {
     let account = account();
-    let payment = cleartext_payment(&account, 0);
+    let payment = cleartext_payment(&account, 0, &mut rng(7));
 
     let Err(error) = InputSpec::clear(
         payment.received,
@@ -294,15 +292,13 @@ fn more_than_sixteen_outputs_is_refused() {
     let spend_key = account.spending_key_at(util::RECEIVING, 3).expect("key");
     let input = InputSpec::clear(genesis, Proof::Transient, spend_key).expect("clear input");
 
-    let predicate = account.predicate_at(util::RECEIVING, 4).expect("predicate");
+    let address = account.address_at(util::RECEIVING, 4).expect("address");
     let too_many = MAX_OUTPUTS + 1;
-    let outputs: Vec<OutputSpec> = (0..too_many as u64)
-        .map(|index| native_output(predicate.clone(), 1, index).0)
-        .collect();
+    let outputs: Vec<OutputSpec> = (0..too_many).map(|_| native_output(address, 1)).collect();
 
     // Refused before any proving: the guard is the first thing build_transfer
     // does, which is also why this test costs nothing.
-    let Err(error) = build_transfer(&[input], &outputs, 0, header(), limits()) else {
+    let Err(error) = build_transfer(&[input], &outputs, 0, header(), limits(), &mut rng(8)) else {
         panic!("roll_k cannot address a seventeenth output");
     };
     assert!(
@@ -319,11 +315,19 @@ fn more_than_sixteen_outputs_is_refused() {
 /// changed.
 const PROVABLE_OUTPUTS: usize = 13;
 
-/// The only multi-output test in the suite, and so the only one that proves
-/// the roll pairs output *i* with `outputs[i]`. It asserts on each output's
-/// **quantity commitment**, not just its predicate: the predicate is pushed
-/// immediately before `output` whatever the stack holds, so a misplaced roll
-/// would still produce the right predicates over the wrong amounts.
+/// The widest transfer in the suite, and the one that proves the roll keeps
+/// each output's commitments, predicate and note together. The predicate is
+/// pushed immediately before `output` whatever the stack holds, so a
+/// misplaced roll would still produce the right predicates, over the wrong
+/// commitments. The test finds every output by its predicate and checks it
+/// twice:
+///
+/// - `open_note` accepts the note after it only if the opening the note
+///   carries rebuilds the published contract, and that opening must state
+///   the quantity the caller asked this output for;
+/// - `InputSpec::confidential`, the check a spend relies on and separate
+///   code from `open_note`, must accept the same opening against the same
+///   published contract.
 #[test]
 fn every_output_keeps_its_own_amount() {
     let account = account();
@@ -348,32 +352,36 @@ fn every_output_keeps_its_own_amount() {
         .map(|(index, qty)| {
             native_output(
                 account
-                    .predicate_at(util::RECEIVING, 10 + index as u32)
-                    .expect("predicate"),
+                    .address_at(util::RECEIVING, 10 + index as u32)
+                    .expect("address"),
                 *qty,
-                index as u64,
             )
-            .0
         })
         .collect();
 
-    let unsigned = build_transfer(&[input], &specs, 0, header(), limits()).expect("build");
+    let unsigned =
+        build_transfer(&[input], &specs, 0, header(), limits(), &mut rng(9)).expect("build");
     let tx = sign(unsigned, &[spend_key]).expect("sign");
     let (_, log) = publish(&tx);
 
-    let created = outputs(&log);
-    assert_eq!(created.len(), PROVABLE_OUTPUTS, "every output is created");
-    for (index, (contract, spec)) in created.iter().zip(&specs).enumerate() {
+    assert_eq!(
+        outputs(&log).len(),
+        PROVABLE_OUTPUTS,
+        "every output is created"
+    );
+    for (index, spec) in specs.iter().enumerate() {
+        let n = 10 + index as u32;
+        let (contract, note) = receive(&log, &account, util::RECEIVING, n);
         assert_eq!(
-            contract.predicate.to_point(),
-            spec.predicate.to_point(),
-            "output {index} predicate"
-        );
-        assert_eq!(
-            published_qty_point(contract),
-            Commitment::blinded_with_factor(Scalar::from(spec.qty), spec.qty_blinding).to_point(),
+            note.opening.qty, spec.qty,
             "output {index} carries its own amount"
         );
+        assert_eq!(note.opening.flv, FLAME_FLAVOR, "output {index} flavor");
+        let key = account.spending_key_at(util::RECEIVING, n).expect("key");
+        if let Err(error) = InputSpec::confidential(&contract, &note.opening, Proof::Transient, key)
+        {
+            panic!("output {index}'s opening does not rebuild it as an input: {error}");
+        }
     }
 }
 
@@ -391,7 +399,8 @@ fn two_inputs_are_signed_in_input_order() {
         .expect("spending key");
     let qty_b = 7_654_321;
 
-    let transfer = || {
+    let mut rng = rng(10);
+    let mut transfer = || {
         let a = clear_contract(&account, 3, 0x07, GENESIS_QTY);
         let b = clear_contract(&account, 6, 0x08, qty_b);
         let ids = vec![a.id(), b.id()];
@@ -399,13 +408,12 @@ fn two_inputs_are_signed_in_input_order() {
             InputSpec::clear(a, Proof::Transient, key_a).expect("first input"),
             InputSpec::clear(b, Proof::Transient, key_b).expect("second input"),
         ];
-        let (output, _) = native_output(
-            account.predicate_at(util::RECEIVING, 4).expect("predicate"),
+        let output = native_output(
+            account.address_at(util::RECEIVING, 4).expect("address"),
             GENESIS_QTY + qty_b - 1_000,
-            0,
         );
         let unsigned =
-            build_transfer(&inputs, &[output], 1_000, header(), limits()).expect("build");
+            build_transfer(&inputs, &[output], 1_000, header(), limits(), &mut rng).expect("build");
         (unsigned, ids)
     };
 
