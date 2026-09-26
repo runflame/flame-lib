@@ -441,21 +441,21 @@ fn confidential_2_to_3_two_flavors() {
 }
 
 /// Confidential transfer composed with `op_fee`: one input
-/// (qty=10) → one output (qty=7) + fee=3, all flavor 0. The
+/// (qty=10) → one output (qty=7) + fee=3, all the native flavor. The
 /// fee opcode produces a `WideToken` debt with q=-3 that is
 /// consumed as an *input* of `mix`, balancing the cleartext
 /// fee against the surplus on the real inputs.
 ///
-/// Script shape (single flavor 0):
+/// Script shape (one flavor, the native one):
 ///
 ///   pushstr <contract>; input(w); <taproot_proof>; push:0; open
-///       → stack: [Token(10, 0)]
+///       → stack: [Token(10, native)]
 ///   push:3; push:0; fee
-///       → stack: [Token(10, 0), WideToken(-3, 0)]
+///       → stack: [Token(10, native), WideToken(-3, native)]
 ///       → txlog: …Header, Input, Fee(3)
-///   push qty_open(7); push flv_open(0)
+///   push qty_open(7); push flv_open(native)
 ///   push:2 (m); push:1 (n); mix
-///       → stack: [out_Token(7, 0)]
+///       → stack: [out_Token(7, native)]
 ///   push:1; pushpoint <out_pred>; output
 ///       → stack: empty; txlog: …Header, Input, Fee(3), Output
 ///
@@ -467,7 +467,7 @@ fn confidential_1_to_1_with_fee() {
 
     let inp = NMInputSpec {
         qty: 10,
-        flv: 0,
+        flv: native_flavor(),
         qty_blind: 11,
         flv_blind: 13,
         anchor: [0xa1; 32],
@@ -477,7 +477,7 @@ fn confidential_1_to_1_with_fee() {
 
     let out = NMOutputSpec {
         qty: 7,
-        flv: 0,
+        flv: native_flavor(),
         qty_blind: 21,
         flv_blind: 22,
         predicate_tag: 0xb1,
@@ -677,7 +677,7 @@ fn confidential_with_fee_undersupply_rejected() {
 
     let inp = NMInputSpec {
         qty: 10,
-        flv: 0,
+        flv: native_flavor(),
         qty_blind: 11,
         flv_blind: 13,
         anchor: [0xa1; 32],
@@ -687,7 +687,7 @@ fn confidential_with_fee_undersupply_rejected() {
     // Output qty = 10 (NOT 7) — fee is unfunded.
     let out = NMOutputSpec {
         qty: 10,
-        flv: 0,
+        flv: native_flavor(),
         qty_blind: 21,
         flv_blind: 22,
         predicate_tag: 0xb1,

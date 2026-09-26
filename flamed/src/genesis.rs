@@ -5,7 +5,7 @@
 //! nothing else. Verifying is not, because any node that opens a
 //! `genesis.json` has to know the file says the truth.
 
-use flamevm::{CellError, Contract, ContractID, Scalar, VMError, Value, FLAME_FLAVOR};
+use flamevm::{CellError, ClearToken, Contract, ContractID, Scalar, VMError, Value, FLAME_FLAVOR};
 use sha2::{Digest, Sha256};
 
 // Only the deriving half resolves a holder; a node that merely opens a
@@ -39,7 +39,9 @@ pub fn genesis_anchor(index: u64) -> [u8; 32] {
 /// `qty_sparks` an operator reads to learn who holds the supply. Checking the
 /// id against the bytes is what stands between a node and an unspendable
 /// allocation; checking the other three is what stands between an operator
-/// and a file that lies about money.
+/// and a file that lies about money. The token must also be native Flame: a
+/// file written under another `FLAME_FLAVOR` agrees with itself everywhere
+/// else, so that check is the one that names the real problem.
 pub fn contracts(genesis: &GenesisFile) -> Result<Vec<(ContractID, Contract)>, GenesisError> {
     let mut resolved = Vec::with_capacity(genesis.contracts.len());
     for (position, record) in genesis.contracts.iter().enumerate() {
@@ -71,24 +73,25 @@ pub fn contracts(genesis: &GenesisFile) -> Result<Vec<(ContractID, Contract)>, G
                 field: "anchor",
             });
         }
-        if !holds_sparks(&contract, record.qty_sparks) {
+        let Some(token) = sparks_held(&contract, record.qty_sparks) else {
             return Err(GenesisError::ContractFieldMismatch {
                 index,
                 field: "qty_sparks",
             });
+        };
+        if token.flv() != FLAME_FLAVOR {
+            return Err(GenesisError::ForeignFlavor { index });
         }
         resolved.push((id, contract));
     }
     Ok(resolved)
 }
 
-/// Whether a contract is a cleartext allocation of exactly this much Flame.
-fn holds_sparks(contract: &Contract, qty_sparks: u64) -> bool {
+/// The cleartext token an allocation holds, if it holds exactly this much.
+fn sparks_held(contract: &Contract, qty_sparks: u64) -> Option<&ClearToken> {
     match contract.payload() {
-        Value::ClearToken(token) => {
-            token.qty() == Scalar::from(qty_sparks) && token.flv() == FLAME_FLAVOR
-        }
-        _ => false,
+        Value::ClearToken(token) if token.qty() == Scalar::from(qty_sparks) => Some(token),
+        _ => None,
     }
 }
 
@@ -265,6 +268,16 @@ pub enum GenesisError {
         index: u64,
         /// Which field.
         field: &'static str,
+    },
+    /// The allocation's token is not native Flame: the file was written
+    /// under another `FLAME_FLAVOR`.
+    #[error(
+        "allocation {index} holds a token whose flavor is not FLAME_FLAVOR; \
+         regenerate genesis.json with `flamed genesis`"
+    )]
+    ForeignFlavor {
+        /// Which allocation.
+        index: u64,
     },
     /// The chain refused the seeded ids.
     #[error(transparent)]

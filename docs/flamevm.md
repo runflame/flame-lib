@@ -473,7 +473,7 @@ All token types are non-copyable. `Token`, `WideToken`, and a nonzero
 `ClearToken` are non-droppable; a zero-quantity `ClearToken` is droppable
 because it carries only a flavor nameplate and no balance.
 
-The native Flame flavor is `FLAME_FLAVOR = 0`. One Flame is exactly
+The native Flame flavor is `FLAME_FLAVOR = 1`. One Flame is exactly
 `100_000_000` sparks; all native-token quantities on the stack and wire are
 integral sparks.
 
@@ -1342,7 +1342,7 @@ _x_ → ø
 
 _qty_ → _−WT_
 
-Pops `qty: Scalar` in sparks (non-negative, `≤ MAX_FEE = 2²⁴`). Fees always use the canonical native flavor `FLAME_FLAVOR = Scalar::ZERO`. The `2²⁴`-spark cap is chosen so fee-rate arithmetic stays within `u64`: even a `2⁴⁰`-byte (~1 TB) transaction leaves 24 bits of headroom. Emits `TxEntry::Fee(qty as u64)` and bumps the per-tx [`CheckedFee`](#fees) accumulator (also capped at `MAX_FEE`). Allocates a fresh `WideToken` debt with `q = −qty`, `f = FLAME_FLAVOR` (both cleartext-constrained) and pushes it. The script must balance the debt against native Flame tokens, typically via [`mix`](#mix).
+Pops `qty: Scalar` in sparks (non-negative, `≤ MAX_FEE = 2²⁴`). Fees always use the canonical native flavor `FLAME_FLAVOR = Scalar::ONE`. The `2²⁴`-spark cap is chosen so fee-rate arithmetic stays within `u64`: even a `2⁴⁰`-byte (~1 TB) transaction leaves 24 bits of headroom. Emits `TxEntry::Fee(qty as u64)` and bumps the per-tx [`CheckedFee`](#fees) accumulator (also capped at `MAX_FEE`). Allocates a fresh `WideToken` debt with `q = −qty`, `f = FLAME_FLAVOR` (both cleartext-constrained) and pushes it. The script must balance the debt against native Flame tokens, typically via [`mix`](#mix).
 
 Hard-fails: `FeeQtyNegative`, `FeeTooHigh` (per-arg or aggregate overflow), `TypeNotScalar`, `ExternalOnly`. The blinded-fee branch is reserved for a future phase.
 

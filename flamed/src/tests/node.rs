@@ -3,15 +3,18 @@
 //! No HTTP here: this is the node itself answering the questions a wallet
 //! asks, with every transaction built by `flamewallet`.
 
+use curve25519_dalek::ristretto::CompressedRistretto;
 use flamechain::mempool::MempoolError;
 use flamechain::utreexo::UtreexoError;
+use flamechain::Blockchain;
 use flamekd::util::{CHANGE, RECEIVING};
+use flamevm::{Anchor, ClearToken, Predicate, Scalar, Value};
 use flamewallet::InputSpec;
 use tempfile::TempDir;
 
 use super::*;
-use crate::cells::proof_bytes;
-use crate::config::GenesisFile;
+use crate::cells::{contract_bytes, proof_bytes};
+use crate::config::{ChainParamsFile, GenesisFile};
 use crate::node::{Node, NodeError, TxStatus};
 
 /// The predicate points of a list of an account's addresses.
@@ -261,6 +264,35 @@ fn a_genesis_that_lies_about_money_is_refused() {
         ))
     ));
 
+    // A file written under another `FLAME_FLAVOR` is not tampered: its
+    // bytes, id and hash all follow from the token it holds, so every check
+    // above passes and only the flavor check can say what is wrong. Zero is
+    // the flavor such files were written with.
+    let foreign_flavor = Scalar::ZERO;
+    assert_ne!(foreign_flavor, FLAME_FLAVOR);
+    let record = &genesis.contracts[0];
+    let foreign = Contract::new(
+        Predicate::opaque(CompressedRistretto(record.predicate.0)),
+        Anchor(record.anchor),
+        Value::ClearToken(ClearToken::new(
+            Scalar::from(record.qty_sparks),
+            foreign_flavor,
+        )),
+    )
+    .expect("a cleartext token is portable");
+    let (chain, _) = Blockchain::devnet_genesis(genesis.chain.params(), &[foreign.id()])
+        .expect("seed the foreign genesis");
+    let mut foreign_file = genesis.clone();
+    foreign_file.contracts[0].id = flamed_rpc::ContractId(foreign.id());
+    foreign_file.contracts[0].bytes = contract_bytes(&foreign).expect("encode").into();
+    foreign_file.genesis_hash = flamed_rpc::BlockId(chain.tip().into_bytes());
+    assert!(matches!(
+        Node::open(&foreign_file, &cfg),
+        Err(NodeError::Genesis(
+            crate::genesis::GenesisError::ForeignFlavor { index: 0 }
+        ))
+    ));
+
     let mut tampered = genesis.clone();
     tampered.genesis_hash = flamed_rpc::BlockId([0x77; 32]);
     assert!(matches!(
@@ -292,6 +324,24 @@ fn the_shipped_devnet_pays_account_a() {
     assert!(
         shipped.contains(&address),
         "configs/chainparams.toml allocates to {address}"
+    );
+}
+
+/// The genesis hash `flamed.md`'s recorded session quotes, pinned so the
+/// doc cites a value the suite guards: a change to any consensus encoding,
+/// `FLAME_FLAVOR` included, fails here instead of silently dating the doc.
+#[test]
+fn the_shipped_devnet_has_the_documented_genesis_hash() {
+    let shipped = ChainParamsFile::load(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/configs/chainparams.toml"
+    )))
+    .expect("the shipped network definition");
+    let genesis = crate::genesis::derive(&shipped).expect("derive the shipped genesis");
+    assert_eq!(
+        hex::encode(genesis.genesis_hash.0),
+        "d5363a727a98d2125cd171727b3d2de4a0830a38b26e1887906f4e704067b270",
+        "update flamed.md's recorded session along with this value"
     );
 }
 
