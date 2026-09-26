@@ -11,7 +11,7 @@ use flamed_rpc::{
     PredicatePoint, ProofResult, TxId, TxStatusResult, MAX_SCAN_PREDICATES,
 };
 use flamekd::util::{CHANGE, RECEIVING};
-use flamewallet::InputSpec;
+use flamepayments::InputSpec;
 use tempfile::TempDir;
 
 use super::*;

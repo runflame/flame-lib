@@ -1,10 +1,10 @@
 [package]
-name = "flamewallet"
+name = "flamepayments"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Flame wallet keys and confidential transfer building"
-readme = "flamewallet.md"
+description = "Wallet-side Flame payments: keys and confidential transfers"
+readme = "flamepayments.md"
 
 [dependencies]
 curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility", "rand_core"] }
@@ -18,7 +18,7 @@ thiserror = "2"
 # `flamechain` on purpose appears twice. The dependency above, without
 # features, serves `block_tx`. This one adds `devnet` for the round-trip
 # test only: with resolver 2 a dev-dependency's features do not reach the
-# normal build, so nothing that depends on `flamewallet` gets
+# normal build, so nothing that depends on `flamepayments` gets
 # `devnet_genesis` compiled in through feature unification. Merging the
 # two lines would defeat that gate.
 [dev-dependencies]

@@ -155,7 +155,7 @@ $ curl -s -X POST -H 'content-type: application/json' \
 Submitting a real transaction takes a wallet, and `src/tests/node.rs` is
 that recorded session: two accounts from fixed seeds, a payment, a sweep, a
 restart, and a spend by the recipient — every transaction built by
-`flamewallet`, submitted to the node, and confirmed.
+`flamepayments`, submitted to the node, and confirmed.
 
 ## The devnet feature
 
