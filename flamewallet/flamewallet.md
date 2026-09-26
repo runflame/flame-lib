@@ -127,6 +127,6 @@ splitting into many outputs should expect the proving ceiling first.
 
 ## What is not here
 
-Notes, encryption, and the two-entry payload. Address discovery and chain
-scanning. Anything on disk, and any command line. Issued tokens. Each belongs
-to a later phase.
+Notes and their encryption, which [Confidential payments](../docs/payments.md)
+specifies. Address discovery and chain scanning. Anything on disk, and any
+command line. Issued tokens. Each belongs to a later phase.
