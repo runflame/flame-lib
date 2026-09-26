@@ -54,10 +54,12 @@ the chain keeps only roots: this file is the only place that contract
 exists. And because the genesis hash commits the ids through the accumulator
 root and nothing else in the file, `Node::open` decodes every contract,
 recomputes its id, and refuses to start on a mismatch — then checks the
-recorded predicate, anchor and quantity against those same bytes. The id
-check is what stands between a node and an unspendable allocation; the other
-three are what stand between an operator and a file that lies about who
-holds the money.
+recorded predicate, anchor and quantity against those same bytes, and that
+the token is native Flame. The id check is what stands between a node and an
+unspendable allocation; the field checks are what stand between an operator
+and a file that lies about who holds the money; the flavor check is what
+tells an operator that a `genesis.json` predates a change of `FLAME_FLAVOR`,
+since such a file agrees with itself everywhere else.
 
 Two nodes that agree on `genesis_hash` can still disagree on `limits`: a
 block header commits the version, the two roots and the storage pool size,
@@ -113,13 +115,13 @@ are generated from the same declaration and cannot drift.
 ```console
 $ cargo run -p flamed --features devnet -- genesis \
       --chainparams flamed/configs/chainparams.toml --out ./genesis.json
-genesis dec6ebd86e54a2dfb76981d5aa93f6cad24238f3336f54634b93daf12fea769d with 1 allocation(s) -> ./genesis.json
+genesis d5363a727a98d2125cd171727b3d2de4a0830a38b26e1887906f4e704067b270 with 1 allocation(s) -> ./genesis.json
 
 $ cargo run -p flamed --features devnet -- run --config flamed/configs/flamed.toml
 flamed: height 0 with 1 unspent contract(s), 0 block(s) archived
 flamed: serving JSON-RPC on http://127.0.0.1:8545
 flamed: minting every 15s
-block 1 ab5df32fcfb4054e0fd63c3604de1b05374cc5d55cc2b1ae017c4129bde83d05 txs=0 dropped=0
+block 1 5b817e3798c44a477267332eec46cb633a1ed654e00506be639feb574408deb5 txs=0 dropped=0
 ```
 
 Running `genesis` twice on the same network definition gives identical
@@ -130,10 +132,10 @@ same network by comparing files.
 $ curl -s -X POST -H 'content-type: application/json' \
     --data '{"jsonrpc":"2.0","id":1,"method":"tip","params":[]}' \
     http://127.0.0.1:8545
-{"jsonrpc":"2.0","id":1,"result":{"hash":"dec6ebd8…","height":0,"contract_root":"2fe8d9f2…"}}
+{"jsonrpc":"2.0","id":1,"result":{"hash":"d5363a72…","height":0,"contract_root":"93bc2680…"}}
 
 $ curl -s -X POST -H 'content-type: application/json' \
-    --data '{"jsonrpc":"2.0","id":2,"method":"proof","params":["aa093e9d…"]}' \
+    --data '{"jsonrpc":"2.0","id":2,"method":"proof","params":["30414078…"]}' \
     http://127.0.0.1:8545
 {"jsonrpc":"2.0","id":2,"result":{"status":"unspent","proof":"AQAAAAAAAAAAAAAAAA=="}}
 ```
@@ -147,7 +149,7 @@ this leaf has no neighbors yet.
 $ curl -s -X POST -H 'content-type: application/json' \
     --data '{"jsonrpc":"2.0","id":3,"method":"submit_tx","params":["AAEC"]}' \
     http://127.0.0.1:8545
-{"jsonrpc":"2.0","id":3,"error":{"code":-32004,"message":"the submitted bytes are not a transaction: insufficient payload bytes"}}
+{"jsonrpc":"2.0","id":3,"error":{"code":-32004,"message":"the submitted bytes do not decode as a transaction under this chain's limits: insufficient payload bytes"}}
 ```
 
 Submitting a real transaction takes a wallet, and `src/tests/node.rs` is
