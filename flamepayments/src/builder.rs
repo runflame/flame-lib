@@ -11,7 +11,7 @@
 //! The VM offers a second way to open a token, one that puts the quantity
 //! and both blinding factors into the bytecode as literals, where every
 //! verifier re-executes them and every spent amount becomes public one hop
-//! after receipt. This module never emits that opcode; `flamewallet.md`
+//! after receipt. This module never emits that opcode; `flamepayments.md`
 //! names it and explains the difference.
 
 use curve25519_dalek::scalar::Scalar as DalekScalar;

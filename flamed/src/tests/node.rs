@@ -1,15 +1,15 @@
 //! The node, in process, over five blocks and a restart.
 //!
 //! No HTTP here: this is the node itself answering the questions a wallet
-//! asks, with every transaction built by `flamewallet`.
+//! asks, with every transaction built by `flamepayments`.
 
 use curve25519_dalek::ristretto::CompressedRistretto;
 use flamechain::mempool::MempoolError;
 use flamechain::utreexo::UtreexoError;
 use flamechain::Blockchain;
 use flamekd::util::{CHANGE, RECEIVING};
+use flamepayments::InputSpec;
 use flamevm::{Anchor, ClearToken, Predicate, Scalar, Value};
-use flamewallet::InputSpec;
 use tempfile::TempDir;
 
 use super::*;

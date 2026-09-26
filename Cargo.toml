@@ -12,7 +12,7 @@ members = [
     "flamevm",
     "btc-integration",
     "flamechain",
-    "flamewallet",
+    "flamepayments",
     "flamed-rpc",
     "flamed",
 ]

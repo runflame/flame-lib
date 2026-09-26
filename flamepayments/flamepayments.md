@@ -1,9 +1,9 @@
-# flamewallet
+# flamepayments
 
-Keys and transfers for a Flame wallet. The crate does two things: it turns a
-flamekd seed into the addresses and keys a wallet hands out, and it builds,
-signs and packages a transfer. It holds nothing on disk, encrypts nothing, and
-knows nothing about scanning the chain.
+The wallet side of Flame payments: keys and transfers. The crate does two
+things: it turns a flamekd seed into the addresses and keys a wallet hands
+out, and it builds, signs and packages a transfer. It holds nothing on disk,
+encrypts nothing, and knows nothing about scanning the chain.
 
 ## An account
 

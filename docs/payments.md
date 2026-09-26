@@ -11,7 +11,7 @@ for wallets and nodes that interoperate. None of them is a consensus rule; see
 
 ## Status
 
-Proposed; not implemented. Today `flamewallet::build_transfer` takes
+Proposed; not implemented. Today `flamepayments::build_transfer` takes
 caller-chosen blinding factors and emits no note, and `flamed`'s `scan`
 returns a contract's bytes without the entry that follows it. This document
 is the target for both.
@@ -101,7 +101,7 @@ change included, from any node that has kept the chain's history
 The output's predicate is `Predicate::opaque(enc(S))`: the bare public
 spending key, with no Taproot tree behind it. A spend authorizes by signing
 the transaction with `signtx`
-([`flamewallet.md`](../flamewallet/flamewallet.md#an-address-and-a-predicate)).
+([`flamepayments.md`](../flamepayments/flamepayments.md#an-address-and-a-predicate)).
 
 `S` appears on chain; `V` never does. The predicate is `S` itself, not a
 one-time key derived per payment, so a node can index outputs by predicate
@@ -233,7 +233,7 @@ temporary).
 ## Building the transaction
 
 The script extends the transfer in
-[`flamewallet.md`](../flamewallet/flamewallet.md#a-transfer) by one
+[`flamepayments.md`](../flamepayments/flamepayments.md#a-transfer) by one
 `push_str` and one `log` after each `output`:
 
 ```text
@@ -315,7 +315,7 @@ A wallet processes each `Output` of a transaction's log as follows:
 9. Otherwise the output is owned and open. Keep its opening
    `(qty, flv, qty_blinding, flv_blinding)` and its memo.
 
-`flamewallet` makes the check in step 8 by rebuilding the contract with
+`flamepayments` makes the check in step 8 by rebuilding the contract with
 `Token::from_opening` and comparing contract ids, as
 `InputSpec::confidential` does. The two are equivalent: with the predicate
 and anchor fixed, a contract's id covers exactly the two commitment points.
@@ -353,7 +353,7 @@ stays unfound until the wallet looks further.
 
 A spend publishes nothing about the amount it spends. It follows the witness
 path described in
-[`flamewallet.md`](../flamewallet/flamewallet.md#why-inputs-travel-as-witnesses):
+[`flamepayments.md`](../flamepayments/flamepayments.md#why-inputs-travel-as-witnesses):
 
 1. Rebuild the contract with open commitments from the opening:
    `Token::from_opening(qty, flv, qty_blinding, flv_blinding)` inside
