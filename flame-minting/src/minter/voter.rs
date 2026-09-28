@@ -26,7 +26,7 @@ where
         Self { sender, journal }
     }
 
-    pub async fn vote(&self, block: &Block) -> Result<(), VoteError<S::Error, J::Error>> {
+    pub async fn vote(&self, block: Arc<Block>) -> Result<(), VoteError<S::Error, J::Error>> {
         let core = block
             .header
             .core_block

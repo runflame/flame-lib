@@ -622,6 +622,7 @@ struct Transition {
 
 /// Active Flame state. Bitcoin header tracking and fork choice live outside;
 /// callers provide an authenticated core-block identity and selected branch.
+#[derive(Clone)]
 pub struct Blockchain {
     params: ChainParams,
     header: BlockHeader,

@@ -6,3 +6,7 @@ edition = "2024"
 [dependencies]
 btc-integration = { path = "../btc-integration" }
 flamechain = { path = "../flamechain" }
+
+[dev-dependencies]
+flamevm = { path = "../flamevm" }
+tokio = { version = "1.53.1", features = ["macros", "rt"] }

@@ -4,6 +4,10 @@ use flamechain::CoreFlameHeight;
 
 use super::PendingReward;
 
+pub mod in_memory;
+
+pub use in_memory::{InMemoryRewardsStorage, InMemoryRewardsStorageError};
+
 pub trait RewardsStorage {
     type Error;
 

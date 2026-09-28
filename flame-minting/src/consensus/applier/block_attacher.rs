@@ -60,11 +60,11 @@ impl<S: CanonicalStorage, H: ChainAccess> BlockAttacher<'_, S, H> {
             .map_err(BlockAttacherError::Blockchain)?;
 
         self.canonical_storage
-            .commit_state(state.tip(), &state)
+            .commit_state(&state)
             .await
             .map_err(BlockAttacherError::CanonicalStorage)?;
 
-        Ok(block.header)
+        Ok(block.header.clone())
     }
 }
 

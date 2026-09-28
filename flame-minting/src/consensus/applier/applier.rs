@@ -286,7 +286,7 @@ pub enum MintingOutcomeApplierError<C, J, S, H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use btc_integration::{BtcBlockTip, MinterP2wsh};
     use flame_chain_service::{ChangesOutcome, ImportOutcome};
@@ -359,7 +359,7 @@ mod tests {
             unreachable!()
         }
 
-        async fn commit_state(&self, _: BlockHash, _: &Blockchain) -> Result<(), Self::Error> {
+        async fn commit_state(&self, _: &Blockchain) -> Result<(), Self::Error> {
             unreachable!()
         }
     }
@@ -467,7 +467,7 @@ mod tests {
             unreachable!()
         }
 
-        async fn get_block(&self, _: BlockTip) -> Result<Option<Block>, Self::Error> {
+        async fn get_block(&self, _: BlockTip) -> Result<Option<Arc<Block>>, Self::Error> {
             unreachable!()
         }
 
@@ -475,7 +475,7 @@ mod tests {
             unreachable!()
         }
 
-        async fn import_block(&mut self, _: Block) -> Result<ImportOutcome, Self::Error> {
+        async fn import_block(&mut self, _: Arc<Block>) -> Result<ImportOutcome, Self::Error> {
             unreachable!()
         }
 

@@ -1,16 +1,20 @@
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 use flamechain::{Block, BlockHeader, BlockTip, CoreBlockHeader, CoreBlockTip};
+
+pub mod in_memory;
+
+pub use in_memory::{InMemoryChainStorage, InMemoryChainStorageError};
 
 pub trait ChainStorage {
     type Error;
 
-    fn add_block(&self, block: &Block) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn add_block(&self, block: Arc<Block>) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     fn get_block(
         &self,
         tip: BlockTip,
-    ) -> impl Future<Output = Result<Option<Block>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<Arc<Block>>, Self::Error>> + Send;
 
     fn get_core_block_header(
         &self,

@@ -2,6 +2,10 @@ use std::future::Future;
 
 use btc_integration::BtcBlockTip;
 
+pub mod in_memory;
+
+pub use in_memory::{InMemoryCursorStorage, InMemoryCursorStorageError};
+
 pub trait CursorStorage: Send + Sync + 'static {
     type Error: Send + 'static;
 

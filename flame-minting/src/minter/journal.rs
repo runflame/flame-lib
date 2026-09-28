@@ -2,6 +2,10 @@ use std::future::Future;
 
 use btc_integration::{AuthenticatedMintingVote, MintingVoteData};
 
+pub mod in_memory;
+
+pub use in_memory::{InMemoryMinterJournal, InMemoryMinterJournalError};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VoteReservation {
     Reserved,

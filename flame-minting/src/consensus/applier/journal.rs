@@ -4,6 +4,10 @@ use btc_integration::BtcBlockTip;
 
 use crate::consensus::MintingOutcome;
 
+pub mod in_memory;
+
+pub use in_memory::{InMemoryMintingJournal, InMemoryMintingJournalError};
+
 pub trait MintingJournal {
     type Error;
 

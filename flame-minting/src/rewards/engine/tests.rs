@@ -52,18 +52,20 @@ impl TestChainStorage {
 impl ChainStorage for TestChainStorage {
     type Error = &'static str;
 
-    async fn add_block(&self, _: &Block) -> Result<(), Self::Error> {
+    async fn add_block(&self, _: Arc<Block>) -> Result<(), Self::Error> {
         unreachable!()
     }
 
-    async fn get_block(&self, tip: BlockTip) -> Result<Option<Block>, Self::Error> {
+    async fn get_block(&self, tip: BlockTip) -> Result<Option<Arc<Block>>, Self::Error> {
         self.reads.lock().unwrap().push(tip);
         if self.fail {
             return Err("chain storage unavailable");
         }
-        Ok(self.blocks.get(&tip).map(|header| Block {
-            header: header.clone(),
-            transactions: vec![],
+        Ok(self.blocks.get(&tip).map(|header| {
+            Arc::new(Block {
+                header: header.clone(),
+                transactions: vec![],
+            })
         }))
     }
 

@@ -98,7 +98,7 @@ where
             );
             return;
         }
-        if let Err(error) = self.voter.vote(&block).await {
+        if let Err(error) = self.voter.vote(block).await {
             log::error!("failed to vote for target BTC height {target_height}: {error:?}");
         }
     }

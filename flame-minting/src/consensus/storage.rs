@@ -8,6 +8,10 @@ use crate::consensus::{
 use btc_integration::{BtcBlockTip, MinterP2wsh};
 use flamechain::{BlockTip, CoreBlockTip, CoreFlameHeight};
 
+pub mod in_memory_storage;
+
+pub use in_memory_storage::{InMemoryConsensusStorage, InMemoryConsensusStorageError};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MinterAcquisitions {
     pub is_double_signed: bool,

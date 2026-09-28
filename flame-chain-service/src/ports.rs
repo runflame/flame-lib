@@ -1,4 +1,4 @@
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 use flamechain::{Block, BlockHash, BlockTip};
 
@@ -16,7 +16,7 @@ pub trait ChainAccess {
     fn get_block(
         &self,
         tip: BlockTip,
-    ) -> impl Future<Output = Result<Option<Block>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<Arc<Block>>, Self::Error>> + Send;
 
     fn get_chain_path(
         &self,
@@ -26,7 +26,7 @@ pub trait ChainAccess {
 
     fn import_block(
         &mut self,
-        block: Block,
+        block: Arc<Block>,
     ) -> impl Future<Output = Result<ImportOutcome, Self::Error>> + Send;
 
     fn select_tip(
@@ -41,10 +41,10 @@ pub trait CoreBlockSource {
     fn get_core_block(
         &self,
         target_height: u64,
-    ) -> impl Future<Output = Result<Option<Block>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<Arc<Block>>, Self::Error>> + Send;
 
     fn wait_core_block(
         &self,
         height: u64,
-    ) -> impl Future<Output = Result<Option<Block>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<Arc<Block>>, Self::Error>> + Send;
 }

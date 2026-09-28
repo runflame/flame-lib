@@ -197,11 +197,11 @@ impl ConsensusStorage for Storage {
 impl ChainStorage for Storage {
     type Error = &'static str;
 
-    async fn add_block(&self, _: &Block) -> Result<(), Self::Error> {
+    async fn add_block(&self, _: Arc<Block>) -> Result<(), Self::Error> {
         unreachable!()
     }
 
-    async fn get_block(&self, tip: BlockTip) -> Result<Option<Block>, Self::Error> {
+    async fn get_block(&self, tip: BlockTip) -> Result<Option<Arc<Block>>, Self::Error> {
         if self.fail_blocks {
             return Err("chain storage unavailable");
         }
@@ -209,9 +209,11 @@ impl ChainStorage for Storage {
             .blocks
             .get(&tip.hash)
             .filter(|header| header.height == tip.height.as_u64())
-            .map(|header| Block {
-                header: header.clone(),
-                transactions: vec![],
+            .map(|header| {
+                Arc::new(Block {
+                    header: header.clone(),
+                    transactions: vec![],
+                })
             }))
     }
 
@@ -299,7 +301,7 @@ impl CanonicalStorage for Storage {
         unreachable!()
     }
 
-    async fn commit_state(&self, _: BlockHash, _: &Blockchain) -> Result<(), Self::Error> {
+    async fn commit_state(&self, _: &Blockchain) -> Result<(), Self::Error> {
         unreachable!()
     }
 }
