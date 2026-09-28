@@ -20,8 +20,8 @@ chain data in issuance or minter selection. The mechanism is **TBD**. It must
 specify proposer eligibility and selection; Flame issuance schedule and rounding;
 any authorizing Bitcoin proof; maturity and Bitcoin-reorg handling; rewards,
 fees, penalties, and equivocation consequences; and the scarce resource from
-which influence derives. VM flavor `0` identifies Flame but does not define its
-issuance.
+which influence derives. VM flavor `1` (`FLAME_FLAVOR`) identifies Flame but
+does not define its issuance.
 
 ## BFT
 
