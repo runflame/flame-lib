@@ -5,5 +5,5 @@ pub mod journal;
 
 pub use applier::{MintingOutcomeApplier, MintingOutcomeApplierError};
 pub use block_attacher::{BlockAttacher, BlockAttacherError};
-pub use block_detacher::BlockDetacher;
+pub use block_detacher::{BlockDetacher, BlockDetacherError};
 pub use journal::MintingJournal;

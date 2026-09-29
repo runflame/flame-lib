@@ -10,7 +10,7 @@ use crate::consensus::{
     WeightedBlockHeader, WeightedVote,
 };
 
-use super::{BlockAttacher, BlockAttacherError, BlockDetacher, MintingJournal};
+use super::{BlockAttacher, BlockAttacherError, BlockDetacher, BlockDetacherError, MintingJournal};
 
 #[repr(u64)]
 enum ApplyIntent {
@@ -161,9 +161,14 @@ impl<C: ConsensusStorage, H: ChainAccess, J: MintingJournal, S: CanonicalStorage
         path: &ChainPath,
     ) -> Result<Vec<BlockHeader>, MintingOutcomeApplierError<C::Error, J::Error, S::Error, H::Error>>
     {
-        let detacher = BlockDetacher;
+        let detacher = BlockDetacher {
+            canonical_storage: &self.canonical_storage,
+        };
         for &block_tip in &path.detach {
-            detacher.detach_block(block_tip);
+            detacher
+                .detach_block(block_tip)
+                .await
+                .map_err(MintingOutcomeApplierError::BlockDetacher)?;
         }
 
         let attacher = BlockAttacher {
@@ -279,6 +284,7 @@ pub enum MintingOutcomeApplierError<C, J, S, H> {
     CanonicalStorage(S),
     ChainAccess(H),
     BlockAttacher(BlockAttacherError<S, H>),
+    BlockDetacher(BlockDetacherError<S>),
     MissingStateTip,
     MissingConsensusTip,
 }
@@ -290,7 +296,8 @@ mod tests {
 
     use btc_integration::{BtcBlockTip, MinterP2wsh};
     use flame_chain_service::{ChangesOutcome, ImportOutcome};
-    use flamechain::{Block, BlockHash, Blockchain, CoreFlameHeight};
+    use flame_storage::state::canonical::InMemoryCanonicalStorage;
+    use flamechain::{Block, BlockHash, Blockchain, ChainParams, CoreBlockHeader, CoreFlameHeight};
 
     use crate::consensus::{IncludedVote, MinterAcquisitions, MintingProtocolParams};
 
@@ -301,7 +308,7 @@ mod tests {
     fn applier() -> TestApplier {
         MintingOutcomeApplier {
             consensus_storage: Storage,
-            chain: Chain,
+            chain: Chain::default(),
             journal: Journal::default(),
             canonical_storage: Storage,
         }
@@ -458,17 +465,27 @@ mod tests {
         }
     }
 
-    struct Chain;
+    #[derive(Default)]
+    struct Chain {
+        blocks: Vec<Arc<Block>>,
+    }
 
     impl ChainAccess for Chain {
         type Error = &'static str;
 
-        async fn set_as_child(&self, _: BlockTip, _: BlockTip) -> Result<(), Self::Error> {
-            unreachable!()
+        async fn set_as_child(&self, parent: BlockTip, child: BlockTip) -> Result<(), Self::Error> {
+            let block = self.get_block(child).await?.ok_or("missing child")?;
+            assert_eq!(block.header.parent, parent.hash);
+            assert_eq!(child.height.as_u64(), parent.height.as_u64() + 1);
+            Ok(())
         }
 
-        async fn get_block(&self, _: BlockTip) -> Result<Option<Arc<Block>>, Self::Error> {
-            unreachable!()
+        async fn get_block(&self, tip: BlockTip) -> Result<Option<Arc<Block>>, Self::Error> {
+            Ok(self
+                .blocks
+                .iter()
+                .find(|block| block.header.block_tip() == tip)
+                .cloned())
         }
 
         async fn get_chain_path(&self, _: BlockTip, _: BlockTip) -> Result<ChainPath, Self::Error> {
@@ -482,6 +499,82 @@ mod tests {
         async fn select_tip(&mut self, _: BlockHash) -> Result<ChangesOutcome, Self::Error> {
             unreachable!()
         }
+    }
+
+    #[tokio::test]
+    async fn detaches_old_branch_before_attaching_replacement() {
+        let ancestor = Blockchain::new(ChainParams::default()).unwrap();
+        let mut old_state = ancestor.clone();
+        let old_first = old_state.build_block([1; 32], Vec::new()).unwrap();
+        old_state.connect(&old_first).unwrap();
+        let old_second = old_state.build_block([2; 32], Vec::new()).unwrap();
+        old_state.connect(&old_second).unwrap();
+
+        let mut new_state = ancestor;
+        let new_first = new_state.build_block([3; 32], Vec::new()).unwrap();
+        new_state.connect(&new_first).unwrap();
+        let mut new_second = new_state.build_block([4; 32], Vec::new()).unwrap();
+        new_second.header.core_block = Some(CoreBlockHeader {
+            height: 1.into(),
+            target_btc_height: 100,
+        });
+        new_state.connect(&new_second).unwrap();
+        let path = ChainPath {
+            detach: vec![old_second.header.block_tip(), old_first.header.block_tip()],
+            attach: vec![new_first.header.block_tip(), new_second.header.block_tip()],
+        };
+        let expected_headers = vec![new_second.header.clone()];
+        let storage = InMemoryCanonicalStorage::new();
+        storage.commit_state(&old_state).await.unwrap();
+        let applier = MintingOutcomeApplier {
+            consensus_storage: Storage,
+            chain: Chain {
+                blocks: vec![Arc::new(new_first), Arc::new(new_second)],
+            },
+            journal: Journal::default(),
+            canonical_storage: storage.clone(),
+        };
+
+        let attached = applier.apply_chain_path(&path).await.unwrap();
+        assert_eq!(attached, expected_headers);
+        let (_, actual) = storage.get_state().await.unwrap().unwrap();
+        assert_eq!(actual.tip(), new_state.tip());
+        assert_eq!(actual.height(), new_state.height());
+        assert_eq!(actual.state_commitment(), new_state.state_commitment());
+    }
+
+    #[tokio::test]
+    async fn detach_error_stops_chain_path_before_attachment() {
+        let mut state = Blockchain::new(ChainParams::default()).unwrap();
+        let block = state.build_block([1; 32], Vec::new()).unwrap();
+        state.connect(&block).unwrap();
+        let storage = InMemoryCanonicalStorage::new();
+        storage.commit_state(&state).await.unwrap();
+        let applier = MintingOutcomeApplier {
+            consensus_storage: Storage,
+            chain: Chain::default(),
+            journal: Journal::default(),
+            canonical_storage: storage.clone(),
+        };
+        let wrong_tip = BlockTip {
+            hash: BlockHash::new([0; 32]),
+            height: state.height().into(),
+        };
+        let result = applier
+            .apply_chain_path(&ChainPath {
+                detach: vec![wrong_tip, block.header.block_tip()],
+                attach: vec![wrong_tip],
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(MintingOutcomeApplierError::BlockDetacher(
+                BlockDetacherError::TipMismatch { .. }
+            ))
+        ));
+        let (_, actual) = storage.get_state().await.unwrap().unwrap();
+        assert_eq!(actual.tip(), state.tip());
+        assert_eq!(actual.state_commitment(), state.state_commitment());
     }
 
     #[tokio::test]
