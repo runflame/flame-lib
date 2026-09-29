@@ -8,7 +8,7 @@ use crate::constraints::Commitment;
 use crate::{Predicate, Scalar, String};
 
 /// Canonical flavor of the native Flame token.
-pub const FLAME_FLAVOR: Scalar = Scalar::ZERO;
+pub const FLAME_FLAVOR: Scalar = Scalar::ONE;
 
 // ── Token ────────────────────────────────────────────────────────
 

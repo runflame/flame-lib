@@ -15,7 +15,7 @@ members = [
     "flamevm",
     "btc-integration",
     "flamechain",
-    "flamewallet",
+    "flamepayments",
     "flamewallet-ffi",
     "flamed-rpc",
     "flamed",

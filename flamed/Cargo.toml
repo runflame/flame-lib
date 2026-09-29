@@ -29,7 +29,7 @@ thiserror = "2"
 tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = "0.8"
 
-# `flamechain` on purpose appears twice, the `flamewallet` pattern. The
+# `flamechain` on purpose appears twice, the `flamepayments` pattern. The
 # dependency above, without features, is the one every consumer of this
 # library gets. This one adds `devnet` for the crate's own tests, which need
 # `devnet_genesis`: with resolver 2 a dev-dependency's features do not reach
@@ -38,7 +38,7 @@ toml = "0.8"
 [dev-dependencies]
 curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility", "rand_core"] }
 flamechain = { path = "../flamechain", features = ["devnet"] }
-flamewallet = { path = "../flamewallet" }
+flamepayments = { path = "../flamepayments" }
 merlin = "3"
 tempfile = "3"
 

@@ -1,9 +1,9 @@
-# flamewallet
+# flamepayments
 
-Keys and transfers for a Flame wallet. The crate does two things: it turns a
-flamekd seed into the addresses and keys a wallet hands out, and it builds,
-signs and packages a transfer. It holds nothing on disk, encrypts nothing, and
-knows nothing about scanning the chain.
+The wallet side of Flame payments: keys and transfers. The crate does two
+things: it turns a flamekd seed into the addresses and keys a wallet hands
+out, and it builds, signs and packages a transfer. It holds nothing on disk,
+encrypts nothing, and knows nothing about scanning the chain.
 
 ## An account
 
@@ -127,6 +127,6 @@ splitting into many outputs should expect the proving ceiling first.
 
 ## What is not here
 
-Notes, encryption, and the two-entry payload. Address discovery and chain
-scanning. Anything on disk, and any command line. Issued tokens. Each belongs
-to a later phase.
+Notes and their encryption, which [Confidential payments](../docs/payments.md)
+specifies. Address discovery and chain scanning. Anything on disk, and any
+command line. Issued tokens. Each belongs to a later phase.

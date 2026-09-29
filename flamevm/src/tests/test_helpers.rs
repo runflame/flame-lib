@@ -801,6 +801,14 @@ pub(crate) fn make_open_token(
 //   └────────────────────────────────────────────────────────┘
 //   ↓  stack: empty → finish_call accepts.
 
+/// The native flavor as the `u64` the NM specs take, so the fee tests
+/// follow `FLAME_FLAVOR` instead of hardcoding its value.
+pub(crate) fn native_flavor() -> u64 {
+    FLAME_FLAVOR
+        .to_u64()
+        .expect("the native flavor fits in u64")
+}
+
 /// Description of one input to the test harness.
 #[derive(Clone)]
 pub(crate) struct NMInputSpec {

@@ -28,7 +28,7 @@ pub(crate) fn limits() -> Limits {
 /// Deterministic blinding factors for output `index`. A transcript rather
 /// than a random source, so a failing test replays exactly.
 pub(crate) fn test_blinding(index: u64) -> (DalekScalar, DalekScalar) {
-    let mut transcript = merlin::Transcript::new(b"flamewallet.test.blinding");
+    let mut transcript = merlin::Transcript::new(b"flamepayments.test.blinding");
     transcript.append_u64(b"output", index);
     let mut qty = [0u8; 64];
     transcript.challenge_bytes(b"qty", &mut qty);

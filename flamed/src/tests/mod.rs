@@ -1,6 +1,6 @@
 //! Fixtures shared by the two round trips.
 //!
-//! Every transaction here is built by `flamewallet` and nothing else. No
+//! Every transaction here is built by `flamepayments` and nothing else. No
 //! test assembles a script, so both round trips exercise the same client
 //! the wallet will be.
 
@@ -13,8 +13,8 @@ use curve25519_dalek::scalar::Scalar as DalekScalar;
 use flamechain::utreexo::Proof;
 use flamechain::{BlockTx, SPARKS_PER_FLAME};
 use flamekd::{util, Network};
+use flamepayments::{block_tx, build_transfer, sign, Account, InputSpec, Opening, OutputSpec};
 use flamevm::{Contract, ContractID, Limits, TxEntry, TxHeader, TxLog, FLAME_FLAVOR};
-use flamewallet::{block_tx, build_transfer, sign, Account, InputSpec, Opening, OutputSpec};
 use merlin::Transcript;
 
 use crate::cells::contract_from_bytes;
