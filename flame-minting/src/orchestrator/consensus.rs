@@ -102,6 +102,14 @@ where
         }
     }
 
+    pub(super) fn engine(&self) -> &E {
+        &self.processor.engine
+    }
+
+    pub(super) fn cursor_storage(&self) -> &K {
+        &self.processor.cursor_storage
+    }
+
     pub async fn startup<I: ConsensusIndexer>(
         &self,
         indexer: Arc<I>,

@@ -7,9 +7,11 @@ use btc_integration::{
     identity::storage::{InMemorySecretStorage, MissingSecret},
 };
 use flame_chain_service::{ChainAccess, CoreBlockSource};
-use flame_storage::ChainStorage;
+use flame_storage::{
+    ChainStorage, chain::InMemoryChainStorage, state::canonical::InMemoryCanonicalStorage,
+};
 
-use crate::consensus::ConsensusStorage;
+use crate::consensus::{ConsensusStorage, storage::InMemoryConsensusStorage};
 use crate::core_block_notifier::CoreBlockNotifier;
 use crate::minter::manager::{
     ShutdownError as MinterShutdownError, StartupError as MinterStartupError,
@@ -25,6 +27,7 @@ mod defaults;
 pub mod ports;
 pub mod sender;
 
+use cursor_storage::in_memory::InMemoryCursorStorage;
 pub use defaults::DefaultConsensusLoop;
 use sender::{MintingSender, SenderStartupError};
 
@@ -103,6 +106,22 @@ where
             chain_manager,
             core_block_notifier,
         })
+    }
+
+    pub fn get_consensus_storage(&self) -> &InMemoryConsensusStorage {
+        &self.consensus_manager.engine().consensus_storage
+    }
+
+    pub fn get_chain_storage(&self) -> &InMemoryChainStorage {
+        &self.consensus_manager.engine().chain_storage
+    }
+
+    pub fn get_canonical_storage(&self) -> &InMemoryCanonicalStorage {
+        &self.consensus_manager.engine().canonical_storage
+    }
+
+    pub fn get_cursor_storage(&self) -> &InMemoryCursorStorage {
+        self.consensus_manager.cursor_storage()
     }
 }
 
