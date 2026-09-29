@@ -32,6 +32,24 @@ pub struct BitcoinConnection<S> {
     sender: Arc<Sender<Core31RpcApi, S>>,
 }
 
+impl<S: SecretStorage> BitcoinConnection<VoteSigner<Core31RpcApi, S>> {
+    pub async fn votes(
+        config: BitcoinConfig,
+        identity: MinterIdentity,
+        secret_storage: S,
+    ) -> Result<Self, BitcoinConnectionError> {
+        validate_identity(&identity)?;
+        let bitcoin = Arc::new(BitcoinFacade::new(Arc::new(Core31RpcApi::new(
+            &config.node_rpc_url,
+            config.auth.clone(),
+        )?)));
+        let wallet = prepare_wallet(&config, &identity).await?;
+        let signer = Arc::new(VoteSigner::new(secret_storage, wallet));
+        let sender = Arc::new(Sender::new(Arc::clone(&bitcoin), signer, identity));
+        Ok(Self { bitcoin, sender })
+    }
+}
+
 impl<S: SecretStorage> BitcoinConnection<TestSigner<Core31RpcApi, S>> {
     /// Connects to regtest with a sender supporting votes and acquisitions.
     pub async fn regtest(

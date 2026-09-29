@@ -2,6 +2,7 @@
 
 mod bitcoin_connection;
 pub mod btc;
+pub mod identity;
 pub mod protocol;
 
 pub use prelude::*;
@@ -15,6 +16,7 @@ pub mod prelude {
         BtcBlockTip, BtcFundedTransaction, BtcFundingInput, BtcTransactionWithPrevouts,
     };
     pub use crate::btc::transaction_builder::BitcoinTransactionBuilder;
+    pub use crate::identity::{IdentityConfig, IdentityError, IdentityManager};
     pub use crate::protocol::{
         Acquisition, AcquisitionData, AuthenticatedMintingVote, HistoryChange, HistoryError,
         HistoryUpdate, IndexedBlock, MinterIdentity, MinterIdentityError, MinterP2wsh,

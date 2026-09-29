@@ -25,6 +25,15 @@ pub trait SecretStorage: Send + Sync {
     async fn get_secret_key(&self) -> Result<SecretKey, Self::Error>;
 }
 
+#[async_trait]
+impl<S: SecretStorage + ?Sized> SecretStorage for Arc<S> {
+    type Error = S::Error;
+
+    async fn get_secret_key(&self) -> Result<SecretKey, Self::Error> {
+        self.as_ref().get_secret_key().await
+    }
+}
+
 struct SecretKeyAccess<S> {
     storage: S,
 }
