@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use curve25519_dalek::ristretto::CompressedRistretto;
 use flamekd::{Language, Mnemonic, ReceivingAddress};
-use flamewallet::Account;
+use flamepayments::Account;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use zeroize::Zeroizing;

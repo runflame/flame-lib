@@ -55,13 +55,13 @@ impl FlameError {
     }
 }
 
-impl From<flamewallet::KeyError> for FlameError {
-    fn from(error: flamewallet::KeyError) -> FlameError {
+impl From<flamepayments::KeyError> for FlameError {
+    fn from(error: flamepayments::KeyError) -> FlameError {
         match error {
-            flamewallet::KeyError::HardenedIndex(_) => FlameError::InvalidKeyPath {
+            flamepayments::KeyError::HardenedIndex(_) => FlameError::InvalidKeyPath {
                 reason: error.to_string(),
             },
-            flamewallet::KeyError::Kd(_) => FlameError::InvalidSeed {
+            flamepayments::KeyError::Kd(_) => FlameError::InvalidSeed {
                 reason: error.to_string(),
             },
         }

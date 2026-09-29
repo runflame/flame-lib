@@ -1,9 +1,9 @@
 [package]
 name = "flamewallet-ffi"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 license = "Apache-2.0"
-description = "A flat, bytes-and-strings facade over flamewallet for native bindings"
+description = "A flat, bytes-and-strings facade over flamepayments for native bindings"
 readme = "flamewallet-ffi.md"
 
 [lib]
@@ -26,13 +26,13 @@ curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility",
 flamechain = { path = "../flamechain" }
 flamekd = { path = "../flamekd" }
 flamevm = { path = "../flamevm" }
-flamewallet = { path = "../flamewallet" }
+flamepayments = { path = "../flamepayments" }
 rand = "0.8"
 thiserror = "2"
 uniffi = "0.32"
 zeroize = "1"
 
-# The `flamewallet` pattern: `devnet` for the round trip only. With resolver
+# The `flamepayments` pattern: `devnet` for the round trip only. With resolver
 # 2 a dev-dependency's features do not reach the normal build, so no binary
 # built from this crate carries `devnet_genesis`.
 [dev-dependencies]

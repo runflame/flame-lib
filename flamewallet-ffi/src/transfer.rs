@@ -2,7 +2,7 @@
 
 use curve25519_dalek::scalar::Scalar as DalekScalar;
 use flamevm::{Limits, TxEntry, TxHeader};
-use flamewallet::{Account, InputSpec, OutputSpec};
+use flamepayments::{Account, InputSpec, OutputSpec};
 use rand::rngs::OsRng;
 use zeroize::Zeroizing;
 
@@ -82,8 +82,8 @@ pub struct Transfer {
 }
 
 impl Opening {
-    pub(crate) fn to_wallet(&self) -> Result<flamewallet::Opening, FlameError> {
-        Ok(flamewallet::Opening {
+    pub(crate) fn to_wallet(&self) -> Result<flamepayments::Opening, FlameError> {
+        Ok(flamepayments::Opening {
             qty: self.qty,
             flv: convert::flavor(Some(&self.flavor))?,
             qty_blinding: convert::blinding(&self.qty_blinding)?,
@@ -91,7 +91,7 @@ impl Opening {
         })
     }
 
-    fn from_wallet(opening: &flamewallet::Opening) -> Opening {
+    fn from_wallet(opening: &flamepayments::Opening) -> Opening {
         Opening {
             qty: opening.qty,
             flavor: opening.flv.to_bytes().to_vec(),
@@ -145,11 +145,11 @@ pub(crate) fn build(account: &Account, request: TransferRequest) -> Result<Trans
         locktime: request.locktime,
     };
     let limits = Limits { gas: request.gas };
-    let unsigned = flamewallet::build_transfer(&specs, &outputs, request.fee, header, limits)
+    let unsigned = flamepayments::build_transfer(&specs, &outputs, request.fee, header, limits)
         .map_err(FlameError::transfer)?;
 
     // `mix` and `output` keep request order, so the log's outputs pair with
-    // `outputs` by position; `flamewallet`'s round trip pins that.
+    // `outputs` by position; `flamepayments`'s round trip pins that.
     let created = unsigned
         .log()
         .entries()
@@ -171,8 +171,8 @@ pub(crate) fn build(account: &Account, request: TransferRequest) -> Result<Trans
     let txid = unsigned.log().txid();
 
     let proofs = specs.iter().map(|spec| spec.proof().clone()).collect();
-    let signed = flamewallet::sign(unsigned, &keys).map_err(FlameError::transfer)?;
-    let block_tx = flamewallet::block_tx(signed, limits, proofs)
+    let signed = flamepayments::sign(unsigned, &keys).map_err(FlameError::transfer)?;
+    let block_tx = flamepayments::block_tx(signed, limits, proofs)
         .to_bytes()
         .map_err(FlameError::transfer)?;
 

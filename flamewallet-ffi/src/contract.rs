@@ -1,7 +1,7 @@
 //! Reading a contract an indexer served.
 
 use flamevm::Value;
-use flamewallet::InputSpec;
+use flamepayments::InputSpec;
 
 use crate::error::FlameError;
 use crate::transfer::Opening;
@@ -65,7 +65,7 @@ pub fn opening_matches(contract: Vec<u8>, opening: Opening) -> Result<bool, Flam
     let key = curve25519_dalek::scalar::Scalar::ZERO;
     match InputSpec::confidential(&contract, &opening, placeholder, key) {
         Ok(_) => Ok(true),
-        Err(flamewallet::BuilderError::OpeningMismatch) => Ok(false),
+        Err(flamepayments::BuilderError::OpeningMismatch) => Ok(false),
         Err(error) => Err(FlameError::transfer(error)),
     }
 }

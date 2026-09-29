@@ -1,4 +1,4 @@
-//! A flat facade over `flamewallet` for Swift, Kotlin and Node.
+//! A flat facade over `flamepayments` for Swift, Kotlin and Node.
 //!
 //! Everything that crosses this boundary is bytes, strings, integers and
 //! plain records; no curve type, contract or proof does. The one exception

@@ -3,6 +3,7 @@ name = "musig"
 version = "0.1.0"
 authors = ["Cathie Yun <cathieyun@gmail.com>", "Oleg Andreev <oleganza@gmail.com>"]
 edition = "2018"
+license = "Apache-2.0"
 
 [dependencies]
 thiserror = "1"

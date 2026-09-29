@@ -1,7 +1,7 @@
 [workspace]
-# 3 for its Rust-version-aware resolution: `Cargo.lock` is not committed, so
-# every fresh checkout resolves anew, and resolver 2 would pick dependencies
-# (uniffi's `cargo-platform`, for one) newer than the pinned toolchain builds.
+# 3 for its Rust-version-aware resolution: whenever `Cargo.lock` is updated,
+# resolver 2 would pick dependencies (uniffi's `cargo-platform`, for one)
+# newer than the pinned toolchain builds. Releases build `--locked`.
 resolver = "3"
 
 members = [
@@ -17,6 +17,7 @@ members = [
     "flamechain",
     "flamepayments",
     "flamewallet-ffi",
+    "flamewallet-wasm",
     "flamed-rpc",
     "flamed",
 ]
@@ -26,7 +27,10 @@ members = [
 # flamevm's `merlin` / `merlinwrite` / `merlinread` opcodes can pass
 # user-supplied `&[u8]` labels through to the transcript directly.
 [patch.crates-io]
-merlin = { git = "https://github.com/runflame/merlin" }
+#
+# Pinned to a commit, like the bulletproofs fork: an unpinned git source is
+# whatever its default branch holds at resolve time.
+merlin = { git = "https://github.com/runflame/merlin", rev = "fcc51efb4fc0b47e1a004cfe3aef65f47c5612f0" }
 
 # What the native bindings ship: `release` plus whole-program LTO and one
 # codegen unit, which is where proving time on a phone is won, and symbols

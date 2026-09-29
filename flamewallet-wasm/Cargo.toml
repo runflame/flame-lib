@@ -1,0 +1,32 @@
+[package]
+name = "flamewallet-wasm"
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+description = "flamewallet-ffi for JavaScript: the web, Electron renderers, extensions and Node"
+readme = "flamewallet-wasm.md"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+flamewallet-ffi = { path = "../flamewallet-ffi" }
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+
+# `rand`'s OS source is `getrandom`, which on wasm32-unknown-unknown has no
+# source at all until `js` routes it to `crypto.getRandomValues`. Every
+# blinding factor and mnemonic comes from there, so this line is what makes
+# the build possible, not an optimisation.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+# The fixture writer for the Node tests: a devnet chain to prove membership
+# against. Dev-only, so no shipped build carries `devnet_genesis`.
+[dev-dependencies]
+curve25519-dalek = "4"
+flamechain = { path = "../flamechain", features = ["devnet"] }
+flamevm = { path = "../flamevm" }

@@ -28,29 +28,36 @@ triple() {
 command -v cargo-ndk >/dev/null || { echo "cargo-ndk missing: cargo install cargo-ndk" >&2; exit 1; }
 
 cd "$ROOT"
+# Per-target flags, because cargo reads `CARGO_TARGET_<triple>_RUSTFLAGS`
+# only while `RUSTFLAGS` is unset: extra flags for every target — CI's path
+# remapping — come in through FLAME_RUSTFLAGS and are folded in here.
+unset RUSTFLAGS
 TARGET_ARGS=()
 for abi in "${ABIS[@]}"; do
-  rustup target add "$(triple "$abi")"
+  target="$(triple "$abi")"
+  rustup target add "$target"
   TARGET_ARGS+=(-t "$abi")
+  flags="${FLAME_RUSTFLAGS:-}"
+  # Android 15 devices may use 16 KB pages, and Google Play requires 64-bit
+  # libraries aligned for them; NDK r27 still defaults to 4 KB.
+  case "$abi" in
+    arm64-v8a | x86_64) flags="$flags -C link-arg=-Wl,-z,max-page-size=16384" ;;
+  esac
+  export "CARGO_TARGET_$(echo "$target" | tr '[:lower:]-' '[:upper:]_')_RUSTFLAGS=$flags"
 done
-
-# Android 15 devices may use 16 KB pages, and Google Play requires 64-bit
-# libraries aligned for them; NDK r27 still defaults to 4 KB.
-export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384"
-export CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384"
 
 # Only what this script writes: OUT may be an app's own source directory.
 rm -rf "$OUT/jniLibs" "$OUT/kotlin"
 cargo ndk --platform "$API" "${TARGET_ARGS[@]}" -o "$OUT/jniLibs" \
-  build -p flamewallet-ffi --profile "$PROFILE"
+  build --locked -p flamewallet-ffi --lib --profile "$PROFILE"
 
 # Bindings come from an unstripped host build, as for Apple.
-cargo build -p flamewallet-ffi
+cargo build --locked -p flamewallet-ffi --lib
 case "$(uname -s)" in
   Darwin) HOST_LIB="target/debug/libflamewallet_ffi.dylib" ;;
   *) HOST_LIB="target/debug/libflamewallet_ffi.so" ;;
 esac
-cargo run -q -p flamewallet-ffi --features cli --bin uniffi-bindgen -- \
+cargo run --locked -q -p flamewallet-ffi --features cli --bin uniffi-bindgen -- \
   generate --library "$HOST_LIB" --language kotlin --no-format --out-dir "$OUT/kotlin"
 
 echo "jniLibs: $OUT/jniLibs"

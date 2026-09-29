@@ -2,5 +2,6 @@
 *.db
 *.DS_Store
 target
-Cargo.lock
 .idea
+# CycloneDX SBOMs: release artifacts, generated in CI
+*.cdx.json

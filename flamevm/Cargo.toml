@@ -19,7 +19,9 @@ thiserror = "2.0.18"
 
 [dependencies.bulletproofs]
 git = "https://github.com/runflame/bulletproofs"
-branch = "develop"
+# The head of `develop` when it was pinned; a branch would let every fresh
+# resolve pull whatever lands there next.
+rev = "a2f52a0d1a502128f0064b7dace607c83ff7ff73"
 features = ["yoloproofs"]
 
 [dependencies.spacesuit]

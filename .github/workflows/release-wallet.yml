@@ -1,0 +1,282 @@
+name: Release wallet bindings
+
+# Builds, tests and publishes the wallet bindings as one set:
+#   @runflame/wallet-rn   — iOS xcframework + Android .so, UniFFI Swift/Kotlin
+#   @runflame/wallet-wasm — WebAssembly + JS glue + TypeScript
+# Both are built from one commit, `--locked`, and published two ways:
+#
+# - Every push to main publishes a release candidate of each package under
+#   the `next` dist-tag. Each takes its crate's version from Cargo.lock —
+#   flamewallet-ffi for native, flamewallet-wasm for wasm, which need not
+#   agree — plus `-rc.N`, N one past the highest candidate of that version on
+#   npm (scripts/next-rc.mjs). A version npm already has as a release is
+#   refused: bump the crate first. Pushes are published one at a time, so two
+#   merges never compute the same N. No GitHub release.
+# - A tag `flamewallet-v<version>` publishes that version of both packages;
+#   its X.Y.Z must equal the one in both Cargo.tomls. A plain version goes
+#   out as `latest`, a `-rc.N` one under `next`, and either gets a GitHub
+#   release.
+#
+# Running the workflow by hand builds and tests everything and publishes
+# nothing.
+#
+# Publishing is npm trusted publishing: no token is stored anywhere. The
+# job's GitHub OIDC token, which names this repository, this workflow file
+# and the `npm` environment, is exchanged with npm for a one-time right to
+# publish, and npm attaches provenance on its own. Each package's settings on
+# npmjs.com must list this trusted publisher — repository
+# runflame/flame-lib, workflow release-wallet.yml, environment npm — and a
+# package has to exist before it can, so each one's first version is
+# published by hand. The `npm` environment should admit only `main` and
+# `flamewallet-v*` tags as deployment refs; a required reviewer there would
+# hold every merge's candidate until someone approves it.
+
+on:
+  push:
+    branches: [main]
+    tags: ['flamewallet-v*']
+  workflow_dispatch:
+
+# One run per ref at a time, never cancelled: a candidate's number is read
+# from npm at the start of a run and taken at its end, so a second merge to
+# main waits for the first to publish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Tool versions, pinned: each is part of what makes a build reproducible.
+  CARGO_DENY_VERSION: 0.20.2
+  CARGO_CYCLONEDX_VERSION: 0.5.9
+  NPM_VERSION: 11.6.1
+  CARGO_NDK_VERSION: 4.1.2
+  NDK_VERSION: r27c
+
+jobs:
+  version:
+    name: Versions to publish
+    runs-on: ubuntu-latest
+    outputs:
+      native: ${{ steps.pick.outputs.native }}
+      wasm: ${{ steps.pick.outputs.wasm }}
+      dist-tag: ${{ steps.pick.outputs.dist-tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - id: pick
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            DIST_TAG="$(flamewallet-ffi/scripts/release-version.sh "$GITHUB_REF_NAME")"
+            NATIVE="${GITHUB_REF_NAME#flamewallet-v}"
+            WASM="$NATIVE"
+          elif [ "$GITHUB_EVENT_NAME" = push ]; then
+            DIST_TAG=next
+            NATIVE="$(node flamewallet-ffi/scripts/next-rc.mjs flamewallet-ffi @runflame/wallet-rn)"
+            WASM="$(node flamewallet-ffi/scripts/next-rc.mjs flamewallet-wasm @runflame/wallet-wasm)"
+          else
+            # A manual run publishes nothing; its packages carry the crates' versions.
+            DIST_TAG=none
+            NATIVE="$(sed -n 's/^version = "\(.*\)"$/\1/p' flamewallet-ffi/Cargo.toml | head -1)"
+            WASM="$(sed -n 's/^version = "\(.*\)"$/\1/p' flamewallet-wasm/Cargo.toml | head -1)"
+          fi
+          echo "native $NATIVE, wasm $WASM, dist-tag $DIST_TAG"
+          {
+            echo "native=$NATIVE"
+            echo "wasm=$WASM"
+            echo "dist-tag=$DIST_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Rust tests and dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --workspace
+      # The graphs that ship, not the workspace: benches and the node never
+      # reach a package, and deny.toml excludes dev-dependencies.
+      - name: cargo deny
+        run: |
+          cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
+          for crate in flamewallet-ffi flamewallet-wasm; do
+            cargo deny --locked --manifest-path "$crate/Cargo.toml" check
+          done
+
+  apple:
+    name: Apple (xcframework)
+    needs: [version, test]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: |
+          export FLAME_RUSTFLAGS="$(.github/remap-flags.sh)"
+          flamewallet-ffi/scripts/build-apple.sh
+      - name: Swift host tests
+        run: cd flamewallet-ffi/host-tests/swift && swift test
+      # Tarred: upload-artifact drops the symlinks a macOS framework is made of.
+      - run: tar -C target/flamewallet-ffi -cf apple.tar apple
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple
+          path: apple.tar
+          if-no-files-found: error
+
+  android:
+    name: Android (jniLibs)
+    needs: [version, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+      - run: cargo install cargo-ndk --locked --version "$CARGO_NDK_VERSION"
+      - name: Build
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          export FLAME_RUSTFLAGS="$(.github/remap-flags.sh)"
+          flamewallet-ffi/scripts/build-android.sh
+      - run: tar -C target/flamewallet-ffi -cf android.tar android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: android.tar
+          if-no-files-found: error
+
+  wasm:
+    name: WebAssembly
+    needs: [version, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: wasm-bindgen at the version Cargo.lock pins
+        run: |
+          VERSION="$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')"
+          cargo install wasm-bindgen-cli --locked --version "$VERSION"
+      - name: Build
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.wasm }}
+        run: |
+          export FLAME_RUSTFLAGS="$(.github/remap-flags.sh)"
+          flamewallet-wasm/scripts/build.sh
+      - name: Node tests
+        run: node --test flamewallet-wasm/test/*.test.mjs
+      - run: tar -C target/wallet-wasm -cf wasm.tar pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm
+          path: wasm.tar
+          if-no-files-found: error
+
+  package:
+    name: Pack, checksum, SBOM
+    needs: [version, apple, android, wasm]
+    # xcodebuild re-assembles the iOS-only xcframework for the npm package.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Unpack the builds
+        run: |
+          mkdir -p target/flamewallet-ffi target/wallet-wasm
+          tar -C target/flamewallet-ffi -xf artifacts/apple/apple.tar
+          tar -C target/flamewallet-ffi -xf artifacts/android/android.tar
+          tar -C target/wallet-wasm -xf artifacts/wasm/wasm.tar
+      - run: flamewallet-ffi/scripts/package-native.sh
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.native }}
+      - name: SBOM of the Rust dependency graph each package links
+        run: |
+          cargo install cargo-cyclonedx --locked --version "$CARGO_CYCLONEDX_VERSION"
+          for crate in flamewallet-ffi flamewallet-wasm; do
+            cargo cyclonedx --manifest-path "$crate/Cargo.toml" --format json --target all
+          done
+          cp flamewallet-ffi/flamewallet-ffi.cdx.json target/wallet-rn/pkg/sbom.cdx.json
+          cp flamewallet-wasm/flamewallet-wasm.cdx.json target/wallet-wasm/pkg/sbom.cdx.json
+      - name: npm pack
+        env:
+          NATIVE: ${{ needs.version.outputs.native }}
+          WASM: ${{ needs.version.outputs.wasm }}
+        run: |
+          mkdir dist
+          for entry in "target/wallet-rn/pkg $NATIVE" "target/wallet-wasm/pkg $WASM"; do
+            read -r pkg expected <<<"$entry"
+            PACKED="$(node -p "require('./$pkg/package.json').version")"
+            if [ "$PACKED" != "$expected" ]; then
+              echo "$pkg is $PACKED, expected $expected" >&2
+              exit 1
+            fi
+            (cd "$pkg" && npm pack --pack-destination "$GITHUB_WORKSPACE/dist")
+          done
+          cp target/wallet-rn/pkg/sbom.cdx.json dist/wallet-rn.cdx.json
+          cp target/wallet-wasm/pkg/sbom.cdx.json dist/wallet-wasm.cdx.json
+          (cd dist && shasum -a 256 * > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          if-no-files-found: error
+
+  publish:
+    name: Publish to npm and GitHub
+    needs: [version, package]
+    # Pushes only — a tag or main. A run by hand publishes nothing, even one
+    # started on a tag ref.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: write      # the GitHub release
+      id-token: write      # trusted publishing, npm provenance, the attestation
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - run: cd dist && shasum -a 256 -c SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*.tgz'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      # Trusted publishing needs npm 11.5.1 or later; pinned rather than
+      # whatever the runner's Node happens to bundle.
+      - run: npm install --global "npm@$NPM_VERSION"
+      - name: npm publish
+        env:
+          DIST_TAG: ${{ needs.version.outputs.dist-tag }}
+        run: |
+          for tarball in dist/*.tgz; do
+            npm publish "$tarball" --access public --tag "$DIST_TAG"
+          done
+      - name: GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIST_TAG: ${{ needs.version.outputs.dist-tag }}
+        run: |
+          PRERELEASE=""
+          [ "$DIST_TAG" = next ] && PRERELEASE="--prerelease"
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --verify-tag --generate-notes $PRERELEASE

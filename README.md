@@ -17,6 +17,7 @@ Flame is a blockchain network that turns Bitcoin into digital cash: confidential
 - [Payment Keys and Transfers](flamepayments/flamepayments.md)
 - [Confidential Payments](docs/payments.md)
 - [Native Wallet Bindings](flamewallet-ffi/flamewallet-ffi.md)
+- [WebAssembly Wallet Bindings](flamewallet-wasm/flamewallet-wasm.md)
 - [The Node and its JSON-RPC](flamed/flamed.md)
 - [Actor Storage Specification](docs/storage.md)
 - [Blockchain State Machine](docs/blockchain.md)
