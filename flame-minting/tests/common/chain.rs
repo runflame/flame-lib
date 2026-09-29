@@ -13,6 +13,21 @@ pub struct TestChain {
     blocks: Arc<RwLock<Vec<Arc<Block>>>>,
 }
 
+impl TestChain {
+    async fn parent_tip(&self, tip: BlockTip) -> Result<BlockTip> {
+        let height = tip
+            .height
+            .as_u64()
+            .checked_sub(1)
+            .context("path has no common ancestor")?;
+        let block = self.get_block(tip).await?.context("missing path block")?;
+        Ok(BlockTip {
+            hash: block.header.parent,
+            height: height.into(),
+        })
+    }
+}
+
 impl ChainAccess for TestChain {
     type Error = bitcoind::anyhow::Error;
 
@@ -40,28 +55,20 @@ impl ChainAccess for TestChain {
     }
 
     async fn get_chain_path(&self, from: BlockTip, to: BlockTip) -> Result<ChainPath> {
-        let mut attach = Vec::new();
-        let mut current = to;
-        while current != from {
-            ensure!(
-                current.height > from.height,
-                "test chain only supports extensions"
-            );
-            let block = self
-                .get_block(current)
-                .await?
-                .context("missing path block")?;
-            attach.push(current);
-            current = BlockTip {
-                hash: block.header.parent,
-                height: (block.header.height - 1).into(),
-            };
+        let mut path = ChainPath::default();
+        let mut from = from;
+        let mut to = to;
+        while from != to {
+            if from.height >= to.height {
+                path.detach.push(from);
+                from = self.parent_tip(from).await?;
+            } else {
+                path.attach.push(to);
+                to = self.parent_tip(to).await?;
+            }
         }
-        attach.reverse();
-        Ok(ChainPath {
-            detach: Vec::new(),
-            attach,
-        })
+        path.attach.reverse();
+        Ok(path)
     }
 
     async fn import_block(&mut self, block: Arc<Block>) -> Result<ImportOutcome> {

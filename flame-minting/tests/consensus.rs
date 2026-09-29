@@ -10,6 +10,43 @@ use flamechain::{BlockTip, CoreBlockTip};
 use common::TestContext;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn stronger_late_vote_reorganizes_to_competing_core_block() -> Result<()> {
+    TestContext::run(|mut ctx| async move {
+        let second_minter = ctx.create_minter().await?;
+        ctx.bitcoin.mine_block().await?;
+        ctx.send_acquisition(Amount::from_sat(20_000)).await?;
+        second_minter
+            .send_acquisition(Amount::from_sat(80_000))
+            .await?;
+        let acquisition_tip = ctx.bitcoin.mine_block().await?;
+        let target_btc_height = u32::try_from(acquisition_tip.height + 1)?;
+        let [first, second] = ctx
+            .flame_chain
+            .create_competing_core_blocks(target_btc_height)
+            .await?;
+        let canonical = ctx.orchestrator.get_canonical_storage();
+
+        ctx.start().await?;
+        ctx.bitcoin
+            .wait_for_vote(&MintingVoteData::V1 {
+                flame_block_height: 1,
+                flame_block_hash: first.header.id(),
+            })
+            .await?;
+        let first_confirmation = ctx.bitcoin.mine_block().await?;
+        ctx.wait_for_processing(first_confirmation).await?;
+        assert_eq!(canonical.get_tip().await?, Some(first.header.block_tip()));
+
+        second_minter.send_vote(1, second.header.id()).await?;
+        let second_confirmation = ctx.bitcoin.mine_block().await?;
+        ctx.wait_for_processing(second_confirmation).await?;
+        assert_eq!(canonical.get_tip().await?, Some(second.header.block_tip()));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn acquisition_and_automatic_vote_select_and_apply_core_block() -> Result<()> {
     TestContext::run(|mut ctx| async move {
         let acquisition_txid = ctx.send_acquisition(Amount::from_sat(20_000)).await?;

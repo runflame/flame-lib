@@ -13,6 +13,7 @@ use flamechain::{Block, Blockchain, ChainParams, CoreBlockHeader};
 
 use super::TestChain;
 
+#[derive(Clone)]
 pub struct FlameChain {
     chain: TestChain,
     chain_storage: InMemoryChainStorage,
@@ -48,12 +49,33 @@ impl FlameChain {
     }
 
     pub async fn create_core_block(&mut self, target_btc_height: u32) -> Result<Arc<Block>> {
+        self.create_core_block_with_hash(target_btc_height, [0; 32])
+            .await
+    }
+
+    pub async fn create_competing_core_blocks(
+        &mut self,
+        target_btc_height: u32,
+    ) -> Result<[Arc<Block>; 2]> {
+        let mut alternative = self.clone();
+        let first = self.create_core_block(target_btc_height).await?;
+        let second = alternative
+            .create_core_block_with_hash(target_btc_height, [1; 32])
+            .await?;
+        Ok([first, second])
+    }
+
+    async fn create_core_block_with_hash(
+        &mut self,
+        target_btc_height: u32,
+        core_block_hash: [u8; 32],
+    ) -> Result<Arc<Block>> {
         let core_height = self
             .core_height
             .checked_add(1)
             .context("core height overflow")?;
         let mut next_state = self.state.clone();
-        let mut block = next_state.build_block([0; 32], Vec::new())?;
+        let mut block = next_state.build_block(core_block_hash, Vec::new())?;
         block.header.core_block = Some(CoreBlockHeader {
             height: core_height.into(),
             target_btc_height,

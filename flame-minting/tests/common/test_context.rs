@@ -2,8 +2,8 @@ use std::{future::Future, panic::resume_unwind, sync::Arc, time::Duration};
 
 use bitcoind::anyhow::{Context, Result, anyhow};
 use btc_integration::{
-    BitcoinConnection, BtcBlockTip, IdentityConfig, MinterIdentity, ProtocolIndexerV31,
-    TestAcquisitionConfig, TestSender, btc::rpc::Core31RpcApi,
+    BitcoinConnection, BtcBlockTip, IdentityConfig, IdentityManager, MinterIdentity,
+    ProtocolIndexerV31, TestAcquisitionConfig, TestSender, btc::rpc::Core31RpcApi,
     identity::storage::InMemorySecretStorage,
 };
 use corepc_client::bitcoin::{Address, Amount, Network, Txid};
@@ -107,6 +107,32 @@ impl TestContext {
 
     pub async fn send_acquisition(&self, amount: Amount) -> Result<Txid> {
         Ok(self.acquisition_sender.send_acquisition(amount).await?)
+    }
+
+    pub async fn create_minter(
+        &self,
+    ) -> Result<Arc<TestSender<Core31RpcApi, Arc<InMemorySecretStorage>>>> {
+        let config = self.orchestrator.identity_manager.config().clone();
+        let manager =
+            IdentityManager::new(Arc::new(InMemorySecretStorage::default()), config.clone());
+        let identity = manager.startup().await?.clone();
+        let connection = BitcoinConnection::regtest(
+            self.bitcoin.config(),
+            identity.clone(),
+            manager.secret_storage().clone(),
+            TestAcquisitionConfig {
+                wallet_rpc_url: self.bitcoin.node.rpc_url_with_wallet("default"),
+                access_predicate: config.access_predicate,
+                validator_pubkey: config.validator_pubkey,
+            },
+        )
+        .await?;
+        let address = Address::p2wsh(identity.witness_script(), Network::Regtest);
+        self.bitcoin
+            .node
+            .client
+            .send_to_address(&address, Amount::from_sat(50_000))?;
+        Ok(connection.get_sender())
     }
 
     pub async fn start(&self) -> Result<()> {
