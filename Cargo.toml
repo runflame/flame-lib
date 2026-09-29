@@ -1,5 +1,8 @@
 [workspace]
-resolver = "2"
+# 3 for its Rust-version-aware resolution: `Cargo.lock` is not committed, so
+# every fresh checkout resolves anew, and resolver 2 would pick dependencies
+# (uniffi's `cargo-platform`, for one) newer than the pinned toolchain builds.
+resolver = "3"
 
 members = [
     "cells",
@@ -13,6 +16,7 @@ members = [
     "btc-integration",
     "flamechain",
     "flamewallet",
+    "flamewallet-ffi",
     "flamed-rpc",
     "flamed",
 ]
@@ -23,3 +27,12 @@ members = [
 # user-supplied `&[u8]` labels through to the transcript directly.
 [patch.crates-io]
 merlin = { git = "https://github.com/runflame/merlin" }
+
+# What the native bindings ship: `release` plus whole-program LTO and one
+# codegen unit, which is where proving time on a phone is won, and symbols
+# stripped. A profile of its own, so building `flamed` stays as it was.
+[profile.release-ffi]
+inherits = "release"
+lto = true
+codegen-units = 1
+strip = true

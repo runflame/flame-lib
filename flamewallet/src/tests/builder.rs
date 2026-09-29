@@ -22,7 +22,7 @@ const SEED: [u8; 64] = [0x21; 64];
 const GENESIS_QTY: u64 = 12_345_678_901;
 
 fn account() -> Account {
-    Account::from_seed(&SEED, Network::Testnet).expect("account from seed")
+    Account::from_seed(&SEED, Network::Testnet, 0).expect("account from seed")
 }
 
 /// A cleartext contract under `RECEIVING/n`, shaped like a devnet genesis

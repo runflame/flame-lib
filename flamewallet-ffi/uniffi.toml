@@ -1,0 +1,8 @@
+[bindings.swift]
+module_name = "FlameWallet"
+ffi_module_name = "FlameWalletFFI"
+ffi_module_filename = "FlameWalletFFI"
+
+[bindings.kotlin]
+package_name = "com.flame.wallet"
+cdylib_name = "flamewallet_ffi"

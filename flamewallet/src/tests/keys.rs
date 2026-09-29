@@ -18,7 +18,7 @@ const PAIRS: [(u32, u32); 5] = [
 ];
 
 fn account() -> Account {
-    Account::from_seed(&SEED, Network::Testnet).expect("account from seed")
+    Account::from_seed(&SEED, Network::Testnet, 0).expect("account from seed")
 }
 
 #[test]
@@ -155,7 +155,7 @@ fn a_hardened_branch_or_index_is_refused() {
 /// branch order or flamekd's derivation changes, this is what notices.
 #[test]
 fn pinned_testnet_address() {
-    let account = Account::from_seed(&[0x11; 64], Network::Testnet).expect("account from seed");
+    let account = Account::from_seed(&[0x11; 64], Network::Testnet, 0).expect("account from seed");
     let address = account
         .address_at(util::RECEIVING, 0)
         .expect("first receiving address");
