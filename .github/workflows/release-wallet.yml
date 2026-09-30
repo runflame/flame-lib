@@ -266,8 +266,10 @@ jobs:
       - name: npm publish
         env:
           DIST_TAG: ${{ needs.version.outputs.dist-tag }}
+        # `./` makes npm read a local file: `dist/x.tgz` alone parses as the
+        # GitHub repository `dist/x.tgz`.
         run: |
-          for tarball in dist/*.tgz; do
+          for tarball in ./dist/*.tgz; do
             npm publish "$tarball" --access public --tag "$DIST_TAG"
           done
       - name: GitHub release
