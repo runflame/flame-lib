@@ -110,7 +110,7 @@ In Flame transactions, all quantities and flavors are hidden by default using cr
 
 ![img/09-confidentiality.png](Confidentiality)
 
-*Confidential payments hide the sender’s balance from the recipient.*
+*Amounts remain hidden from the network; the merchant sees its payment, but no balances or amounts before or after it.*
 
 The graph of transactions remains public to efficiently prevent double-spending. Common graph-hiding designs retain spent identifiers to prevent double-spending, alongside commitments to outputs. This creates state that grows with transaction history, while techniques for limiting that growth affect the security model and smart contract capabilities. Flame makes a different trade-off: explicitly tracking unspent outputs allows storage to be dramatically optimized and smart contracts to operate freely on hidden values.
 
