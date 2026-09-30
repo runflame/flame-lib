@@ -8,7 +8,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{MinterJournal, ports::VoteSender, voter::Voter, worker::MinterWorker};
+use super::{MinterJournal, VotePolicy, ports::VoteSender, voter::Voter, worker::MinterWorker};
 
 #[derive(Debug)]
 pub enum StartupError {
@@ -32,6 +32,7 @@ impl Drop for MinterWorkerHandle {
 }
 
 pub struct MinterManager<C, S, J> {
+    vote_policy: VotePolicy,
     core_block_source: Arc<C>,
     voter: Arc<Voter<S, J>>,
     worker: Mutex<Option<MinterWorkerHandle>>,
@@ -46,8 +47,14 @@ where
     J: MinterJournal<TransactionId = S::TransactionId> + Send + Sync + 'static,
     J::Error: Debug + Send,
 {
-    pub fn new(core_block_source: Arc<C>, sender: Arc<S>, journal: Arc<J>) -> Self {
+    pub fn new(
+        core_block_source: Arc<C>,
+        sender: Arc<S>,
+        journal: Arc<J>,
+        vote_policy: VotePolicy,
+    ) -> Self {
         Self {
+            vote_policy,
             core_block_source,
             voter: Arc::new(Voter::new(sender, journal)),
             worker: Mutex::new(None),
@@ -58,6 +65,10 @@ where
         &self,
         subscription: watch::Receiver<Option<BtcBlockTip>>,
     ) -> Result<(), StartupError> {
+        if self.vote_policy == VotePolicy::Manual {
+            return Ok(());
+        }
+
         let mut slot = self.worker.lock().await;
         if slot.is_some() {
             return Err(StartupError::AlreadyRunning);
@@ -87,3 +98,6 @@ where
         result
     }
 }
+
+#[cfg(test)]
+mod tests;

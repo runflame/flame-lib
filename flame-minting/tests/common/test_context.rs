@@ -10,7 +10,7 @@ use corepc_client::bitcoin::{Address, Amount, Network, Txid};
 use flame_chain_service::InMemoryChain;
 use flame_minting::{
     MintingOrchestrator,
-    minter::{MinterManager, journal::in_memory::InMemoryMinterJournal},
+    minter::{MinterManager, VotePolicy, journal::in_memory::InMemoryMinterJournal},
     orchestrator::{DefaultConsensusLoop, cursor_storage::CursorStorage, sender::MintingSender},
 };
 use flamevm::Predicate;
@@ -52,6 +52,7 @@ impl TestContext {
             bitcoin.config(),
             initial_cursor,
             identity_config.clone(),
+            VotePolicy::Auto,
         )?);
         let identity = orchestrator.identity_manager.startup().await?.clone();
         let connection = BitcoinConnection::regtest(
