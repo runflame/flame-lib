@@ -8,7 +8,7 @@ In 2009, Bitcoin [BTC] presented a novel approach to peer-to-peer cryptographic 
 
 Over time, the cryptocurrency market took a distinctive shape: as of 2026, approximately two-thirds of total cryptocurrency market capitalization is attributed to Bitcoin [CMC] as a value asset, and one-third to altcoins. In terms of functionality, Bitcoin is inferior to the majority of the altcoins: it has high confirmation latency, low bandwidth, limited programmability and no on-chain privacy. Yet, the majority of the market value is allocated to this *valuable asset*, while only a third is allocated to *functionality* for payments and trading.
 
-![img/01-fragmentation.png](Fragmentation)
+![Fragmentation](img/01-fragmentation.png)
 
 *Fragmentation of assets and functionality.*
 
@@ -24,25 +24,25 @@ Flame uses a proof-of-burn mechanism for solving the double-spending problem, se
 
 Proof-of-burn schemes were first sketched by dacoinminster and Iain Stewart [PoB]; Slimcoin [SM] then implemented a variant of proof-of-burn using *its own* coins, raising concerns similar to those of a proof-of-stake system. Flame is the first attempt to implement a consensus protocol based on continuous burning of bitcoins.
 
-![img/02-chain.png](Chain)
+![Chain](img/02-chain.png)
 
 *Flame chain with proof-of-burn weights equal to amounts of burned bitcoins.*
 
 As in a proof-of-work network, it is possible that two or more Flame blocks at the same height are endorsed by proof-of-burn. In that case, nodes choose the chain with higher cumulative proof, but retain the alternative branches in case they become stronger in the future.
 
-![img/03-fork.png](Fork)
+![Fork](img/03-fork.png)
 
 *Choosing the chain with the most weight.*
 
 The weight of each Flame block is determined by the weights of its *endorsements*, which are defined by the amount of bitcoin burned. Delayed endorsements, where Flame block N is endorsed at Bitcoin block N + k, are exponentially discounted to mitigate attempts to fork the chain at a later date. Delays are nonetheless allowed to enable Flame to survive Bitcoin chain reorganizations.
 
-![img/04-delays.png](Delays)
+![Delays](img/04-delays.png)
 
 *Delayed Flame blocks get exponentially discounted weight.*
 
 The total weight of the chain is computed as the sum of binary logarithms of individual block weights. This measures sustained support rather than total expenditure of bitcoins: over a fixed number of blocks, a given total effective burn produces the greatest chain weight when distributed evenly. Concentrating expenditure in one block is therefore less effective than supporting successive blocks.
 
-![img/05-concentration.png](Concentration)
+![Concentration](img/05-concentration.png)
 
 *Concentrating weight in the last block becomes exponentially more expensive.*
 
@@ -78,13 +78,13 @@ Tokens are created via *programmatic issuance*: each token *flavor* is securely 
 
 Tokens are transferred through inputs and outputs. Each output specifies a new destination for the funds, and each input identifies an output from a previous transaction and unlocks its value. The input is said to spend the earlier transaction’s output.
 
-![img/06-flow.png](Flow)
+![Flow](img/06-flow.png)
 
 *Value flow from inputs to outputs in external transactions.*
 
 Unspent outputs are called *contracts*. Contracts protect their *payloads* (tokens and data) with a *predicate* using a variant of the Taproot scheme [TR]. Predicates can be used directly as public keys to verify the transaction signature, but may contain a more sophisticated set of conditions: they can pack multiple public keys for a multi-signature policy or arbitrarily complex programs. When the contract conditions are satisfied, the contract is destroyed and its contents are available to the transaction for subsequent use.
 
-![img/07-objcap.png](ObjCap)
+![ObjCap](img/07-objcap.png)
 
 *Contracts implement the object capability model by guarding payloads with predicates.*
 
@@ -96,7 +96,7 @@ Contracts are most suitable for executing private *few-party* agreements: nodes 
 
 To interact with actors, external transactions produce *messages* in addition to outputs. Messages accept the same linear types as contract payloads. Messages are FlameVM values that get processed by an actor’s code in *internal transactions*. Messages are processed asynchronously: the external transaction is included in the block regardless of the result of the internal transaction.
 
-![img/08-actors.png](Actors)
+![Actors](img/08-actors.png)
 
 *Actors receive messages from external transactions.*
 
@@ -108,7 +108,7 @@ To keep track of resource usage within all kinds of transactions, FlameVM assign
 
 In Flame transactions, all quantities and flavors are hidden by default using cryptographic commitments. Contracts may also keep arbitrary numeric data hidden. At the moment of issuance, an asset type must be public because the flavor is tied to the issuance program, but the quantity could remain hidden.
 
-![img/09-confidentiality.png](Confidentiality)
+![Confidentiality](img/09-confidentiality.png)
 
 *Amounts remain hidden from the network; the merchant sees its payment, but no balances or amounts before or after it.*
 
@@ -118,7 +118,7 @@ Non-trivial contracts can keep their parameters, such as prices, expiration time
 
 The programmable constraint system, pioneered in Interstellar’s ZkVM and available within external transactions, is based on Bulletproofs [BP], Ristretto [RT] and Merlin [MR]. FlameVM provides types for arithmetic and logical expressions on hidden values that become part of a single arithmetic circuit subject to a single zero-knowledge proof. Every secret value starts as a Pedersen commitment [PC] and becomes part of one or more linear expressions. These expressions are combined into Boolean constraints, which together form the dynamically constructed constraint system.
 
-![img/10-constraints.png](Constraints)
+![Constraints](img/10-constraints.png)
 
 *Lifecycle of arithmetic expressions and logical constraints with hidden variables.*
 
@@ -130,7 +130,7 @@ Flame, like Bitcoin, replicates validation across nodes rather than dividing the
 
 Balances held in contracts are represented by unspent transaction outputs (UTXOs). The set of UTXOs is in turn compressed using the Utreexo protocol proposed by Thaddeus Dryja [Utreexo]. Utreexo allows nodes to keep only the roots of perfect Merkle trees and lets users keep track of their own UTXOs within such a “forest”. Every input in an external transaction provides a Merkle proof of inclusion in the Utreexo accumulator that acts simultaneously as a proof and as the missing data needed to update the structure for the next block. Utreexo fully externalizes the cost of storing private data to users.
 
-![img/11-utreexo.png](Utreexo)
+![Utreexo](img/11-utreexo.png)
 
 *Utreexo compresses the storage of all unspent outputs into a short list of Merkle roots.*
 
@@ -163,7 +163,7 @@ Note that minters use BFT pre-agreement as a method to effectively utilize their
 
 Low-latency payment confirmation is possible using BFT pre-agreement. Minters continuously synchronize their sets of transactions and timestamp them as intermediate blocks (*iblocks*). By the time a Flame block needs to be produced, most transactions have been processed and the latest iblock can be endorsed via proof-of-burn. Pre-agreement may be used to provide payment assurance without waiting for the next Bitcoin block.
 
-![img/12-iblocks.png](iblocks)
+![iblocks](img/12-iblocks.png)
 
 *Intermediate blocks allow low-latency confirmation for low-risk payments.*
 
