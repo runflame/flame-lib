@@ -1,5 +1,7 @@
 # Flame: decentralized electronic cash with confidentiality and smart contracts
 
+Oleg Andreev (oleg@safely.app)
+
 **Abstract.** Flame is an electronic cash network based on Bitcoin. Flame introduces decentralized proof-of-burn consensus with a unified architecture that combines confidentiality and a powerful programming environment. The network continuously burns bitcoins as a means to timestamp blocks of transactions. As an incentive, the network issues new units of *flames*.
 
 ## 1. Introduction
