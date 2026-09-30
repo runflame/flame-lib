@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use bitcoind::anyhow::{Context, Result};
-use flame_chain_service::ChainAccess;
+use flame_chain_service::{ChainAccess, InMemoryChain};
 use flame_minting::consensus::{
     ConsensusStorage, WeightedBlockHeader, storage::InMemoryConsensusStorage,
 };
@@ -11,11 +11,9 @@ use flame_storage::{
 };
 use flamechain::{Block, Blockchain, ChainParams, CoreBlockHeader};
 
-use super::TestChain;
-
 #[derive(Clone)]
 pub struct FlameChain {
-    chain: TestChain,
+    chain: InMemoryChain,
     chain_storage: InMemoryChainStorage,
     consensus_storage: InMemoryConsensusStorage,
     state: Blockchain,
@@ -24,7 +22,7 @@ pub struct FlameChain {
 
 impl FlameChain {
     pub async fn new(
-        chain: TestChain,
+        chain: InMemoryChain,
         chain_storage: InMemoryChainStorage,
         consensus_storage: InMemoryConsensusStorage,
         canonical_storage: &InMemoryCanonicalStorage,

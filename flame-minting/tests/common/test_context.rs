@@ -7,6 +7,7 @@ use btc_integration::{
     identity::storage::InMemorySecretStorage,
 };
 use corepc_client::bitcoin::{Address, Amount, Network, Txid};
+use flame_chain_service::InMemoryChain;
 use flame_minting::{
     MintingOrchestrator,
     minter::{MinterManager, journal::in_memory::InMemoryMinterJournal},
@@ -15,14 +16,14 @@ use flame_minting::{
 use flamevm::Predicate;
 use tokio::time::{sleep, timeout};
 
-use super::{BitcoinRegtest, FlameChain, TestChain, UnusedNotifier};
+use super::{BitcoinRegtest, FlameChain, UnusedNotifier};
 
 type TestOrchestrator = MintingOrchestrator<
     Arc<MintingSender>,
     Arc<ProtocolIndexerV31>,
-    DefaultConsensusLoop<TestChain>,
-    MinterManager<TestChain, MintingSender, InMemoryMinterJournal>,
-    TestChain,
+    DefaultConsensusLoop<InMemoryChain>,
+    MinterManager<InMemoryChain, MintingSender, InMemoryMinterJournal>,
+    InMemoryChain,
     UnusedNotifier,
 >;
 
@@ -38,7 +39,7 @@ impl TestContext {
     async fn new() -> Result<Self> {
         let bitcoin = Arc::new(BitcoinRegtest::new()?);
         let initial_cursor = bitcoin.mine_block().await?;
-        let chain = TestChain::default();
+        let chain = InMemoryChain::default();
         let identity_config = IdentityConfig {
             flame_predicate: Predicate::opaque(Predicate::unspendable_key()),
             access_predicate: Predicate::opaque(Predicate::unspendable_key()),

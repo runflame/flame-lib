@@ -1,3 +1,7 @@
+pub mod in_memory;
+
+pub use in_memory::{InMemoryChain, InMemoryChainError};
+
 use flame_storage::ChainStorage;
 use flamechain::{BlockHash, BlockTip, FlameBlockValidator};
 
