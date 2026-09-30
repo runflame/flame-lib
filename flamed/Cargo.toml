@@ -39,7 +39,7 @@ toml = "0.8"
 curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility", "rand_core"] }
 flamechain = { path = "../flamechain", features = ["devnet"] }
 flamepayments = { path = "../flamepayments" }
-merlin = "3"
+rand = "0.8"
 tempfile = "3"
 
 [features]

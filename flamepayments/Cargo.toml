@@ -7,13 +7,16 @@ description = "Wallet-side Flame payments: keys and confidential transfers"
 readme = "flamepayments.md"
 
 [dependencies]
+aes-siv = { version = "0.8", default-features = false, features = ["alloc", "zeroize"] }
 curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility", "rand_core"] }
 flamechain = { path = "../flamechain" }
 flamekd = { path = "../flamekd" }
 flamevm = { path = "../flamevm" }
 merlin = "3"
 musig = { path = "../musig" }
+rand_core = { version = "0.6", default-features = false }
 thiserror = "2"
+zeroize = { version = "1", features = ["derive"] }
 
 # `flamechain` on purpose appears twice. The dependency above, without
 # features, serves `block_tx`. This one adds `devnet` for the round-trip
@@ -24,3 +27,4 @@ thiserror = "2"
 [dev-dependencies]
 flamechain = { path = "../flamechain", features = ["devnet"] }
 hex = "0.3"
+rand = "0.8"

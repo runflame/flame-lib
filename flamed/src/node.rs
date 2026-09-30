@@ -16,7 +16,9 @@ use flamechain::{
     utreexo_hasher, Block, BlockHash, BlockTx, Blockchain, ChainError, ChainParams, ContractLeaf,
     ExecutionKind, Mempool, MempoolError, MempoolPolicy, RebaseReport,
 };
-use flamed_rpc::{ContractEnvelope, ContractId, PredicatePoint, ScanEntry, SpentAt, TxId};
+use flamed_rpc::{
+    ContractEnvelope, ContractId, NoteEnvelope, PredicatePoint, ScanEntry, SpentAt, TxId,
+};
 use flamevm::{CellError, ContractID, TxEntry, TxID, TxLog, VMError};
 use sha2::{Digest, Sha256};
 
@@ -141,6 +143,7 @@ impl Node {
                     txid: GENESIS_TXID,
                     predicate: contract.predicate.to_point().to_bytes(),
                     contract: record.bytes.0.clone(),
+                    note: None,
                 },
             );
         }
@@ -237,7 +240,7 @@ impl Node {
     }
 
     /// Every contract created at `since_height` or later under one of these
-    /// predicates, in height order.
+    /// predicates, in height order, each with the note that followed it.
     pub fn scan(&self, predicates: &[[u8; 32]], since_height: u64) -> Vec<ScanEntry> {
         let unique: BTreeSet<[u8; 32]> = predicates.iter().copied().collect();
         let mut hits = Vec::new();
@@ -255,6 +258,7 @@ impl Node {
                     txid: TxId(record.txid.0),
                     predicate: PredicatePoint(record.predicate),
                     bytes: ContractEnvelope(record.contract.clone()),
+                    note: record.note.clone().map(NoteEnvelope),
                     spent: self.outputs.spend_of(id).map(|spend| SpentAt {
                         height: spend.height,
                         txid: TxId(spend.txid.0),
@@ -528,8 +532,11 @@ fn connect_block(
         let txid = log.txid();
         // 3. In log order, not inputs then outputs: a contract created and
         //    spent inside one block has to end up spent, and two passes
-        //    would leave it unspent and spent at once.
-        for entry in log.entries() {
+        //    would leave it unspent and spent at once. An output keeps the
+        //    entry after it when that entry is `Data`: the output's note,
+        //    kept byte for byte and never parsed here.
+        let entries = log.entries();
+        for (index, entry) in entries.iter().enumerate() {
             match entry {
                 TxEntry::Input(id) => {
                     utxos.remove(id);
@@ -545,6 +552,10 @@ fn connect_block(
                             txid,
                             predicate: contract.predicate.to_point().to_bytes(),
                             contract: contract_bytes(contract)?,
+                            note: match entries.get(index + 1) {
+                                Some(TxEntry::Data(note)) => Some(note.clone()),
+                                _ => None,
+                            },
                         },
                     );
                 }

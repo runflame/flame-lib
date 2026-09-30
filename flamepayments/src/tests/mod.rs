@@ -2,15 +2,19 @@
 
 mod builder;
 mod keys;
+mod note;
 mod roundtrip;
 
-use curve25519_dalek::scalar::Scalar as DalekScalar;
+use flamekd::ReceivingAddress;
 use flamevm::{
-    CellEncode, Contract, ContractID, ExternalTx, Limits, Predicate, TxEntry, TxHeader, TxLog,
-    FLAME_FLAVOR,
+    CellEncode, Contract, ContractID, ExternalTx, Limits, TxEntry, TxHeader, TxLog, FLAME_FLAVOR,
 };
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
-use crate::builder::{Opening, OutputSpec};
+use crate::builder::OutputSpec;
+use crate::keys::Account;
+use crate::note::{open_note, outputs_with_notes, ReceivedNote};
 
 /// The header every test transaction uses.
 pub(crate) fn header() -> TxHeader {
@@ -25,40 +29,57 @@ pub(crate) fn limits() -> Limits {
     Limits { gas: 10_000_000 }
 }
 
-/// Deterministic blinding factors for output `index`. A transcript rather
-/// than a random source, so a failing test replays exactly.
-pub(crate) fn test_blinding(index: u64) -> (DalekScalar, DalekScalar) {
-    let mut transcript = merlin::Transcript::new(b"flamepayments.test.blinding");
-    transcript.append_u64(b"output", index);
-    let mut qty = [0u8; 64];
-    transcript.challenge_bytes(b"qty", &mut qty);
-    let mut flv = [0u8; 64];
-    transcript.challenge_bytes(b"flv", &mut flv);
-    (
-        DalekScalar::from_bytes_mod_order_wide(&qty),
-        DalekScalar::from_bytes_mod_order_wide(&flv),
-    )
+/// The generator a test draws every `r` from. Seeded, so a failing test
+/// replays exactly; one per test, threaded through every transfer it builds,
+/// because a transfer rebuilt from a re-seeded generator would reuse `r`.
+pub(crate) fn rng(seed: u64) -> StdRng {
+    StdRng::seed_from_u64(seed)
 }
 
-/// A native-flavor output of `qty` sparks under `predicate`, together with
-/// the opening its recipient needs in order to spend it.
-pub(crate) fn native_output(predicate: Predicate, qty: u64, index: u64) -> (OutputSpec, Opening) {
-    let (qty_blinding, flv_blinding) = test_blinding(index);
-    (
-        OutputSpec {
-            predicate,
-            qty,
-            flv: FLAME_FLAVOR,
-            qty_blinding,
-            flv_blinding,
-        },
-        Opening {
-            qty,
-            flv: FLAME_FLAVOR,
-            qty_blinding,
-            flv_blinding,
-        },
+/// A native-flavor output of `qty` sparks to `address`, with no memo.
+pub(crate) fn native_output(address: ReceivingAddress, qty: u64) -> OutputSpec {
+    OutputSpec {
+        address,
+        qty,
+        flv: FLAME_FLAVOR,
+        memo: Vec::new(),
+    }
+}
+
+/// The one output a log created under `address`'s predicate, with its note.
+/// A transfer sorts its outputs, so an output is found by what it pays,
+/// never by its position.
+pub(crate) fn output_to<'a>(
+    log: &'a TxLog,
+    address: &ReceivingAddress,
+) -> (&'a Contract, Option<&'a [u8]>) {
+    let point = address.spending_key().compress();
+    let mut found = outputs_with_notes(log)
+        .into_iter()
+        .filter(|(contract, _)| contract.predicate.to_point() == point);
+    let output = found.next().expect("an output pays the address");
+    assert!(found.next().is_none(), "one output pays the address");
+    output
+}
+
+/// The output a log paid to `m/…/branch/n`, opened the way its recipient
+/// opens it: from the note that follows it.
+pub(crate) fn receive(
+    log: &TxLog,
+    account: &Account,
+    branch: u32,
+    n: u32,
+) -> (Contract, ReceivedNote) {
+    let address = account.address_at(branch, n).expect("address");
+    let (contract, note) = output_to(log, &address);
+    let received = open_note(
+        contract,
+        note,
+        &address,
+        &account.viewing_key_at(branch, n).expect("viewing key"),
     )
+    .expect("the recipient opens its note");
+    (contract.clone(), received)
 }
 
 /// Encode, decode and verify — the verifier's view of a built transaction,

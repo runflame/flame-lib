@@ -29,6 +29,8 @@ base64_newtype! {
     ContractEnvelope;
     /// A block transaction, as `BlockTx::to_bytes` gives it.
     BlockTxEnvelope;
+    /// An output's note: the `Data` entry after it, byte for byte.
+    NoteEnvelope;
 }
 
 /// The chain's current tip.
@@ -115,6 +117,10 @@ pub struct ScanEntry {
     pub predicate: PredicatePoint,
     /// Its bytes, as published.
     pub bytes: ContractEnvelope,
+    /// The `Data` entry right after it in its log, if any: the note a
+    /// confidential output's recipient opens. Absent when none followed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<NoteEnvelope>,
     /// Absent while the contract is unspent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spent: Option<SpentAt>,

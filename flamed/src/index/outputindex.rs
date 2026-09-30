@@ -15,6 +15,10 @@ pub struct OutputRecord {
     pub predicate: [u8; 32],
     /// The contract itself, as a `CellEnvelope`.
     pub contract: Vec<u8>,
+    /// The entry right after the contract's `Output` in its log, if that
+    /// entry is `Data`, byte for byte: the output's note, which this node
+    /// never parses.
+    pub note: Option<Vec<u8>>,
 }
 
 /// What became of a contract.
