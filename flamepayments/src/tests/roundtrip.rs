@@ -20,7 +20,7 @@ const ALLOCATION: u64 = 1_000 * FLAME;
 const FEE: u64 = 1_000;
 
 fn account(seed: &[u8; 64]) -> Account {
-    Account::from_seed(seed, Network::Testnet).expect("account from seed")
+    Account::from_seed(seed, Network::Testnet, 0).expect("account from seed")
 }
 
 /// Runs `proof` through `catchup` and checks the result against the chain's

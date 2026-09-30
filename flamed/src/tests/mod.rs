@@ -38,7 +38,7 @@ pub(crate) const FLAME: u64 = SPARKS_PER_FLAME;
 pub(crate) const FEE: u64 = 1_000;
 
 pub(crate) fn account(seed: &[u8; 64]) -> Account {
-    Account::from_seed(seed, Network::Testnet).expect("a 64-byte seed derives an account")
+    Account::from_seed(seed, Network::Testnet, 0).expect("a 64-byte seed derives an account")
 }
 
 pub(crate) fn header() -> TxHeader {

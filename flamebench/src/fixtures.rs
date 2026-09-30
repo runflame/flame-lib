@@ -200,7 +200,7 @@ pub fn account(index: u8) -> Account {
         RECIPIENT => &RECIPIENT_SEED,
         other => panic!("no fixture account {other}"),
     };
-    Account::from_seed(seed, Network::Testnet).expect("a fixture seed derives an account")
+    Account::from_seed(seed, Network::Testnet, 0).expect("a fixture seed derives an account")
 }
 
 /// One confidential input as its owner holds it: the published contract,

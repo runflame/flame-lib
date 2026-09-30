@@ -1,0 +1,39 @@
+[package]
+name = "flamewallet-ffi"
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+description = "A flat, bytes-and-strings facade over flamepayments for native bindings"
+readme = "flamewallet-ffi.md"
+
+[lib]
+name = "flamewallet_ffi"
+# `lib` for the Node addon and the tests, `staticlib` for the Apple
+# xcframework, `cdylib` for Android and for bindgen's `--library` mode.
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+# Only the bindings generator needs this; the library never does.
+cli = ["uniffi/cli"]
+
+[dependencies]
+curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility", "rand_core"] }
+flamechain = { path = "../flamechain" }
+flamekd = { path = "../flamekd" }
+flamevm = { path = "../flamevm" }
+flamepayments = { path = "../flamepayments" }
+rand = "0.8"
+thiserror = "2"
+uniffi = "0.32"
+zeroize = "1"
+
+# The `flamepayments` pattern: `devnet` for the round trip only. With resolver
+# 2 a dev-dependency's features do not reach the normal build, so no binary
+# built from this crate carries `devnet_genesis`.
+[dev-dependencies]
+flamechain = { path = "../flamechain", features = ["devnet"] }

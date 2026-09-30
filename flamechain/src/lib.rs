@@ -1,6 +1,7 @@
 use std::fmt;
 
 pub mod block;
+pub mod codec;
 pub mod mempool;
 pub mod storage;
 pub mod utreexo;

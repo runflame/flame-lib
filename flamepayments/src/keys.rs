@@ -35,8 +35,17 @@ pub struct Account {
 }
 
 impl Account {
-    /// The node at `m/35263'/network'/0'` from a 64-byte seed.
-    pub fn from_seed(seed: &[u8; 64], network: Network) -> Result<Account, KeyError> {
+    /// The node at `m/35263'/network'/0'` from a 64-byte seed, with
+    /// `next_index` receiving addresses already issued. The seed holds the
+    /// keys, not how many addresses were handed out, so a reopened wallet
+    /// passes back the counter it stored; a new one passes 0. Refuses a
+    /// hardened index — no address at or past it can ever be issued.
+    pub fn from_seed(
+        seed: &[u8; 64],
+        network: Network,
+        next_index: u32,
+    ) -> Result<Account, KeyError> {
+        let next_index = normal(next_index)?;
         let network_index = match network {
             Network::Mainnet => util::MAINNET,
             Network::Testnet => util::TESTNET,
@@ -48,7 +57,7 @@ impl Account {
         Ok(Account {
             account,
             network,
-            next_index: 0,
+            next_index,
         })
     }
 

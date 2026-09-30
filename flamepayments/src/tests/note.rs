@@ -113,7 +113,7 @@ fn hex32(text: &str) -> [u8; 32] {
 fn check(vector: &Vector) {
     // The zero seed is the doc's; `v` pins the derivation path before
     // anything is derived from it.
-    let account = Account::from_seed(&[0u8; 64], Network::Testnet).expect("account");
+    let account = Account::from_seed(&[0u8; 64], Network::Testnet, 0).expect("account");
     let address = account.address_at(vector.branch, 0).expect("address");
     let v = account
         .viewing_key_at(vector.branch, 0)
@@ -215,7 +215,7 @@ fn the_change_vector() {
 }
 
 fn account() -> Account {
-    Account::from_seed(&SEED, Network::Testnet).expect("account from seed")
+    Account::from_seed(&SEED, Network::Testnet, 0).expect("account from seed")
 }
 
 /// A cleartext allocation under `RECEIVING/0`, spent as a clear input.
