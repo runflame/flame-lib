@@ -1,17 +1,11 @@
 use std::{future::Future, sync::Arc};
 
-use flamechain::{Block, BlockHash, BlockTip};
+use flamechain::{Block, BlockTip};
 
-use crate::chain::{ChainPath, ChangesOutcome, ImportOutcome};
+use crate::chain::{ChainPath, ImportOutcome};
 
 pub trait ChainAccess {
     type Error;
-
-    fn set_as_child(
-        &self,
-        parent: BlockTip,
-        child: BlockTip,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     fn get_block(
         &self,
@@ -28,11 +22,6 @@ pub trait ChainAccess {
         &mut self,
         block: Arc<Block>,
     ) -> impl Future<Output = Result<ImportOutcome, Self::Error>> + Send;
-
-    fn select_tip(
-        &mut self,
-        tip: BlockHash,
-    ) -> impl Future<Output = Result<ChangesOutcome, Self::Error>> + Send;
 }
 
 pub trait CoreBlockSource {

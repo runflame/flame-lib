@@ -44,17 +44,6 @@ impl<S: CanonicalStorage, H: ChainAccess> BlockAttacher<'_, S, H> {
             });
         }
 
-        self.chain
-            .set_as_child(
-                BlockTip {
-                    hash: state_tip,
-                    height: state_height.into(),
-                },
-                block_tip,
-            )
-            .await
-            .map_err(BlockAttacherError::ChainAccess)?;
-
         state
             .connect(&block)
             .map_err(BlockAttacherError::Blockchain)?;

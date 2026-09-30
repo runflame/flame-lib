@@ -295,7 +295,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use btc_integration::{BtcBlockTip, MinterP2wsh};
-    use flame_chain_service::{ChangesOutcome, ImportOutcome};
+    use flame_chain_service::ImportOutcome;
     use flame_storage::state::canonical::InMemoryCanonicalStorage;
     use flamechain::{Block, BlockHash, Blockchain, ChainParams, CoreBlockHeader, CoreFlameHeight};
 
@@ -473,13 +473,6 @@ mod tests {
     impl ChainAccess for Chain {
         type Error = &'static str;
 
-        async fn set_as_child(&self, parent: BlockTip, child: BlockTip) -> Result<(), Self::Error> {
-            let block = self.get_block(child).await?.ok_or("missing child")?;
-            assert_eq!(block.header.parent, parent.hash);
-            assert_eq!(child.height.as_u64(), parent.height.as_u64() + 1);
-            Ok(())
-        }
-
         async fn get_block(&self, tip: BlockTip) -> Result<Option<Arc<Block>>, Self::Error> {
             Ok(self
                 .blocks
@@ -493,10 +486,6 @@ mod tests {
         }
 
         async fn import_block(&mut self, _: Arc<Block>) -> Result<ImportOutcome, Self::Error> {
-            unreachable!()
-        }
-
-        async fn select_tip(&mut self, _: BlockHash) -> Result<ChangesOutcome, Self::Error> {
             unreachable!()
         }
     }

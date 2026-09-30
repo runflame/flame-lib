@@ -6,8 +6,8 @@ use std::{
 
 use btc_integration::{HistoryError, HistoryUpdate, ShutdownError, StartupError};
 use corepc_client::{bitcoin::hashes::Hash, client_sync::Auth};
-use flame_chain_service::{ChainPath, ChangesOutcome, ImportOutcome};
-use flamechain::{Block, BlockHash, BlockTip};
+use flame_chain_service::{ChainPath, ImportOutcome};
+use flamechain::{Block, BlockTip};
 use flamevm::Predicate;
 use tokio::sync::watch;
 
@@ -19,10 +19,6 @@ struct Chain;
 impl ChainAccess for Chain {
     type Error = Infallible;
 
-    async fn set_as_child(&self, _: BlockTip, _: BlockTip) -> Result<(), Self::Error> {
-        unreachable!()
-    }
-
     async fn get_block(&self, _: BlockTip) -> Result<Option<Arc<Block>>, Self::Error> {
         unreachable!()
     }
@@ -32,10 +28,6 @@ impl ChainAccess for Chain {
     }
 
     async fn import_block(&mut self, _: Arc<Block>) -> Result<ImportOutcome, Self::Error> {
-        unreachable!()
-    }
-
-    async fn select_tip(&mut self, _: BlockHash) -> Result<ChangesOutcome, Self::Error> {
         unreachable!()
     }
 }

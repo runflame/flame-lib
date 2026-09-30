@@ -3,10 +3,10 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use bitcoind::anyhow::{Context, Result, ensure};
-use flame_chain_service::{ChainAccess, ChainPath, ChangesOutcome, CoreBlockSource, ImportOutcome};
+use bitcoind::anyhow::{Context, Result};
+use flame_chain_service::{ChainAccess, ChainPath, CoreBlockSource, ImportOutcome};
 use flame_minting::core_block_notifier::CoreBlockNotifier;
-use flamechain::{Block, BlockHash, BlockTip};
+use flamechain::{Block, BlockTip};
 
 #[derive(Clone, Default)]
 pub struct TestChain {
@@ -30,19 +30,6 @@ impl TestChain {
 
 impl ChainAccess for TestChain {
     type Error = bitcoind::anyhow::Error;
-
-    async fn set_as_child(&self, parent: BlockTip, child: BlockTip) -> Result<()> {
-        let block = self
-            .get_block(child)
-            .await?
-            .context("missing child block")?;
-        ensure!(block.header.parent == parent.hash, "unexpected parent");
-        ensure!(
-            child.height.as_u64() == parent.height.as_u64() + 1,
-            "unexpected height"
-        );
-        Ok(())
-    }
 
     async fn get_block(&self, tip: BlockTip) -> Result<Option<Arc<Block>>> {
         Ok(self
@@ -79,10 +66,6 @@ impl ChainAccess for TestChain {
         }
         blocks.push(block);
         Ok(ImportOutcome::Imported(hash))
-    }
-
-    async fn select_tip(&mut self, _: BlockHash) -> Result<ChangesOutcome> {
-        unreachable!("consensus applies the chain path through set_as_child")
     }
 }
 
