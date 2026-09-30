@@ -13,12 +13,12 @@ admission. It does **not** choose a Bitcoin branch, talk to Bitcoin Core, select
 minters, run BFT, persist data, or provide networking. Those responsibilities
 remain outside the state machine:
 
-| Component | Responsibility |
-| --- | --- |
-| `flamevm` | Verify external scripts and execute actor messages under an explicit context. |
-| `flamechain` | Apply deterministic Flame state transitions and make them reversible. |
-| `btc-integration` | Observe and validate Bitcoin data, then supply authenticated core-block context and branch changes. |
-| consensus / node | Choose the accepted branch, authenticate context, store blocks and undo, and call detach/attach operations. |
+| Component         | Responsibility                                                                                              |
+|-------------------|-------------------------------------------------------------------------------------------------------------|
+| `flamevm`         | Verify external scripts and execute actor messages under an explicit context.                               |
+| `flamechain`      | Apply deterministic Flame state transitions and make them reversible.                                       |
+| `btc-integration` | Observe and validate Bitcoin data, then supply authenticated core-block context and branch changes.         |
+| consensus / node  | Choose the accepted branch, authenticate context, store blocks and undo, and call detach/attach operations. |
 
 The block header commits an opaque `core_block_hash`, while FlameVM receives the
 corresponding height as a plain integer rather than a Bitcoin RPC object. This
@@ -155,7 +155,7 @@ TxLog in place of execution.
 
 `BlockTx::witness_hash` is its root CellID; `witness_root` is the ordered
 transaction-sequence CellID. `BlockHeader::id` is the CellID of the Cell holding
-the fixed 212-byte header payload, including its Cell descriptor. Tests cover
+the 213-byte regular-header or 221-byte Core-header payload, including its Cell descriptor. Tests cover
 canonical round trips, exact bounds, witness isolation, and retained Utreexo
 golden vectors.
 
@@ -236,28 +236,28 @@ specified.
 
 Trust-boundary ownership is deliberately narrow:
 
-| Value | Source and decoder rule |
-| --- | --- |
-| `Block`, `BlockTx`, `ExternalTx` | Network consensus input; use their bounded canonical decoders and reject trailing bytes before application. |
-| Utreexo `Forest` and `Proof` | Consensus state/witness; use the exact bounded encodings above. |
-| FlameVM `TxLog`, `TxEntry`, `Message` | Derived by verified execution; Cell codecs support commitments and archives, but consensus never admits decoded copies as execution results. |
-| `WorkForest`, `Catchup`, actor undo/checkpoints | Local transient or persistence data; Serde representation is non-consensus and cannot enter block application. |
+| Value                                           | Source and decoder rule                                                                                                                      |
+|-------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|
+| `Block`, `BlockTx`, `ExternalTx`                | Network consensus input; use their bounded canonical decoders and reject trailing bytes before application.                                  |
+| Utreexo `Forest` and `Proof`                    | Consensus state/witness; use the exact bounded encodings above.                                                                              |
+| FlameVM `TxLog`, `TxEntry`, `Message`           | Derived by verified execution; Cell codecs support commitments and archives, but consensus never admits decoded copies as execution results. |
+| `WorkForest`, `Catchup`, actor undo/checkpoints | Local transient or persistence data; Serde representation is non-consensus and cannot enter block application.                               |
 
 ## Consensus limits
 
 The current v1 defaults are:
 
-| Limit | Default | Accounting rule |
-| --- | ---: | --- |
-| Transactions | 10,000/block | External `BlockTx` count. |
-| Canonical witness bytes | 16 MiB/block | Both the complete block envelope and the sum of standalone `BlockTx` envelope sizes are bounded. |
-| External script | 1 MiB/tx, 4 MiB/block | `ExternalTx.script` bytes. |
-| Declared gas | 35,000,000/tx | Envelope cap for `Limits.gas`. |
-| Gas credit | 10,000,000/tx, 100,000,000/block | Actual `gas_used - direct_send_gas`. |
-| Internal gas | 25,000,000/block | Direct external `Send` grants; descendants are not counted twice. |
-| R1CS multiplications | 1,024/tx, 100,000/block | Exact final constraint-system multipliers. |
-| Delivered messages | 100,000/block | Every dequeued message, including descendants. |
-| Utreexo proofs | 100,000/tx, depth 63 | One proof per derived `Input`. |
+| Limit                   |                          Default | Accounting rule                                                                                  |
+|-------------------------|---------------------------------:|--------------------------------------------------------------------------------------------------|
+| Transactions            |                     10,000/block | External `BlockTx` count.                                                                        |
+| Canonical witness bytes |                     16 MiB/block | Both the complete block envelope and the sum of standalone `BlockTx` envelope sizes are bounded. |
+| External script         |            1 MiB/tx, 4 MiB/block | `ExternalTx.script` bytes.                                                                       |
+| Declared gas            |                    35,000,000/tx | Envelope cap for `Limits.gas`.                                                                   |
+| Gas credit              | 10,000,000/tx, 100,000,000/block | Actual `gas_used - direct_send_gas`.                                                             |
+| Internal gas            |                 25,000,000/block | Direct external `Send` grants; descendants are not counted twice.                                |
+| R1CS multiplications    |          1,024/tx, 100,000/block | Exact final constraint-system multipliers.                                                       |
+| Delivered messages      |                    100,000/block | Every dequeued message, including descendants.                                                   |
+| Utreexo proofs          |             100,000/tx, depth 63 | One proof per derived `Input`.                                                                   |
 
 Active values are consensus parameters selected by protocol version; the table
 records the implementation defaults rather than granting nodes local freedom to
@@ -346,18 +346,18 @@ must obtain an older trusted snapshot/state sync instead.
 
 ## Decision ledger
 
-| Decision | Benefit | Cost / risk |
-| --- | --- | --- |
-| Keep Bitcoin tracking outside `flamechain`. | Pure, repeatable state transitions and no RPC dependency in consensus code. | The caller must authenticate and commit context; a forged height corrupts lease timing. |
-| Derive internal transactions. | One admission path; actor effects cannot be forged. | Validators repeat serial work; receipts alone are not proofs. |
-| Use Flame Utreexo for contracts. | Small common live-contract state and user-carried proofs. | Proof transport/catchup and owner availability become operational requirements. |
-| Lease resident actor bodies while retaining frozen commitments. | Prices common payload storage without destroying linear values. | Frozen metadata persists; applications need witnesses to recover missing bodies. |
-| Use endpoint reserve pricing. | One checked rational formula; reserve pressure is immediate. | Purchase splitting follows a much cheaper harmonic path; ordering creates MEV. |
-| Stage a whole block atomically. | Invalid tails cannot leave partial state. | Requires transient working state; naive cloning may be expensive. |
-| Retain complete undo. | Simple, exact detach and safe failed-branch handling. | Disk/memory grows with state size and reorg window. |
-| Keep mempool policy local and bounded. | Limits RAM/CPU DoS and avoids making relay policy consensus. | Nodes may hold different candidates; basic eviction is gameable. |
-| Use canonical Cell IDs and exact outer envelopes. | Shared encoding and proof structure, with separately committed execution availability. | Any grammar change changes commitments and requires protocol coordination. |
-| Freeze actor bodies at the expiry boundary. | Linear ownership survives without bulk traversal/retirement. | Archives and transaction witnesses become necessary for recovery; permanent metadata still has a cost. |
+| Decision                                                        | Benefit                                                                                | Cost / risk                                                                                            |
+|-----------------------------------------------------------------|----------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------|
+| Keep Bitcoin tracking outside `flamechain`.                     | Pure, repeatable state transitions and no RPC dependency in consensus code.            | The caller must authenticate and commit context; a forged height corrupts lease timing.                |
+| Derive internal transactions.                                   | One admission path; actor effects cannot be forged.                                    | Validators repeat serial work; receipts alone are not proofs.                                          |
+| Use Flame Utreexo for contracts.                                | Small common live-contract state and user-carried proofs.                              | Proof transport/catchup and owner availability become operational requirements.                        |
+| Lease resident actor bodies while retaining frozen commitments. | Prices common payload storage without destroying linear values.                        | Frozen metadata persists; applications need witnesses to recover missing bodies.                       |
+| Use endpoint reserve pricing.                                   | One checked rational formula; reserve pressure is immediate.                           | Purchase splitting follows a much cheaper harmonic path; ordering creates MEV.                         |
+| Stage a whole block atomically.                                 | Invalid tails cannot leave partial state.                                              | Requires transient working state; naive cloning may be expensive.                                      |
+| Retain complete undo.                                           | Simple, exact detach and safe failed-branch handling.                                  | Disk/memory grows with state size and reorg window.                                                    |
+| Keep mempool policy local and bounded.                          | Limits RAM/CPU DoS and avoids making relay policy consensus.                           | Nodes may hold different candidates; basic eviction is gameable.                                       |
+| Use canonical Cell IDs and exact outer envelopes.               | Shared encoding and proof structure, with separately committed execution availability. | Any grammar change changes commitments and requires protocol coordination.                             |
+| Freeze actor bodies at the expiry boundary.                     | Linear ownership survives without bulk traversal/retirement.                           | Archives and transaction witnesses become necessary for recovery; permanent metadata still has a cost. |
 
 ## Launch-critical TBDs
 

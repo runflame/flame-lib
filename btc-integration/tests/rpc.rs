@@ -1,13 +1,10 @@
 mod common;
 
 use bitcoind::anyhow::Context;
-use btc_integration::mint_proofs::MintingProofData;
-use btc_integration::prelude::*;
-use btc_integration::rpc::RpcApi;
-use common::setup;
+use btc_integration::btc::rpc::BtcBlockTip;
+use btc_integration::protocol::Acquisition;
+use common::{create_connection, setup};
 use corepc_client::bitcoin::Amount;
-use ed25519_dalek::SigningKey;
-use flamevm::Predicate;
 use std::sync::Arc;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -45,49 +42,51 @@ async fn core31_rpc_api_works_with_regtest_blocks_and_transactions() -> bitcoind
     let published_txid = rpc.publish_transaction(&signed_transaction.tx).await?;
     assert_eq!(published_txid, expected_txid);
 
+    let confirmation_block = ctx.generate_next_block()?;
+    let confirmed = rpc
+        .transactions_with_prevouts_in_block(confirmation_block)
+        .await?
+        .into_iter()
+        .find(|entry| entry.transaction.compute_txid() == expected_txid)
+        .context("published transaction was not included in the next block")?;
+    assert_eq!(confirmed.prevouts.len(), confirmed.transaction.input.len());
+    assert!(confirmed.prevouts.iter().all(Option::is_some));
+
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn mint_proof_sender_works_with_core31_rpc_api() -> bitcoind::anyhow::Result<()> {
+async fn acquisition_sender_works_with_core31_rpc_api() -> bitcoind::anyhow::Result<()> {
     let ctx = setup()?;
-    let rpc = Arc::clone(&ctx.rpc);
-    let mint_proof_sender = MintProofSenderV31::new(Arc::clone(&rpc), FlameNetwork::Testnet);
-    let sent_amount = Amount::from_btc(1.0).expect("valid BTC amount");
-    let flame_block_hash = BlockHash::from([0xab; 32]);
-    let flame_address = Predicate::opaque(Predicate::unspendable_key());
-    let validator_pubkey = SigningKey::from_bytes(&[7; 32]).verifying_key();
+    let connection = create_connection(&ctx).await?;
+    let sender = connection.get_sender();
+    let sent_amount = Amount::from_sat(25_000);
 
-    let txid = mint_proof_sender
-        .send_mint_proof(
-            sent_amount,
-            &[],
-            flame_block_hash,
-            flame_address.clone(),
-            Some(validator_pubkey),
-        )
-        .await?;
+    assert!(matches!(
+        sender.send_acquisition(Amount::ZERO).await,
+        Err(btc_integration::MintingSendError::ZeroAcquisitionAmount)
+    ));
+
+    let txid = sender.send_acquisition(sent_amount).await?;
     let confirmation_block = ctx.generate_next_block()?;
     let confirmed_transactions = ctx.rpc.transactions_in_block(confirmation_block).await?;
     let confirmed_transaction = confirmed_transactions
         .iter()
         .find(|transaction| transaction.compute_txid() == txid)
-        .context("mint-proof transaction was not included in the next block")?;
-    let confirmed_mint_output = confirmed_transaction
-        .output
-        .iter()
-        .find(|output| MintingProofData::from_tx_out(output).is_some())
-        .context("confirmed transaction does not contain a mint-proof output")?;
+        .context("Acquisition transaction was not included in the next block")?;
+    let acquisitions = Acquisition::from_tx(confirmed_transaction);
 
-    assert_eq!(confirmed_mint_output.value, sent_amount);
+    assert_eq!(acquisitions.len(), 1);
+    assert_eq!(acquisitions[0].txid(), txid);
+    assert_eq!(acquisitions[0].amount(), sent_amount);
+    assert_eq!(acquisitions[0].data().minter_p2wsh, sender.minter().p2wsh());
     assert_eq!(
-        MintingProofData::from_tx_out(confirmed_mint_output),
-        Some(MintingProofData {
-            network: FlameNetwork::Testnet,
-            flame_block_hash,
-            flame_reward_address: flame_address,
-            validator_pubkey: Some(validator_pubkey),
-        })
+        acquisitions[0].data().access_predicate.to_point(),
+        flamevm::Predicate::unspendable_key(),
+    );
+    assert_eq!(
+        acquisitions[0].data().validator_pubkey,
+        ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]).verifying_key(),
     );
 
     Ok(())

@@ -4,14 +4,16 @@ pub mod block;
 pub mod mempool;
 pub mod storage;
 pub mod utreexo;
+pub mod validation;
 
 pub use block::{
     AppliedBlock, Block, BlockHeader, BlockLimits, BlockTx, Blockchain, ChainError, ChainParams,
-    ContractLeaf, ExecutionKind, ExecutionRecord, ReorgOutcome, StateCommitment,
+    CoreBlockHeader, ContractLeaf, ExecutionKind, ExecutionRecord, ReorgOutcome, StateCommitment,
 };
 pub use mempool::{Mempool, MempoolEntry, MempoolError, MempoolPolicy, RebaseReport};
 pub use storage::{Lease, SPARKS_PER_FLAME, StorageError, StorageParams, StoredActor};
 pub use utreexo::utreexo_hasher;
+pub use validation::FlameBlockValidator;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -61,9 +63,71 @@ impl fmt::Display for InvalidFlameNetwork {
 
 impl std::error::Error for InvalidFlameNetwork {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FlameHeight(u64);
+
+impl FlameHeight {
+    pub const fn new(height: u64) -> Self {
+        Self(height)
+    }
+
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for FlameHeight {
+    fn from(height: u64) -> Self {
+        Self::new(height)
+    }
+}
+
+impl From<FlameHeight> for u64 {
+    fn from(height: FlameHeight) -> Self {
+        height.as_u64()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CoreFlameHeight(u32);
+
+impl CoreFlameHeight {
+    pub const fn new(height: u32) -> Self {
+        Self(height)
+    }
+
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for CoreFlameHeight {
+    fn from(height: u32) -> Self {
+        Self::new(height)
+    }
+}
+
+impl From<CoreFlameHeight> for u32 {
+    fn from(height: CoreFlameHeight) -> Self {
+        height.as_u32()
+    }
+}
+
 /// The hash of a Flame block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockHash([u8; 32]);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockTip {
+    pub hash: BlockHash,
+    pub height: FlameHeight,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CoreBlockTip {
+    pub hash: BlockHash,
+    pub height: CoreFlameHeight,
+}
 
 impl BlockHash {
     pub const fn new(bytes: [u8; 32]) -> Self {

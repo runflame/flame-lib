@@ -15,9 +15,9 @@ use flamevm::{
 use merkle::{Hash, MerkleItem};
 use merlin::Transcript;
 
-use crate::BlockHash;
 use crate::storage::{ActorStore, RegistryUndo, StorageError, StorageParams, StoredActor};
 use crate::utreexo::{self, Catchup, Forest, Proof, UtreexoError};
+use crate::{BlockHash, BlockTip, CoreFlameHeight};
 
 /// Consensus resource bounds. Networks can select smaller values through
 /// [`ChainParams`] without changing the transition algorithm.
@@ -202,9 +202,37 @@ pub struct StateCommitment {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoreBlockHeader {
+    pub height: CoreFlameHeight,
+    pub target_btc_height: u32,
+}
+
+impl CellEncode for CoreBlockHeader {
+    fn encode(&self, builder: &mut CellBuilder) -> Result<(), CellError> {
+        builder
+            .store_u32(self.height.as_u32())?
+            .store_u32(self.target_btc_height)?;
+        Ok(())
+    }
+}
+
+impl CellDecode for CoreBlockHeader {
+    fn decode<R: CellResolver + ?Sized>(
+        slice: &mut CellSlice<'_>,
+        _cells: &mut R,
+    ) -> Result<Self, CellError> {
+        Ok(Self {
+            height: CoreFlameHeight::from(slice.load_u32()?),
+            target_btc_height: slice.load_u32()?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockHeader {
     pub version: u32,
     pub height: u64,
+    pub core_block: Option<CoreBlockHeader>,
     /// Opaque authenticated Bitcoin/core-block identity supplied by the caller.
     pub core_block_hash: [u8; 32],
     pub parent: BlockHash,
@@ -214,8 +242,18 @@ pub struct BlockHeader {
 }
 
 impl BlockHeader {
+    // Root CellID (32), BoC count (4), Cell descriptor (2), and max payload (221).
+    const MAX_ENCODED_SIZE: usize = 259;
+
     pub fn id(&self) -> BlockHash {
-        BlockHash::new(self.to_cell().expect("fixed-size block header").id())
+        BlockHash::new(self.to_cell().expect("bounded block header").id())
+    }
+
+    pub fn block_tip(&self) -> BlockTip {
+        BlockTip {
+            hash: self.id(),
+            height: self.height.into(),
+        }
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, CellError> {
@@ -226,12 +264,15 @@ impl BlockHeader {
         if expected_version != 1 {
             return Err(CellError::InvalidFormat);
         }
-        let mut envelope = decode_envelope(bytes, 250)?;
+        let mut envelope = decode_envelope(bytes, Self::MAX_ENCODED_SIZE)?;
         let root = envelope
             .cells()
             .get(&envelope.root())
             .expect("validated envelope root");
-        let header = Self::from_cell(&root, &mut TypedDecode::new(&mut envelope, 250)?)?;
+        let header = Self::from_cell(
+            &root,
+            &mut TypedDecode::new(&mut envelope, Self::MAX_ENCODED_SIZE)?,
+        )?;
         if header.version != expected_version {
             return Err(CellError::InvalidFormat);
         }
@@ -244,9 +285,16 @@ impl BlockHeader {
 
 impl CellEncode for BlockHeader {
     fn encode(&self, builder: &mut CellBuilder) -> Result<(), CellError> {
+        builder.store_u32(self.version)?.store_u64(self.height)?;
+        match &self.core_block {
+            None => {
+                builder.store_u8(0)?;
+            }
+            Some(core_block) => {
+                builder.store_u8(1)?.store(core_block)?;
+            }
+        }
         builder
-            .store_u32(self.version)?
-            .store_u64(self.height)?
             .store_bytes(&self.core_block_hash)?
             .store_bytes(self.parent.as_bytes())?
             .store_bytes(&self.witness_root)?
@@ -266,6 +314,11 @@ impl CellDecode for BlockHeader {
         Ok(Self {
             version: slice.load_u32()?,
             height: slice.load_u64()?,
+            core_block: match slice.load_u8()? {
+                0 => None,
+                1 => Some(CoreBlockHeader::decode(slice, cells)?),
+                _ => return Err(CellError::InvalidFormat),
+            },
             core_block_hash: <[u8; 32]>::decode(slice, cells)?,
             parent: BlockHash::new(<[u8; 32]>::decode(slice, cells)?),
             witness_root: <[u8; 32]>::decode(slice, cells)?,
@@ -569,6 +622,7 @@ struct Transition {
 
 /// Active Flame state. Bitcoin header tracking and fork choice live outside;
 /// callers provide an authenticated core-block identity and selected branch.
+#[derive(Clone)]
 pub struct Blockchain {
     params: ChainParams,
     header: BlockHeader,
@@ -627,6 +681,7 @@ impl Blockchain {
         let header = BlockHeader {
             version: params.version,
             height: 0,
+            core_block: None,
             core_block_hash: [0; 32],
             parent: BlockHash::new([0; 32]),
             witness_root: empty_sequence_id(),
@@ -713,6 +768,7 @@ impl Blockchain {
             header: BlockHeader {
                 version: self.params.version,
                 height,
+                core_block: None,
                 core_block_hash,
                 parent: self.tip(),
                 witness_root: empty_sequence_id(),
@@ -1423,7 +1479,7 @@ mod tests {
         let block = chain.build_block([0x11; 32], Vec::new()).unwrap();
         let bytes = block.to_bytes().unwrap();
         let header_cell = block.header.to_cell().unwrap();
-        assert_eq!(header_cell.payload().len(), 212);
+        assert_eq!(header_cell.payload().len(), 213);
         assert!(header_cell.refs().is_empty());
         assert_eq!(
             &header_cell.payload()[..12],
@@ -1589,6 +1645,77 @@ mod tests {
         let (seeded, _) = Blockchain::devnet_genesis(params, &[]).expect("devnet genesis");
         assert_eq!(plain.tip(), seeded.tip());
         assert_eq!(plain.state_commitment(), seeded.state_commitment());
+    }
+
+    #[test]
+    fn block_tip_preserves_full_u64_height() {
+        let mut header = Blockchain::new(ChainParams::default()).unwrap().header;
+        for height in [0, u64::from(u32::MAX) + 1, u64::MAX] {
+            header.height = height;
+            let decoded = BlockHeader::from_bytes_bounded(&header.to_bytes().unwrap(), 1).unwrap();
+            let tip = decoded.block_tip();
+            assert_eq!(tip.hash, header.id());
+            assert_eq!(tip.height.as_u64(), height);
+            assert_eq!(u64::from(tip.height), height);
+        }
+    }
+
+    #[test]
+    fn core_block_header_round_trips_and_commits_both_heights() {
+        let mut chain = Blockchain::new(ChainParams::default()).unwrap();
+        let mut block = chain.build_block([0x11; 32], Vec::new()).unwrap();
+        let regular_id = block.header.id();
+        let mut core_ids = BTreeSet::new();
+
+        for (height, target_btc_height) in [(0, 0), (1, 0), (0, 1), (u32::MAX, u32::MAX)] {
+            block.header.core_block = Some(CoreBlockHeader {
+                height: CoreFlameHeight::from(height),
+                target_btc_height,
+            });
+            let cell = block.header.to_cell().unwrap();
+            assert_eq!(cell.payload().len(), 221);
+            assert_eq!(cell.payload()[12], 1);
+            assert_eq!(&cell.payload()[13..17], &height.to_le_bytes());
+            assert_eq!(&cell.payload()[17..21], &target_btc_height.to_le_bytes());
+            assert!(cell.refs().is_empty());
+            assert_ne!(block.header.id(), regular_id);
+            assert!(core_ids.insert(block.header.id()));
+
+            let header_bytes = block.header.to_bytes().unwrap();
+            assert_eq!(header_bytes.len(), BlockHeader::MAX_ENCODED_SIZE);
+            assert_eq!(
+                BlockHeader::from_bytes_bounded(&header_bytes, 1).unwrap(),
+                block.header,
+            );
+            let bytes = block.to_bytes().unwrap();
+            let decoded = Block::from_bytes_bounded(&bytes, ChainParams::default()).unwrap();
+            assert_eq!(decoded.header, block.header);
+            assert_eq!(decoded.to_bytes().unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn block_header_rejects_invalid_or_truncated_core_metadata() {
+        let header = Blockchain::new(ChainParams::default()).unwrap().header;
+        let cell = header.to_cell().unwrap();
+        assert_eq!(cell.payload()[12], 0);
+        for tag in [2, u8::MAX] {
+            let mut payload = cell.payload().to_vec();
+            payload[12] = tag;
+            let invalid = Cell::new(payload, vec![]).unwrap();
+            assert_eq!(
+                BlockHeader::from_cell(&invalid, &mut ()),
+                Err(CellError::InvalidFormat),
+            );
+        }
+
+        let mut payload = cell.payload()[..13].to_vec();
+        payload[12] = 1;
+        let truncated = Cell::new(payload, vec![]).unwrap();
+        assert_eq!(
+            BlockHeader::from_cell(&truncated, &mut ()),
+            Err(CellError::InsufficientBytes),
+        );
     }
 
     #[test]

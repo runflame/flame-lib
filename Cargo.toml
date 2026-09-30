@@ -15,6 +15,9 @@ members = [
     "flamepayments",
     "flamed-rpc",
     "flamed",
+    "flame-chain-service",
+    "flame-minting",
+    "flame-storage",
 ]
 
 # Use the runflame fork of merlin to enable its `dynamic-labels`
