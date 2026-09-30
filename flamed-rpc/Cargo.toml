@@ -1,0 +1,15 @@
+[package]
+name = "flamed-rpc"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "The JSON-RPC 2.0 protocol of the flamed node"
+
+[dependencies]
+base64 = "0.22"
+hex = "0.3"
+jsonrpsee = { version = "0.26", features = ["macros", "server-core", "client-core", "http-client"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

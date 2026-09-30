@@ -1,0 +1,48 @@
+[package]
+name = "flamed"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "The Flame node: an archival devnet node with a JSON-RPC 2.0 interface"
+readme = "flamed.md"
+
+[[bin]]
+name = "flamed"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+flamechain = { path = "../flamechain" }
+flamed-rpc = { path = "../flamed-rpc" }
+flamekd = { path = "../flamekd" }
+flamevm = { path = "../flamevm" }
+hex = "0.3"
+jsonrpsee = { version = "0.26", features = ["server"] }
+readerwriter = { path = "../readerwriter" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+# `net` is named explicitly. `jsonrpsee-server` enables it anyway, so the
+# build would work without it today, but the IO driver this crate's own
+# runtime turns on must not depend on another crate's feature list.
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+toml = "0.8"
+
+# `flamechain` on purpose appears twice, the `flamepayments` pattern. The
+# dependency above, without features, is the one every consumer of this
+# library gets. This one adds `devnet` for the crate's own tests, which need
+# `devnet_genesis`: with resolver 2 a dev-dependency's features do not reach
+# the normal build, so nothing downstream gets a genesis constructor through
+# feature unification.
+[dev-dependencies]
+curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility", "rand_core"] }
+flamechain = { path = "../flamechain", features = ["devnet"] }
+flamepayments = { path = "../flamepayments" }
+merlin = "3"
+tempfile = "3"
+
+[features]
+# Everything a public chain gets from minting and consensus, and this devnet
+# fakes: genesis allocations and the interval minter.
+devnet = ["flamechain/devnet"]

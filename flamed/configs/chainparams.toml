@@ -1,0 +1,32 @@
+# The Flame devnet definition. Every node on this network reads exactly
+# these bytes; `flamed genesis` turns them into a genesis.json all of them
+# agree on.
+version = 1
+
+# The HRP an `address` allocation below is read with. Optional, testnet by
+# default. It reaches no consensus value: genesis.json records the resolved
+# predicate either way.
+network = "testnet"
+
+[storage]
+# unit_bytes, initial_pool_units, lease_duration_blocks,
+# issued_units_per_block, minimum_lease_units, minimum_remaining_units,
+# lease_record_bytes, initial_price_sparks_per_unit — every field is
+# optional and falls back to the upstream StorageParams::default().
+
+[limits]
+# max_transactions, max_witness_bytes, max_transaction_script_bytes,
+# max_script_bytes, max_transaction_gas, max_gas_credit, max_external_gas,
+# max_internal_gas, max_multiplications_per_transaction,
+# max_multiplications, max_messages, max_proofs_per_transaction,
+# max_proof_depth — every field is optional and falls back to the upstream
+# BlockLimits::default().
+
+# 1000 Flame, the whole supply of this devnet, under the first receiving
+# address of the wallet seeded with [0xa1; 64] on testnet — the account the
+# tests call A, so a fresh devnet is spendable out of the box. Exactly one
+# of `address` and `predicate` names the holder; an operator writes the
+# address a wallet printed and never handles a wallet-internal value.
+[[genesis]]
+address = "tf1ujp3zt7heh0nqyxnhlzdu2cnc7dnsef8zv6mmamae7pfl6pw0d4j4qnqmpkwqjakn4xs4nsh76tawfq246uvx8tx2wedvegns66vgfq7m0gmy"
+qty_sparks = 100000000000

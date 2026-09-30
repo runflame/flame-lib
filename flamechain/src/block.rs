@@ -633,12 +633,50 @@ pub struct Blockchain {
 }
 
 impl Blockchain {
+    /// A chain with an empty contract accumulator.
     pub fn new(params: ChainParams) -> Result<Self, ChainError> {
+        Self::at_genesis(params, Forest::new())
+    }
+
+    /// DEVNET ONLY. A chain whose contract accumulator already holds `ids`,
+    /// so a private test network has something to spend. Contracts enter a
+    /// public chain only by minting; this constructor is removed before any
+    /// public release. Returns the catchup that turns `Proof::Transient`
+    /// into `Proof::Committed` for each id. Duplicate ids are rejected with
+    /// [`ChainError::DuplicateContract`]: the accumulator stores ids, and two
+    /// equal leaves would leave one of them unspendable. Leaves are inserted
+    /// in sorted order, so `ids` is a set: any permutation of it yields the
+    /// same genesis, and two nodes cannot fork on seed ordering alone.
+    #[cfg(any(test, feature = "devnet"))]
+    pub fn devnet_genesis(
+        params: ChainParams,
+        ids: &[ContractID],
+    ) -> Result<(Self, Catchup), ChainError> {
+        if params.version != 1 {
+            return Err(ChainError::UnsupportedVersion);
+        }
+        let mut seeded = BTreeSet::new();
+        for id in ids {
+            if !seeded.insert(*id) {
+                return Err(ChainError::DuplicateContract);
+            }
+        }
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
+        let mut work = Forest::new().work_forest();
+        for id in &seeded {
+            work.insert(&ContractLeaf(*id), &hasher);
+        }
+        let (contracts, catchup) = work.normalize(&hasher);
+        Ok((Self::at_genesis(params, contracts)?, catchup))
+    }
+
+    /// The genesis header over `contracts`. Shared by [`Self::new`] and the
+    /// devnet constructor.
+    fn at_genesis(params: ChainParams, contracts: Forest) -> Result<Self, ChainError> {
         if params.version != 1 {
             return Err(ChainError::UnsupportedVersion);
         }
         let actors = ActorStore::new(params.storage)?;
-        let contracts = Forest::new();
         let contract_root = contracts.root(&utreexo::utreexo_hasher::<ContractLeaf>());
         let header = BlockHeader {
             version: params.version,
@@ -708,7 +746,9 @@ impl Blockchain {
         Ok(self.actors.actor_capacity(actor, height)?)
     }
 
-    pub(crate) fn contract_forest(&self) -> &Forest {
+    /// The committed contract accumulator at the tip. Callers verify
+    /// membership proofs against it before building a spend.
+    pub fn contract_forest(&self) -> &Forest {
         &self.contracts
     }
 
@@ -1240,8 +1280,10 @@ impl Blockchain {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct ContractLeaf(pub ContractID);
+/// Utreexo leaf for a contract id. Public so callers outside the crate can
+/// verify and refresh their own membership proofs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ContractLeaf(pub ContractID);
 
 impl MerkleItem for ContractLeaf {
     fn commit(&self, t: &mut Transcript) {
@@ -1492,6 +1534,117 @@ mod tests {
             BlockTx::from_bytes_bounded(&tx_bytes, 1, limits),
             Err(CellError::InvalidFormat)
         ));
+    }
+
+    const DEVNET_IDS: [ContractID; 3] = [[0x11; 32], [0x22; 32], [0x33; 32]];
+
+    #[test]
+    fn devnet_genesis_matches_a_hand_built_forest() {
+        let (chain, _) = Blockchain::devnet_genesis(ChainParams::default(), &DEVNET_IDS)
+            .expect("devnet genesis");
+
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
+        let mut work = Forest::new().work_forest();
+        let mut sorted = DEVNET_IDS;
+        sorted.sort();
+        for id in &sorted {
+            work.insert(&ContractLeaf(*id), &hasher);
+        }
+        let (expected, _) = work.normalize(&hasher);
+
+        assert_eq!(
+            chain.contract_forest().root(&hasher),
+            expected.root(&hasher)
+        );
+        assert_eq!(chain.state_commitment().contracts, expected.root(&hasher));
+        assert_eq!(chain.contract_forest().count(), DEVNET_IDS.len() as u64);
+        assert_eq!(chain.height(), 0);
+    }
+
+    #[test]
+    fn devnet_genesis_catchup_yields_committed_proofs() {
+        let (chain, catchup) = Blockchain::devnet_genesis(ChainParams::default(), &DEVNET_IDS)
+            .expect("devnet genesis");
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
+
+        for id in &DEVNET_IDS {
+            let leaf = ContractLeaf(*id);
+            let proof = catchup
+                .update_proof(&leaf, Proof::Transient, &hasher)
+                .expect("transient proof catches up");
+            let Proof::Committed(path) = proof else {
+                panic!("a seeded contract must become Committed");
+            };
+            chain
+                .contract_forest()
+                .verify(&leaf, &path, &hasher)
+                .expect("committed proof verifies against the genesis forest");
+        }
+    }
+
+    #[test]
+    fn devnet_genesis_ignores_id_order() {
+        let mut reversed = DEVNET_IDS;
+        reversed.reverse();
+        let (forward, _) = Blockchain::devnet_genesis(ChainParams::default(), &DEVNET_IDS)
+            .expect("devnet genesis");
+        let (backward, catchup) =
+            Blockchain::devnet_genesis(ChainParams::default(), &reversed).expect("devnet genesis");
+
+        // Utreexo leaf positions follow insertion order, so an unsorted seed
+        // list would fork two devnet nodes at height 0.
+        assert_eq!(forward.tip(), backward.tip());
+        assert_eq!(forward.state_commitment(), backward.state_commitment());
+
+        // The catchup from either ordering still resolves every id.
+        let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
+        for id in &DEVNET_IDS {
+            let leaf = ContractLeaf(*id);
+            let Proof::Committed(path) = catchup
+                .update_proof(&leaf, Proof::Transient, &hasher)
+                .expect("transient proof catches up")
+            else {
+                panic!("a seeded contract must become Committed");
+            };
+            forward
+                .contract_forest()
+                .verify(&leaf, &path, &hasher)
+                .expect("either ordering commits the same forest");
+        }
+    }
+
+    #[test]
+    fn devnet_genesis_rejects_duplicate_ids() {
+        assert!(matches!(
+            Blockchain::devnet_genesis(ChainParams::default(), &[[7; 32], [7; 32]]),
+            Err(ChainError::DuplicateContract)
+        ));
+    }
+
+    #[test]
+    fn devnet_genesis_rejects_unsupported_version() {
+        let params = ChainParams {
+            version: 2,
+            ..ChainParams::default()
+        };
+        assert!(matches!(
+            Blockchain::new(params),
+            Err(ChainError::UnsupportedVersion)
+        ));
+        // Duplicate ids would fail too; the version check must come first.
+        assert!(matches!(
+            Blockchain::devnet_genesis(params, &[[7; 32], [7; 32]]),
+            Err(ChainError::UnsupportedVersion)
+        ));
+    }
+
+    #[test]
+    fn empty_devnet_genesis_matches_new() {
+        let params = ChainParams::default();
+        let plain = Blockchain::new(params).expect("new");
+        let (seeded, _) = Blockchain::devnet_genesis(params, &[]).expect("devnet genesis");
+        assert_eq!(plain.tip(), seeded.tip());
+        assert_eq!(plain.state_commitment(), seeded.state_commitment());
     }
 
     #[test]

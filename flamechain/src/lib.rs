@@ -8,10 +8,11 @@ pub mod validation;
 
 pub use block::{
     AppliedBlock, Block, BlockHeader, BlockLimits, BlockTx, Blockchain, ChainError, ChainParams,
-    CoreBlockHeader, ExecutionKind, ExecutionRecord, ReorgOutcome, StateCommitment,
+    CoreBlockHeader, ContractLeaf, ExecutionKind, ExecutionRecord, ReorgOutcome, StateCommitment,
 };
 pub use mempool::{Mempool, MempoolEntry, MempoolError, MempoolPolicy, RebaseReport};
 pub use storage::{Lease, SPARKS_PER_FLAME, StorageError, StorageParams, StoredActor};
+pub use utreexo::utreexo_hasher;
 pub use validation::FlameBlockValidator;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

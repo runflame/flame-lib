@@ -8,7 +8,7 @@ use crate::constraints::Commitment;
 use crate::{Predicate, Scalar, String};
 
 /// Canonical flavor of the native Flame token.
-pub const FLAME_FLAVOR: Scalar = Scalar::ZERO;
+pub const FLAME_FLAVOR: Scalar = Scalar::ONE;
 
 // ── Token ────────────────────────────────────────────────────────
 
@@ -53,6 +53,33 @@ impl Token {
         Some(Token {
             qty: Commitment::unblinded(qty),
             flv: Commitment::unblinded(flv),
+        })
+    }
+
+    /// Builds a `Token` whose commitments the caller can open: each half
+    /// is an [`Commitment::Open`] over the supplied value and blinding
+    /// factor, so the token carries the prover's witness.
+    ///
+    /// This is what a wallet needs to spend a confidential output it
+    /// received. The published Contract holds only the two commitment
+    /// points; the recipient, who kept the openings, rebuilds the same
+    /// Contract with open commitments and pushes it as a private witness
+    /// through `String::contract`. The alternative — opening the token
+    /// on the stack with `decrypt` — puts the quantity and both blinding
+    /// factors into the bytecode, where every verifier reads them.
+    ///
+    /// Returns `None` unless `qty` is a non-negative 64-bit value,
+    /// mirroring [`Token::cleartext`].
+    pub fn from_opening(
+        qty: Scalar,
+        flv: Scalar,
+        qty_blinding: DalekScalar,
+        flv_blinding: DalekScalar,
+    ) -> Option<Token> {
+        qty.to_u64()?;
+        Some(Token {
+            qty: Commitment::blinded_with_factor(qty, qty_blinding),
+            flv: Commitment::blinded_with_factor(flv, flv_blinding),
         })
     }
 
@@ -221,4 +248,49 @@ pub fn flavor_from_predicate(predicate: &Predicate, tag: &String) -> Scalar {
     let mut buf = [0u8; 64];
     t.challenge_bytes(b"flavor", &mut buf);
     Scalar::from(DalekScalar::from_bytes_mod_order_wide(&buf))
+}
+
+// ── Tests ────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_opening_commits_to_the_values_it_was_given() {
+        let qty = Scalar::from(42_000_000_000u64);
+        let flv = Scalar::from(7u64);
+        let qty_blinding = DalekScalar::from(11u64);
+        let flv_blinding = DalekScalar::from(13u64);
+
+        let token = Token::from_opening(qty, flv, qty_blinding, flv_blinding)
+            .expect("a 64-bit quantity opens");
+
+        assert_eq!(
+            token.qty().to_point(),
+            Commitment::blinded_with_factor(qty, qty_blinding).to_point(),
+            "the qty half commits to the value and blinding passed in"
+        );
+        assert_eq!(
+            token.flv().to_point(),
+            Commitment::blinded_with_factor(flv, flv_blinding).to_point(),
+            "the flv half commits to the value and blinding passed in"
+        );
+        assert_eq!(token.qty().witness(), Some((qty, qty_blinding)));
+        assert_eq!(token.flv().witness(), Some((flv, flv_blinding)));
+    }
+
+    #[test]
+    fn from_opening_rejects_a_quantity_outside_the_64_bit_range() {
+        assert!(
+            Token::from_opening(
+                -Scalar::from(1u64),
+                FLAME_FLAVOR,
+                DalekScalar::ZERO,
+                DalekScalar::ZERO,
+            )
+            .is_none(),
+            "a centered-negative quantity has no 64-bit range proof"
+        );
+    }
 }
