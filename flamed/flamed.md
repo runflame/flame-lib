@@ -29,7 +29,9 @@ are not in it:
 - **Which predicate locks which contract.** The chain never knew: an id
   commits the predicate, but nothing indexes the reverse. `OutputIndex` keeps
   that map, which is what makes `scan` possible and what Phase 3's wallet
-  discovery will be built on.
+  discovery will be built on. It also keeps the note that follows each
+  output, the `Data` entry right after it in its log, byte for byte and
+  never parsed ([Confidential payments](../docs/payments.md#the-node)).
 
 All three live in memory and are rebuilt by replaying `blocks.bin`. The only
 durable state this node has is that file and `genesis.json`.
@@ -89,7 +91,7 @@ lowercase hex strings; blobs are standard base64.
 | `contract` | `id` | the contract as published, with its height and predicate |
 | `submit_tx` | `block_tx` | the txid, once the mempool has taken it |
 | `tx_status` | `txid` | `unknown`, `mempool`, or `confirmed` with where |
-| `scan` | `predicates`, `since_height` | every contract created under those predicates since that height |
+| `scan` | `predicates`, `since_height` | every contract created under those predicates since that height, each with its note |
 
 Server-defined error codes, in the JSON-RPC 2.0 server range: `-32001`
 `NOT_FOUND`, `-32002` `MEMPOOL_REJECTED`, `-32003` `LIMIT_EXCEEDED`,

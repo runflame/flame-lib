@@ -20,6 +20,7 @@ members = [
     "flamewallet-wasm",
     "flamed-rpc",
     "flamed",
+    "flamebench",
 ]
 
 # Use the runflame fork of merlin to enable its `dynamic-labels`
@@ -40,3 +41,15 @@ inherits = "release"
 lto = true
 codegen-units = 1
 strip = true
+
+# Proving and verifying are unbearably slow without optimizations, so the
+# crypto dependencies are optimized in dev builds too: every test that
+# proves or verifies a transaction runs in seconds, not minutes. Only these
+# two dependencies, never a workspace member, so debugging flamevm and the
+# rest stays as it was. `cargo bench` builds optimized anyway. The price is
+# a longer first dev build of these two crates.
+[profile.dev.package.bulletproofs]
+opt-level = 3
+
+[profile.dev.package.curve25519-dalek]
+opt-level = 3

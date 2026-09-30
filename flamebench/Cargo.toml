@@ -1,0 +1,50 @@
+[package]
+name = "flamebench"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Flame benchmarks: what a transaction costs to verify and to send, and verifier scaling"
+publish = false
+
+[dependencies]
+core_affinity = "0.8"
+curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility", "rand_core"] }
+flamechain = { path = "../flamechain" }
+flamekd = { path = "../flamekd" }
+flamepayments = { path = "../flamepayments" }
+flamevm = { path = "../flamevm" }
+hex = "0.3"
+merlin = "3"
+musig = { path = "../musig" }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Copied from flamevm, so Cargo resolves one `bulletproofs`.
+[dependencies.bulletproofs]
+git = "https://github.com/runflame/bulletproofs"
+branch = "develop"
+features = ["yoloproofs"]
+
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "tx_cost"
+harness = false
+
+[[bench]]
+name = "send"
+harness = false
+
+[[bench]]
+name = "verifier_scaling"
+harness = false
+
+[[bin]]
+name = "report"
+path = "src/bin/report.rs"
+
+[[bin]]
+name = "first-send"
+path = "src/bin/first-send.rs"

@@ -1,16 +1,14 @@
 //! Two accounts, two blocks, on a real chain: a cleartext genesis
-//! allocation becomes a confidential payment, the payment is spent on, and
-//! every membership proof is refreshed through the catchup of the block
-//! that moved it.
+//! allocation becomes a confidential payment, its recipient opens the note
+//! and spends it on, and every membership proof is refreshed through the
+//! catchup of the block that moved it.
 
 use flamechain::utreexo::{Catchup, Proof};
 use flamechain::{utreexo_hasher, Blockchain, ChainParams, ContractLeaf};
-use flamekd::{util, Network};
-use flamevm::{
-    Anchor, ClearToken, Contract, ContractID, Predicate, Scalar, TxLog, Value, FLAME_FLAVOR,
-};
+use flamekd::{util, Network, ReceivingAddress};
+use flamevm::{Anchor, ClearToken, Contract, ContractID, Scalar, TxLog, Value, FLAME_FLAVOR};
 
-use super::{header, inputs, limits, native_output, outputs, publish};
+use super::{header, inputs, limits, native_output, outputs, publish, receive, rng};
 use crate::builder::{block_tx, build_transfer, sign, InputSpec};
 use crate::keys::Account;
 
@@ -43,22 +41,27 @@ fn refresh(chain: &Blockchain, catchup: &Catchup, id: ContractID, proof: Proof) 
     updated
 }
 
-fn assert_predicates(log: &TxLog, expected: &[&Predicate]) {
-    let created = outputs(log);
-    assert_eq!(created.len(), expected.len(), "output count");
-    for (contract, predicate) in created.iter().zip(expected) {
-        assert_eq!(
-            contract.predicate.to_point(),
-            predicate.to_point(),
-            "output predicate"
-        );
-    }
+/// The log pays exactly these addresses, in whatever order the builder
+/// sorted its outputs into.
+fn assert_pays(log: &TxLog, expected: &[ReceivingAddress]) {
+    let mut created: Vec<[u8; 32]> = outputs(log)
+        .iter()
+        .map(|contract| contract.predicate.to_point().to_bytes())
+        .collect();
+    let mut expected: Vec<[u8; 32]> = expected
+        .iter()
+        .map(|address| address.spending_key().compress().to_bytes())
+        .collect();
+    created.sort();
+    expected.sort();
+    assert_eq!(created, expected, "the outputs pay these addresses");
 }
 
 #[test]
 fn two_accounts_spend_across_two_blocks() {
     let alice = account(&A_SEED);
     let bob = account(&B_SEED);
+    let mut rng = rng(20);
 
     // 1. One cleartext allocation for Alice, as a devnet genesis makes them.
     let allocation = Contract::new(
@@ -81,25 +84,34 @@ fn two_accounts_spend_across_two_blocks() {
     let alice_key = alice.spending_key_at(util::RECEIVING, 0).expect("key");
     let input = InputSpec::clear(allocation, allocation_proof.clone(), alice_key)
         .expect("clear input on the allocation");
-    let bob_predicate = bob.predicate_at(util::RECEIVING, 0).expect("predicate");
-    let alice_change_predicate = alice.predicate_at(util::CHANGE, 0).expect("predicate");
-    let (to_bob, bob_opening) = native_output(bob_predicate.clone(), payment, 0);
-    // Alice's own change opening is hers to keep; this test never spends it.
-    let (to_change, _) = native_output(alice_change_predicate.clone(), change, 1);
+    let bob_address = bob.address_at(util::RECEIVING, 0).expect("address");
+    let alice_change_address = alice.address_at(util::CHANGE, 0).expect("address");
+    let to_bob = native_output(bob_address, payment);
+    let to_change = native_output(alice_change_address, change);
 
-    let unsigned = build_transfer(&[input], &[to_bob, to_change], FEE, header(), limits())
-        .expect("build the payment");
+    let unsigned = build_transfer(
+        &[input],
+        &[to_bob, to_change],
+        FEE,
+        header(),
+        limits(),
+        &mut rng,
+    )
+    .expect("build the payment");
 
     // The log is readable before signing: the wallet knows what it is about
     // to authorize.
     assert_eq!(inputs(unsigned.log()), vec![allocation_id]);
-    assert_predicates(unsigned.log(), &[&bob_predicate, &alice_change_predicate]);
+    assert_pays(unsigned.log(), &[bob_address, alice_change_address]);
 
     let tx = sign(unsigned, &[alice_key]).expect("sign");
     let (_, published) = publish(&tx);
-    let created = outputs(&published);
-    let bob_contract = created[0].clone();
-    let alice_change = created[1].clone();
+    // Each side opens its own output's note; this test never spends Alice's
+    // change, but her note must open all the same.
+    let (bob_contract, bob_note) = receive(&published, &bob, util::RECEIVING, 0);
+    let (alice_change, alice_change_note) = receive(&published, &alice, util::CHANGE, 0);
+    assert_eq!(bob_note.opening.qty, payment);
+    assert_eq!(alice_change_note.opening.qty, change);
 
     let block = chain
         .build_block(
@@ -124,17 +136,18 @@ fn two_accounts_spend_across_two_blocks() {
     );
 
     // 5. Bob rebuilds his input the way a recipient must: from the contract
-    // as published, plus the opening Alice sent him out of band.
+    // as published, plus the opening its note carried.
     let bob_payment = 100 * FLAME;
     let bob_change = payment - bob_payment - FEE;
     let bob_key = bob.spending_key_at(util::RECEIVING, 0).expect("key");
-    let input = InputSpec::confidential(&bob_contract, &bob_opening, bob_proof.clone(), bob_key)
-        .expect("confidential input on Bob's contract");
+    let input =
+        InputSpec::confidential(&bob_contract, &bob_note.opening, bob_proof.clone(), bob_key)
+            .expect("confidential input on Bob's contract");
 
-    let alice_second_predicate = alice.predicate_at(util::RECEIVING, 1).expect("predicate");
-    let bob_change_predicate = bob.predicate_at(util::CHANGE, 0).expect("predicate");
-    let (to_alice, _) = native_output(alice_second_predicate.clone(), bob_payment, 2);
-    let (to_bob_change, _) = native_output(bob_change_predicate.clone(), bob_change, 3);
+    let alice_second_address = alice.address_at(util::RECEIVING, 1).expect("address");
+    let bob_change_address = bob.address_at(util::CHANGE, 0).expect("address");
+    let to_alice = native_output(alice_second_address, bob_payment);
+    let to_bob_change = native_output(bob_change_address, bob_change);
 
     let unsigned = build_transfer(
         &[input],
@@ -142,19 +155,16 @@ fn two_accounts_spend_across_two_blocks() {
         FEE,
         header(),
         limits(),
+        &mut rng,
     )
     .expect("build Bob's payment");
     assert_eq!(inputs(unsigned.log()), vec![bob_contract.id()]);
-    assert_predicates(
-        unsigned.log(),
-        &[&alice_second_predicate, &bob_change_predicate],
-    );
+    assert_pays(unsigned.log(), &[alice_second_address, bob_change_address]);
 
     let tx = sign(unsigned, &[bob_key]).expect("sign");
     let (_, published) = publish(&tx);
-    let created = outputs(&published);
-    let alice_received = created[0].clone();
-    let bob_change_contract = created[1].clone();
+    let (alice_received, _) = receive(&published, &alice, util::RECEIVING, 1);
+    let (bob_change_contract, _) = receive(&published, &bob, util::CHANGE, 0);
 
     // Bob's proof is still the one from block 1: no block has passed since.
     let block = chain

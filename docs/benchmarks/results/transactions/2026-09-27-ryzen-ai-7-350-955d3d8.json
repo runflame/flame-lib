@@ -1,0 +1,603 @@
+{
+  "schema": 2,
+  "run": {
+    "date": "2026-09-27",
+    "commit": "955d3d8ab9ee15ddd37eb83b01ae5a9637477a67",
+    "dirty": true,
+    "rustc": "rustc 1.90.0 (1159e78c4 2025-09-14)",
+    "commands": [
+      "cargo run -p flamebench --bin report -- --cpu-order",
+      "cargo bench -p flamebench --no-run",
+      "taskset -c 2 cargo bench -p flamebench --bench tx_cost",
+      "taskset -c 2 cargo bench -p flamebench --bench send",
+      "cargo run -p flamebench --bin report"
+    ],
+    "durations": [
+      {
+        "bench": "tx_cost",
+        "secs": 213.577810766
+      },
+      {
+        "bench": "send",
+        "secs": 364.654904654
+      }
+    ]
+  },
+  "machine": {
+    "cpu_model": "AMD Ryzen AI 7 350 w/ Radeon 860M",
+    "cpu_order": [
+      {
+        "cpu": 2,
+        "package": 0,
+        "core": 2,
+        "class": "fast",
+        "thread": 0,
+        "max_freq_khz": 5090910
+      },
+      {
+        "cpu": 4,
+        "package": 0,
+        "core": 4,
+        "class": "fast",
+        "thread": 0,
+        "max_freq_khz": 5090910
+      },
+      {
+        "cpu": 6,
+        "package": 0,
+        "core": 6,
+        "class": "fast",
+        "thread": 0,
+        "max_freq_khz": 5090910
+      },
+      {
+        "cpu": 0,
+        "package": 0,
+        "core": 0,
+        "class": "fast",
+        "thread": 0,
+        "max_freq_khz": 5090910
+      },
+      {
+        "cpu": 1,
+        "package": 0,
+        "core": 1,
+        "class": "compact",
+        "thread": 0,
+        "max_freq_khz": 3506494
+      },
+      {
+        "cpu": 3,
+        "package": 0,
+        "core": 3,
+        "class": "compact",
+        "thread": 0,
+        "max_freq_khz": 3506494
+      },
+      {
+        "cpu": 5,
+        "package": 0,
+        "core": 5,
+        "class": "compact",
+        "thread": 0,
+        "max_freq_khz": 3506494
+      },
+      {
+        "cpu": 7,
+        "package": 0,
+        "core": 7,
+        "class": "compact",
+        "thread": 0,
+        "max_freq_khz": 3350650
+      },
+      {
+        "cpu": 10,
+        "package": 0,
+        "core": 2,
+        "class": "fast",
+        "thread": 1,
+        "max_freq_khz": 5090910
+      },
+      {
+        "cpu": 12,
+        "package": 0,
+        "core": 4,
+        "class": "fast",
+        "thread": 1,
+        "max_freq_khz": 5090910
+      },
+      {
+        "cpu": 14,
+        "package": 0,
+        "core": 6,
+        "class": "fast",
+        "thread": 1,
+        "max_freq_khz": 5090910
+      },
+      {
+        "cpu": 8,
+        "package": 0,
+        "core": 0,
+        "class": "fast",
+        "thread": 1,
+        "max_freq_khz": 5090910
+      },
+      {
+        "cpu": 9,
+        "package": 0,
+        "core": 1,
+        "class": "compact",
+        "thread": 1,
+        "max_freq_khz": 3506494
+      },
+      {
+        "cpu": 11,
+        "package": 0,
+        "core": 3,
+        "class": "compact",
+        "thread": 1,
+        "max_freq_khz": 3506494
+      },
+      {
+        "cpu": 13,
+        "package": 0,
+        "core": 5,
+        "class": "compact",
+        "thread": 1,
+        "max_freq_khz": 3506494
+      },
+      {
+        "cpu": 15,
+        "package": 0,
+        "core": 7,
+        "class": "compact",
+        "thread": 1,
+        "max_freq_khz": 3350650
+      }
+    ],
+    "governor": "powersave",
+    "energy_performance_preference": "balance_performance",
+    "platform_profile": "balanced",
+    "power_source": "mains"
+  },
+  "shapes": [
+    {
+      "id": "1to2",
+      "label": "1 → 2",
+      "inputs": 1,
+      "outputs": 2,
+      "fee": 1000,
+      "bytes": 1921,
+      "gas_used": 6238,
+      "multiplications": 137,
+      "decode_method": "block_tx",
+      "verify_ns": 2101293.7291666665,
+      "decode_ns": 12445.838408119658,
+      "signature_ns": 30197.56421939988,
+      "r1cs_estimate_ns": 2098227.06,
+      "utreexo": [
+        {
+          "leaves": 1024,
+          "depth": 10,
+          "ns": 5143.112145988109
+        },
+        {
+          "leaves": 65536,
+          "depth": 16,
+          "ns": 7949.504326530612
+        }
+      ],
+      "send": {
+        "prepare_ns": 140111.5514101862,
+        "build_ns": 25147050.444444448,
+        "sign_ns": 315905.29340277775,
+        "package_ns": 5357.390825432236,
+        "open_note_ns": 171951.15331697158,
+        "prove_estimate_ns": 20060928.35,
+        "warm_peak_bytes": 636483,
+        "fresh": {
+          "runs": 15,
+          "first_ns": 34890689.0,
+          "second_ns": 22976235.0,
+          "first_peak_bytes": 964579
+        }
+      }
+    },
+    {
+      "id": "2to2",
+      "label": "2 → 2",
+      "inputs": 2,
+      "outputs": 2,
+      "fee": 1000,
+      "bytes": 2089,
+      "gas_used": 8216,
+      "multiplications": 141,
+      "decode_method": "block_tx",
+      "verify_ns": 2144758.083333333,
+      "decode_ns": 14738.30478559583,
+      "signature_ns": 37437.047220122615,
+      "r1cs_estimate_ns": 2102544.854166667,
+      "utreexo": [
+        {
+          "leaves": 1024,
+          "depth": 10,
+          "ns": 5143.112145988109
+        },
+        {
+          "leaves": 65536,
+          "depth": 16,
+          "ns": 7949.504326530612
+        }
+      ],
+      "send": {
+        "prepare_ns": 280190.11085858586,
+        "build_ns": 24963095.555555556,
+        "sign_ns": 317899.4375,
+        "package_ns": 6330.7600294699705,
+        "open_note_ns": 172246.60518040386,
+        "prove_estimate_ns": 20199120.75,
+        "warm_peak_bytes": 648388,
+        "fresh": {
+          "runs": 15,
+          "first_ns": 36169720.0,
+          "second_ns": 24563506.0,
+          "first_peak_bytes": 976484
+        }
+      }
+    },
+    {
+      "id": "4to4",
+      "label": "4 → 4",
+      "inputs": 4,
+      "outputs": 4,
+      "fee": 1000,
+      "bytes": 2885,
+      "gas_used": 17932,
+      "multiplications": 281,
+      "decode_method": "block_tx",
+      "verify_ns": 3740998.8214285714,
+      "decode_ns": 19580.3217636517,
+      "signature_ns": 51932.19978697665,
+      "r1cs_estimate_ns": 3672208.25,
+      "utreexo": [
+        {
+          "leaves": 1024,
+          "depth": 10,
+          "ns": 5143.112145988109
+        },
+        {
+          "leaves": 65536,
+          "depth": 16,
+          "ns": 7949.504326530612
+        }
+      ],
+      "send": {
+        "prepare_ns": 560450.2271084337,
+        "build_ns": 45600407.099999994,
+        "sign_ns": 609400.9718660968,
+        "package_ns": 8609.89761095409,
+        "open_note_ns": 193872.2953125,
+        "prove_estimate_ns": 41089855.1,
+        "warm_peak_bytes": 949864,
+        "fresh": {
+          "runs": 15,
+          "first_ns": 58816346.0,
+          "second_ns": 46942880.0,
+          "first_peak_bytes": 1277960
+        }
+      }
+    },
+    {
+      "id": "1to13",
+      "label": "1 → 13",
+      "inputs": 1,
+      "outputs": 13,
+      "fee": 1000,
+      "bytes": 4227,
+      "gas_used": 37918,
+      "multiplications": 885,
+      "decode_method": "block_tx",
+      "verify_ns": 6867093.9375,
+      "decode_ns": 17261.615593583312,
+      "signature_ns": 30408.31190872136,
+      "r1cs_estimate_ns": 6891351.9375,
+      "utreexo": [
+        {
+          "leaves": 1024,
+          "depth": 10,
+          "ns": 5143.112145988109
+        },
+        {
+          "leaves": 65536,
+          "depth": 16,
+          "ns": 7949.504326530612
+        }
+      ],
+      "send": {
+        "prepare_ns": 140009.06510416666,
+        "build_ns": 98381236.66666666,
+        "sign_ns": 1897686.926739927,
+        "package_ns": 7599.361525037723,
+        "open_note_ns": 195234.18308080808,
+        "prove_estimate_ns": 88730507.5,
+        "warm_peak_bytes": 2895342,
+        "fresh": {
+          "runs": 15,
+          "first_ns": 113487629.0,
+          "second_ns": 100610267.0,
+          "first_peak_bytes": 3223438
+        }
+      }
+    }
+  ],
+  "over_capacity": [
+    {
+      "id": "1to14",
+      "label": "1 → 14",
+      "inputs": 1,
+      "outputs": 14,
+      "proves": false,
+      "error": "VMError::R1CSProofConstruction",
+      "multiplications": null
+    }
+  ],
+  "limits": {
+    "max_multiplications": 100000,
+    "max_multiplications_per_transaction": 1024,
+    "max_transactions": 10000
+  },
+  "estimates": [
+    {
+      "id": "tx_cost/utreexo/1024",
+      "median_ns": 5143.112145988109,
+      "lower_ns": 5137.940153301887,
+      "upper_ns": 5148.255425347223
+    },
+    {
+      "id": "tx_cost/utreexo/65536",
+      "median_ns": 7949.504326530612,
+      "lower_ns": 7944.302800479808,
+      "upper_ns": 7956.14
+    },
+    {
+      "id": "tx_cost/verify/1to2",
+      "median_ns": 2101293.7291666665,
+      "lower_ns": 2100061.875,
+      "upper_ns": 2102361.1666666665
+    },
+    {
+      "id": "tx_cost/decode/1to2",
+      "median_ns": 12445.838408119658,
+      "lower_ns": 12439.15268065268,
+      "upper_ns": 12451.693567828184
+    },
+    {
+      "id": "tx_cost/signature/1to2",
+      "median_ns": 30197.56421939988,
+      "lower_ns": 30146.218265993262,
+      "upper_ns": 30216.95743929983
+    },
+    {
+      "id": "tx_cost/r1cs_synthetic/137",
+      "median_ns": 2098227.06,
+      "lower_ns": 2097043.86,
+      "upper_ns": 2102848.76
+    },
+    {
+      "id": "send/prepare/1to2",
+      "median_ns": 140111.5514101862,
+      "lower_ns": 140014.17,
+      "upper_ns": 140179.0550514626
+    },
+    {
+      "id": "send/build/1to2",
+      "median_ns": 25147050.444444448,
+      "lower_ns": 25106184.777777776,
+      "upper_ns": 25190460.833333332
+    },
+    {
+      "id": "send/sign/1to2",
+      "median_ns": 315905.29340277775,
+      "lower_ns": 315842.99,
+      "upper_ns": 315980.72842261905
+    },
+    {
+      "id": "send/package/1to2",
+      "median_ns": 5357.390825432236,
+      "lower_ns": 5346.52682578368,
+      "upper_ns": 5366.137980004544
+    },
+    {
+      "id": "send/open_note/1to2",
+      "median_ns": 171951.15331697158,
+      "lower_ns": 171832.2578616352,
+      "upper_ns": 172029.70512820513
+    },
+    {
+      "id": "send/r1cs_prove_synthetic/137",
+      "median_ns": 20060928.35,
+      "lower_ns": 20025594.3,
+      "upper_ns": 20071563.25
+    },
+    {
+      "id": "tx_cost/verify/2to2",
+      "median_ns": 2144758.083333333,
+      "lower_ns": 2143147.375,
+      "upper_ns": 2147218.125
+    },
+    {
+      "id": "tx_cost/decode/2to2",
+      "median_ns": 14738.30478559583,
+      "lower_ns": 14731.74295190713,
+      "upper_ns": 14765.530490405115
+    },
+    {
+      "id": "tx_cost/signature/2to2",
+      "median_ns": 37437.047220122615,
+      "lower_ns": 37399.69259259259,
+      "upper_ns": 37476.27347114556
+    },
+    {
+      "id": "tx_cost/r1cs_synthetic/141",
+      "median_ns": 2102544.854166667,
+      "lower_ns": 2101052.0416666665,
+      "upper_ns": 2106600.375
+    },
+    {
+      "id": "send/prepare/2to2",
+      "median_ns": 280190.11085858586,
+      "lower_ns": 280152.1655844156,
+      "upper_ns": 280246.0357142857
+    },
+    {
+      "id": "send/build/2to2",
+      "median_ns": 24963095.555555556,
+      "lower_ns": 24123680.888888888,
+      "upper_ns": 26002808.444444444
+    },
+    {
+      "id": "send/sign/2to2",
+      "median_ns": 317899.4375,
+      "lower_ns": 317871.9954545455,
+      "upper_ns": 317988.1443661972
+    },
+    {
+      "id": "send/package/2to2",
+      "median_ns": 6330.7600294699705,
+      "lower_ns": 6323.434178473775,
+      "upper_ns": 6339.364481156427
+    },
+    {
+      "id": "send/open_note/2to2",
+      "median_ns": 172246.60518040386,
+      "lower_ns": 172120.95833333334,
+      "upper_ns": 172400.3086419753
+    },
+    {
+      "id": "send/r1cs_prove_synthetic/141",
+      "median_ns": 20199120.75,
+      "lower_ns": 20164104.049999997,
+      "upper_ns": 20231689.799999997
+    },
+    {
+      "id": "tx_cost/verify/4to4",
+      "median_ns": 3740998.8214285714,
+      "lower_ns": 3735549.0,
+      "upper_ns": 3749567.428571428
+    },
+    {
+      "id": "tx_cost/decode/4to4",
+      "median_ns": 19580.3217636517,
+      "lower_ns": 19557.021739130432,
+      "upper_ns": 19609.82555780933
+    },
+    {
+      "id": "tx_cost/signature/4to4",
+      "median_ns": 51932.19978697665,
+      "lower_ns": 51853.03770609319,
+      "upper_ns": 52007.78333333333
+    },
+    {
+      "id": "tx_cost/r1cs_synthetic/281",
+      "median_ns": 3672208.25,
+      "lower_ns": 3666489.285714286,
+      "upper_ns": 3676386.4285714286
+    },
+    {
+      "id": "send/prepare/4to4",
+      "median_ns": 560450.2271084337,
+      "lower_ns": 560323.2962962963,
+      "upper_ns": 560566.0674157303
+    },
+    {
+      "id": "send/build/4to4",
+      "median_ns": 45600407.099999994,
+      "lower_ns": 45562609.099999994,
+      "upper_ns": 45737734.1
+    },
+    {
+      "id": "send/sign/4to4",
+      "median_ns": 609400.9718660968,
+      "lower_ns": 609169.6814873418,
+      "upper_ns": 609708.5909090909
+    },
+    {
+      "id": "send/package/4to4",
+      "median_ns": 8609.89761095409,
+      "lower_ns": 8590.889882888745,
+      "upper_ns": 8628.150339392545
+    },
+    {
+      "id": "send/open_note/4to4",
+      "median_ns": 193872.2953125,
+      "lower_ns": 193652.03125,
+      "upper_ns": 194314.6283993784
+    },
+    {
+      "id": "send/r1cs_prove_synthetic/281",
+      "median_ns": 41089855.1,
+      "lower_ns": 39247678.0,
+      "upper_ns": 43163671.6
+    },
+    {
+      "id": "tx_cost/verify/1to13",
+      "median_ns": 6867093.9375,
+      "lower_ns": 6860430.125,
+      "upper_ns": 6875581.0
+    },
+    {
+      "id": "tx_cost/decode/1to13",
+      "median_ns": 17261.615593583312,
+      "lower_ns": 17253.703580901856,
+      "upper_ns": 17270.61578342408
+    },
+    {
+      "id": "tx_cost/signature/1to13",
+      "median_ns": 30408.31190872136,
+      "lower_ns": 30350.538383838382,
+      "upper_ns": 30443.43722943723
+    },
+    {
+      "id": "tx_cost/r1cs_synthetic/885",
+      "median_ns": 6891351.9375,
+      "lower_ns": 6886289.3125,
+      "upper_ns": 6901385.75
+    },
+    {
+      "id": "send/prepare/1to13",
+      "median_ns": 140009.06510416666,
+      "lower_ns": 139985.4453125,
+      "upper_ns": 140051.94479166667
+    },
+    {
+      "id": "send/build/1to13",
+      "median_ns": 98381236.66666666,
+      "lower_ns": 98313691.5,
+      "upper_ns": 98521376.66666666
+    },
+    {
+      "id": "send/sign/1to13",
+      "median_ns": 1897686.926739927,
+      "lower_ns": 1897411.1986111111,
+      "upper_ns": 1898091.530624621
+    },
+    {
+      "id": "send/package/1to13",
+      "median_ns": 7599.361525037723,
+      "lower_ns": 7588.744287304866,
+      "upper_ns": 7616.70412979351
+    },
+    {
+      "id": "send/open_note/1to13",
+      "median_ns": 195234.18308080808,
+      "lower_ns": 195084.24479166663,
+      "upper_ns": 195489.38239990175
+    },
+    {
+      "id": "send/r1cs_prove_synthetic/885",
+      "median_ns": 88730507.5,
+      "lower_ns": 88666207.33333334,
+      "upper_ns": 88838091.66666667
+    }
+  ]
+}

@@ -15,9 +15,9 @@ pub mod types;
 
 pub use api::{FlamedApiClient, FlamedApiServer};
 pub use types::{
-    codes, BlockId, BlockTxEnvelope, ContractEnvelope, ContractId, ContractResult, PredicatePoint,
-    ProofBytes, ProofResult, ScanEntry, ScanResult, SpentAt, TipResult, TxId, TxStatusResult,
-    MAX_PROOF_IDS, MAX_SCAN_PREDICATES,
+    codes, BlockId, BlockTxEnvelope, ContractEnvelope, ContractId, ContractResult, NoteEnvelope,
+    PredicatePoint, ProofBytes, ProofResult, ScanEntry, ScanResult, SpentAt, TipResult, TxId,
+    TxStatusResult, MAX_PROOF_IDS, MAX_SCAN_PREDICATES,
 };
 
 /// Required on any `impl FlamedApiServer`.

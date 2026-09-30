@@ -1,7 +1,8 @@
 //! The node, in process, over five blocks and a restart.
 //!
 //! No HTTP here: this is the node itself answering the questions a wallet
-//! asks, with every transaction built by `flamepayments`.
+//! asks, with every transaction built by `flamepayments` and every opening
+//! read from a note the node returned.
 
 use curve25519_dalek::ristretto::CompressedRistretto;
 use flamechain::mempool::MempoolError;
@@ -36,6 +37,7 @@ fn a_node_serves_two_wallets_across_five_blocks() {
     let dir = TempDir::new().expect("temp dir");
     let a = account(&SEED_A);
     let b = account(&SEED_B);
+    let mut rng = rng(50);
     let (genesis, cfg) = devnet(dir.path(), &a);
 
     // 1-2. A node opened on a fresh devnet holds one spendable contract.
@@ -55,11 +57,11 @@ fn a_node_serves_two_wallets_across_five_blocks() {
     let a_key = a.spending_key_at(RECEIVING, 0).expect("key");
     let input = InputSpec::clear(contract_of(&node, &genesis_id), genesis_proof, a_key)
         .expect("a cleartext allocation is a clear input");
-    let (to_b, b_opening) = output(&b, RECEIVING, 0, payment, 0);
-    let (to_change, a_change_opening) = output(&a, CHANGE, 0, change, 1);
-    let (packaged, contracts) = signed_transfer(vec![input], &[to_b, to_change], FEE);
-    let b_id = contracts[0].id();
-    let a_change_id = contracts[1].id();
+    let to_b = output(&b, RECEIVING, 0, payment);
+    let to_change = output(&a, CHANGE, 0, change);
+    let (packaged, contracts) = signed_transfer(vec![input], &[to_b, to_change], FEE, &mut rng);
+    let b_id = paying(&contracts, &b, RECEIVING, 0).id();
+    let a_change_id = paying(&contracts, &a, CHANGE, 0).id();
 
     let txid = node.submit(&submitted(&packaged)).expect("A's payment");
     assert_eq!(node.tx_status(&txid), TxStatus::Mempool);
@@ -81,6 +83,16 @@ fn a_node_serves_two_wallets_across_five_blocks() {
     let a_change_proof_at_1 = live(&node, &a_change_id);
     assert!(node.verify_proof(&b_id, &b_proof_at_1));
     assert!(node.verify_proof(&a_change_id, &a_change_proof_at_1));
+
+    // Each recipient scans its own predicate and opens the note that came
+    // back with the contract: nothing travels between A and B but the
+    // chain.
+    let (b_contract, b_opening) = received(&node, &b, RECEIVING, 0);
+    assert_eq!(b_contract.id(), b_id);
+    assert_eq!(b_opening.qty, payment);
+    let (a_change_contract, a_change_opening) = received(&node, &a, CHANGE, 0);
+    assert_eq!(a_change_contract.id(), a_change_id);
+    assert_eq!(a_change_opening.qty, change);
 
     // 4. Two empty blocks. Normalizing an unmodified forest returns the
     //    same roots, so an empty block moves no merkle path at all.
@@ -123,9 +135,9 @@ fn a_node_serves_two_wallets_across_five_blocks() {
         a_change_key,
     )
     .expect("A can open its own change");
-    let (to_a1, _) = output(&a, RECEIVING, 1, swept, 2);
-    let (packaged, contracts) = signed_transfer(vec![input], &[to_a1], FEE);
-    let a_recv1_id = contracts[0].id();
+    let to_a1 = output(&a, RECEIVING, 1, swept);
+    let (packaged, contracts) = signed_transfer(vec![input], &[to_a1], FEE, &mut rng);
+    let a_recv1_id = paying(&contracts, &a, RECEIVING, 1).id();
     node.submit(&submitted(&packaged)).expect("A's sweep");
     node.mint_block().expect("block 4");
     assert!(matches!(
@@ -134,21 +146,26 @@ fn a_node_serves_two_wallets_across_five_blocks() {
     ));
 
     // 7. B spends what it received, rebuilding the input the way a
-    //    recipient must: the contract as published, plus the opening A sent
-    //    out of band.
+    //    recipient must: the contract as published, plus the opening it
+    //    read from the note `scan` returned in step 3.
     let b_payment = 100 * FLAME;
     let b_change = payment - b_payment - FEE;
     let b_key = b.spending_key_at(RECEIVING, 0).expect("key");
     let b_contract = contract_of(&node, &b_id);
-    let (to_a2, _) = output(&a, RECEIVING, 2, b_payment, 3);
-    let (to_b_change, _) = output(&b, CHANGE, 0, b_change, 4);
+    let to_a2 = output(&a, RECEIVING, 2, b_payment);
+    let to_b_change = output(&b, CHANGE, 0, b_change);
 
     // First with the proof B has held since block 1. Block 4 moved it, and
     // a Catchup repairs a proof across one block only — this refusal is the
     // whole reason the node keeps a UtxoSet at all.
     let stale = InputSpec::confidential(&b_contract, &b_opening, b_proof_at_1, b_key)
         .expect("B can open its own contract");
-    let (packaged, _) = signed_transfer(vec![stale], &[to_a2.clone(), to_b_change.clone()], FEE);
+    let (packaged, _) = signed_transfer(
+        vec![stale],
+        &[to_a2.clone(), to_b_change.clone()],
+        FEE,
+        &mut rng,
+    );
     let refusal = node
         .submit(&submitted(&packaged))
         .expect_err("a proof from before block 4 no longer proves membership");
@@ -168,8 +185,8 @@ fn a_node_serves_two_wallets_across_five_blocks() {
     };
     let input = InputSpec::confidential(&b_contract, &b_opening, b_proof_now.clone(), b_key)
         .expect("B can open its own contract");
-    let (packaged, contracts) = signed_transfer(vec![input], &[to_a2, to_b_change], FEE);
-    let a_recv2_id = contracts[0].id();
+    let (packaged, contracts) = signed_transfer(vec![input], &[to_a2, to_b_change], FEE, &mut rng);
+    let a_recv2_id = paying(&contracts, &a, RECEIVING, 2).id();
     node.submit(&submitted(&packaged))
         .expect("the node's own proof is accepted");
     node.mint_block().expect("block 5");
@@ -194,6 +211,19 @@ fn a_node_serves_two_wallets_across_five_blocks() {
     assert_eq!(hits[1].spent.expect("the change is spent").height, 4);
     assert!(hits[2].spent.is_none(), "the swept output is unspent");
     assert!(hits[3].spent.is_none(), "what B sent back is unspent");
+    assert!(
+        hits[0].note.is_none(),
+        "the genesis allocation is a clear token and carries no note"
+    );
+    assert!(
+        hits[1..].iter().all(|hit| hit.note.is_some()),
+        "every confidential contract comes with its note"
+    );
+
+    // The note for what B sent back opens for A, a restart and three blocks
+    // after A last spoke to B.
+    let (_, a_recv2_opening) = received(&node, &a, RECEIVING, 2);
+    assert_eq!(a_recv2_opening.qty, b_payment);
 
     // `since_height` is the wallet's resume point.
     let recent = node.scan(&a_predicates, 4);

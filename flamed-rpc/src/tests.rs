@@ -3,8 +3,8 @@
 //! on.
 
 use crate::types::{
-    BlockId, ContractEnvelope, ContractId, PredicatePoint, ProofBytes, ProofResult, ScanEntry,
-    ScanResult, SpentAt, TipResult, TxId, TxStatusResult,
+    BlockId, ContractEnvelope, ContractId, NoteEnvelope, PredicatePoint, ProofBytes, ProofResult,
+    ScanEntry, ScanResult, SpentAt, TipResult, TxId, TxStatusResult,
 };
 
 #[test]
@@ -91,6 +91,7 @@ fn an_unspent_scan_entry_omits_its_spend() {
         txid: TxId([0x44; 32]),
         predicate: PredicatePoint([0x55; 32]),
         bytes: ContractEnvelope(vec![0xde, 0xad]),
+        note: None,
         spent: None,
     };
     let result = ScanResult {
@@ -111,4 +112,36 @@ fn an_unspent_scan_entry_omits_its_spend() {
         serde_json::from_str(&serde_json::to_string(&spent).expect("serialize"))
             .expect("deserialize");
     assert_eq!(round_tripped, spent);
+}
+
+#[test]
+fn a_scan_entry_carries_its_note_as_base64_or_omits_it() {
+    let entry = ScanEntry {
+        id: ContractId([0x33; 32]),
+        height: 1,
+        txid: TxId([0x44; 32]),
+        predicate: PredicatePoint([0x55; 32]),
+        bytes: ContractEnvelope(vec![0xde, 0xad]),
+        note: Some(NoteEnvelope(vec![0x01, 0x02, 0x03, 0xff])),
+        spent: None,
+    };
+    let json = serde_json::to_value(&entry).expect("serialize");
+    assert_eq!(json["note"], "AQID/w==");
+    assert_eq!(
+        serde_json::from_value::<ScanEntry>(json).expect("deserialize"),
+        entry
+    );
+
+    // Without a note the field is absent, not null, and its absence reads
+    // back as no note.
+    let bare = ScanEntry {
+        note: None,
+        ..entry
+    };
+    let json = serde_json::to_value(&bare).expect("serialize");
+    assert!(json.get("note").is_none());
+    assert_eq!(
+        serde_json::from_value::<ScanEntry>(json).expect("deserialize"),
+        bare
+    );
 }
