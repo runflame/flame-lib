@@ -18,15 +18,21 @@ an opaque handle; spending keys never leave a call. Keys are named by
 | `next_index()` | Receiving counter to persist. |
 | `owns(predicate, gap)` | Path a contract belongs to, if any. |
 | `receiving_key()` | `recv…` key for an indexer. |
-| `address_to_predicate(address, network)` | Predicate for an output. |
+| `address_to_predicate(address, network)` | Predicate an address's payments are locked with. |
 | `decode_contract(bytes)` | Id, predicate, cleartext amount. |
+| `open_note(contract, note, path)` | Opening and memo from an output's note. |
 | `opening_matches(contract, opening)` | Whether an opening opens a contract. |
-| `build_transfer(request)` | Txid, `BlockTx` bytes, output openings. |
+| `build_transfer(request)` | Txid, `BlockTx` bytes, each output with its note. |
 
-Errors are `FlameError`; `InvalidBytes { what }` names the bad field.
+Errors are `FlameError`; `InvalidBytes { what }` names the bad field, and
+`Note { failure }` says why a note did not open.
 
-Output openings are the only way to spend an output: deliver the recipient's,
-keep the change's.
+Outputs are paid to bech32f addresses. Each carries an encrypted note, and
+only its recipient can open it: amount, blinding factors and memo, as
+`docs/payments.md` specifies. A scan serves each contract with its note:
+`owns` finds the path, `open_note` gives the opening, and a later
+`TransferInput` spends with it. Change is opened the same way. Created
+outputs come back in published order, which is sorted, not request order.
 
 ## Building
 

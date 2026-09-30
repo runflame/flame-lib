@@ -35,6 +35,14 @@ pub enum FlameError {
     #[error("input {input} is not locked to the key at its path")]
     KeyMismatch { input: u32 },
 
+    /// A note did not open; `failure` says how, and so what the wallet does
+    /// with the output.
+    #[error("note not opened: {reason}")]
+    Note {
+        failure: crate::NoteFailure,
+        reason: String,
+    },
+
     /// The transfer could not be built or signed.
     #[error("transfer refused: {reason}")]
     Transfer { reason: String },

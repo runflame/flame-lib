@@ -4,9 +4,8 @@
 //! length, so each of these checks the length first and the encoding second,
 //! and names the field it refuses.
 
-use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar as DalekScalar;
-use flamevm::{Predicate, Scalar};
+use flamevm::Scalar;
 
 use crate::error::FlameError;
 
@@ -14,16 +13,6 @@ pub(crate) fn array32(what: &str, bytes: &[u8]) -> Result<[u8; 32], FlameError> 
     bytes
         .try_into()
         .map_err(|_| FlameError::bytes(what, format!("{} bytes, expected 32", bytes.len())))
-}
-
-/// A predicate as a compressed point that decompresses: a payment locked to
-/// anything else could never be spent, so it is refused before it is built.
-pub(crate) fn predicate(bytes: &[u8]) -> Result<Predicate, FlameError> {
-    let point = CompressedRistretto(array32("predicate", bytes)?);
-    if point.decompress().is_none() {
-        return Err(FlameError::bytes("predicate", "not a Ristretto point"));
-    }
-    Ok(Predicate::opaque(point))
 }
 
 /// A canonical flavor scalar. `None` is the native flavor.

@@ -1,8 +1,8 @@
 //! A transfer, from served bytes to signed bytes, in one call.
 
-use curve25519_dalek::scalar::Scalar as DalekScalar;
-use flamevm::{Limits, TxEntry, TxHeader};
+use flamekd::ReceivingAddress;
 use flamepayments::{Account, InputSpec, OutputSpec};
+use flamevm::{Limits, TxHeader};
 use rand::rngs::OsRng;
 use zeroize::Zeroizing;
 
@@ -40,12 +40,15 @@ pub struct TransferInput {
 /// One contract being created.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct TransferOutput {
-    /// The recipient's predicate: [`crate::address_to_predicate`], or
-    /// [`crate::Wallet::address`] on the change branch.
-    pub predicate: Vec<u8>,
+    /// The recipient's bech32f address, for the wallet's network; for
+    /// change, [`crate::Wallet::address`] on the change branch.
+    pub address: String,
     pub qty: u64,
     /// `None` for flames.
     pub flavor: Option<Vec<u8>>,
+    /// Sealed into the output's note with the amount; only the recipient
+    /// reads it. At most 8102 bytes; empty for none.
+    pub memo: Vec<u8>,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -60,15 +63,16 @@ pub struct TransferRequest {
     pub locktime: u32,
 }
 
-/// One contract the transfer creates, in request order.
+/// One contract the transfer creates.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct CreatedOutput {
     pub contract_id: Vec<u8>,
     /// Its published bytes, as an indexer will serve them once confirmed.
     pub contract: Vec<u8>,
-    /// Delivered to the recipient out of band, or kept for change: the
-    /// output can be spent from this record and nothing else.
-    pub opening: Opening,
+    /// The encrypted note that follows it on chain, as an indexer's scan
+    /// serves it. Its recipient opens it with [`crate::Wallet::open_note`];
+    /// so does this wallet, for its change.
+    pub note: Vec<u8>,
 }
 
 /// A signed transfer, ready to publish.
@@ -78,6 +82,9 @@ pub struct Transfer {
     pub txid: Vec<u8>,
     /// `BlockTx::to_bytes`: what a node's `submit_tx` takes.
     pub block_tx: Vec<u8>,
+    /// In the order they are published, which is not request order: the
+    /// builder sorts them so that position says nothing about which one is
+    /// the change. Match one to its request by its predicate.
     pub outputs: Vec<CreatedOutput>,
 }
 
@@ -91,7 +98,7 @@ impl Opening {
         })
     }
 
-    fn from_wallet(opening: &flamepayments::Opening) -> Opening {
+    pub(crate) fn from_wallet(opening: &flamepayments::Opening) -> Opening {
         Opening {
             qty: opening.qty,
             flavor: opening.flv.to_bytes().to_vec(),
@@ -126,16 +133,20 @@ pub(crate) fn build(account: &Account, request: TransferRequest) -> Result<Trans
         keys.push(key);
     }
 
+    let network = account.network();
     let outputs = request
         .outputs
         .iter()
         .map(|output| {
             Ok(OutputSpec {
-                predicate: convert::predicate(&output.predicate)?,
+                address: ReceivingAddress::from_bech32(&output.address, network).map_err(
+                    |error| FlameError::InvalidAddress {
+                        reason: error.to_string(),
+                    },
+                )?,
                 qty: output.qty,
                 flv: convert::flavor(output.flavor.as_deref())?,
-                qty_blinding: DalekScalar::random(&mut OsRng),
-                flv_blinding: DalekScalar::random(&mut OsRng),
+                memo: output.memo.clone(),
             })
         })
         .collect::<Result<Vec<_>, FlameError>>()?;
@@ -145,26 +156,20 @@ pub(crate) fn build(account: &Account, request: TransferRequest) -> Result<Trans
         locktime: request.locktime,
     };
     let limits = Limits { gas: request.gas };
-    let unsigned = flamepayments::build_transfer(&specs, &outputs, request.fee, header, limits)
-        .map_err(FlameError::transfer)?;
+    let unsigned =
+        flamepayments::build_transfer(&specs, &outputs, request.fee, header, limits, &mut OsRng)
+            .map_err(FlameError::transfer)?;
 
-    // `mix` and `output` keep request order, so the log's outputs pair with
-    // `outputs` by position; `flamepayments`'s round trip pins that.
-    let created = unsigned
-        .log()
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            TxEntry::Output(contract) => Some(contract),
-            _ => None,
-        })
-        .zip(&outputs)
-        .map(|(contract, spec)| {
+    let created = flamepayments::outputs_with_notes(unsigned.log())
+        .into_iter()
+        .map(|(contract, note)| {
             Ok(CreatedOutput {
                 contract_id: contract.id().to_vec(),
                 contract: flamechain::codec::contract_bytes(contract)
                     .map_err(FlameError::transfer)?,
-                opening: Opening::from_wallet(&spec.opening()),
+                note: note
+                    .expect("the builder writes a note after every output")
+                    .to_vec(),
             })
         })
         .collect::<Result<Vec<_>, FlameError>>()?;

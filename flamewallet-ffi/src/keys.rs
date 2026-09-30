@@ -11,6 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::convert::array32;
 use crate::error::FlameError;
+use crate::note::{self, ReceivedNote};
 use crate::transfer::{self, Transfer, TransferRequest};
 
 /// Which network addresses are encoded for: `f1…` or `tf1…`.
@@ -200,6 +201,19 @@ impl Wallet {
     pub fn receiving_key(&self) -> String {
         let account = self.account();
         account.recv_key().to_bech32(account.network())
+    }
+
+    /// Opens the note that followed `contract` in its log, as a scan serves
+    /// the pair; `note` is `None` when the scan served none. `path` is what
+    /// [`Wallet::owns`] found for the contract's predicate. The opening it
+    /// gives is what a later [`crate::TransferInput`] spends the output with.
+    pub fn open_note(
+        &self,
+        contract: Vec<u8>,
+        note: Option<Vec<u8>>,
+        path: KeyPath,
+    ) -> Result<ReceivedNote, FlameError> {
+        note::open(&self.account(), &contract, note.as_deref(), path)
     }
 
     /// Builds, proves and signs a transfer. The keys come from the paths

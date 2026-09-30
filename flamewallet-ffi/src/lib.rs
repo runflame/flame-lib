@@ -16,6 +16,7 @@ mod contract;
 mod convert;
 mod error;
 mod keys;
+mod note;
 mod transfer;
 
 #[cfg(test)]
@@ -27,6 +28,7 @@ pub use keys::{
     address_to_predicate, generate_mnemonic, mnemonic_to_seed, validate_mnemonic, IssuedAddress,
     KeyPath, Network, Wallet,
 };
+pub use note::{NoteFailure, ReceivedNote};
 pub use transfer::{
     CreatedOutput, Opening, Transfer, TransferInput, TransferOutput, TransferRequest,
 };

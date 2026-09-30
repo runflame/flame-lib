@@ -67,11 +67,13 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
-fn request_json(request: &TransferRequest) -> String {
+/// `notes[i]`, when present, is the note a scan served with input `i`.
+fn request_json(request: &TransferRequest, notes: &[Option<&[u8]>]) -> String {
     let inputs: Vec<String> = request
         .inputs
         .iter()
-        .map(|input| {
+        .zip(notes)
+        .map(|(input, note)| {
             let opening = match &input.opening {
                 None => "null".to_owned(),
                 Some(o) => format!(
@@ -82,9 +84,14 @@ fn request_json(request: &TransferRequest) -> String {
                     hex(&o.flavor_blinding)
                 ),
             };
+            let note = match note {
+                None => "null".to_owned(),
+                Some(note) => format!(r#""{}""#, hex(note)),
+            };
             format!(
-                r#"{{"contract":"{}","proof":"{}","path":{{"branch":{},"index":{}}},"opening":{}}}"#,
+                r#"{{"contract":"{}","note":{},"proof":"{}","path":{{"branch":{},"index":{}}},"opening":{}}}"#,
                 hex(&input.contract),
+                note,
                 hex(&input.proof),
                 input.path.branch,
                 input.path.index,
@@ -97,9 +104,8 @@ fn request_json(request: &TransferRequest) -> String {
         .iter()
         .map(|output| {
             format!(
-                r#"{{"predicate":"{}","qty":"{}"}}"#,
-                hex(&output.predicate),
-                output.qty
+                r#"{{"address":"{}","qty":"{}"}}"#,
+                output.address, output.qty
             )
         })
         .collect();
@@ -141,14 +147,16 @@ fn write_fixtures() {
         }],
         outputs: vec![
             TransferOutput {
-                predicate: bob_at.predicate.clone(),
+                address: bob_at.address.clone(),
                 qty: PAYMENT,
                 flavor: None,
+                memo: Vec::new(),
             },
             TransferOutput {
-                predicate: alice.address(change()).expect("change").predicate,
+                address: alice.address(change()).expect("change").address,
                 qty: ALLOCATION - PAYMENT - FEE,
                 flavor: None,
+                memo: Vec::new(),
             },
         ],
         fee: FEE,
@@ -157,7 +165,24 @@ fn write_fixtures() {
     };
     let paid = alice.build_transfer(clear.clone()).expect("build");
     let applied = connect(&mut chain, &paid);
-    let to_bob = &paid.outputs[0];
+    // Outputs are sorted: Bob's is the one locked to his predicate.
+    let to_bob = paid
+        .outputs
+        .iter()
+        .find(|output| {
+            flamewallet_ffi::decode_contract(output.contract.clone())
+                .expect("decode")
+                .predicate
+                == bob_at.predicate
+        })
+        .expect("an output pays Bob");
+    let received = bob
+        .open_note(
+            to_bob.contract.clone(),
+            Some(to_bob.note.clone()),
+            receiving(0),
+        )
+        .expect("Bob opens his note");
     let to_bob_id: ContractID = to_bob.contract_id.clone().try_into().expect("32 bytes");
 
     // Allocation's proof went stale with block 1; Bob's is fresh.
@@ -167,18 +192,20 @@ fn write_fixtures() {
             contract: to_bob.contract.clone(),
             proof: served_proof(&applied.catchup, to_bob_id, Proof::Transient),
             path: receiving(0),
-            opening: Some(to_bob.opening.clone()),
+            opening: Some(received.opening),
         }],
         outputs: vec![
             TransferOutput {
-                predicate: alice_at.predicate.clone(),
+                address: alice_at.address.clone(),
                 qty: back,
                 flavor: None,
+                memo: Vec::new(),
             },
             TransferOutput {
-                predicate: bob.address(change()).expect("change").predicate,
+                address: bob.address(change()).expect("change").address,
                 qty: PAYMENT - back - FEE,
                 flavor: None,
+                memo: Vec::new(),
             },
         ],
         fee: FEE,
@@ -189,9 +216,9 @@ fn write_fixtures() {
     let json = format!(
         r#"{{"network":"testnet","scenarios":{{"clear":{{"seed":"{}","request":{}}},"confidential":{{"seed":"{}","request":{}}}}}}}"#,
         hex(&A_SEED),
-        request_json(&clear),
+        request_json(&clear, &[None]),
         hex(&B_SEED),
-        request_json(&confidential)
+        request_json(&confidential, &[Some(&to_bob.note)])
     );
     std::fs::write(&out, json).expect("write fixtures");
 }

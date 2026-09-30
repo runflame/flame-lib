@@ -16,7 +16,25 @@ const FEE: u64 = 1_000;
 const GAS: u64 = 10_000_000;
 
 fn wallet(seed: &[u8; 64]) -> std::sync::Arc<Wallet> {
-    Wallet::new(seed.to_vec(), Network::Testnet, 0).expect("wallet from seed")
+    wallet_on(seed, Network::Testnet)
+}
+
+fn wallet_on(seed: &[u8; 64], network: Network) -> std::sync::Arc<Wallet> {
+    Wallet::new(seed.to_vec(), network, 0).expect("wallet from seed")
+}
+
+/// The one output of `transfer` locked to `predicate`. Outputs are sorted,
+/// so one is found by what it pays, never by its position.
+fn paying<'a>(transfer: &'a Transfer, predicate: &[u8]) -> &'a CreatedOutput {
+    let mut found = transfer.outputs.iter().filter(|output| {
+        decode_contract(output.contract.clone())
+            .expect("decode")
+            .predicate
+            == predicate
+    });
+    let output = found.next().expect("an output pays the predicate");
+    assert!(found.next().is_none(), "one output pays the predicate");
+    output
 }
 
 fn receiving(index: u32) -> KeyPath {
@@ -166,15 +184,16 @@ fn two_wallets_spend_across_two_blocks() {
         }],
         outputs: vec![
             TransferOutput {
-                predicate: address_to_predicate(bob_address.address, Network::Testnet)
-                    .expect("parse"),
+                address: bob_address.address.clone(),
                 qty: payment,
                 flavor: None,
+                memo: b"for the bicycle".to_vec(),
             },
             TransferOutput {
-                predicate: change.predicate,
+                address: change.address.clone(),
                 qty: ALLOCATION - payment - FEE,
                 flavor: None,
+                memo: Vec::new(),
             },
         ],
         fee: FEE,
@@ -190,25 +209,83 @@ fn two_wallets_spend_across_two_blocks() {
         Err(FlameError::KeyMismatch { input: 0 })
     ));
 
+    // An address for the other network is refused before anything is proven.
+    let mut elsewhere = request.clone();
+    elsewhere.outputs[0].address = wallet_on(&B_SEED, Network::Mainnet)
+        .address(receiving(0))
+        .expect("address")
+        .address;
+    assert!(matches!(
+        alice.build_transfer(elsewhere),
+        Err(FlameError::InvalidAddress { .. })
+    ));
+
     let transfer = alice.build_transfer(request).expect("build the payment");
     assert_eq!(transfer.txid.len(), 32);
     assert_eq!(transfer.outputs.len(), 2);
     let applied = connect(&mut chain, 1, &transfer);
 
-    // 3. Bob reads his output, checks the opening Alice sent him, and
-    // recognizes it as his.
-    let to_bob = &transfer.outputs[0];
+    // 3. Bob finds his output by its predicate, as a scan would, and opens
+    // its note. Alice opens her change the same way; neither opens the
+    // other's.
+    let to_bob = paying(&transfer, &bob_address.predicate);
+    let to_change = paying(&transfer, &change.predicate);
     let info = decode_contract(to_bob.contract.clone()).expect("decode");
     assert_eq!(info.value, ContractValue::Confidential);
     assert_eq!(
         bob.owns(info.predicate, 20).expect("owns"),
         Some(receiving(0))
     );
-    assert!(opening_matches(to_bob.contract.clone(), to_bob.opening.clone()).expect("check"));
-    assert!(
-        !opening_matches(to_bob.contract.clone(), transfer.outputs[1].opening.clone())
-            .expect("check")
+    let received = bob
+        .open_note(
+            to_bob.contract.clone(),
+            Some(to_bob.note.clone()),
+            receiving(0),
+        )
+        .expect("Bob opens his note");
+    assert_eq!(received.opening.qty, payment);
+    assert_eq!(received.memo, b"for the bicycle");
+    assert!(opening_matches(to_bob.contract.clone(), received.opening.clone()).expect("check"));
+    let kept = alice
+        .open_note(
+            to_change.contract.clone(),
+            Some(to_change.note.clone()),
+            change.path,
+        )
+        .expect("Alice opens her change");
+    assert_eq!(kept.opening.qty, ALLOCATION - payment - FEE);
+    assert!(!opening_matches(to_bob.contract.clone(), kept.opening).expect("check"));
+
+    // The outcomes a wallet has to tell apart.
+    let failure = |result: Result<ReceivedNote, FlameError>| match result {
+        Err(FlameError::Note { failure, .. }) => failure,
+        other => panic!("expected a note failure, got {other:?}"),
+    };
+    assert_eq!(
+        failure(bob.open_note(to_bob.contract.clone(), None, receiving(0))),
+        NoteFailure::Missing
     );
+    assert_eq!(
+        failure(bob.open_note(
+            to_bob.contract.clone(),
+            Some(to_change.note.clone()),
+            receiving(0)
+        )),
+        NoteFailure::Undecryptable
+    );
+    assert_eq!(
+        failure(alice.open_note(allocation_bytes.clone(), None, receiving(0))),
+        NoteFailure::NotConfidential
+    );
+    assert!(matches!(
+        bob.open_note(
+            to_bob.contract.clone(),
+            Some(to_bob.note.clone()),
+            receiving(1)
+        ),
+        Err(FlameError::InvalidKeyPath { .. })
+    ));
+
     let bob_proof = served_proof(
         &chain,
         &applied.catchup,
@@ -231,18 +308,20 @@ fn two_wallets_spend_across_two_blocks() {
                 contract: to_bob.contract.clone(),
                 proof: bob_proof,
                 path: receiving(0),
-                opening: Some(to_bob.opening.clone()),
+                opening: Some(received.opening),
             }],
             outputs: vec![
                 TransferOutput {
-                    predicate: alice_second.predicate.clone(),
+                    address: alice_second.address.clone(),
                     qty: back,
                     flavor: None,
+                    memo: Vec::new(),
                 },
                 TransferOutput {
-                    predicate: bob_change.predicate,
+                    address: bob_change.address,
                     qty: payment - back - FEE,
                     flavor: None,
+                    memo: Vec::new(),
                 },
             ],
             fee: FEE,
@@ -251,16 +330,26 @@ fn two_wallets_spend_across_two_blocks() {
         })
         .expect("build Bob's payment");
     let applied = connect(&mut chain, 2, &transfer);
+    let to_alice = paying(&transfer, &alice_second.predicate);
     served_proof(
         &chain,
         &applied.catchup,
-        id(&transfer.outputs[0].contract_id),
+        id(&to_alice.contract_id),
         Proof::Transient,
     );
     assert_eq!(
         alice.owns(alice_second.predicate, 0).expect("owns"),
         Some(receiving(1))
     );
+    let received = alice
+        .open_note(
+            to_alice.contract.clone(),
+            Some(to_alice.note.clone()),
+            receiving(1),
+        )
+        .expect("Alice opens her note");
+    assert_eq!(received.opening.qty, back);
+    assert!(received.memo.is_empty());
 }
 
 #[test]

@@ -17,7 +17,9 @@ use wasm_bindgen::prelude::*;
 
 mod types;
 
-use types::{ContractInfo, IssuedAddress, KeyPath, Network, Opening, Transfer, TransferRequest};
+use types::{
+    ContractInfo, IssuedAddress, KeyPath, Network, Opening, ReceivedNote, Transfer, TransferRequest,
+};
 
 #[wasm_bindgen(typescript_custom_section)]
 const TYPES: &'static str = include_str!("types.d.ts");
@@ -36,6 +38,8 @@ extern "C" {
     pub type JsContractInfo;
     #[wasm_bindgen(typescript_type = "Opening")]
     pub type JsOpening;
+    #[wasm_bindgen(typescript_type = "ReceivedNote")]
+    pub type JsReceivedNote;
     #[wasm_bindgen(typescript_type = "TransferRequest")]
     pub type JsTransferRequest;
     #[wasm_bindgen(typescript_type = "Transfer")]
@@ -156,6 +160,23 @@ impl Wallet {
         self.0.receiving_key()
     }
 
+    /// Opens the note a scan served with `contract` (`undefined` if none),
+    /// with the key at `path`, as `owns` found it.
+    #[wasm_bindgen(js_name = openNote)]
+    pub fn open_note(
+        &self,
+        contract: Vec<u8>,
+        note: Option<Vec<u8>>,
+        path: JsKeyPath,
+    ) -> Result<JsReceivedNote, JsValue> {
+        let path: KeyPath = from_js(path.into())?;
+        let received = self
+            .0
+            .open_note(contract, note, path.into())
+            .map_err(error)?;
+        Ok(to_js(&ReceivedNote::from(received))?.into())
+    }
+
     /// Builds, proves and signs a transfer; blocks for the proof.
     #[wasm_bindgen(js_name = buildTransfer)]
     pub fn build_transfer(&self, request: JsTransferRequest) -> Result<JsTransfer, JsValue> {
@@ -179,6 +200,13 @@ fn error(error: flamewallet_ffi::FlameError) -> JsValue {
             vec![("what", what.into()), ("reason", reason.into())],
         ),
         E::KeyMismatch { input } => ("keyMismatch", vec![("input", (*input).into())]),
+        E::Note { failure, reason } => (
+            "note",
+            vec![
+                ("failure", note_failure(*failure).into()),
+                ("reason", reason.into()),
+            ],
+        ),
         E::Transfer { reason } => ("transfer", vec![("reason", reason.into())]),
     };
     let thrown = js_sys::Error::new(&error.to_string());
@@ -189,6 +217,18 @@ fn error(error: flamewallet_ffi::FlameError) -> JsValue {
         let _ = js_sys::Reflect::set(&thrown, &name.into(), &value);
     }
     thrown.into()
+}
+
+fn note_failure(failure: flamewallet_ffi::NoteFailure) -> &'static str {
+    use flamewallet_ffi::NoteFailure as F;
+    match failure {
+        F::Missing => "missing",
+        F::Malformed => "malformed",
+        F::UnknownVersion => "unknownVersion",
+        F::Undecryptable => "undecryptable",
+        F::OpeningMismatch => "openingMismatch",
+        F::NotConfidential => "notConfidential",
+    }
 }
 
 /// A value the caller shaped wrongly — a missing field, a number where a

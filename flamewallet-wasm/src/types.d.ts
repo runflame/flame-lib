@@ -48,10 +48,13 @@ export interface TransferInput {
 }
 
 export interface TransferOutput {
-  predicate: Uint8Array;
+  /** The recipient's bech32f address, for the wallet's network. */
+  address: string;
   qty: bigint;
   /** Absent for flames. */
   flavor?: Uint8Array;
+  /** Sealed into the note for the recipient alone; at most 8102 bytes. */
+  memo?: Uint8Array;
 }
 
 export interface TransferRequest {
@@ -68,8 +71,8 @@ export interface CreatedOutput {
   contractId: Uint8Array;
   /** Its published bytes, as an indexer serves them once confirmed. */
   contract: Uint8Array;
-  /** The only record the output can be spent from. */
-  opening: Opening;
+  /** The encrypted note that follows it on chain; `Wallet.openNote` reads it. */
+  note: Uint8Array;
 }
 
 export interface Transfer {
@@ -77,8 +80,24 @@ export interface Transfer {
   txid: Uint8Array;
   /** `BlockTx::to_bytes`: what a node's `submit_tx` takes. */
   blockTx: Uint8Array;
+  /** In published order, not request order: match each by its predicate. */
   outputs: CreatedOutput[];
 }
+
+/** What `Wallet.openNote` gives: the opening to spend with, and the memo. */
+export interface ReceivedNote {
+  opening: Opening;
+  memo: Uint8Array;
+}
+
+/** Why a note did not open; `docs/payments.md` "Receiving" says what to do. */
+export type NoteFailure =
+  | "missing"
+  | "malformed"
+  | "unknownVersion"
+  | "undecryptable"
+  | "openingMismatch"
+  | "notConfidential";
 
 /** What every call throws. Fields beyond `kind` depend on it. */
 export interface FlameError extends Error {
@@ -90,10 +109,13 @@ export interface FlameError extends Error {
     | "invalidKeyPath"
     | "invalidBytes"
     | "keyMismatch"
+    | "note"
     | "transfer";
   reason?: string;
   /** For `invalidBytes`: contract, proof, predicate, flavor or blinding. */
   what?: string;
   /** For `keyMismatch`: the input's position. */
   input?: number;
+  /** For `note`: how it failed. */
+  failure?: NoteFailure;
 }

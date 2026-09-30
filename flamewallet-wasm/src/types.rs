@@ -76,11 +76,12 @@ pub struct TransferInput {
 
 #[derive(Deserialize)]
 pub struct TransferOutput {
-    #[serde(with = "serde_bytes")]
-    pub predicate: Vec<u8>,
+    pub address: String,
     pub qty: u64,
     #[serde(default, with = "serde_bytes")]
     pub flavor: Option<Vec<u8>>,
+    #[serde(default, with = "serde_bytes")]
+    pub memo: Vec<u8>,
 }
 
 #[derive(Deserialize)]
@@ -100,7 +101,15 @@ pub struct CreatedOutput {
     pub contract_id: Vec<u8>,
     #[serde(with = "serde_bytes")]
     pub contract: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub note: Vec<u8>,
+}
+
+#[derive(Serialize)]
+pub struct ReceivedNote {
     pub opening: Opening,
+    #[serde(with = "serde_bytes")]
+    pub memo: Vec<u8>,
 }
 
 #[derive(Serialize)]
@@ -212,9 +221,10 @@ impl From<TransferRequest> for ffi::TransferRequest {
                 .outputs
                 .into_iter()
                 .map(|output| ffi::TransferOutput {
-                    predicate: output.predicate,
+                    address: output.address,
                     qty: output.qty,
                     flavor: output.flavor,
+                    memo: output.memo,
                 })
                 .collect(),
             fee: request.fee,
@@ -235,9 +245,18 @@ impl From<ffi::Transfer> for Transfer {
                 .map(|output| CreatedOutput {
                     contract_id: output.contract_id,
                     contract: output.contract,
-                    opening: output.opening.into(),
+                    note: output.note,
                 })
                 .collect(),
+        }
+    }
+}
+
+impl From<ffi::ReceivedNote> for ReceivedNote {
+    fn from(received: ffi::ReceivedNote) -> ReceivedNote {
+        ReceivedNote {
+            opening: received.opening.into(),
+            memo: received.memo,
         }
     }
 }

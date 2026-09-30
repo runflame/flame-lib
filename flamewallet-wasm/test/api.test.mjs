@@ -33,7 +33,7 @@ function request(json) {
             }
         })),
         outputs: json.outputs.map(output => ({
-            predicate: bytes(output.predicate),
+            address: output.address,
             qty: BigInt(output.qty)
         })),
         fee: BigInt(json.fee),
@@ -95,14 +95,30 @@ test('a transfer from served bytes to signed bytes', () => {
     assert.ok(transfer.blockTx.length > 0);
     assert.equal(transfer.outputs.length, 2);
 
-    const [toBob, toChange] = transfer.outputs;
+    // Outputs are sorted, so each is found by whose predicate locks it.
+    const bobPath = { branch: 0, index: 0 };
+    const changePath = { branch: 1, index: 0 };
+    const toBob = transfer.outputs.find(output =>
+        bob.owns(wasm.decodeContract(output.contract).predicate, 0) !== undefined);
+    const toChange = transfer.outputs.find(output => output !== toBob);
     const info = wasm.decodeContract(toBob.contract);
     assert.deepEqual(info.value, { kind: 'confidential' });
     assert.deepEqual(info.id, toBob.contractId);
-    assert.deepEqual(bob.owns(info.predicate, 0), { branch: 0, index: 0 });
-    assert.equal(toBob.opening.qty, BigInt(clear.request.outputs[0].qty));
-    assert.ok(wasm.openingMatches(toBob.contract, toBob.opening));
-    assert.ok(!wasm.openingMatches(toBob.contract, toChange.opening));
+    assert.deepEqual(bob.owns(info.predicate, 0), bobPath);
+    assert.deepEqual(alice.owns(wasm.decodeContract(toChange.contract).predicate, 0), changePath);
+
+    const received = bob.openNote(toBob.contract, toBob.note, bobPath);
+    assert.equal(received.opening.qty, BigInt(clear.request.outputs[0].qty));
+    assert.ok(received.memo instanceof Uint8Array);
+    assert.ok(wasm.openingMatches(toBob.contract, received.opening));
+    const kept = alice.openNote(toChange.contract, toChange.note, changePath);
+    assert.equal(kept.opening.qty, BigInt(clear.request.outputs[1].qty));
+    assert.ok(!wasm.openingMatches(toBob.contract, kept.opening));
+
+    assert.throws(() => bob.openNote(toBob.contract, undefined, bobPath),
+        flameError('note', { failure: 'missing' }));
+    assert.throws(() => bob.openNote(toBob.contract, toChange.note, bobPath),
+        flameError('note', { failure: 'undecryptable' }));
 });
 
 test('spending a confidential input with its opening', () => {
@@ -110,13 +126,20 @@ test('spending a confidential input with its opening', () => {
     const spend = request(confidential.request);
     const received = wasm.decodeContract(spend.inputs[0].contract);
     assert.deepEqual(received.value, { kind: 'confidential' });
+    // The opening the input carries is the one its note gives.
+    const input = confidential.request.inputs[0];
+    const opened = bob.openNote(spend.inputs[0].contract, bytes(input.note), input.path);
+    assert.deepEqual(opened.opening, spend.inputs[0].opening);
     assert.ok(wasm.openingMatches(spend.inputs[0].contract, spend.inputs[0].opening));
 
     const transfer = bob.buildTransfer(spend);
     assert.equal(transfer.outputs.length, 2);
-    assert.deepEqual(
-        transfer.outputs.map(output => output.opening.qty),
-        spend.outputs.map(output => output.qty)
+    const changePath = { branch: 1, index: 0 };
+    const toChange = transfer.outputs.find(output =>
+        bob.owns(wasm.decodeContract(output.contract).predicate, 0) !== undefined);
+    assert.equal(
+        bob.openNote(toChange.contract, toChange.note, changePath).opening.qty,
+        spend.outputs[1].qty
     );
 
     // Without its opening a confidential input cannot be spent.
@@ -134,6 +157,10 @@ test('errors name what was wrong', () => {
     const wrongKey = request(clear.request);
     wrongKey.inputs[0].path = { branch: 0, index: 1 };
     assert.throws(() => alice.buildTransfer(wrongKey), flameError('keyMismatch', { input: 0 }));
+
+    const wrongNetwork = request(clear.request);
+    wrongNetwork.outputs[0].address = wasm.Wallet.fromSeed(bytes(clear.seed), 'mainnet', 0).nextAddress().address;
+    assert.throws(() => alice.buildTransfer(wrongNetwork), flameError('invalidAddress'));
 
     // A shape mistake is the caller's bug, thrown as a TypeError.
     const misshapen = request(clear.request);
