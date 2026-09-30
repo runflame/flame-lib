@@ -12,8 +12,6 @@ Over time, the cryptocurrency market took a distinctive shape: as of 2026, appro
 
 ![Fragmentation](img/01-fragmentation.png)
 
-*Fragmentation of assets and functionality.*
-
 This functionality is fragmented and disconnected from a truly valuable asset: every project optimizes its own “killer feature” with significant engineering trade-offs — centrally allocated tokens, semi-trusted bridged assets or stablecoins backed by conventional finance.
 
 In this paper, we present Flame: a peer-to-peer network that solves the double-spending problem through bitcoin-based proof-of-burn consensus and provides a powerful programming architecture for confidential, high-performance financial applications.
