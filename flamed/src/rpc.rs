@@ -11,9 +11,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use flamed_rpc::{
-    async_trait, codes, BlockId, BlockTxEnvelope, ContractEnvelope, ContractId, ContractResult,
-    ErrorCode, ErrorObjectOwned, FlamedApiServer, PredicatePoint, ProofBytes, ProofResult,
-    RpcResult, ScanResult, TipResult, TxId, TxStatusResult, MAX_PROOF_IDS, MAX_SCAN_PREDICATES,
+    async_trait, codes, BlockId, BlockResult, BlockTxEnvelope, ContractEnvelope, ContractId,
+    ContractResult, ErrorCode, ErrorObjectOwned, FlamedApiServer, PredicatePoint, ProofBytes,
+    ProofResult, RpcResult, ScanResult, TipResult, TxId, TxStatusResult, MAX_PROOF_IDS,
+    MAX_SCAN_PREDICATES,
 };
 use jsonrpsee::server::{BatchRequestConfig, Server, ServerConfig, ServerHandle};
 
@@ -75,6 +76,10 @@ impl FlamedRpc {
 
 #[async_trait]
 impl FlamedApiServer for FlamedRpc {
+    async fn block(&self, height: u64) -> RpcResult<BlockResult> {
+        self.with_node(move |node| node.block(height)).await
+    }
+
     async fn tip(&self) -> RpcResult<TipResult> {
         self.with_node(|node| {
             let tip = node.tip();
@@ -189,7 +194,7 @@ pub async fn serve(
 impl From<NodeError> for ErrorObjectOwned {
     fn from(error: NodeError) -> Self {
         let code = match &error {
-            NodeError::UnknownContract(_) => codes::NOT_FOUND,
+            NodeError::UnknownContract(_) | NodeError::NotFound(_) => codes::NOT_FOUND,
             NodeError::Mempool(_) => codes::MEMPOOL_REJECTED,
             NodeError::Limit { .. } => codes::LIMIT_EXCEEDED,
             NodeError::Decode(_) => codes::INVALID_BYTES,

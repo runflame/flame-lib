@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use flamechain::BlockHash;
+use flamed_rpc::{BlockSummary, TransactionSummary};
 use flamevm::TxID;
 
 /// Where a transaction landed, and what it did.
@@ -14,6 +15,8 @@ pub struct TxRecord {
     pub block: BlockHash,
     /// Its effect log, as a `CellEnvelope`.
     pub log: Vec<u8>,
+    /// Public execution summary.
+    pub summary: TransactionSummary,
 }
 
 /// Confirmed transactions, by id.
@@ -23,6 +26,7 @@ pub struct TxIndex {
     // upstream's own mempool keeps a `BTreeSet<[u8; 32]>`.
     txs: BTreeMap<[u8; 32], TxRecord>,
     by_height: BTreeMap<u64, Vec<TxID>>,
+    blocks: BTreeMap<u64, BlockSummary>,
 }
 
 impl TxIndex {
@@ -58,5 +62,15 @@ impl TxIndex {
     /// Whether any have.
     pub fn is_empty(&self) -> bool {
         self.txs.is_empty()
+    }
+
+    /// Adds a header after the block has been accepted.
+    pub fn insert_block(&mut self, block: BlockSummary) {
+        self.blocks.insert(block.header.height, block);
+    }
+
+    /// Header at an exact height.
+    pub fn block(&self, height: u64) -> Option<&BlockSummary> {
+        self.blocks.get(&height)
     }
 }

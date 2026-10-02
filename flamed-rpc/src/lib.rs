@@ -7,7 +7,7 @@
 //! the call site — `BlockId(chain.tip().into_bytes())`, `TxId(txid.0)` — and
 //! a wire type never has to know what it decodes into. That knowledge belongs
 //! to the caller, and leaving it there is what lets an explorer, a monitor or
-//! a WASM client use these seven methods without the VM behind them.
+//! a WASM client use these methods without the VM behind them.
 
 pub mod api;
 pub mod codec;
@@ -15,9 +15,10 @@ pub mod types;
 
 pub use api::{FlamedApiClient, FlamedApiServer};
 pub use types::{
-    codes, BlockId, BlockTxEnvelope, ContractEnvelope, ContractId, ContractResult, NoteEnvelope,
-    PredicatePoint, ProofBytes, ProofResult, ScanEntry, ScanResult, SpentAt, TipResult, TxId,
-    TxStatusResult, MAX_PROOF_IDS, MAX_SCAN_PREDICATES,
+    codes, ActorId, BlockHeader, BlockId, BlockResult, BlockSummary, BlockTxEnvelope,
+    ContractEnvelope, ContractId, ContractResult, ExecutionData, NoteEnvelope, PredicatePoint,
+    ProofBytes, ProofResult, ScanEntry, ScanResult, SpentAt, StateCommitment, TipResult,
+    TransactionSummary, TxId, TxStatusResult, MAX_PROOF_IDS, MAX_SCAN_PREDICATES,
 };
 
 /// Required on any `impl FlamedApiServer`.
