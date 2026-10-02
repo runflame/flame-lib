@@ -1,4 +1,4 @@
-//! The seven methods `flamed` serves.
+//! The methods `flamed` serves.
 //!
 //! The macro generates `FlamedApiServer`, which `flamed` implements, and
 //! `FlamedApiClient`, blanket-implemented for every jsonrpsee client, so the
@@ -13,14 +13,19 @@ use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 
 use crate::types::{
-    BlockTxEnvelope, ContractId, ContractResult, PredicatePoint, ProofResult, ScanResult,
-    TipResult, TxId, TxStatusResult,
+    BlockResult, BlockTxEnvelope, ContractId, ContractResult, PredicatePoint, ProofResult,
+    ScanResult, TipResult, TxId, TxStatusResult,
 };
 
 /// The `flamed` JSON-RPC 2.0 API. Parameters are positional, in the order
 /// written; method names carry no prefix.
 #[rpc(server, client)]
 pub trait FlamedApi {
+    /// One block by height, including its internal executions.
+    /// Genesis is height zero; `NOT_FOUND` if the height is absent.
+    #[method(name = "block")]
+    async fn block(&self, height: u64) -> RpcResult<BlockResult>;
+
     /// The current tip: its hash, its height, and the contract accumulator root.
     #[method(name = "tip")]
     async fn tip(&self) -> RpcResult<TipResult>;
