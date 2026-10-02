@@ -205,11 +205,13 @@ fn a_block_preserves_execution_categories_links_and_exact_fees() {
                 "transactions": 1, "internal": 1, "failed": 1, "size_bytes": 1234
             },
             "executions": [{
-                "id": "66".repeat(32), "kind": "internal_failed",
-                "parent": "77".repeat(32),
-                "actor": "88".repeat(32),
+                "id": "66".repeat(32),
+                "execution": {
+                    "kind": "internal_failed", "parent": "77".repeat(32),
+                    "actor": "88".repeat(32), "error": "actor not found"
+                },
                 "fee_sparks": "18446744073709551615", "inputs": 0, "outputs": 1,
-                "messages": 0, "error": "actor not found"
+                "messages": 0
             }]
         })
     );
@@ -217,7 +219,7 @@ fn a_block_preserves_execution_categories_links_and_exact_fees() {
 }
 
 #[test]
-fn execution_data_is_flat_and_requires_each_variants_fields() {
+fn execution_data_is_nested_and_requires_each_variants_fields() {
     use crate::{ActorId, ExecutionData, TransactionSummary};
     use serde_json::json;
 
@@ -255,14 +257,10 @@ fn execution_data_is_flat_and_requires_each_variants_fields() {
             outputs: 0,
             messages: 0,
         };
-        let mut expected = json!({
+        let expected = json!({
             "id": "66".repeat(32), "fee_sparks": "0", "inputs": 0,
-            "outputs": 0, "messages": 0
+            "outputs": 0, "messages": 0, "execution": fields
         });
-        expected
-            .as_object_mut()
-            .unwrap()
-            .extend(fields.as_object().unwrap().clone());
         assert_eq!(serde_json::to_value(&summary).unwrap(), expected);
         assert_eq!(
             serde_json::from_value::<TransactionSummary>(expected.clone()).unwrap(),
@@ -270,13 +268,13 @@ fn execution_data_is_flat_and_requires_each_variants_fields() {
         );
         for field in std::iter::once("kind").chain(required) {
             let mut missing = expected.clone();
-            missing.as_object_mut().unwrap().remove(field);
+            missing["execution"].as_object_mut().unwrap().remove(field);
             assert!(
                 serde_json::from_value::<TransactionSummary>(missing).is_err(),
                 "accepted missing {field} in {expected}"
             );
             let mut null = expected.clone();
-            null[field] = serde_json::Value::Null;
+            null["execution"][field] = serde_json::Value::Null;
             assert!(
                 serde_json::from_value::<TransactionSummary>(null).is_err(),
                 "accepted null {field} in {expected}"
