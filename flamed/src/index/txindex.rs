@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use flamechain::BlockHash;
-use flamed_rpc::{BlockSummary, TransactionSummary};
+use flamed_rpc::{BlockSummary, TransactionSummary, TransactionsResult};
 use flamevm::TxID;
 
 /// Where a transaction landed, and what it did.
@@ -72,5 +72,36 @@ impl TxIndex {
     /// Header at an exact height.
     pub fn block(&self, height: u64) -> Option<&BlockSummary> {
         self.blocks.get(&height)
+    }
+
+    /// A page of executions, newest first.
+    /// Returns `None` if the cursor does not name a confirmed execution.
+    pub fn transactions(&self, before: Option<TxID>, limit: usize) -> Option<TransactionsResult> {
+        let height = match before {
+            Some(id) => self.get(&id)?.height,
+            None => u64::MAX,
+        };
+
+        let mut ids = self
+            .by_height
+            .range(..=height)
+            .rev()
+            .flat_map(|(_, ids)| ids.iter().rev())
+            .skip_while(|id| before.is_some_and(|cursor| **id != cursor));
+
+        if before.is_some() {
+            ids.next();
+        }
+
+        let transactions = ids
+            .by_ref()
+            .take(limit)
+            .map(|id| self.txs[&id.0].summary.clone())
+            .collect();
+
+        Some(TransactionsResult {
+            transactions,
+            has_more: ids.next().is_some(),
+        })
     }
 }

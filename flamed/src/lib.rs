@@ -19,6 +19,7 @@ pub mod cells;
 pub mod config;
 pub mod genesis;
 pub mod index;
+mod inspect;
 #[cfg(any(test, feature = "devnet"))]
 pub mod minter;
 pub mod node;

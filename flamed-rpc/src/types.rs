@@ -14,6 +14,8 @@ use crate::codec::{base64_newtype, hex32_newtype};
 hex32_newtype! {
     /// An actor hash.
     ActorId;
+    /// A cell hash.
+    CellId;
     /// A block hash.
     BlockId;
     /// A transaction id.
@@ -179,6 +181,272 @@ pub struct TransactionSummary {
     pub messages: u32,
 }
 
+/// A public execution effect.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum TxEntry {
+    /// The transaction header.
+    Header {
+        /// Protocol version.
+        version: u32,
+        /// Transaction lock time.
+        locktime: u32,
+    },
+    /// The committed execution witness.
+    CellWitness {
+        /// Hash of the witness body set.
+        #[serde(with = "crate::codec::hex32")]
+        hash: [u8; 32],
+    },
+    /// Bytes published by the execution.
+    Data {
+        /// All bytes, encoded as base64.
+        #[serde(with = "crate::codec::base64")]
+        bytes: Vec<u8>,
+    },
+    /// A consumed contract.
+    Input {
+        /// Contract identifier.
+        contract: ContractId,
+    },
+    /// A received message.
+    Receive {
+        /// Message identifier.
+        #[serde(with = "crate::codec::hex32")]
+        message: [u8; 32],
+    },
+    /// A created contract.
+    Output {
+        /// Contract identifier.
+        contract: ContractId,
+        /// Predicate that locks the contract.
+        predicate: PredicatePoint,
+        /// Contract anchor.
+        #[serde(with = "crate::codec::hex32")]
+        anchor: [u8; 32],
+        /// Complete public payload, including available cells.
+        payload: TxValue,
+    },
+    /// A newly deployed actor.
+    ActorDeploy {
+        /// Actor identifier.
+        actor: ActorId,
+        /// Complete constructor code, encoded as base64.
+        #[serde(with = "crate::codec::base64")]
+        code: Vec<u8>,
+        /// Code root hash.
+        #[serde(with = "crate::codec::hex32")]
+        code_hash: [u8; 32],
+    },
+    /// An actor state update.
+    ActorSave {
+        /// Actor identifier.
+        actor: ActorId,
+        /// State root hash.
+        #[serde(with = "crate::codec::hex32")]
+        state_hash: [u8; 32],
+        /// Saved state, including available cells.
+        state: TxValue,
+    },
+    /// An actor code update.
+    SetCode {
+        /// Actor identifier.
+        actor: ActorId,
+        /// Complete new code, encoded as base64.
+        #[serde(with = "crate::codec::base64")]
+        code: Vec<u8>,
+        /// Code root hash.
+        #[serde(with = "crate::codec::hex32")]
+        code_hash: [u8; 32],
+    },
+    /// Removal of an actor.
+    ActorDestroy {
+        /// Actor identifier.
+        actor: ActorId,
+    },
+    /// An outgoing asynchronous message.
+    Send {
+        /// Message identifier.
+        #[serde(with = "crate::codec::hex32")]
+        message: [u8; 32],
+        /// Message destination or constructor code.
+        target: ActorTarget,
+        /// Sending actor, if present.
+        caller: Option<ActorId>,
+        /// Message anchor.
+        #[serde(with = "crate::codec::hex32")]
+        anchor: [u8; 32],
+        /// Message arguments, in order.
+        payload: Vec<TxValue>,
+        /// Gas limit as an exact decimal string.
+        gas_limit: String,
+        /// Predicate for the gas refund.
+        refund_predicate: PredicatePoint,
+    },
+    /// Storage purchased by an actor.
+    StoragePurchase {
+        /// Actor identifier.
+        actor: ActorId,
+        /// Number of storage bytes.
+        bytes: u64,
+        /// Height at which the storage expires.
+        expiry_height: u64,
+        /// Storage fee as an exact scalar string.
+        fee_sparks: String,
+    },
+    /// Transaction fee, excluding storage fees.
+    Fee {
+        /// Fee in sparks as an exact decimal string.
+        sparks: String,
+    },
+    /// Public asset issuance.
+    IssuePublic {
+        /// Issued quantity as an exact scalar string.
+        quantity: String,
+        /// Asset flavor as an exact scalar string.
+        flavor: String,
+    },
+    /// Confidential asset issuance.
+    IssuePrivate {
+        /// Compressed quantity commitment.
+        #[serde(with = "crate::codec::hex32")]
+        quantity_commitment: [u8; 32],
+        /// Compressed flavor commitment.
+        #[serde(with = "crate::codec::hex32")]
+        flavor_commitment: [u8; 32],
+    },
+    /// Retired assets.
+    Retire {
+        /// Compressed quantity commitment.
+        #[serde(with = "crate::codec::hex32")]
+        quantity_commitment: [u8; 32],
+        /// Compressed flavor commitment.
+        #[serde(with = "crate::codec::hex32")]
+        flavor_commitment: [u8; 32],
+    },
+}
+
+/// A message destination.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ActorTarget {
+    /// An actor addressed by hash.
+    Hash {
+        /// Actor identifier.
+        actor: ActorId,
+    },
+    /// An actor addressed by its constructor code.
+    Constructor {
+        /// Actor identifier, equal to the code root hash.
+        actor: ActorId,
+        /// Complete constructor code, encoded as base64.
+        #[serde(with = "crate::codec::base64")]
+        code: Vec<u8>,
+    },
+}
+
+/// A public VM value.
+/// Scalar strings use signed decimal when the magnitude fits in `u128`.
+/// Larger scalars use `0x` followed by their canonical little-endian bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TxValue {
+    /// A scalar.
+    Scalar {
+        /// Exact scalar string.
+        value: String,
+    },
+    /// A byte string.
+    String {
+        /// All bytes, encoded as base64.
+        #[serde(with = "crate::codec::base64")]
+        bytes: Vec<u8>,
+    },
+    /// A dictionary with all its values available.
+    Dict {
+        /// Entries in ascending scalar-key order.
+        entries: Vec<DictEntry>,
+    },
+    /// A compressed curve point.
+    Point {
+        /// Compressed point bytes.
+        #[serde(with = "crate::codec::hex32")]
+        hex: [u8; 32],
+    },
+    /// A public token.
+    ClearToken {
+        /// Quantity as an exact scalar string.
+        quantity: String,
+        /// Flavor as an exact scalar string.
+        flavor: String,
+    },
+    /// A confidential token.
+    Token {
+        /// Compressed quantity commitment.
+        #[serde(with = "crate::codec::hex32")]
+        quantity_commitment: [u8; 32],
+        /// Compressed flavor commitment.
+        #[serde(with = "crate::codec::hex32")]
+        flavor_commitment: [u8; 32],
+    },
+    /// A value with missing bodies that prevent full decoding.
+    Cells {
+        /// Value root hash. The root body can also be absent.
+        root: CellId,
+        /// All reachable available cells, ordered by hash.
+        /// References to absent cells remain hashes.
+        cells: Vec<ValueCell>,
+    },
+}
+
+/// One entry in a public dictionary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DictEntry {
+    /// Key as an exact scalar string.
+    pub key: String,
+    /// Public value.
+    pub value: TxValue,
+}
+
+/// One available body from a partially archived value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValueCell {
+    /// Cell identifier.
+    pub id: CellId,
+    /// Complete cell payload, encoded as base64.
+    #[serde(with = "crate::codec::base64")]
+    pub data: Vec<u8>,
+    /// Child hashes in cell reference order.
+    pub refs: Vec<CellId>,
+}
+
+/// One confirmed execution, its location, and its public effects.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransactionResult {
+    /// Execution summary.
+    pub summary: TransactionSummary,
+    /// Containing block height.
+    pub height: u64,
+    /// Containing block identifier.
+    pub block: BlockId,
+    /// Canonical public effect log as a base64 CellEnvelope.
+    #[serde(with = "crate::codec::base64")]
+    pub log: Vec<u8>,
+    /// Public effects in execution order. Absent unless `decode_effects` is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effects: Option<Vec<TxEntry>>,
+}
+
+/// A page of confirmed executions, newest first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransactionsResult {
+    /// Execution summaries in this page.
+    pub transactions: Vec<TransactionSummary>,
+    /// Whether more matching executions precede this page.
+    /// Use the last execution's id as `before` for the next page.
+    pub has_more: bool,
+}
+
 /// The state committed by a block header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateCommitment {
@@ -240,6 +508,9 @@ pub struct BlockResult {
     pub executions: Vec<TransactionSummary>,
 }
 
+/// Maximum number of executions in one `transactions` page.
+pub const MAX_PAGE_SIZE: u32 = 100;
+
 /// The most predicates one `scan` may name.
 ///
 /// It bounds the question, not the answer: a predicate with a long history
@@ -252,7 +523,7 @@ pub const MAX_PROOF_IDS: usize = 1024;
 
 /// Server-defined JSON-RPC error codes, in the -32000..-32099 range.
 pub mod codes {
-    /// The node has no such contract or block.
+    /// The node has no such contract, block, or confirmed execution.
     pub const NOT_FOUND: i32 = -32001;
     /// The mempool refused a submitted transaction.
     pub const MEMPOOL_REJECTED: i32 = -32002;

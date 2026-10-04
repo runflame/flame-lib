@@ -8,6 +8,7 @@
 mod block;
 mod node;
 mod rpc;
+mod transactions;
 
 use std::path::Path;
 
