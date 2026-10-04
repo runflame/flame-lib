@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flamed_rpc::{
-    ActorId, BlockId, BlockResult, ClientError, ExecutionData, FlamedApiClient, HttpClientBuilder,
-    TxId,
+    ActorId, BlockId, BlockResult, BlocksResult, ClientError, ExecutionData, FlamedApiClient,
+    HttpClientBuilder, TxId, MAX_PAGE_SIZE,
 };
 use flamevm::{ActorID, CellEncode, ScriptBuilder, String as VmString};
 use jsonrpsee::{core::client::ClientT, rpc_params};
@@ -22,6 +22,100 @@ fn counter_code() -> Vec<u8> {
         .put()
         .save()
         .to_bytecode()
+}
+
+#[tokio::test]
+async fn block_pages_follow_height_order_and_survive_replay() {
+    let dir = TempDir::new().unwrap();
+    let (genesis, cfg) = devnet(dir.path(), &account(&SEED_A));
+    let mut node = Node::open(&genesis, &cfg).unwrap();
+    let initial = node.blocks(None, 1).unwrap();
+    assert_eq!(initial.blocks, vec![node.block(0).unwrap().summary]);
+    assert!(!initial.has_more);
+
+    deploy(&mut node, &genesis);
+    node.mint_block().unwrap();
+    let expected: Vec<_> = (0..=2)
+        .rev()
+        .map(|height| node.block(height).unwrap().summary)
+        .collect();
+    let shared = Arc::new(Mutex::new(node));
+    let (addr, handle) = crate::rpc::serve(Arc::clone(&shared), cfg.rpc_bind)
+        .await
+        .unwrap();
+    let client = HttpClientBuilder::default()
+        .build(format!("http://{addr}"))
+        .unwrap();
+
+    let first = client.blocks(None, 2).await.unwrap();
+    assert_eq!(first.blocks, expected[..2]);
+    assert!(first.has_more);
+    let cursor = first.blocks.last().unwrap().header.height;
+
+    // A new tip must not shift a page requested with an existing cursor.
+    shared.lock().unwrap().mint_block().unwrap();
+    let last = client.blocks(Some(cursor), 2).await.unwrap();
+    assert_eq!(last.blocks, expected[2..]);
+    assert!(!last.has_more);
+    assert_eq!([first.blocks, last.blocks].concat(), expected);
+
+    let all = client.blocks(None, MAX_PAGE_SIZE).await.unwrap();
+    assert_eq!(all.blocks[0], client.block(3).await.unwrap().summary);
+    assert_eq!(all.blocks[1..], expected);
+    assert!(!all.has_more);
+    assert_eq!(client.blocks(None, 4).await.unwrap(), all);
+    for before in [4, u64::MAX] {
+        assert_eq!(
+            client.blocks(Some(before), MAX_PAGE_SIZE).await.unwrap(),
+            all
+        );
+    }
+    assert_eq!(client.blocks(Some(1), 1).await.unwrap(), initial);
+    let exhausted = client.blocks(Some(0), MAX_PAGE_SIZE).await.unwrap();
+    assert!(exhausted.blocks.is_empty());
+    assert!(!exhausted.has_more);
+
+    let json: serde_json::Value = client
+        .request("blocks", rpc_params![Option::<u64>::None, MAX_PAGE_SIZE])
+        .await
+        .unwrap();
+    assert!(json.get("next").is_none());
+    assert_eq!(json["has_more"], false);
+    assert_eq!(json["blocks"][0]["header"]["height"], 3);
+    assert_eq!(serde_json::from_value::<BlocksResult>(json).unwrap(), all);
+
+    for limit in [0, MAX_PAGE_SIZE + 1, u32::MAX] {
+        let ClientError::Call(error) = client.blocks(None, limit).await.unwrap_err() else {
+            panic!("expected limit error")
+        };
+        assert_eq!(error.code(), flamed_rpc::codes::LIMIT_EXCEEDED);
+    }
+    for params in [
+        rpc_params![-1, 1],
+        rpc_params!["1", 1],
+        rpc_params![Option::<u64>::None, -1],
+        rpc_params![Option::<u64>::None],
+    ] {
+        let invalid: Result<BlocksResult, _> = client.request("blocks", params).await;
+        let ClientError::Call(error) = invalid.unwrap_err() else {
+            panic!("expected invalid params")
+        };
+        assert_eq!(error.code(), flamed_rpc::ErrorCode::InvalidParams.code());
+    }
+
+    drop(client);
+    handle.stop().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), handle.stopped())
+        .await
+        .unwrap();
+    drop(shared);
+
+    let reopened = Node::open(&genesis, &cfg).unwrap();
+    assert_eq!(reopened.blocks(None, MAX_PAGE_SIZE).unwrap(), all);
+    assert_eq!(
+        reopened.blocks(Some(cursor), 2).unwrap().blocks,
+        expected[2..]
+    );
 }
 
 pub(super) fn deploy(node: &mut Node, genesis: &GenesisFile) -> (ActorId, ContractID) {

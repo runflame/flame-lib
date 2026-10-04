@@ -1,9 +1,10 @@
 //! Transactions by id.
 
 use std::collections::BTreeMap;
+use std::ops::Bound::{Excluded, Unbounded};
 
 use flamechain::BlockHash;
-use flamed_rpc::{BlockSummary, TransactionSummary, TransactionsResult};
+use flamed_rpc::{BlockSummary, BlocksResult, TransactionSummary, TransactionsResult};
 use flamevm::TxID;
 
 /// Where a transaction landed, and what it did.
@@ -72,6 +73,24 @@ impl TxIndex {
     /// Header at an exact height.
     pub fn block(&self, height: u64) -> Option<&BlockSummary> {
         self.blocks.get(&height)
+    }
+
+    /// A page of blocks, newest first and strictly below `before`.
+    pub fn blocks(&self, before: Option<u64>, limit: usize) -> BlocksResult {
+        let mut blocks = self
+            .blocks
+            .range((Unbounded, before.map_or(Unbounded, Excluded)))
+            .rev();
+        let page = blocks
+            .by_ref()
+            .take(limit)
+            .map(|(_, block)| block.clone())
+            .collect();
+
+        BlocksResult {
+            blocks: page,
+            has_more: blocks.next().is_some(),
+        }
     }
 
     /// A page of executions, newest first.

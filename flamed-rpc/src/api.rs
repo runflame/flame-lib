@@ -13,15 +13,20 @@ use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 
 use crate::types::{
-    ActorId, ActorResult, BlockResult, BlockTxEnvelope, ContractId, ContractResult, PredicatePoint,
-    ProofResult, ScanResult, TipResult, TransactionResult, TransactionsResult, TxId,
-    TxStatusResult,
+    ActorId, ActorResult, BlockResult, BlockTxEnvelope, BlocksResult, ContractId, ContractResult,
+    PendingTransactionsResult, PredicatePoint, ProofResult, ScanResult, TipResult,
+    TransactionResult, TransactionsResult, TxId, TxStatusResult,
 };
 
 /// The `flamed` JSON-RPC 2.0 API. Parameters are positional, in the order
 /// written; method names carry no prefix.
 #[rpc(server, client)]
 pub trait FlamedApi {
+    /// Blocks newest first, strictly below `before` when provided. Limit 1..100.
+    /// Includes genesis at height zero.
+    #[method(name = "blocks")]
+    async fn blocks(&self, before: Option<u64>, limit: u32) -> RpcResult<BlocksResult>;
+
     /// One block by height, including its internal executions.
     /// Genesis is height zero; `NOT_FOUND` if the height is absent.
     #[method(name = "block")]
@@ -33,6 +38,10 @@ pub trait FlamedApi {
     #[method(name = "transactions")]
     async fn transactions(&self, before: Option<TxId>, limit: u32)
         -> RpcResult<TransactionsResult>;
+
+    /// The first pending transactions in mempool admission order. Limit 1..100.
+    #[method(name = "pending_transactions")]
+    async fn pending_transactions(&self, limit: u32) -> RpcResult<PendingTransactionsResult>;
 
     /// One confirmed external or internal execution.
     /// Set `decode_effects` to true to decode public effects. The default is false.
