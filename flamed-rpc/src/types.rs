@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::codec::{base64_newtype, hex32_newtype};
 
 hex32_newtype! {
+    /// An actor hash.
+    ActorId;
     /// A block hash.
     BlockId;
     /// A transaction id.
@@ -135,6 +137,109 @@ pub struct ScanResult {
     pub outputs: Vec<ScanEntry>,
 }
 
+/// Execution category and its data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExecutionData {
+    /// A signed transaction submitted by a client.
+    External,
+    /// Successful asynchronous message execution.
+    Internal {
+        /// Execution which sent the received message.
+        parent: TxId,
+        /// Target of the received message.
+        actor: ActorId,
+    },
+    /// Failed message delivery. Effects describe its refund.
+    InternalFailed {
+        /// Execution which sent the received message.
+        parent: TxId,
+        /// Target of the received message.
+        actor: ActorId,
+        /// VM error text. This text is not a consensus field.
+        error: String,
+    },
+}
+
+/// Summary of a confirmed execution.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransactionSummary {
+    /// Transaction / execution identifier.
+    pub id: TxId,
+    /// Execution category and its data.
+    pub execution: ExecutionData,
+    /// Transaction fee in sparks, as an exact decimal string.
+    /// This value excludes storage fees.
+    pub fee_sparks: String,
+    /// Number of consumed outputs.
+    pub inputs: u32,
+    /// Number of created outputs, including refunds.
+    pub outputs: u32,
+    /// Number of outgoing asynchronous messages.
+    pub messages: u32,
+}
+
+/// The state committed by a block header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateCommitment {
+    /// Specialized Utreexo accumulator commitment.
+    #[serde(with = "crate::codec::hex32")]
+    pub contracts: [u8; 32],
+    /// Cell Trie commitment to actor content and persistent availability.
+    #[serde(with = "crate::codec::hex32")]
+    pub actors: [u8; 32],
+    /// Available storage units committed by the block.
+    pub available_storage_units: u64,
+}
+
+/// The complete block header. Block headers contain no timestamp.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockHeader {
+    /// Consensus protocol version.
+    pub version: u32,
+    /// Block height; genesis is zero.
+    pub height: u64,
+    /// Opaque authenticated Bitcoin/core-block identity supplied by the caller.
+    #[serde(with = "crate::codec::hex32")]
+    pub core_block_hash: [u8; 32],
+    /// Previous block identifier, as committed in the header.
+    pub parent: BlockId,
+    /// Committed witness root, as hex.
+    #[serde(with = "crate::codec::hex32")]
+    pub witness_root: [u8; 32],
+    /// Committed effects root, as hex.
+    #[serde(with = "crate::codec::hex32")]
+    pub effects_root: [u8; 32],
+    /// State committed by the block.
+    pub state: StateCommitment,
+}
+
+/// A block header with its identifier and execution counts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockSummary {
+    /// Block identifier.
+    pub id: BlockId,
+    /// Complete consensus header.
+    pub header: BlockHeader,
+    /// External transaction count.
+    pub transactions: u32,
+    /// Internal execution count, including failures.
+    pub internal: u32,
+    /// Failed internal execution count.
+    pub failed: u32,
+    /// Serialized block size in bytes; zero for synthetic genesis.
+    pub size_bytes: u64,
+}
+
+/// A block and its execution summaries in consensus order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockResult {
+    /// Header summary.
+    pub summary: BlockSummary,
+    /// Both external and internal executions.
+    pub executions: Vec<TransactionSummary>,
+}
+
 /// The most predicates one `scan` may name.
 ///
 /// It bounds the question, not the answer: a predicate with a long history
@@ -147,7 +252,7 @@ pub const MAX_PROOF_IDS: usize = 1024;
 
 /// Server-defined JSON-RPC error codes, in the -32000..-32099 range.
 pub mod codes {
-    /// The node has no such contract.
+    /// The node has no such contract or block.
     pub const NOT_FOUND: i32 = -32001;
     /// The mempool refused a submitted transaction.
     pub const MEMPOOL_REJECTED: i32 = -32002;
