@@ -17,11 +17,12 @@ use flamechain::{
     ExecutionKind, Mempool, MempoolError, MempoolPolicy, RebaseReport,
 };
 use flamed_rpc::{
-    ActorId, BlockHeader, BlockId, BlockResult, BlockSummary, ContractEnvelope, ContractId,
-    ExecutionData, NoteEnvelope, PredicatePoint, ScanEntry, SpentAt, StateCommitment,
-    TransactionResult, TransactionSummary, TransactionsResult, TxId, MAX_PAGE_SIZE,
+    ActorCode, ActorId, ActorResult, ActorStateEnvelope, BlockHeader, BlockId, BlockResult,
+    BlockSummary, ContractEnvelope, ContractId, ExecutionData, NoteEnvelope, PredicatePoint,
+    ScanEntry, SpentAt, StateCommitment, TransactionResult, TransactionSummary, TransactionsResult,
+    TxId, MAX_PAGE_SIZE,
 };
-use flamevm::{CellError, ContractID, TxEntry, TxID, VMError};
+use flamevm::{ActorID, CellError, ContractID, TxEntry, TxID, VMError};
 use sha2::{Digest, Sha256};
 
 use crate::cells::{contract_bytes, log_bytes};
@@ -248,6 +249,39 @@ impl Node {
         Ok(BlockResult {
             summary,
             executions,
+        })
+    }
+
+    /// Current actor code, state, and storage availability.
+    pub fn actor(&self, id: ActorId) -> Result<ActorResult, NodeError> {
+        let info = self
+            .chain
+            .actor_info(&ActorID::Hash(id.0))
+            .map_err(|error| match error {
+                ChainError::Vm(VMError::ActorNotFound) => {
+                    NodeError::NotFound(format!("actor {id}"))
+                }
+                other => NodeError::Chain(other),
+            })?;
+
+        let tip = self.tip();
+
+        Ok(ActorResult {
+            id,
+            height: tip.height,
+            block: BlockId(tip.hash.into_bytes()),
+            code_hash: info.code_root,
+            state_hash: info.state_root,
+            code_size: info.code_size,
+            state_size: info.state_size,
+            storage_used: info.storage_used,
+            storage_capacity: info.storage_capacity,
+            code: info.code.map(ActorCode),
+            state: info.state.map(|state| ActorStateEnvelope(state.encode())),
+            decoded_state: None,
+            state_error: None,
+            instructions: Vec::new(),
+            code_error: None,
         })
     }
 
@@ -792,7 +826,7 @@ pub enum NodeError {
     /// The node has no such contract.
     #[error("no contract {0}")]
     UnknownContract(String),
-    /// A requested block or confirmed execution is absent.
+    /// A requested actor, block, or confirmed execution is absent.
     #[error("not found: {0}")]
     NotFound(String),
     /// A request named more items than the method allows.

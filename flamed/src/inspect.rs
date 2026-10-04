@@ -1,15 +1,74 @@
-//! Public effects for transaction responses.
+//! Public VM data for RPC responses.
 
 use std::collections::HashSet;
 
 use flamed_rpc::{
-    ActorId, ActorTarget, CellId, ContractId, DictEntry, PredicatePoint, TxEntry as RpcTxEntry,
-    TxValue, ValueCell,
+    ActorId, ActorResult, ActorTarget, CellId, ContractId, DictEntry, InstructionView,
+    PredicatePoint, TxEntry as RpcTxEntry, TxValue, ValueCell,
 };
 use flamevm::{
     ActorID, Anchor, Cell, CellDecode, CellEncode, CellEnvelope, CellError, CellRef, CellResolver,
-    CellSlice, Contract, Predicate, Scalar, Trie, TxEntry, Value,
+    CellSlice, Contract, Instruction, Predicate, Scalar, Trie, TxEntry, Value,
 };
+
+/// Decodes the available state and code from a current actor snapshot.
+pub fn actor(mut result: ActorResult) -> ActorResult {
+    let decoded = result.state.as_ref().map(|bytes| {
+        let mut gas = (bytes.0.len() as u64).saturating_mul(4);
+        let mut envelope = CellEnvelope::decode(&bytes.0, bytes.0.len(), &mut gas)?;
+        let reference = CellRef::pruned(envelope.root());
+        match envelope
+            .resolve(&reference)
+            .and_then(|cell| Value::from_cell(&cell, &mut envelope))
+        {
+            Ok(value) => render_value(&value),
+            Err(CellError::MissingCell(_)) => available_cells(&reference, &mut envelope),
+            Err(error) => Err(error),
+        }
+    });
+
+    (result.decoded_state, result.state_error) = match decoded {
+        Some(Ok(value)) => (Some(value), None),
+        Some(Err(error)) => (None, Some(error.to_string())),
+        None => (None, Some("State body is unavailable".into())),
+    };
+
+    (result.instructions, result.code_error) = match &result.code {
+        Some(code) => disassemble(&code.0),
+        None => (Vec::new(), Some("Code body is unavailable".into())),
+    };
+
+    result
+}
+
+fn disassemble(code: &[u8]) -> (Vec<InstructionView>, Option<String>) {
+    let mut instructions = Vec::new();
+    let mut remaining = code;
+    while !remaining.is_empty() {
+        let offset = (code.len() - remaining.len()) as u64;
+        let op = match Instruction::parse(&mut remaining) {
+            Ok(op) => op,
+            Err(error) => {
+                return (instructions, Some(format!("Byte {offset}: {error}")));
+            }
+        };
+        let text = match op {
+            Instruction::PushInt(n) => format!("push {}", scalar(n)),
+            Instruction::PushStr(s) => format!("pushstr 0x{}", hex::encode(s.to_bytes())),
+            Instruction::PushPoint(p) => format!("pushpoint 0x{}", hex::encode(p.to_bytes())),
+            Instruction::DupK(k) => format!("dup:{k}"),
+            Instruction::RollK(k) => format!("roll:{k}"),
+            Instruction::Label(n) => format!("label:{n}"),
+            Instruction::Jump(n) => format!("jump:{n}"),
+            Instruction::JumpIf(n) => format!("jumpif:{n}"),
+            Instruction::Ext(n) => format!("ext 0x{n:02x}"),
+            Instruction::Alloc(_) => "alloc".into(),
+            plain => format!("{plain:?}").to_ascii_lowercase(),
+        };
+        instructions.push(InstructionView { offset, text });
+    }
+    (instructions, None)
+}
 
 /// Reads public effects from an archived log.
 pub fn effects(bytes: &[u8]) -> Result<Vec<RpcTxEntry>, CellError> {

@@ -35,6 +35,10 @@ base64_newtype! {
     BlockTxEnvelope;
     /// An output's note: the `Data` entry after it, byte for byte.
     NoteEnvelope;
+    /// An actor's raw VM bytecode.
+    ActorCode;
+    /// An actor's public state as a `CellEnvelope`.
+    ActorStateEnvelope;
 }
 
 /// The chain's current tip.
@@ -80,6 +84,53 @@ pub struct ContractResult {
     pub predicate: PredicatePoint,
     /// Its bytes, as published.
     pub bytes: ContractEnvelope,
+}
+
+/// Current actor state, code, storage, and decoded views.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActorResult {
+    /// The requested actor address.
+    pub id: ActorId,
+    /// The height at which all fields were read.
+    pub height: u64,
+    /// The block hash at that height.
+    pub block: BlockId,
+    /// Code root cell hash, retained even if the body is unavailable.
+    #[serde(with = "crate::codec::hex32")]
+    pub code_hash: [u8; 32],
+    /// State root cell hash, retained even if the body is unavailable.
+    #[serde(with = "crate::codec::hex32")]
+    pub state_hash: [u8; 32],
+    /// Logical bytecode length, excluding cell framing.
+    pub code_size: u64,
+    /// Logical state size in encoded cell bytes.
+    pub state_size: u64,
+    /// Resident code/state bytes plus lease records.
+    pub storage_used: u64,
+    /// Capacity of leases valid at this height, in bytes.
+    pub storage_capacity: u64,
+    /// Bytecode as base64. Null if any code cell is unavailable.
+    pub code: Option<ActorCode>,
+    /// State envelope as base64. Null if the root body is unavailable.
+    /// Descendant cells can still be missing.
+    pub state: Option<ActorStateEnvelope>,
+    /// Public state or available cells when some bodies are missing.
+    pub decoded_state: Option<TxValue>,
+    /// Why the state could not be decoded.
+    pub state_error: Option<String>,
+    /// Instructions in bytecode order, up to the first parse error.
+    pub instructions: Vec<InstructionView>,
+    /// Missing code or a parse error with its byte offset.
+    pub code_error: Option<String>,
+}
+
+/// One decoded VM instruction.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructionView {
+    /// Byte offset in the original code.
+    pub offset: u64,
+    /// Instruction mnemonic and complete inline arguments.
+    pub text: String,
 }
 
 /// Where a transaction is.
@@ -523,7 +574,7 @@ pub const MAX_PROOF_IDS: usize = 1024;
 
 /// Server-defined JSON-RPC error codes, in the -32000..-32099 range.
 pub mod codes {
-    /// The node has no such contract, block, or confirmed execution.
+    /// The node has no such actor, contract, block, or confirmed execution.
     pub const NOT_FOUND: i32 = -32001;
     /// The mempool refused a submitted transaction.
     pub const MEMPOOL_REJECTED: i32 = -32002;
