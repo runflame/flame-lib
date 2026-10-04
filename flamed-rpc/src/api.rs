@@ -66,7 +66,8 @@ pub trait FlamedApi {
     #[method(name = "proofs")]
     async fn proofs(&self, ids: Vec<ContractId>) -> RpcResult<Vec<(ContractId, ProofResult)>>;
 
-    /// One contract as the node archived it. `NOT_FOUND` if it has none.
+    /// An archived contract, its spend status, and its decoded public payload.
+    /// Returns `NOT_FOUND` if the contract does not exist.
     #[method(name = "contract")]
     async fn contract(&self, id: ContractId) -> RpcResult<ContractResult>;
 

@@ -146,18 +146,35 @@ impl FlamedApiServer for FlamedRpc {
     }
 
     async fn contract(&self, id: ContractId) -> RpcResult<ContractResult> {
-        self.with_node(move |node| {
-            let record = node
-                .contract(&id.0)
-                .ok_or_else(|| NodeError::UnknownContract(id.to_string()))?;
-            Ok(ContractResult {
-                height: record.height,
-                txid: TxId(record.txid.0),
-                predicate: PredicatePoint(record.predicate),
-                bytes: ContractEnvelope(record.contract.clone()),
+        let snapshot = self
+            .with_node(move |node| {
+                let record = node
+                    .contract(&id.0)
+                    .ok_or_else(|| NodeError::UnknownContract(id.to_string()))?;
+                let status = proof_result(node.proof(&id.0));
+                let tip = node.tip();
+                Ok(ContractResult {
+                    height: record.height,
+                    txid: TxId(record.txid.0),
+                    predicate: PredicatePoint(record.predicate),
+                    bytes: ContractEnvelope(record.contract.clone()),
+                    created_block: node.block_summary(record.height)?.id,
+                    status,
+                    tip: TipResult {
+                        hash: BlockId(tip.hash.into_bytes()),
+                        height: tip.height,
+                        contract_root: tip.contract_root,
+                    },
+                    anchor: [0; 32],
+                    decoded_payload: None,
+                    payload_error: None,
+                })
             })
-        })
-        .await
+            .await?;
+        tokio::task::spawn_blocking(move || inspect::contract(id, snapshot))
+            .await
+            .map_err(|error| internal(error.to_string()))?
+            .map_err(|error| internal(error.to_string()))
     }
 
     async fn submit_tx(&self, block_tx: BlockTxEnvelope) -> RpcResult<TxId> {

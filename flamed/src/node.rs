@@ -238,13 +238,16 @@ impl Node {
         Ok(self.txindex.blocks(before, page_limit(limit)?))
     }
 
+    /// A block header and its execution counts.
+    pub fn block_summary(&self, height: u64) -> Result<&BlockSummary, NodeError> {
+        self.txindex
+            .block(height)
+            .ok_or_else(|| NodeError::NotFound(format!("block {height}")))
+    }
+
     /// A header and its executions, including internal deliveries.
     pub fn block(&self, height: u64) -> Result<BlockResult, NodeError> {
-        let summary = self
-            .txindex
-            .block(height)
-            .cloned()
-            .ok_or_else(|| NodeError::NotFound(format!("block {height}")))?;
+        let summary = self.block_summary(height)?.clone();
         let executions = self
             .txindex
             .at_height(height)
