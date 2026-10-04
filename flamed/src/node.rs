@@ -18,9 +18,10 @@ use flamechain::{
 };
 use flamed_rpc::{
     ActorCode, ActorId, ActorResult, ActorStateEnvelope, BlockHeader, BlockId, BlockResult,
-    BlockSummary, ContractEnvelope, ContractId, ExecutionData, NoteEnvelope, PredicatePoint,
-    ScanEntry, SpentAt, StateCommitment, TransactionResult, TransactionSummary, TransactionsResult,
-    TxId, MAX_PAGE_SIZE,
+    BlockSummary, BlockTxEnvelope, BlocksResult, ContractEnvelope, ContractId, ExecutionData,
+    NoteEnvelope, PendingTransaction, PendingTransactionsResult, PredicatePoint, ScanEntry,
+    SpentAt, StateCommitment, TransactionResult, TransactionSummary, TransactionsResult, TxId,
+    MAX_PAGE_SIZE,
 };
 use flamevm::{ActorID, CellError, ContractID, TxEntry, TxID, VMError};
 use sha2::{Digest, Sha256};
@@ -232,6 +233,11 @@ impl Node {
         self.outputs.get(id)
     }
 
+    /// A page of blocks, newest first.
+    pub fn blocks(&self, before: Option<u64>, limit: u32) -> Result<BlocksResult, NodeError> {
+        Ok(self.txindex.blocks(before, page_limit(limit)?))
+    }
+
     /// A header and its executions, including internal deliveries.
     pub fn block(&self, height: u64) -> Result<BlockResult, NodeError> {
         let summary = self
@@ -315,16 +321,30 @@ impl Node {
         before: Option<TxId>,
         limit: u32,
     ) -> Result<TransactionsResult, NodeError> {
-        if limit == 0 || limit > MAX_PAGE_SIZE {
-            return Err(NodeError::Limit {
-                got: limit as usize,
-                max: MAX_PAGE_SIZE as usize,
-            });
-        }
-
         self.txindex
-            .transactions(before.map(|id| TxID(id.0)), limit as usize)
+            .transactions(before.map(|id| TxID(id.0)), page_limit(limit)?)
             .ok_or_else(|| NodeError::NotFound("transaction cursor".into()))
+    }
+
+    /// The first pending transactions in mempool admission order.
+    pub fn pending_transactions(&self, limit: u32) -> Result<PendingTransactionsResult, NodeError> {
+        let limit = page_limit(limit)?;
+        Ok(PendingTransactionsResult {
+            transactions: self
+                .mempool
+                .entries()
+                .take(limit)
+                .map(|entry| {
+                    Ok(PendingTransaction {
+                        id: TxId(entry.txid().0),
+                        block_tx: BlockTxEnvelope(entry.transaction().to_bytes()?),
+                        fee_sparks: entry.fee().to_string(),
+                        witness_bytes: entry.witness_bytes() as u64,
+                    })
+                })
+                .collect::<Result<_, CellError>>()?,
+            total: self.mempool.len() as u64,
+        })
     }
 
     /// Where a transaction is.
@@ -545,6 +565,16 @@ impl Node {
             })
             .collect()
     }
+}
+
+fn page_limit(limit: u32) -> Result<usize, NodeError> {
+    if limit == 0 || limit > MAX_PAGE_SIZE {
+        return Err(NodeError::Limit {
+            got: limit as usize,
+            max: MAX_PAGE_SIZE as usize,
+        });
+    }
+    Ok(limit as usize)
 }
 
 /// Whether a build failure means the block was too large rather than that

@@ -498,6 +498,28 @@ pub struct TransactionsResult {
     pub has_more: bool,
 }
 
+/// One transaction waiting in the mempool.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingTransaction {
+    /// Transaction identifier.
+    pub id: TxId,
+    /// Full transaction, limits, and proofs as a base64 BlockTx envelope.
+    pub block_tx: BlockTxEnvelope,
+    /// Offered transaction fee in sparks, as an exact decimal string.
+    pub fee_sparks: String,
+    /// Witness size counted by the mempool, in bytes.
+    pub witness_bytes: u64,
+}
+
+/// A bounded view of the current mempool, in admission order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingTransactionsResult {
+    /// The first transactions in the mempool, up to the requested limit.
+    pub transactions: Vec<PendingTransaction>,
+    /// Total number of transactions in the mempool at the time of this response.
+    pub total: u64,
+}
+
 /// The state committed by a block header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateCommitment {
@@ -559,7 +581,17 @@ pub struct BlockResult {
     pub executions: Vec<TransactionSummary>,
 }
 
-/// Maximum number of executions in one `transactions` page.
+/// A page of blocks, newest first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlocksResult {
+    /// Block summaries in this page.
+    pub blocks: Vec<BlockSummary>,
+    /// Whether older blocks remain.
+    /// Use the last block's header height as `before` for the next page.
+    pub has_more: bool,
+}
+
+/// Maximum entries in a `blocks`, `transactions`, or `pending_transactions` response.
 pub const MAX_PAGE_SIZE: u32 = 100;
 
 /// The most predicates one `scan` may name.

@@ -4,8 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flamed_rpc::{
-    ClientError, ExecutionData, FlamedApiClient, HttpClientBuilder, TransactionResult,
-    TransactionsResult, TxEntry as RpcTxEntry, TxId, MAX_PAGE_SIZE,
+    BlockTxEnvelope, ClientError, ExecutionData, FlamedApiClient, HttpClientBuilder,
+    PendingTransaction, PendingTransactionsResult, TransactionResult, TransactionsResult,
+    TxEntry as RpcTxEntry, TxId, MAX_PAGE_SIZE,
 };
 use flamevm::{ScriptBuilder, String as VmString};
 use jsonrpsee::{core::client::ClientT, rpc_params};
@@ -13,6 +14,123 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::NodeError;
+
+#[tokio::test]
+async fn pending_transactions_are_bounded_and_disappear_after_confirmation() {
+    let dir = TempDir::new().unwrap();
+    let a = account(&SEED_A);
+    let (genesis, cfg) = devnet(dir.path(), &a);
+    let node = Node::open(&genesis, &cfg).unwrap();
+    let id = genesis.contracts[0].id.0;
+    let input = InputSpec::clear(
+        contract_of(&node, &id),
+        live(&node, &id),
+        a.spending_key_at(util::RECEIVING, 0).unwrap(),
+    )
+    .unwrap();
+    let (transfer, _) = signed_transfer(
+        vec![input],
+        &[output(&a, util::CHANGE, 0, GENESIS_SPARKS - FEE)],
+        FEE,
+        &mut rng(72),
+    );
+    let shared = Arc::new(Mutex::new(node));
+    let (addr, handle) = crate::rpc::serve(Arc::clone(&shared), cfg.rpc_bind)
+        .await
+        .unwrap();
+    let client = HttpClientBuilder::default()
+        .build(format!("http://{addr}"))
+        .unwrap();
+    let empty = client.pending_transactions(MAX_PAGE_SIZE).await.unwrap();
+    assert!(empty.transactions.is_empty());
+    assert_eq!(empty.total, 0);
+
+    let id = client
+        .submit_tx(BlockTxEnvelope(submitted(&transfer)))
+        .await
+        .unwrap();
+    let mut expected = vec![PendingTransaction {
+        id,
+        block_tx: BlockTxEnvelope(submitted(&transfer)),
+        fee_sparks: FEE.to_string(),
+        witness_bytes: transfer.witness_size().unwrap() as u64,
+    }];
+    for index in 0..MAX_PAGE_SIZE {
+        let tx = ScriptBuilder::new()
+            .push_str(index.to_le_bytes().to_vec())
+            .log()
+            .build_tx(header(), limits())
+            .unwrap()
+            .without_signature()
+            .unwrap();
+        let tx = block_tx(tx, limits(), vec![]);
+        expected.push(PendingTransaction {
+            id: client
+                .submit_tx(BlockTxEnvelope(submitted(&tx)))
+                .await
+                .unwrap(),
+            block_tx: BlockTxEnvelope(submitted(&tx)),
+            fee_sparks: "0".into(),
+            witness_bytes: tx.witness_size().unwrap() as u64,
+        });
+    }
+    for limit in [1, 2, MAX_PAGE_SIZE] {
+        let pending = client.pending_transactions(limit).await.unwrap();
+        assert_eq!(pending.transactions, expected[..limit as usize]);
+        assert_eq!(pending.total, expected.len() as u64);
+    }
+    assert!(client
+        .transactions(None, MAX_PAGE_SIZE)
+        .await
+        .unwrap()
+        .transactions
+        .is_empty());
+    let json: serde_json::Value = client
+        .request("pending_transactions", rpc_params![1])
+        .await
+        .unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "transactions": [expected[0]],
+            "total": expected.len(),
+        })
+    );
+    assert!(json["transactions"][0]["block_tx"].is_string());
+    for limit in [0, MAX_PAGE_SIZE + 1, u32::MAX] {
+        let ClientError::Call(error) = client.pending_transactions(limit).await.unwrap_err() else {
+            panic!("expected limit error")
+        };
+        assert_eq!(error.code(), flamed_rpc::codes::LIMIT_EXCEEDED);
+    }
+    for params in [rpc_params![-1], rpc_params!["1"], rpc_params![]] {
+        let invalid: Result<PendingTransactionsResult, _> =
+            client.request("pending_transactions", params).await;
+        let ClientError::Call(error) = invalid.unwrap_err() else {
+            panic!("expected invalid params")
+        };
+        assert_eq!(error.code(), flamed_rpc::ErrorCode::InvalidParams.code());
+    }
+
+    shared.lock().unwrap().mint_block().unwrap();
+    assert_eq!(
+        client.pending_transactions(MAX_PAGE_SIZE).await.unwrap(),
+        empty
+    );
+    assert_eq!(
+        client.block(1).await.unwrap().summary.transactions as usize,
+        expected.len()
+    );
+    assert_eq!(
+        client.tx(id, None).await.unwrap().summary.fee_sparks,
+        FEE.to_string()
+    );
+    drop(client);
+    handle.stop().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), handle.stopped())
+        .await
+        .unwrap();
+}
 
 #[test]
 fn transaction_pages_follow_execution_order_across_blocks_and_replay() {

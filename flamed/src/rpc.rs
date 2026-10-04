@@ -11,10 +11,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use flamed_rpc::{
-    async_trait, codes, ActorId, ActorResult, BlockId, BlockResult, BlockTxEnvelope,
+    async_trait, codes, ActorId, ActorResult, BlockId, BlockResult, BlockTxEnvelope, BlocksResult,
     ContractEnvelope, ContractId, ContractResult, ErrorCode, ErrorObjectOwned, FlamedApiServer,
-    PredicatePoint, ProofBytes, ProofResult, RpcResult, ScanResult, TipResult, TransactionResult,
-    TransactionsResult, TxId, TxStatusResult, MAX_PROOF_IDS, MAX_SCAN_PREDICATES,
+    PendingTransactionsResult, PredicatePoint, ProofBytes, ProofResult, RpcResult, ScanResult,
+    TipResult, TransactionResult, TransactionsResult, TxId, TxStatusResult, MAX_PROOF_IDS,
+    MAX_SCAN_PREDICATES,
 };
 use jsonrpsee::server::{BatchRequestConfig, Server, ServerConfig, ServerHandle};
 
@@ -77,6 +78,10 @@ impl FlamedRpc {
 
 #[async_trait]
 impl FlamedApiServer for FlamedRpc {
+    async fn blocks(&self, before: Option<u64>, limit: u32) -> RpcResult<BlocksResult> {
+        self.with_node(move |node| node.blocks(before, limit)).await
+    }
+
     async fn block(&self, height: u64) -> RpcResult<BlockResult> {
         self.with_node(move |node| node.block(height)).await
     }
@@ -87,6 +92,11 @@ impl FlamedApiServer for FlamedRpc {
         limit: u32,
     ) -> RpcResult<TransactionsResult> {
         self.with_node(move |node| node.transactions(before, limit))
+            .await
+    }
+
+    async fn pending_transactions(&self, limit: u32) -> RpcResult<PendingTransactionsResult> {
+        self.with_node(move |node| node.pending_transactions(limit))
             .await
     }
 

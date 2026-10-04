@@ -16,11 +16,12 @@ pub mod types;
 pub use api::{FlamedApiClient, FlamedApiServer};
 pub use types::{
     codes, ActorCode, ActorId, ActorResult, ActorStateEnvelope, ActorTarget, BlockHeader, BlockId,
-    BlockResult, BlockSummary, BlockTxEnvelope, CellId, ContractEnvelope, ContractId,
-    ContractResult, DictEntry, ExecutionData, InstructionView, NoteEnvelope, PredicatePoint,
-    ProofBytes, ProofResult, ScanEntry, ScanResult, SpentAt, StateCommitment, TipResult,
-    TransactionResult, TransactionSummary, TransactionsResult, TxEntry, TxId, TxStatusResult,
-    TxValue, ValueCell, MAX_PAGE_SIZE, MAX_PROOF_IDS, MAX_SCAN_PREDICATES,
+    BlockResult, BlockSummary, BlockTxEnvelope, BlocksResult, CellId, ContractEnvelope, ContractId,
+    ContractResult, DictEntry, ExecutionData, InstructionView, NoteEnvelope, PendingTransaction,
+    PendingTransactionsResult, PredicatePoint, ProofBytes, ProofResult, ScanEntry, ScanResult,
+    SpentAt, StateCommitment, TipResult, TransactionResult, TransactionSummary, TransactionsResult,
+    TxEntry, TxId, TxStatusResult, TxValue, ValueCell, MAX_PAGE_SIZE, MAX_PROOF_IDS,
+    MAX_SCAN_PREDICATES,
 };
 
 /// Required on any `impl FlamedApiServer`.
