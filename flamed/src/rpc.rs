@@ -13,8 +13,8 @@ use std::sync::Arc;
 use flamed_rpc::{
     async_trait, codes, BlockId, BlockResult, BlockTxEnvelope, ContractEnvelope, ContractId,
     ContractResult, ErrorCode, ErrorObjectOwned, FlamedApiServer, PredicatePoint, ProofBytes,
-    ProofResult, RpcResult, ScanResult, TipResult, TxId, TxStatusResult, MAX_PROOF_IDS,
-    MAX_SCAN_PREDICATES,
+    ProofResult, RpcResult, ScanResult, TipResult, TransactionResult, TransactionsResult, TxId,
+    TxStatusResult, MAX_PROOF_IDS, MAX_SCAN_PREDICATES,
 };
 use jsonrpsee::server::{BatchRequestConfig, Server, ServerConfig, ServerHandle};
 
@@ -78,6 +78,20 @@ impl FlamedRpc {
 impl FlamedApiServer for FlamedRpc {
     async fn block(&self, height: u64) -> RpcResult<BlockResult> {
         self.with_node(move |node| node.block(height)).await
+    }
+
+    async fn transactions(
+        &self,
+        before: Option<TxId>,
+        limit: u32,
+    ) -> RpcResult<TransactionsResult> {
+        self.with_node(move |node| node.transactions(before, limit))
+            .await
+    }
+
+    async fn tx(&self, id: TxId, decode_effects: Option<bool>) -> RpcResult<TransactionResult> {
+        self.with_node(move |node| node.transaction(id, decode_effects.unwrap_or(false)))
+            .await
     }
 
     async fn tip(&self) -> RpcResult<TipResult> {

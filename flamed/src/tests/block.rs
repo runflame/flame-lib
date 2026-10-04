@@ -24,7 +24,7 @@ fn counter_code() -> Vec<u8> {
         .to_bytecode()
 }
 
-fn deploy(node: &mut Node, genesis: &GenesisFile) -> (ActorId, ContractID) {
+pub(super) fn deploy(node: &mut Node, genesis: &GenesisFile) -> (ActorId, ContractID) {
     let input = contract_of(node, &genesis.contracts[0].id.0);
     let constructor = ScriptBuilder::new()
         .push_int(1_024u64)
@@ -68,7 +68,7 @@ fn deploy(node: &mut Node, genesis: &GenesisFile) -> (ActorId, ContractID) {
     (ActorId(actor.to_hash()), change)
 }
 
-fn send_messages(
+pub(super) fn send_messages(
     node: &mut Node,
     actor: ActorId,
     input_id: ContractID,

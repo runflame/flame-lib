@@ -19,7 +19,7 @@ use flamechain::{
 use flamed_rpc::{
     ActorId, BlockHeader, BlockId, BlockResult, BlockSummary, ContractEnvelope, ContractId,
     ExecutionData, NoteEnvelope, PredicatePoint, ScanEntry, SpentAt, StateCommitment,
-    TransactionSummary, TxId,
+    TransactionResult, TransactionSummary, TransactionsResult, TxId, MAX_PAGE_SIZE,
 };
 use flamevm::{CellError, ContractID, TxEntry, TxID, VMError};
 use sha2::{Digest, Sha256};
@@ -28,6 +28,7 @@ use crate::cells::{contract_bytes, log_bytes};
 use crate::config::{GenesisFile, NodeConfig};
 use crate::genesis::{self, GenesisError};
 use crate::index::{OutputIndex, OutputRecord, SpendRecord, TxIndex, TxRecord};
+use crate::inspect;
 use crate::store::{BlockStore, StoreError};
 use crate::utxos::UtxoSet;
 
@@ -248,6 +249,48 @@ impl Node {
             summary,
             executions,
         })
+    }
+
+    /// Confirmed external or internal execution details.
+    pub fn transaction(
+        &self,
+        id: TxId,
+        decode_effects: bool,
+    ) -> Result<TransactionResult, NodeError> {
+        let record = self
+            .txindex
+            .get(&TxID(id.0))
+            .ok_or_else(|| NodeError::NotFound(format!("transaction {id}")))?;
+
+        Ok(TransactionResult {
+            summary: record.summary.clone(),
+            height: record.height,
+            block: BlockId(record.block.into_bytes()),
+            log: record.log.clone(),
+            effects: if decode_effects {
+                Some(inspect::effects(&record.log)?)
+            } else {
+                None
+            },
+        })
+    }
+
+    /// Confirmed executions, newest first.
+    pub fn transactions(
+        &self,
+        before: Option<TxId>,
+        limit: u32,
+    ) -> Result<TransactionsResult, NodeError> {
+        if limit == 0 || limit > MAX_PAGE_SIZE {
+            return Err(NodeError::Limit {
+                got: limit as usize,
+                max: MAX_PAGE_SIZE as usize,
+            });
+        }
+
+        self.txindex
+            .transactions(before.map(|id| TxID(id.0)), limit as usize)
+            .ok_or_else(|| NodeError::NotFound("transaction cursor".into()))
     }
 
     /// Where a transaction is.
@@ -749,7 +792,7 @@ pub enum NodeError {
     /// The node has no such contract.
     #[error("no contract {0}")]
     UnknownContract(String),
-    /// A requested block is absent.
+    /// A requested block or confirmed execution is absent.
     #[error("not found: {0}")]
     NotFound(String),
     /// A request named more items than the method allows.

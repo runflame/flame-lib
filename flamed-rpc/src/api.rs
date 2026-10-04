@@ -14,7 +14,7 @@ use jsonrpsee::proc_macros::rpc;
 
 use crate::types::{
     BlockResult, BlockTxEnvelope, ContractId, ContractResult, PredicatePoint, ProofResult,
-    ScanResult, TipResult, TxId, TxStatusResult,
+    ScanResult, TipResult, TransactionResult, TransactionsResult, TxId, TxStatusResult,
 };
 
 /// The `flamed` JSON-RPC 2.0 API. Parameters are positional, in the order
@@ -25,6 +25,19 @@ pub trait FlamedApi {
     /// Genesis is height zero; `NOT_FOUND` if the height is absent.
     #[method(name = "block")]
     async fn block(&self, height: u64) -> RpcResult<BlockResult>;
+
+    /// Confirmed executions, newest first.
+    /// `before` excludes the named execution and all newer executions. Limit 1..100.
+    /// Returns `NOT_FOUND` if the cursor does not name a confirmed execution.
+    #[method(name = "transactions")]
+    async fn transactions(&self, before: Option<TxId>, limit: u32)
+        -> RpcResult<TransactionsResult>;
+
+    /// One confirmed external or internal execution.
+    /// Set `decode_effects` to true to decode public effects. The default is false.
+    /// Returns `NOT_FOUND` for unknown or pending transactions.
+    #[method(name = "tx")]
+    async fn tx(&self, id: TxId, decode_effects: Option<bool>) -> RpcResult<TransactionResult>;
 
     /// The current tip: its hash, its height, and the contract accumulator root.
     #[method(name = "tip")]
