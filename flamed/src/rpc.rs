@@ -11,14 +11,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use flamed_rpc::{
-    async_trait, codes, BlockId, BlockResult, BlockTxEnvelope, ContractEnvelope, ContractId,
-    ContractResult, ErrorCode, ErrorObjectOwned, FlamedApiServer, PredicatePoint, ProofBytes,
-    ProofResult, RpcResult, ScanResult, TipResult, TransactionResult, TransactionsResult, TxId,
-    TxStatusResult, MAX_PROOF_IDS, MAX_SCAN_PREDICATES,
+    async_trait, codes, ActorId, ActorResult, BlockId, BlockResult, BlockTxEnvelope,
+    ContractEnvelope, ContractId, ContractResult, ErrorCode, ErrorObjectOwned, FlamedApiServer,
+    PredicatePoint, ProofBytes, ProofResult, RpcResult, ScanResult, TipResult, TransactionResult,
+    TransactionsResult, TxId, TxStatusResult, MAX_PROOF_IDS, MAX_SCAN_PREDICATES,
 };
 use jsonrpsee::server::{BatchRequestConfig, Server, ServerConfig, ServerHandle};
 
 use crate::cells::proof_bytes;
+use crate::inspect;
 use crate::node::{Node, NodeError, ProofStatus, SharedNode, TxStatus};
 
 /// The largest request this node will read. A full 1024-predicate `scan`
@@ -92,6 +93,13 @@ impl FlamedApiServer for FlamedRpc {
     async fn tx(&self, id: TxId, decode_effects: Option<bool>) -> RpcResult<TransactionResult> {
         self.with_node(move |node| node.transaction(id, decode_effects.unwrap_or(false)))
             .await
+    }
+
+    async fn actor(&self, id: ActorId) -> RpcResult<ActorResult> {
+        let snapshot = self.with_node(move |node| node.actor(id)).await?;
+        tokio::task::spawn_blocking(move || inspect::actor(snapshot))
+            .await
+            .map_err(|error| internal(error.to_string()))
     }
 
     async fn tip(&self) -> RpcResult<TipResult> {

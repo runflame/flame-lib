@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use cells::{
-    BagOfCells, Cell, CellBuilder, CellDecode, CellEncode, CellError, CellID, CellRef,
-    CellResolver, CellSlice, Trie, resolve_cell,
+    BagOfCells, Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellID,
+    CellRef, CellResolver, CellSlice, Trie, resolve_cell,
 };
 
 use flamevm::{
@@ -90,6 +90,28 @@ pub struct Lease {
 pub struct StoredActor {
     pub root: CellID,
     pub cells: Arc<BagOfCells>,
+}
+
+/// A read-only view of an actor's committed content and storage at one height.
+#[derive(Clone, Debug)]
+pub struct ActorInfo {
+    /// Root cell hash of the current code, even when its bytes are unavailable.
+    pub code_root: CellID,
+    /// Root cell hash of the current state, even when its bytes are unavailable.
+    pub state_root: CellID,
+    /// Logical bytecode length, excluding cell framing.
+    pub code_size: u64,
+    /// Logical state size in encoded cell bytes.
+    pub state_size: u64,
+    /// Resident code/state bytes plus lease records.
+    pub storage_used: u64,
+    /// Capacity of leases valid at the snapshot height, in bytes.
+    pub storage_capacity: u64,
+    /// Bytecode, if all its cells are resident.
+    pub code: Option<Vec<u8>>,
+    /// State root and reachable resident cells. Descendants may still be pruned.
+    /// Absent if even the state root body is unavailable.
+    pub state: Option<CellEnvelope>,
 }
 
 #[derive(Clone)]
@@ -551,6 +573,37 @@ impl ActorStore {
         Self::stored_slot(slot).map_err(Into::into)
     }
 
+    pub(crate) fn actor_info(&self, actor: &ActorID, height: u64) -> Result<ActorInfo, VMError> {
+        let slot = self.require_live(actor.to_hash())?;
+        let live = slot.live.as_ref().ok_or(VMError::ActorNotFound)?;
+
+        // Read only committed public cells, never cached values or private witnesses.
+        // In particular, load_state would check out the actor for execution.
+        let mut cells = live.cells.as_ref().clone();
+        let code = match self.load_code_with_cells(actor, &mut cells) {
+            Ok(code) => Some(code),
+            Err(VMError::Cell(CellError::MissingCell(_))) => None,
+            Err(error) => return Err(error),
+        };
+
+        let state = live
+            .cells
+            .get(&live.state_root)
+            .map(|root| CellEnvelope::new(live.state_root, collect_owned([root], &live.cells)?))
+            .transpose()?;
+
+        Ok(ActorInfo {
+            code_root: live.code_root,
+            state_root: live.state_root,
+            code_size: live.code_bytes,
+            state_size: live.state_bytes,
+            storage_used: self.usage_slot(slot)?,
+            storage_capacity: self.capacity_slot(slot, height)?,
+            code,
+            state,
+        })
+    }
+
     fn stored_slot(slot: &ActorSlot) -> Result<StoredActor, CellError> {
         let root = Arc::new(slot.to_cell()?);
         let empty = BagOfCells::new();
@@ -1002,6 +1055,73 @@ mod tests {
         assert!(matches!(
             cold.load_state(&actor()),
             Err(VMError::ActorEmpty)
+        ));
+    }
+
+    #[test]
+    fn actor_info_reads_public_cells_without_checkout_or_cached_witnesses() {
+        let token = flamevm::Token::cleartext(Scalar::from(7u64), FLAME_FLAVOR).unwrap();
+        let mut store = ActorStore::new(StorageParams::default()).unwrap();
+        store.deploy(actor(), vec![0], Value::Token(token)).unwrap();
+        let root_before = store.actor_root();
+        for _ in 0..2 {
+            let info = store.actor_info(&actor(), 0).unwrap();
+            assert_eq!(info.code, Some(vec![0]));
+            let mut envelope = info.state.unwrap();
+            let root = envelope.cells().get(&envelope.root()).unwrap();
+            let Value::Token(token) = Value::from_cell(&root, &mut envelope).unwrap() else {
+                panic!("expected a public token");
+            };
+            assert_eq!(token.qty().assignment(), None);
+            assert_eq!(token.flv().assignment(), None);
+        }
+        assert_eq!(store.actor_root(), root_before);
+        assert!(store.checked_out.is_empty());
+
+        // Cached code/state must not substitute for absent committed bodies.
+        let live = store
+            .actors
+            .get_mut(&actor().to_hash())
+            .unwrap()
+            .live
+            .as_mut()
+            .unwrap();
+        assert!(live.code.is_some() && live.state.is_some());
+        live.cells = Arc::new(BagOfCells::new());
+        let info = store.actor_info(&actor(), 0).unwrap();
+        assert!(info.code.is_none() && info.state.is_none());
+    }
+
+    #[test]
+    fn actor_info_preserves_pruned_state_references() {
+        let mut state = Dict::new();
+        state.insert(Scalar::ZERO, Value::Scalar(Scalar::ONE));
+        let mut store = ActorStore::new(StorageParams::default()).unwrap();
+        store.deploy(actor(), vec![0], Value::Dict(state)).unwrap();
+        let live = store
+            .actors
+            .get_mut(&actor().to_hash())
+            .unwrap()
+            .live
+            .as_mut()
+            .unwrap();
+        let mut resident = BagOfCells::new();
+        resident
+            .insert(live.cells.get(&live.code_root).unwrap())
+            .unwrap();
+        resident
+            .insert(live.cells.get(&live.state_root).unwrap())
+            .unwrap();
+        live.cells = Arc::new(resident);
+        let info = store.actor_info(&actor(), 0).unwrap();
+        assert_eq!(info.code, Some(vec![0]));
+        let mut envelope = info.state.unwrap();
+        assert_eq!(envelope.root(), info.state_root);
+        assert_eq!(envelope.cells().len(), 1);
+        let root = envelope.cells().get(&envelope.root()).unwrap();
+        assert!(matches!(
+            Value::from_cell(&root, &mut envelope),
+            Err(CellError::MissingCell(_))
         ));
     }
 

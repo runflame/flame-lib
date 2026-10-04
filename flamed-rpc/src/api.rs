@@ -13,8 +13,9 @@ use jsonrpsee::core::RpcResult;
 use jsonrpsee::proc_macros::rpc;
 
 use crate::types::{
-    BlockResult, BlockTxEnvelope, ContractId, ContractResult, PredicatePoint, ProofResult,
-    ScanResult, TipResult, TransactionResult, TransactionsResult, TxId, TxStatusResult,
+    ActorId, ActorResult, BlockResult, BlockTxEnvelope, ContractId, ContractResult, PredicatePoint,
+    ProofResult, ScanResult, TipResult, TransactionResult, TransactionsResult, TxId,
+    TxStatusResult,
 };
 
 /// The `flamed` JSON-RPC 2.0 API. Parameters are positional, in the order
@@ -38,6 +39,11 @@ pub trait FlamedApi {
     /// Returns `NOT_FOUND` for unknown or pending transactions.
     #[method(name = "tx")]
     async fn tx(&self, id: TxId, decode_effects: Option<bool>) -> RpcResult<TransactionResult>;
+
+    /// Current actor state and code, with decoded state and instructions.
+    /// Returns `NOT_FOUND` if the actor does not exist.
+    #[method(name = "actor")]
+    async fn actor(&self, id: ActorId) -> RpcResult<ActorResult>;
 
     /// The current tip: its hash, its height, and the contract accumulator root.
     #[method(name = "tip")]

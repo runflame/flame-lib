@@ -5,6 +5,7 @@
 //! test assembles a script, so both round trips exercise the same client
 //! the wallet will be.
 
+mod actor;
 mod block;
 mod node;
 mod rpc;

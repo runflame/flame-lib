@@ -16,7 +16,9 @@ use merkle::{Hash, MerkleItem};
 use merlin::Transcript;
 
 use crate::BlockHash;
-use crate::storage::{ActorStore, RegistryUndo, StorageError, StorageParams, StoredActor};
+use crate::storage::{
+    ActorInfo, ActorStore, RegistryUndo, StorageError, StorageParams, StoredActor,
+};
 use crate::utreexo::{self, Catchup, Forest, Proof, UtreexoError};
 
 /// Consensus resource bounds. Networks can select smaller values through
@@ -687,6 +689,11 @@ impl Blockchain {
     /// Snapshot content and exact body availability for archives/witness creation.
     pub fn actor_storage(&self, actor: &ActorID) -> Result<StoredActor, ChainError> {
         Ok(self.actors.stored_actor(actor)?)
+    }
+
+    /// Current actor code, state, and storage availability.
+    pub fn actor_info(&self, actor: &ActorID) -> Result<ActorInfo, ChainError> {
+        Ok(self.actors.actor_info(actor, self.height())?)
     }
 
     pub fn actor_capacity(&self, actor: &ActorID, height: u64) -> Result<u64, ChainError> {
