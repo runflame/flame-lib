@@ -73,7 +73,7 @@ pub enum ProofResult {
     Unknown,
 }
 
-/// One contract as the node archived it.
+/// An archived contract, its spend status, and its public payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContractResult {
     /// The height that created it.
@@ -84,6 +84,20 @@ pub struct ContractResult {
     pub predicate: PredicatePoint,
     /// Its bytes, as published.
     pub bytes: ContractEnvelope,
+    /// The block that created it, including genesis.
+    pub created_block: BlockId,
+    /// Spend status at `tip`. An unspent proof is valid against this tip.
+    pub status: ProofResult,
+    /// Chain tip at which the spend status was read.
+    pub tip: TipResult,
+    /// Contract anchor, as hex.
+    #[serde(with = "crate::codec::hex32")]
+    pub anchor: [u8; 32],
+    /// Public payload or available cells when some bodies are missing.
+    /// Confidential tokens expose commitments only.
+    pub decoded_payload: Option<TxValue>,
+    /// Why the payload could not be decoded.
+    pub payload_error: Option<String>,
 }
 
 /// Current actor state, code, storage, and decoded views.

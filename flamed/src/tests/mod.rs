@@ -7,6 +7,7 @@
 
 mod actor;
 mod block;
+mod contract;
 mod node;
 mod rpc;
 mod transactions;

@@ -3,13 +3,43 @@
 use std::collections::HashSet;
 
 use flamed_rpc::{
-    ActorId, ActorResult, ActorTarget, CellId, ContractId, DictEntry, InstructionView,
-    PredicatePoint, TxEntry as RpcTxEntry, TxValue, ValueCell,
+    ActorId, ActorResult, ActorTarget, CellId, ContractId, ContractResult, DictEntry,
+    InstructionView, PredicatePoint, TxEntry as RpcTxEntry, TxValue, ValueCell,
 };
 use flamevm::{
     ActorID, Anchor, Cell, CellDecode, CellEncode, CellEnvelope, CellError, CellRef, CellResolver,
     CellSlice, Contract, Instruction, Predicate, Scalar, Trie, TxEntry, Value,
 };
+
+/// Decodes an archived contract's public payload.
+pub fn contract(id: ContractId, mut result: ContractResult) -> Result<ContractResult, CellError> {
+    let bytes = &result.bytes.0;
+    let mut gas = (bytes.len() as u64).saturating_mul(4);
+    let mut envelope = CellEnvelope::decode(bytes, bytes.len(), &mut gas)?;
+    if envelope.root() != id.0 {
+        return Err(CellError::InvalidFormat);
+    }
+    let root = envelope.resolve(&CellRef::pruned(envelope.root()))?;
+    let (contract, decoded) = match Contract::from_cell(&root, &mut envelope) {
+        Ok(contract) => {
+            let decoded = render_value(contract.payload());
+            (contract, decoded)
+        }
+        Err(CellError::MissingCell(_)) => {
+            let contract = Contract::from_trusted_cell(&root, &mut envelope)?;
+            let payload = CellRef::resident(contract.payload().to_cell()?);
+            let decoded = available_cells(&payload, &mut envelope);
+            (contract, decoded)
+        }
+        Err(error) => return Err(error),
+    };
+    result.anchor = contract.anchor.0;
+    (result.decoded_payload, result.payload_error) = match decoded {
+        Ok(value) => (Some(value), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    Ok(result)
+}
 
 /// Decodes the available state and code from a current actor snapshot.
 pub fn actor(mut result: ActorResult) -> ActorResult {
