@@ -44,8 +44,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -60,6 +59,8 @@ jobs:
   version:
     name: Versions to publish
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       native: ${{ steps.pick.outputs.native }}
       wasm: ${{ steps.pick.outputs.wasm }}
@@ -97,6 +98,8 @@ jobs:
   test:
     name: Rust tests and dependency policy
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -116,6 +119,8 @@ jobs:
     name: Apple (xcframework)
     needs: [version, test]
     runs-on: macos-15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -139,6 +144,8 @@ jobs:
     name: Android (jniLibs)
     needs: [version, test]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -166,6 +173,8 @@ jobs:
     name: WebAssembly
     needs: [version, test]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -198,6 +207,8 @@ jobs:
     needs: [version, apple, android, wasm]
     # xcodebuild re-assembles the iOS-only xcframework for the npm package.
     runs-on: macos-15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
