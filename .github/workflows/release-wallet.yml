@@ -65,7 +65,7 @@ jobs:
       wasm: ${{ steps.pick.outputs.wasm }}
       dist-tag: ${{ steps.pick.outputs.dist-tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -96,7 +96,7 @@ jobs:
     name: Rust tests and dependency policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --workspace
       # The graphs that ship, not the workspace: benches and the node never
@@ -113,7 +113,7 @@ jobs:
     needs: [version, test]
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: |
@@ -134,7 +134,7 @@ jobs:
     needs: [version, test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@v2
       - uses: nttld/setup-ndk@v1
         id: ndk
@@ -159,7 +159,7 @@ jobs:
     needs: [version, test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
@@ -189,7 +189,7 @@ jobs:
     # xcodebuild re-assembles the iOS-only xcframework for the npm package.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
