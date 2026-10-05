@@ -129,7 +129,7 @@ jobs:
         run: cd flamewallet-ffi/host-tests/swift && swift test
       # Tarred: upload-artifact drops the symlinks a macOS framework is made of.
       - run: tar -C target/flamewallet-ffi -cf apple.tar apple
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: apple
           path: apple.tar
@@ -156,7 +156,7 @@ jobs:
           export FLAME_RUSTFLAGS="$(.github/remap-flags.sh)"
           flamewallet-ffi/scripts/build-android.sh
       - run: tar -C target/flamewallet-ffi -cf android.tar android
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: android
           path: android.tar
@@ -187,7 +187,7 @@ jobs:
       - name: Node tests
         run: node --test flamewallet-wasm/test/*.test.mjs
       - run: tar -C target/wallet-wasm -cf wasm.tar pkg
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wasm
           path: wasm.tar
@@ -241,7 +241,7 @@ jobs:
           cp target/wallet-wasm/pkg/sbom.cdx.json dist/wallet-wasm.cdx.json
           (cd dist && shasum -a 256 * > SHA256SUMS)
           cat dist/SHA256SUMS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
           path: dist
