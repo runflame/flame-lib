@@ -160,6 +160,13 @@ impl Wallet {
         self.0.receiving_key()
     }
 
+    /// The bech32f view key a watch-only wallet is given: it reads every
+    /// amount and memo but cannot spend, so store it as a secret.
+    #[wasm_bindgen(js_name = viewKey)]
+    pub fn view_key(&self) -> String {
+        self.0.view_key()
+    }
+
     /// Opens the note a scan served with `contract` (`undefined` if none),
     /// with the key at `path`, as `owns` found it.
     #[wasm_bindgen(js_name = openNote)]

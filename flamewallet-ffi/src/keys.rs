@@ -203,6 +203,15 @@ impl Wallet {
         account.recv_key().to_bech32(account.network())
     }
 
+    /// The account's view key in bech32f (`view1…` / `testview1…`): what a
+    /// watch-only wallet is given. It derives every address and opens every
+    /// note, so it reads every amount and memo, but it cannot spend. Store
+    /// it as a secret.
+    pub fn view_key(&self) -> String {
+        let account = self.account();
+        account.view_key().to_bech32(account.network())
+    }
+
     /// Opens the note that followed `contract` in its log, as a scan serves
     /// the pair; `note` is `None` when the scan served none. `path` is what
     /// [`Wallet::owns`] found for the contract's predicate. The opening it

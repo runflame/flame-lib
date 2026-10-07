@@ -125,6 +125,7 @@ fn addresses_and_counter() {
     assert_eq!(reopened.next_address().expect("issue").path, receiving(41));
     assert!(Wallet::new(A_SEED.to_vec(), Network::Testnet, 1 << 31).is_err());
     assert!(reopened.receiving_key().starts_with("testrecv1"));
+    assert!(reopened.view_key().starts_with("testview1"));
 }
 
 #[test]

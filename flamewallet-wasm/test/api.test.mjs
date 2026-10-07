@@ -79,6 +79,7 @@ test('addresses and ownership', () => {
     assert.deepEqual(wallet.owns(first.predicate, 0), { branch: 0, index: 0 });
     assert.equal(wallet.owns(new Uint8Array(32).fill(1), 5), undefined);
     assert.ok(wallet.receivingKey().startsWith('testrecv1'));
+    assert.ok(wallet.viewKey().startsWith('testview1'));
 });
 
 test('a transfer from served bytes to signed bytes', () => {
