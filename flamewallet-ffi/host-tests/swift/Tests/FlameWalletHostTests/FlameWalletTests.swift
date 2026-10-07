@@ -21,6 +21,7 @@ final class FlameWalletTests: XCTestCase {
         XCTAssertEqual(predicate, first.predicate)
         XCTAssertEqual(try wallet.owns(predicate: predicate, gap: 0), KeyPath(branch: 0, index: 0))
         XCTAssertTrue(wallet.receivingKey().hasPrefix("testrecv1"))
+        XCTAssertTrue(wallet.viewKey().hasPrefix("testview1"))
     }
 
     func testErrorsNameTheField() {

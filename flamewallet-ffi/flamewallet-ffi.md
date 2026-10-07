@@ -18,6 +18,7 @@ an opaque handle; spending keys never leave a call. Keys are named by
 | `next_index()` | Receiving counter to persist. |
 | `owns(predicate, gap)` | Path a contract belongs to, if any. |
 | `receiving_key()` | `recv…` key for an indexer. |
+| `view_key()` | `view…` key for a watch-only wallet: reads amounts, cannot spend. |
 | `address_to_predicate(address, network)` | Predicate an address's payments are locked with. |
 | `decode_contract(bytes)` | Id, predicate, cleartext amount. |
 | `open_note(contract, note, path)` | Opening and memo from an output's note. |

@@ -80,6 +80,28 @@ fn the_branch_receiving_key_derives_the_same_addresses() {
 }
 
 #[test]
+fn the_view_key_derives_the_same_viewing_keys() {
+    let account = account();
+    let view = account.view_key();
+    assert_eq!(
+        view.to_recv(),
+        account.recv_key(),
+        "the view key narrows to the account recv key"
+    );
+
+    for (branch, n) in PAIRS {
+        assert_eq!(
+            view.derive_child(branch)
+                .and_then(|key| key.derive_child(n))
+                .expect("child")
+                .viewing_key(),
+            &account.viewing_key_at(branch, n).expect("viewing key"),
+            "v at {branch}/{n}"
+        );
+    }
+}
+
+#[test]
 fn next_address_hands_out_consecutive_receiving_addresses() {
     let mut account = account();
     for expected in 0..3 {

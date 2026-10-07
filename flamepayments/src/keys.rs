@@ -8,7 +8,7 @@
 
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar as DalekScalar;
-use flamekd::{util, Network, ReceivingAddress, RecvKey, SpendKey, HARDENED};
+use flamekd::{util, Network, ReceivingAddress, RecvKey, SpendKey, ViewKey, HARDENED};
 use flamevm::Predicate;
 
 /// A key could not be derived.
@@ -93,6 +93,13 @@ impl Account {
     /// `v_n`, the viewing scalar at `m/…/branch/n`, by value.
     pub fn viewing_key_at(&self, branch: u32, n: u32) -> Result<DalekScalar, KeyError> {
         Ok(*self.spend_key_at(branch, n)?.viewing_key())
+    }
+
+    /// The account-level view key: what a watch-only wallet is given. It
+    /// generates every address below the account and opens their notes, so
+    /// it reads every amount and memo, but it holds no spending scalar.
+    pub fn view_key(&self) -> ViewKey {
+        self.account.to_view()
     }
 
     /// The account-level receiving key: what an indexer is given. It
