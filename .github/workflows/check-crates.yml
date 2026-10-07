@@ -6,17 +6,27 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions: {}
+
 jobs:
   cargo-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
     - name: Cargo test
       run: cargo test
 
   cargo-bench:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
     - name: Build benchmarks
       run: RUSTFLAGS="-C opt-level=0" cargo bench --no-run

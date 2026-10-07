@@ -44,8 +44,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -60,13 +59,17 @@ jobs:
   version:
     name: Versions to publish
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       native: ${{ steps.pick.outputs.native }}
       wasm: ${{ steps.pick.outputs.wasm }}
       dist-tag: ${{ steps.pick.outputs.dist-tag }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
       - id: pick
@@ -95,9 +98,13 @@ jobs:
   test:
     name: Rust tests and dependency policy
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --locked --workspace
       # The graphs that ship, not the workspace: benches and the node never
       # reach a package, and deny.toml excludes dev-dependencies.
@@ -112,9 +119,13 @@ jobs:
     name: Apple (xcframework)
     needs: [version, test]
     runs-on: macos-15
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build
         run: |
           export FLAME_RUSTFLAGS="$(.github/remap-flags.sh)"
@@ -123,7 +134,7 @@ jobs:
         run: cd flamewallet-ffi/host-tests/swift && swift test
       # Tarred: upload-artifact drops the symlinks a macOS framework is made of.
       - run: tar -C target/flamewallet-ffi -cf apple.tar apple
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: apple
           path: apple.tar
@@ -133,10 +144,14 @@ jobs:
     name: Android (jniLibs)
     needs: [version, test]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - uses: nttld/setup-ndk@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
         id: ndk
         with:
           ndk-version: ${{ env.NDK_VERSION }}
@@ -148,7 +163,7 @@ jobs:
           export FLAME_RUSTFLAGS="$(.github/remap-flags.sh)"
           flamewallet-ffi/scripts/build-android.sh
       - run: tar -C target/flamewallet-ffi -cf android.tar android
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: android
           path: android.tar
@@ -158,10 +173,14 @@ jobs:
     name: WebAssembly
     needs: [version, test]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
       - name: wasm-bindgen at the version Cargo.lock pins
@@ -177,7 +196,7 @@ jobs:
       - name: Node tests
         run: node --test flamewallet-wasm/test/*.test.mjs
       - run: tar -C target/wallet-wasm -cf wasm.tar pkg
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wasm
           path: wasm.tar
@@ -188,9 +207,13 @@ jobs:
     needs: [version, apple, android, wasm]
     # xcodebuild re-assembles the iOS-only xcframework for the npm package.
     runs-on: macos-15
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
       - name: Unpack the builds
@@ -229,7 +252,7 @@ jobs:
           cp target/wallet-wasm/pkg/sbom.cdx.json dist/wallet-wasm.cdx.json
           (cd dist && shasum -a 256 * > SHA256SUMS)
           cat dist/SHA256SUMS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
           path: dist
@@ -248,15 +271,15 @@ jobs:
       id-token: write      # trusted publishing, npm provenance, the attestation
       attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: dist
           path: dist
       - run: cd dist && shasum -a 256 -c SHA256SUMS
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: 'dist/*.tgz'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
