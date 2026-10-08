@@ -23,7 +23,7 @@ use flamechain::{BlockTx, ChainParams, SPARKS_PER_FLAME};
 use flamekd::{util, Network, ReceivingAddress};
 use flamepayments::{
     block_tx, build_transfer, open_note, outputs_with_notes, sign, Account, BuilderError,
-    InputSpec, Opening, OutputSpec,
+    InputSpec, Opening, OutputSpec, SpendAccount, ViewingKey,
 };
 use flamevm::{
     Anchor, CellEncode, CellError, ClearToken, Contract, ContractID, ExternalTx, Limits, Scalar,
@@ -169,7 +169,7 @@ pub struct KeyPath {
 
 impl KeyPath {
     /// The account behind the path.
-    pub fn account(&self) -> Account {
+    pub fn account(&self) -> SpendAccount {
         account(self.account)
     }
 
@@ -194,13 +194,13 @@ impl KeyPath {
 }
 
 /// The fixture account `index`: [`SENDER`] or [`RECIPIENT`].
-pub fn account(index: u8) -> Account {
+pub fn account(index: u8) -> SpendAccount {
     let seed = match index {
         SENDER => &SENDER_SEED,
         RECIPIENT => &RECIPIENT_SEED,
         other => panic!("no fixture account {other}"),
     };
-    Account::from_seed(seed, Network::Testnet, 0).expect("a fixture seed derives an account")
+    SpendAccount::from_seed(seed, Network::Testnet, 0).expect("a fixture seed derives an account")
 }
 
 /// One confidential input as its owner holds it: the published contract,
@@ -436,8 +436,8 @@ pub fn pool() -> Pool {
 /// The two accounts, the generator every `r` comes from, and the next
 /// unused address on each branch that pays.
 struct Wallet {
-    sender: Account,
-    recipient: Account,
+    sender: SpendAccount,
+    recipient: SpendAccount,
     rng: StdRng,
     next_funding: u32,
     next_payment: u32,
@@ -626,7 +626,7 @@ fn encode(tx: ExternalTx, inputs: usize) -> (ExternalTx, Vec<u8>, DecodeMethod) 
 }
 
 /// The owner of `m/…/branch/n` in `account`.
-fn owner(account: &Account, branch: u32, n: u32) -> Owner {
+fn owner<K: ViewingKey>(account: &Account<K>, branch: u32, n: u32) -> Owner {
     Owner {
         address: account.address_at(branch, n).expect("address"),
         view_key: account.viewing_key_at(branch, n).expect("viewing key"),

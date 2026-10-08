@@ -13,20 +13,24 @@ an opaque handle; spending keys never leave a call. Keys are named by
 | `generate_mnemonic(words)` | English BIP-39 phrase, 12–24 words. |
 | `validate_mnemonic(phrase)` | Whether the phrase is valid. |
 | `mnemonic_to_seed(phrase, passphrase)` | 64-byte seed. |
-| `Wallet::new(seed, network, next_index)` / `Wallet::from_mnemonic(...)` | Account `m/35263'/network'/0'`. |
+| `Wallet::new(seed, network, next_index)` / `Wallet::from_mnemonic(...)` | Spend wallet, account `m/35263'/network'/0'`. |
+| `Wallet::from_view_key(view_key, network, next_index)` | View wallet: finds and opens, cannot spend. |
+| `Wallet::from_receiving_key(receiving_key, network, next_index)` | Receive wallet: finds, cannot open or spend. |
+| `kind()` | `Spend`, `View` or `Receive`. |
 | `address(path)` / `next_address()` | bech32f address and predicate. |
 | `next_index()` | Receiving counter to persist. |
 | `owns(predicate, gap)` | Path a contract belongs to, if any. |
-| `receiving_key()` | `recv…` key for an indexer. |
-| `view_key()` | `view…` key for a watch-only wallet: reads amounts, cannot spend. |
+| `receiving_key()` | `recv…` key a receive wallet is built from. |
+| `view_key()` | `view…` key a view wallet is built from; not on a receive wallet. |
 | `address_to_predicate(address, network)` | Predicate an address's payments are locked with. |
 | `decode_contract(bytes)` | Id, predicate, cleartext amount. |
-| `open_note(contract, note, path)` | Opening and memo from an output's note. |
+| `open_note(contract, note, path)` | Opening and memo from an output's note; not on a receive wallet. |
 | `opening_matches(contract, opening)` | Whether an opening opens a contract. |
-| `build_transfer(request)` | Txid, `BlockTx` bytes, each output with its note. |
+| `build_transfer(request)` | Txid, `BlockTx` bytes, each output with its note; spend wallet only. |
 
-Errors are `FlameError`; `InvalidBytes { what }` names the bad field, and
-`Note { failure }` says why a note did not open.
+Errors are `FlameError`; `InvalidBytes { what }` names the bad field,
+`Note { failure }` says why a note did not open, and `NotPermitted { wallet,
+needs }` says a call needs a wallet built from a stronger key.
 
 Outputs are paid to bech32f addresses. Each carries an encrypted note, and
 only its recipient can open it: amount, blinding factors and memo, as

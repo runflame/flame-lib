@@ -10,7 +10,7 @@ use flamevm::{Anchor, ClearToken, Contract, ContractID, Scalar, TxLog, Value, FL
 
 use super::{header, inputs, limits, native_output, outputs, publish, receive, rng};
 use crate::builder::{block_tx, build_transfer, sign, InputSpec};
-use crate::keys::Account;
+use crate::keys::SpendAccount;
 
 const A_SEED: [u8; 64] = [0x41; 64];
 const B_SEED: [u8; 64] = [0x42; 64];
@@ -19,8 +19,8 @@ const FLAME: u64 = flamechain::SPARKS_PER_FLAME;
 const ALLOCATION: u64 = 1_000 * FLAME;
 const FEE: u64 = 1_000;
 
-fn account(seed: &[u8; 64]) -> Account {
-    Account::from_seed(seed, Network::Testnet, 0).expect("account from seed")
+fn account(seed: &[u8; 64]) -> SpendAccount {
+    SpendAccount::from_seed(seed, Network::Testnet, 0).expect("account from seed")
 }
 
 /// Runs `proof` through `catchup` and checks the result against the chain's

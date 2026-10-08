@@ -125,7 +125,10 @@ fn addresses_and_counter() {
     assert_eq!(reopened.next_address().expect("issue").path, receiving(41));
     assert!(Wallet::new(A_SEED.to_vec(), Network::Testnet, 1 << 31).is_err());
     assert!(reopened.receiving_key().starts_with("testrecv1"));
-    assert!(reopened.view_key().starts_with("testview1"));
+    assert!(reopened
+        .view_key()
+        .expect("view key")
+        .starts_with("testview1"));
 }
 
 #[test]
@@ -256,6 +259,90 @@ fn two_wallets_spend_across_two_blocks() {
         .expect("Alice opens her change");
     assert_eq!(kept.opening.qty, ALLOCATION - payment - FEE);
     assert!(!opening_matches(to_bob.contract.clone(), kept.opening).expect("check"));
+
+    // Bob from his view key alone finds and opens the same output and
+    // cannot spend; from his receiving key alone he finds it and can
+    // neither open nor spend.
+    let bob_view_key = bob.view_key().expect("view key");
+    let view = Wallet::from_view_key(bob_view_key.clone(), Network::Testnet, bob.next_index())
+        .expect("view wallet");
+    let receive =
+        Wallet::from_receiving_key(bob.receiving_key(), Network::Testnet, bob.next_index())
+            .expect("receive wallet");
+    assert_eq!(bob.kind(), WalletKind::Spend);
+    assert_eq!(view.kind(), WalletKind::View);
+    assert_eq!(receive.kind(), WalletKind::Receive);
+    assert_eq!(view.view_key().expect("view key"), bob_view_key);
+    for wallet in [&view, &receive] {
+        assert_eq!(wallet.receiving_key(), bob.receiving_key());
+        assert_eq!(
+            wallet
+                .owns(bob_address.predicate.clone(), 20)
+                .expect("owns"),
+            Some(receiving(0))
+        );
+        assert_eq!(
+            wallet.address(receiving(0)).expect("address"),
+            bob.address(receiving(0)).expect("address")
+        );
+    }
+    let viewed = view
+        .open_note(
+            to_bob.contract.clone(),
+            Some(to_bob.note.clone()),
+            receiving(0),
+        )
+        .expect("view-only Bob opens his note");
+    assert_eq!(viewed, received);
+
+    let refused = |result: Result<_, FlameError>| match result {
+        Err(FlameError::NotPermitted { wallet, needs }) => (wallet, needs),
+        Ok(_) => panic!("expected NotPermitted, got Ok"),
+        Err(other) => panic!("expected NotPermitted, got {other:?}"),
+    };
+    let empty = || TransferRequest {
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        fee: FEE,
+        gas: GAS,
+        locktime: 0,
+    };
+    assert_eq!(
+        refused(view.build_transfer(empty()).map(drop)),
+        (WalletKind::View, WalletKind::Spend)
+    );
+    assert_eq!(
+        refused(receive.build_transfer(empty()).map(drop)),
+        (WalletKind::Receive, WalletKind::Spend)
+    );
+    assert_eq!(
+        refused(receive.view_key().map(drop)),
+        (WalletKind::Receive, WalletKind::View)
+    );
+    assert_eq!(
+        refused(
+            receive
+                .open_note(
+                    to_bob.contract.clone(),
+                    Some(to_bob.note.clone()),
+                    receiving(0)
+                )
+                .map(drop)
+        ),
+        (WalletKind::Receive, WalletKind::View)
+    );
+    assert!(matches!(
+        Wallet::from_view_key(bob_view_key, Network::Mainnet, 0),
+        Err(FlameError::InvalidKey { .. })
+    ));
+    assert!(matches!(
+        Wallet::from_view_key(bob.receiving_key(), Network::Testnet, 0),
+        Err(FlameError::InvalidKey { .. })
+    ));
+    assert!(matches!(
+        Wallet::from_receiving_key(bob.view_key().expect("view key"), Network::Testnet, 0),
+        Err(FlameError::InvalidKey { .. })
+    ));
 
     // The outcomes a wallet has to tell apart.
     let failure = |result: Result<ReceivedNote, FlameError>| match result {

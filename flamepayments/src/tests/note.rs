@@ -16,7 +16,7 @@ use rand::rngs::StdRng;
 
 use super::{header, limits, native_output, output_to, outputs, publish, receive, rng};
 use crate::builder::{build_transfer, sign, BuilderError, InputSpec, OutputSpec};
-use crate::keys::Account;
+use crate::keys::SpendAccount;
 use crate::note::{
     open_note, outputs_with_notes, seal, seal_plaintext, NoteError, MEMO_MAX, NOTE_VERSION,
 };
@@ -113,7 +113,7 @@ fn hex32(text: &str) -> [u8; 32] {
 fn check(vector: &Vector) {
     // The zero seed is the doc's; `v` pins the derivation path before
     // anything is derived from it.
-    let account = Account::from_seed(&[0u8; 64], Network::Testnet, 0).expect("account");
+    let account = SpendAccount::from_seed(&[0u8; 64], Network::Testnet, 0).expect("account");
     let address = account.address_at(vector.branch, 0).expect("address");
     let v = account
         .viewing_key_at(vector.branch, 0)
@@ -214,12 +214,12 @@ fn the_change_vector() {
     check(&CHANGE);
 }
 
-fn account() -> Account {
-    Account::from_seed(&SEED, Network::Testnet, 0).expect("account from seed")
+fn account() -> SpendAccount {
+    SpendAccount::from_seed(&SEED, Network::Testnet, 0).expect("account from seed")
 }
 
 /// A cleartext allocation under `RECEIVING/0`, spent as a clear input.
-fn allocation(account: &Account, qty: u64) -> InputSpec {
+fn allocation(account: &SpendAccount, qty: u64) -> InputSpec {
     let contract = Contract::new(
         account.predicate_at(util::RECEIVING, 0).expect("predicate"),
         Anchor([0x07; 32]),
@@ -231,7 +231,7 @@ fn allocation(account: &Account, qty: u64) -> InputSpec {
 }
 
 /// The allocation, split into `outputs` with no fee, signed and published.
-fn transfer(account: &Account, outputs: &[OutputSpec], rng: &mut StdRng) -> TxLog {
+fn transfer(account: &SpendAccount, outputs: &[OutputSpec], rng: &mut StdRng) -> TxLog {
     let total = outputs.iter().map(|output| output.qty).sum();
     let unsigned = build_transfer(
         &[allocation(account, total)],

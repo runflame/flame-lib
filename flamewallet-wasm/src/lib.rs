@@ -28,6 +28,8 @@ const TYPES: &'static str = include_str!("types.d.ts");
 extern "C" {
     #[wasm_bindgen(typescript_type = "Network")]
     pub type JsNetwork;
+    #[wasm_bindgen(typescript_type = "WalletKind")]
+    pub type JsWalletKind;
     #[wasm_bindgen(typescript_type = "KeyPath")]
     pub type JsKeyPath;
     #[wasm_bindgen(typescript_type = "KeyPath | undefined")]
@@ -89,7 +91,10 @@ pub fn opening_matches(contract: Vec<u8>, opening: JsOpening) -> Result<bool, Js
 
 /// One account, `m/35263'/network'/0'`. Its keys live in this module's
 /// memory until `free()` — or `using` — drops the handle, which zeroizes
-/// them; nothing a caller receives is key material.
+/// them. Two calls hand key material to JavaScript, where nothing can wipe
+/// it, so keep what they return as secret as the wallet: `viewKey()` reads
+/// every amount and memo, and `receivingKey()` links every address.
+/// Neither can spend.
 #[wasm_bindgen]
 pub struct Wallet(Arc<flamewallet_ffi::Wallet>);
 
@@ -122,6 +127,43 @@ impl Wallet {
         flamewallet_ffi::Wallet::from_mnemonic(phrase, passphrase, network.into(), next_index)
             .map(Wallet)
             .map_err(error)
+    }
+
+    /// A view wallet from its bech32f view key, as `viewKey` gives it.
+    /// Everything works except `buildTransfer`, which throws
+    /// `notPermitted`. Only the key `viewKey` exports will do: a key from
+    /// another node is accepted and silently owns nothing.
+    #[wasm_bindgen(js_name = fromViewKey)]
+    pub fn from_view_key(
+        #[wasm_bindgen(js_name = viewKey)] view_key: String,
+        network: JsNetwork,
+        #[wasm_bindgen(js_name = nextIndex)] next_index: u32,
+    ) -> Result<Wallet, JsValue> {
+        let network: Network = from_js(network.into())?;
+        flamewallet_ffi::Wallet::from_view_key(view_key, network.into(), next_index)
+            .map(Wallet)
+            .map_err(error)
+    }
+
+    /// A receive wallet from its bech32f receiving key, as `receivingKey`
+    /// gives it. It issues addresses and finds payments; `viewKey`,
+    /// `openNote` and `buildTransfer` throw `notPermitted`. Only the key
+    /// `receivingKey` exports will do, as with `fromViewKey`.
+    #[wasm_bindgen(js_name = fromReceivingKey)]
+    pub fn from_receiving_key(
+        #[wasm_bindgen(js_name = receivingKey)] receiving_key: String,
+        network: JsNetwork,
+        #[wasm_bindgen(js_name = nextIndex)] next_index: u32,
+    ) -> Result<Wallet, JsValue> {
+        let network: Network = from_js(network.into())?;
+        flamewallet_ffi::Wallet::from_receiving_key(receiving_key, network.into(), next_index)
+            .map(Wallet)
+            .map_err(error)
+    }
+
+    /// What this wallet was built from: `spend`, `view` or `receive`.
+    pub fn kind(&self) -> JsWalletKind {
+        JsValue::from_str(wallet_kind(self.0.kind())).unchecked_into()
     }
 
     pub fn network(&self) -> Result<JsNetwork, JsValue> {
@@ -160,11 +202,12 @@ impl Wallet {
         self.0.receiving_key()
     }
 
-    /// The bech32f view key a watch-only wallet is given: it reads every
-    /// amount and memo but cannot spend, so store it as a secret.
+    /// The bech32f view key a view wallet is built from: it reads every
+    /// amount and memo but cannot spend, so store it as a secret. A
+    /// receive wallet throws `notPermitted`.
     #[wasm_bindgen(js_name = viewKey)]
-    pub fn view_key(&self) -> String {
-        self.0.view_key()
+    pub fn view_key(&self) -> Result<String, JsValue> {
+        self.0.view_key().map_err(error)
     }
 
     /// Opens the note a scan served with `contract` (`undefined` if none),
@@ -200,6 +243,14 @@ fn error(error: flamewallet_ffi::FlameError) -> JsValue {
     let (kind, fields): (&str, Vec<(&str, JsValue)>) = match &error {
         E::InvalidMnemonic { reason } => ("invalidMnemonic", vec![("reason", reason.into())]),
         E::InvalidSeed { reason } => ("invalidSeed", vec![("reason", reason.into())]),
+        E::InvalidKey { reason } => ("invalidKey", vec![("reason", reason.into())]),
+        E::NotPermitted { wallet, needs } => (
+            "notPermitted",
+            vec![
+                ("wallet", wallet_kind(*wallet).into()),
+                ("needs", wallet_kind(*needs).into()),
+            ],
+        ),
         E::InvalidAddress { reason } => ("invalidAddress", vec![("reason", reason.into())]),
         E::InvalidKeyPath { reason } => ("invalidKeyPath", vec![("reason", reason.into())]),
         E::InvalidBytes { what, reason } => (
@@ -224,6 +275,15 @@ fn error(error: flamewallet_ffi::FlameError) -> JsValue {
         let _ = js_sys::Reflect::set(&thrown, &name.into(), &value);
     }
     thrown.into()
+}
+
+fn wallet_kind(kind: flamewallet_ffi::WalletKind) -> &'static str {
+    use flamewallet_ffi::WalletKind as K;
+    match kind {
+        K::Spend => "spend",
+        K::View => "view",
+        K::Receive => "receive",
+    }
 }
 
 fn note_failure(failure: flamewallet_ffi::NoteFailure) -> &'static str {

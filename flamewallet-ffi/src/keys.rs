@@ -3,8 +3,8 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use curve25519_dalek::ristretto::CompressedRistretto;
-use flamekd::{Language, Mnemonic, ReceivingAddress};
-use flamepayments::Account;
+use flamekd::{Language, Mnemonic, ReceivingAddress, RecvKey, ViewKey};
+use flamepayments::{Account, AccountKey, ReceiveAccount, SpendAccount, ViewAccount};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use zeroize::Zeroizing;
@@ -100,16 +100,81 @@ fn parse_mnemonic(phrase: &str) -> Result<Mnemonic, FlameError> {
     })
 }
 
+/// What a [`Wallet`] was built from, and so what it can do. Each kind can
+/// do everything the next one can.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum WalletKind {
+    /// From a seed or mnemonic: finds, opens and spends.
+    Spend,
+    /// From a view key: finds and opens every payment, cannot spend.
+    View,
+    /// From a receiving key: finds every payment, cannot open or spend.
+    Receive,
+}
+
 /// One account, `m/35263'/network'/0'`, behind an opaque handle.
 ///
-/// The handle is the only thing that ever holds key material: every
-/// spending key is derived inside a call and dropped before it returns. It
+/// The handle holds the account key, and every child key is derived inside
+/// a call and dropped before it returns. Two calls hand key material out,
+/// and the caller must keep what they return as secret as the wallet
+/// itself: [`Wallet::view_key`] reads every amount and memo, and
+/// [`Wallet::receiving_key`] links every address. Neither can spend. It
 /// is safe to share across threads. Calls that read or advance the counter
 /// are serialized; [`Wallet::build_transfer`] works on a copy and holds no
 /// lock while it proves.
 #[derive(uniffi::Object)]
 pub struct Wallet {
-    account: Mutex<Account>,
+    account: Mutex<Holder>,
+}
+
+/// The three accounts a [`Wallet`] can hold. Bindings see one class, so
+/// the choice `flamepayments` makes in the type is made here at run time,
+/// and only here.
+enum Holder {
+    Spend(SpendAccount),
+    View(ViewAccount),
+    Receive(ReceiveAccount),
+}
+
+impl Holder {
+    fn kind(&self) -> WalletKind {
+        match self {
+            Holder::Spend(_) => WalletKind::Spend,
+            Holder::View(_) => WalletKind::View,
+            Holder::Receive(_) => WalletKind::Receive,
+        }
+    }
+
+    fn refuse(&self, needs: WalletKind) -> FlameError {
+        FlameError::NotPermitted {
+            wallet: self.kind(),
+            needs,
+        }
+    }
+}
+
+/// Runs `$body` with `$account` bound to whichever account `$holder`
+/// holds, for the calls every kind of account answers.
+macro_rules! with_account {
+    ($holder:expr, $account:ident => $body:expr) => {
+        match $holder {
+            Holder::Spend($account) => $body,
+            Holder::View($account) => $body,
+            Holder::Receive($account) => $body,
+        }
+    };
+}
+
+/// As [`with_account!`], for the calls that need a viewing key: a receive
+/// account is refused with [`FlameError::NotPermitted`].
+macro_rules! with_viewing_account {
+    ($holder:expr, $account:ident => $body:expr) => {
+        match $holder {
+            Holder::Spend($account) => $body,
+            Holder::View($account) => $body,
+            holder @ Holder::Receive(_) => Err(holder.refuse(WalletKind::View)),
+        }
+    };
 }
 
 #[uniffi::export]
@@ -130,10 +195,9 @@ impl Wallet {
                 reason: format!("{} bytes, expected 64", seed.len()),
             }
         })?);
-        let account = Account::from_seed(&seed, network.into(), next_index)?;
-        Ok(Arc::new(Wallet {
-            account: Mutex::new(account),
-        }))
+        let account = SpendAccount::from_seed(&seed, network.into(), next_index)
+            .map_err(FlameError::from_seed_derivation)?;
+        Ok(Wallet::holding(Holder::Spend(account)))
     }
 
     /// The account below `phrase` and `passphrase`, without the caller ever
@@ -146,15 +210,62 @@ impl Wallet {
         next_index: u32,
     ) -> Result<Arc<Wallet>, FlameError> {
         let seed = Zeroizing::new(parse_mnemonic(&phrase)?.to_seed(passphrase));
-        let account = Account::from_seed(&seed, network.into(), next_index)?;
-        Ok(Arc::new(Wallet {
-            account: Mutex::new(account),
-        }))
+        let account = SpendAccount::from_seed(&seed, network.into(), next_index)
+            .map_err(FlameError::from_seed_derivation)?;
+        Ok(Wallet::holding(Holder::Spend(account)))
+    }
+
+    /// A view wallet from the account's view key in bech32f, as
+    /// [`Wallet::view_key`] gives it, for `network`; `next_index` as in
+    /// [`Wallet::new`]. Every call works except
+    /// [`Wallet::build_transfer`], which refuses with
+    /// [`FlameError::NotPermitted`].
+    ///
+    /// It must be the key of the account node, `m/35263'/network'/0'`,
+    /// exactly as [`Wallet::view_key`] exports it. The encoding carries no
+    /// depth, so a key from any other node is accepted too, and that
+    /// wallet silently owns nothing: every `owns` is `None`.
+    #[uniffi::constructor]
+    pub fn from_view_key(
+        view_key: String,
+        network: Network,
+        next_index: u32,
+    ) -> Result<Arc<Wallet>, FlameError> {
+        let view_key = Zeroizing::new(view_key);
+        let view = ViewKey::from_bech32(&view_key, network.into()).map_err(invalid_key)?;
+        let account = ViewAccount::from_view_key(view, network.into(), next_index)?;
+        Ok(Wallet::holding(Holder::View(account)))
+    }
+
+    /// A receive wallet from the account's receiving key in bech32f, as
+    /// [`Wallet::receiving_key`] gives it, for `network`; `next_index` as
+    /// in [`Wallet::new`]. It issues addresses and finds payments;
+    /// [`Wallet::view_key`], [`Wallet::open_note`] and
+    /// [`Wallet::build_transfer`] refuse with [`FlameError::NotPermitted`].
+    ///
+    /// As with [`Wallet::from_view_key`], it must be the account node's
+    /// key: one from any other node is accepted and silently owns nothing.
+    #[uniffi::constructor]
+    pub fn from_receiving_key(
+        receiving_key: String,
+        network: Network,
+        next_index: u32,
+    ) -> Result<Arc<Wallet>, FlameError> {
+        // Its derivation secret still requires privacy, as flamekd says.
+        let receiving_key = Zeroizing::new(receiving_key);
+        let recv = RecvKey::from_bech32(&receiving_key, network.into()).map_err(invalid_key)?;
+        let account = ReceiveAccount::from_recv_key(recv, network.into(), next_index)?;
+        Ok(Wallet::holding(Holder::Receive(account)))
+    }
+
+    /// What this wallet was built from, and so what it can do.
+    pub fn kind(&self) -> WalletKind {
+        self.account().kind()
     }
 
     /// The network this wallet's addresses are encoded for.
     pub fn network(&self) -> Network {
-        match self.account().network() {
+        match with_account!(&*self.account(), account => account.network()) {
             flamekd::Network::Mainnet => Network::Mainnet,
             flamekd::Network::Testnet => Network::Testnet,
         }
@@ -162,25 +273,26 @@ impl Wallet {
 
     /// The address and predicate at `path`, without issuing anything.
     pub fn address(&self, path: KeyPath) -> Result<IssuedAddress, FlameError> {
-        issued(&self.account(), path)
+        with_account!(&*self.account(), account => issued(account, path))
     }
 
     /// Issues the next receiving address and advances the counter.
     pub fn next_address(&self) -> Result<IssuedAddress, FlameError> {
-        let mut account = self.account();
-        let (index, _) = account.next_address()?;
-        issued(
-            &account,
-            KeyPath {
-                branch: flamekd::util::RECEIVING,
-                index,
-            },
-        )
+        with_account!(&mut *self.account(), account => {
+            let (index, _) = account.next_address()?;
+            issued(
+                account,
+                KeyPath {
+                    branch: flamekd::util::RECEIVING,
+                    index,
+                },
+            )
+        })
     }
 
     /// The next receiving index not yet issued.
     pub fn next_index(&self) -> u32 {
-        self.account().next_index()
+        with_account!(&*self.account(), account => account.next_index())
     }
 
     /// Which path below `next_index + gap`, on either branch, owns
@@ -188,10 +300,8 @@ impl Wallet {
     /// it covers, so `gap` is the caller's cost budget.
     pub fn owns(&self, predicate: Vec<u8>, gap: u32) -> Result<Option<KeyPath>, FlameError> {
         let point = CompressedRistretto(array32("predicate", &predicate)?);
-        Ok(self
-            .account()
-            .owns(&point, gap)
-            .map(|(branch, index)| KeyPath { branch, index }))
+        let owner = with_account!(&*self.account(), account => account.owns(&point, gap));
+        Ok(owner.map(|(branch, index)| KeyPath { branch, index }))
     }
 
     /// The account's receiving key in bech32f (`recv1…` / `testrecv1…`):
@@ -199,30 +309,35 @@ impl Wallet {
     /// every address and links their activity, and can neither spend nor
     /// read a payment's amount.
     pub fn receiving_key(&self) -> String {
-        let account = self.account();
-        account.recv_key().to_bech32(account.network())
+        with_account!(&*self.account(), account => {
+            account.recv_key().to_bech32(account.network())
+        })
     }
 
     /// The account's view key in bech32f (`view1…` / `testview1…`): what a
-    /// watch-only wallet is given. It derives every address and opens every
+    /// view wallet is built from. It derives every address and opens every
     /// note, so it reads every amount and memo, but it cannot spend. Store
-    /// it as a secret.
-    pub fn view_key(&self) -> String {
-        let account = self.account();
-        account.view_key().to_bech32(account.network())
+    /// it as a secret. A receive wallet has none to give.
+    pub fn view_key(&self) -> Result<String, FlameError> {
+        with_viewing_account!(&*self.account(), account => {
+            Ok(account.view_key().to_bech32(account.network()))
+        })
     }
 
     /// Opens the note that followed `contract` in its log, as a scan serves
     /// the pair; `note` is `None` when the scan served none. `path` is what
     /// [`Wallet::owns`] found for the contract's predicate. The opening it
     /// gives is what a later [`crate::TransferInput`] spends the output with.
+    /// A receive wallet cannot open notes.
     pub fn open_note(
         &self,
         contract: Vec<u8>,
         note: Option<Vec<u8>>,
         path: KeyPath,
     ) -> Result<ReceivedNote, FlameError> {
-        note::open(&self.account(), &contract, note.as_deref(), path)
+        with_viewing_account!(&*self.account(), account => {
+            note::open(account, &contract, note.as_deref(), path)
+        })
     }
 
     /// Builds, proves and signs a transfer. The keys come from the paths
@@ -232,24 +347,42 @@ impl Wallet {
     /// account with the lock released: other calls on this handle, from a
     /// UI thread say, do not wait for it. The build never touches the
     /// counter, so nothing the copy does needs writing back.
+    ///
+    /// Only a spend wallet builds; the others refuse with
+    /// [`FlameError::NotPermitted`] before reading the request.
     pub fn build_transfer(&self, request: TransferRequest) -> Result<Transfer, FlameError> {
-        let account = self.account().clone();
+        let account = match &*self.account() {
+            Holder::Spend(account) => account.clone(),
+            holder => return Err(holder.refuse(WalletKind::Spend)),
+        };
         transfer::build(&account, request)
     }
 }
 
+fn invalid_key(error: flamekd::Error) -> FlameError {
+    FlameError::InvalidKey {
+        reason: error.to_string(),
+    }
+}
+
 impl Wallet {
+    fn holding(holder: Holder) -> Arc<Wallet> {
+        Arc::new(Wallet {
+            account: Mutex::new(holder),
+        })
+    }
+
     /// A poisoned lock means another call panicked mid-way; the account
     /// holds only derivation state and a counter, and neither is left
     /// half-written by any method, so the guard is taken regardless.
-    fn account(&self) -> MutexGuard<'_, Account> {
+    fn account(&self) -> MutexGuard<'_, Holder> {
         self.account
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
-fn issued(account: &Account, path: KeyPath) -> Result<IssuedAddress, FlameError> {
+fn issued<K: AccountKey>(account: &Account<K>, path: KeyPath) -> Result<IssuedAddress, FlameError> {
     let address = account.address_at(path.branch, path.index)?;
     Ok(IssuedAddress {
         path,

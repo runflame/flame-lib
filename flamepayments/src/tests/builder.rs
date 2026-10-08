@@ -11,7 +11,7 @@ use super::{fees, header, inputs, limits, native_output, outputs, publish, recei
 use crate::builder::{
     build_transfer, sign, BuilderError, InputSpec, Opening, OutputSpec, MAX_OUTPUTS,
 };
-use crate::keys::Account;
+use crate::keys::SpendAccount;
 
 const SEED: [u8; 64] = [0x21; 64];
 
@@ -19,13 +19,13 @@ const SEED: [u8; 64] = [0x21; 64];
 /// number with a long run of zeros would make a chance match likelier.
 const GENESIS_QTY: u64 = 12_345_678_901;
 
-fn account() -> Account {
-    Account::from_seed(&SEED, Network::Testnet, 0).expect("account from seed")
+fn account() -> SpendAccount {
+    SpendAccount::from_seed(&SEED, Network::Testnet, 0).expect("account from seed")
 }
 
 /// A cleartext contract under `RECEIVING/n`, shaped like a devnet genesis
 /// allocation. `anchor` keeps sibling contracts distinct.
-fn clear_contract(account: &Account, n: u32, anchor: u8, qty: u64) -> Contract {
+fn clear_contract(account: &SpendAccount, n: u32, anchor: u8, qty: u64) -> Contract {
     Contract::new(
         account
             .predicate_at(util::RECEIVING, n)
@@ -37,7 +37,7 @@ fn clear_contract(account: &Account, n: u32, anchor: u8, qty: u64) -> Contract {
 }
 
 /// The allocation most tests spend, under `RECEIVING/3`.
-fn genesis_contract(account: &Account, qty: u64) -> Contract {
+fn genesis_contract(account: &SpendAccount, qty: u64) -> Contract {
     clear_contract(account, 3, 0x07, qty)
 }
 
@@ -58,7 +58,7 @@ struct Payment {
     opening: Opening,
 }
 
-fn cleartext_payment(account: &Account, fee: u64, rng: &mut StdRng) -> Payment {
+fn cleartext_payment(account: &SpendAccount, fee: u64, rng: &mut StdRng) -> Payment {
     let genesis = genesis_contract(account, GENESIS_QTY);
     let genesis_id = genesis.id();
     let spend_key = account
@@ -86,7 +86,7 @@ fn cleartext_payment(account: &Account, fee: u64, rng: &mut StdRng) -> Payment {
 
 /// The recipient of `payment` spends it on, paying `fee`.
 fn confidential_spend(
-    account: &Account,
+    account: &SpendAccount,
     payment: &Payment,
     fee: u64,
     rng: &mut StdRng,

@@ -21,7 +21,21 @@ final class FlameWalletTests: XCTestCase {
         XCTAssertEqual(predicate, first.predicate)
         XCTAssertEqual(try wallet.owns(predicate: predicate, gap: 0), KeyPath(branch: 0, index: 0))
         XCTAssertTrue(wallet.receivingKey().hasPrefix("testrecv1"))
-        XCTAssertTrue(wallet.viewKey().hasPrefix("testview1"))
+        XCTAssertTrue(try wallet.viewKey().hasPrefix("testview1"))
+
+        let view = try Wallet.fromViewKey(viewKey: wallet.viewKey(), network: .testnet, nextIndex: wallet.nextIndex())
+        let receive = try Wallet.fromReceivingKey(receivingKey: wallet.receivingKey(), network: .testnet, nextIndex: wallet.nextIndex())
+        XCTAssertEqual(wallet.kind(), .spend)
+        XCTAssertEqual(view.kind(), .view)
+        XCTAssertEqual(receive.kind(), .receive)
+        XCTAssertEqual(try view.owns(predicate: predicate, gap: 0), KeyPath(branch: 0, index: 0))
+        XCTAssertEqual(try receive.owns(predicate: predicate, gap: 0), KeyPath(branch: 0, index: 0))
+        XCTAssertThrowsError(try receive.viewKey()) { error in
+            guard case FlameError.NotPermitted(_, let needs) = error else {
+                return XCTFail("expected NotPermitted, got \(error)")
+            }
+            XCTAssertEqual(needs, .view)
+        }
     }
 
     func testErrorsNameTheField() {

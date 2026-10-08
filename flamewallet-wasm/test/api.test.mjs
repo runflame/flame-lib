@@ -120,6 +120,31 @@ test('a transfer from served bytes to signed bytes', () => {
         flameError('note', { failure: 'missing' }));
     assert.throws(() => bob.openNote(toBob.contract, toChange.note, bobPath),
         flameError('note', { failure: 'undecryptable' }));
+
+    // Bob from his view key alone opens the same note and cannot spend;
+    // from his receiving key alone he finds it and can neither open nor spend.
+    const view = wasm.Wallet.fromViewKey(bob.viewKey(), 'testnet', bob.nextIndex());
+    const receive = wasm.Wallet.fromReceivingKey(bob.receivingKey(), 'testnet', bob.nextIndex());
+    assert.equal(bob.kind(), 'spend');
+    assert.equal(view.kind(), 'view');
+    assert.equal(receive.kind(), 'receive');
+    for (const wallet of [view, receive]) {
+        assert.equal(wallet.receivingKey(), bob.receivingKey());
+        assert.deepEqual(wallet.owns(info.predicate, 0), bobPath);
+    }
+    assert.deepEqual(view.openNote(toBob.contract, toBob.note, bobPath), received);
+    const spend = request(confidential.request);
+    assert.throws(() => view.buildTransfer(spend),
+        flameError('notPermitted', { wallet: 'view', needs: 'spend' }));
+    assert.throws(() => receive.buildTransfer(spend),
+        flameError('notPermitted', { wallet: 'receive', needs: 'spend' }));
+    assert.throws(() => receive.openNote(toBob.contract, toBob.note, bobPath),
+        flameError('notPermitted', { wallet: 'receive', needs: 'view' }));
+    assert.throws(() => receive.viewKey(),
+        flameError('notPermitted', { wallet: 'receive', needs: 'view' }));
+    assert.throws(() => wasm.Wallet.fromViewKey(bob.viewKey(), 'mainnet', 0), flameError('invalidKey'));
+    assert.throws(() => wasm.Wallet.fromViewKey(bob.receivingKey(), 'testnet', 0), flameError('invalidKey'));
+    assert.throws(() => wasm.Wallet.fromReceivingKey(bob.viewKey(), 'testnet', 0), flameError('invalidKey'));
 });
 
 test('spending a confidential input with its opening', () => {

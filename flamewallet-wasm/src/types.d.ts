@@ -1,6 +1,13 @@
 /** Which network addresses are encoded for: `f1…` or `tf1…`. */
 export type Network = "mainnet" | "testnet";
 
+/**
+ * What a `Wallet` was built from, and so what it can do: `spend` (seed or
+ * mnemonic) finds, opens and spends; `view` (view key) finds and opens;
+ * `receive` (receiving key) only finds.
+ */
+export type WalletKind = "spend" | "view" | "receive";
+
 /** `m/35263'/network'/0'/branch/index`; branch 0 is receiving, 1 is change. */
 export interface KeyPath {
   branch: number;
@@ -105,6 +112,8 @@ export interface FlameError extends Error {
   kind:
     | "invalidMnemonic"
     | "invalidSeed"
+    | "invalidKey"
+    | "notPermitted"
     | "invalidAddress"
     | "invalidKeyPath"
     | "invalidBytes"
@@ -118,4 +127,8 @@ export interface FlameError extends Error {
   input?: number;
   /** For `note`: how it failed. */
   failure?: NoteFailure;
+  /** For `notPermitted`: the wallet that refused. */
+  wallet?: WalletKind;
+  /** For `notPermitted`: the least kind of wallet that could. */
+  needs?: WalletKind;
 }

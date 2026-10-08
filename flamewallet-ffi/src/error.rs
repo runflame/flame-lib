@@ -17,6 +17,20 @@ pub enum FlameError {
     #[error("invalid seed: {reason}")]
     InvalidSeed { reason: String },
 
+    /// A view or receiving key does not parse for the wallet's network, or
+    /// flamekd refused to derive from the key a wallet holds.
+    #[error("invalid key: {reason}")]
+    InvalidKey { reason: String },
+
+    /// The wallet's key does not allow the call: a view wallet cannot
+    /// spend, and a receive wallet can neither spend nor open notes.
+    /// `wallet` is this wallet's kind, `needs` the least kind that could.
+    #[error("a {wallet:?} wallet cannot do this; it needs a {needs:?} wallet")]
+    NotPermitted {
+        wallet: crate::WalletKind,
+        needs: crate::WalletKind,
+    },
+
     /// An address does not parse for the wallet's network.
     #[error("invalid address: {reason}")]
     InvalidAddress { reason: String },
@@ -61,15 +75,29 @@ impl FlameError {
             reason: reason.to_string(),
         }
     }
+
+    /// As the `From` conversion, but a flamekd refusal blames the seed: for
+    /// the constructors that derive the account from one.
+    pub(crate) fn from_seed_derivation(error: flamepayments::KeyError) -> FlameError {
+        match error {
+            flamepayments::KeyError::Kd(_) => FlameError::InvalidSeed {
+                reason: error.to_string(),
+            },
+            other => other.into(),
+        }
+    }
 }
 
+/// A flamekd refusal blames the key the wallet holds, whichever kind: only
+/// the seed constructors know there was a seed, and they use
+/// [`FlameError::from_seed_derivation`].
 impl From<flamepayments::KeyError> for FlameError {
     fn from(error: flamepayments::KeyError) -> FlameError {
         match error {
             flamepayments::KeyError::HardenedIndex(_) => FlameError::InvalidKeyPath {
                 reason: error.to_string(),
             },
-            flamepayments::KeyError::Kd(_) => FlameError::InvalidSeed {
+            flamepayments::KeyError::Kd(_) => FlameError::InvalidKey {
                 reason: error.to_string(),
             },
         }
