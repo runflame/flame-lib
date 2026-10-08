@@ -13,7 +13,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 
 use crate::builder::OutputSpec;
-use crate::keys::Account;
+use crate::keys::SpendAccount;
 use crate::note::{open_note, outputs_with_notes, ReceivedNote};
 
 /// The header every test transaction uses.
@@ -66,7 +66,7 @@ pub(crate) fn output_to<'a>(
 /// opens it: from the note that follows it.
 pub(crate) fn receive(
     log: &TxLog,
-    account: &Account,
+    account: &SpendAccount,
     branch: u32,
     n: u32,
 ) -> (Contract, ReceivedNote) {

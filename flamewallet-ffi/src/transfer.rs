@@ -1,7 +1,7 @@
 //! A transfer, from served bytes to signed bytes, in one call.
 
 use flamekd::ReceivingAddress;
-use flamepayments::{Account, InputSpec, OutputSpec};
+use flamepayments::{InputSpec, OutputSpec, SpendAccount};
 use flamevm::{Limits, TxHeader};
 use rand::rngs::OsRng;
 use zeroize::Zeroizing;
@@ -108,7 +108,10 @@ impl Opening {
     }
 }
 
-pub(crate) fn build(account: &Account, request: TransferRequest) -> Result<Transfer, FlameError> {
+pub(crate) fn build(
+    account: &SpendAccount,
+    request: TransferRequest,
+) -> Result<Transfer, FlameError> {
     let mut specs = Vec::with_capacity(request.inputs.len());
     let mut keys = Zeroizing::new(Vec::with_capacity(request.inputs.len()));
     for (position, input) in request.inputs.iter().enumerate() {

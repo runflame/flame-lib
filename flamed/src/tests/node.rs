@@ -19,7 +19,7 @@ use crate::config::{ChainParamsFile, GenesisFile};
 use crate::node::{Node, NodeError, TxStatus};
 
 /// The predicate points of a list of an account's addresses.
-fn predicates(account: &Account, addresses: &[(u32, u32)]) -> Vec<[u8; 32]> {
+fn predicates<K: AccountKey>(account: &Account<K>, addresses: &[(u32, u32)]) -> Vec<[u8; 32]> {
     addresses
         .iter()
         .map(|(branch, n)| {

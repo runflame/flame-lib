@@ -12,9 +12,30 @@ crate opens.
 
 ## An account
 
-An `Account` is the node at `m/35263'/network'/0'`, derived from a 64-byte
-seed. Everything below it lives on the two normal branches of the standard
-path — receiving (`0`) and change (`1`) — so an address is
+An `Account<K>` is the node at `m/35263'/network'/0'`, held as one of
+the three flamekd keys; the key is the type parameter, and what the
+account can do follows from it:
+
+| Type | Built by | Can |
+| --- | --- | --- |
+| `SpendAccount = Account<SpendKey>` | `from_seed` | find, open, spend |
+| `ViewAccount = Account<ViewKey>` | `from_view_key`, `to_view_account()` | find, open |
+| `ReceiveAccount = Account<RecvKey>` | `from_recv_key`, `to_receive_account()` | find |
+
+Methods live where their key allows: `impl<K: AccountKey>` for addresses,
+predicates, `owns` and the counter; `impl<K: ViewingKey>` for
+`viewing_key_at` and `view_key`; `impl SpendAccount` for
+`spending_key_at`. Calling past what the key allows does not compile.
+Both traits are sealed to flamekd's keys. Code that needs only addresses
+takes `&Account<K>` with `K: AccountKey`, and only notes `K: ViewingKey`.
+
+`from_view_key` and `from_recv_key` must be given the account node's key,
+as `view_key()` and `recv_key()` export it. The bech32f encoding carries no
+depth, so nothing can check this: a key from any other node builds an
+account that silently owns nothing.
+
+Everything below the account node lives on the two normal branches of the
+standard path — receiving (`0`) and change (`1`) — so an address is
 `m/35263'/network'/0'/branch/n`. The path constants come from `flamekd::util`;
 this crate never repeats their values.
 
@@ -22,9 +43,8 @@ Two derivations lead to the same place, and the difference matters:
 
 - `address_at(branch, n)` goes through the account's **receiving key**, so
   the derivation itself touches no secret — it is the derivation an indexer
-  holding only a receiving key would perform. Note that an `Account` cannot
-  yet be built that way: `from_seed` is the only constructor, so a watch-only
-  account waits on a `from_recv_key` that does not exist today.
+  holding only a receiving key would perform, and the one a
+  `ReceiveAccount` does.
 - `spending_key_at(branch, n)` goes through the spending key and returns the
   scalar by value. The extended key it came from zeroizes on drop and never
   leaves the module; the scalar it hands back does not, so protecting that

@@ -26,7 +26,7 @@ pub use contract::{decode_contract, opening_matches, ContractInfo, ContractValue
 pub use error::FlameError;
 pub use keys::{
     address_to_predicate, generate_mnemonic, mnemonic_to_seed, validate_mnemonic, IssuedAddress,
-    KeyPath, Network, Wallet,
+    KeyPath, Network, Wallet, WalletKind,
 };
 pub use note::{NoteFailure, ReceivedNote};
 pub use transfer::{

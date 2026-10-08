@@ -1,10 +1,41 @@
-//! Accounts: one flamekd seed, the addresses and keys below it.
+//! Accounts: one flamekd seed, or a key below it, and the addresses and keys
+//! below that.
 //!
 //! An [`Account`] is the node at `m/35263'/network'/0'`. Everything the
 //! wallet hands out lives under it on the two normal branches — receiving
 //! (`util::RECEIVING`) and change (`util::CHANGE`) — so an address is
 //! `m/35263'/network'/0'/branch/n`. The path constants come from
 //! [`flamekd::util`] and are never copied here.
+//!
+//! What an account can do is in its type, one per flamekd key:
+//!
+//! - [`SpendAccount`], `Account<SpendKey>`, comes from a seed: it finds,
+//!   opens and spends.
+//! - [`ViewAccount`], `Account<ViewKey>`, comes from a view key: it finds
+//!   and opens every payment, and has no `spending_key_at`.
+//! - [`ReceiveAccount`], `Account<RecvKey>`, comes from a receiving key: it
+//!   finds every payment, and has neither `spending_key_at` nor
+//!   `viewing_key_at`.
+//!
+//! `Account<K>` with `K: AccountKey` names any of the three, and with
+//! `K: ViewingKey` either of the first two, for code that needs no more.
+//! Calling past what the key allows does not compile:
+//!
+//! ```compile_fail
+//! # use flamekd::Network;
+//! # use flamepayments::{SpendAccount, ViewAccount};
+//! let account = SpendAccount::from_seed(&[7; 64], Network::Testnet, 0).unwrap();
+//! let view: ViewAccount = account.to_view_account();
+//! view.spending_key_at(0, 0); // no such method on a ViewAccount
+//! ```
+//!
+//! ```compile_fail
+//! # use flamekd::Network;
+//! # use flamepayments::{ReceiveAccount, SpendAccount};
+//! let account = SpendAccount::from_seed(&[7; 64], Network::Testnet, 0).unwrap();
+//! let receive: ReceiveAccount = account.to_receive_account();
+//! receive.viewing_key_at(0, 0); // no such method on a ReceiveAccount
+//! ```
 
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::scalar::Scalar as DalekScalar;
@@ -25,16 +56,109 @@ pub enum KeyError {
     Kd(#[from] flamekd::Error),
 }
 
-/// One account: the spending key at `m/35263'/network'/0'`, the network its
-/// addresses are encoded for, and the next unissued receiving index.
+/// The extended key an [`Account`] holds at `m/35263'/network'/0'`: a
+/// [`SpendKey`], a [`ViewKey`] or a [`RecvKey`]. All three derive the same
+/// normal children and so the same addresses. Sealed: an account is built
+/// from one of these three and nothing else.
+pub trait AccountKey: Clone + sealed::Sealed {
+    /// The normal or, for a `SpendKey`, hardened child at `index`.
+    fn derive_child(&self, index: u32) -> Result<Self, flamekd::Error>;
+
+    /// This node with spending and viewing authority removed.
+    fn to_recv(&self) -> RecvKey;
+}
+
+/// An [`AccountKey`] that also views: a [`SpendKey`] or a [`ViewKey`]. Both
+/// derive the same viewing scalars, so both open the same notes.
+pub trait ViewingKey: AccountKey {
+    /// The viewing scalar of this node.
+    fn viewing_key(&self) -> &DalekScalar;
+
+    /// This node with spending authority removed.
+    fn to_view(&self) -> ViewKey;
+}
+
+impl AccountKey for SpendKey {
+    fn derive_child(&self, index: u32) -> Result<Self, flamekd::Error> {
+        SpendKey::derive_child(self, index)
+    }
+
+    fn to_recv(&self) -> RecvKey {
+        SpendKey::to_recv(self)
+    }
+}
+
+impl ViewingKey for SpendKey {
+    fn viewing_key(&self) -> &DalekScalar {
+        SpendKey::viewing_key(self)
+    }
+
+    fn to_view(&self) -> ViewKey {
+        SpendKey::to_view(self)
+    }
+}
+
+impl AccountKey for ViewKey {
+    fn derive_child(&self, index: u32) -> Result<Self, flamekd::Error> {
+        ViewKey::derive_child(self, index)
+    }
+
+    fn to_recv(&self) -> RecvKey {
+        ViewKey::to_recv(self)
+    }
+}
+
+impl ViewingKey for ViewKey {
+    fn viewing_key(&self) -> &DalekScalar {
+        ViewKey::viewing_key(self)
+    }
+
+    fn to_view(&self) -> ViewKey {
+        self.clone()
+    }
+}
+
+impl AccountKey for RecvKey {
+    fn derive_child(&self, index: u32) -> Result<Self, flamekd::Error> {
+        RecvKey::derive_child(self, index)
+    }
+
+    fn to_recv(&self) -> RecvKey {
+        self.clone()
+    }
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for flamekd::SpendKey {}
+    impl Sealed for flamekd::ViewKey {}
+    impl Sealed for flamekd::RecvKey {}
+}
+
+/// One account: the extended key at `m/35263'/network'/0'`, the network
+/// its addresses are encoded for, and the next unissued receiving index.
+/// `K` says which key, and so what the account can do: see
+/// [`SpendAccount`], [`ViewAccount`] and [`ReceiveAccount`].
 #[derive(Clone)]
-pub struct Account {
-    account: SpendKey,
+pub struct Account<K> {
+    account: K,
     network: Network,
     next_index: u32,
 }
 
-impl Account {
+/// A spending account: built from a seed, it finds, opens and spends.
+pub type SpendAccount = Account<SpendKey>;
+
+/// A view account: built from a view key, it finds and opens every payment
+/// the spending account does, and cannot spend any of them.
+pub type ViewAccount = Account<ViewKey>;
+
+/// A receive account: built from a receiving key, it generates every
+/// address and finds every payment, and can neither open nor spend one.
+/// What an indexer holds.
+pub type ReceiveAccount = Account<RecvKey>;
+
+impl SpendAccount {
     /// The node at `m/35263'/network'/0'` from a 64-byte seed, with
     /// `next_index` receiving addresses already issued. The seed holds the
     /// keys, not how many addresses were handed out, so a reopened wallet
@@ -44,8 +168,7 @@ impl Account {
         seed: &[u8; 64],
         network: Network,
         next_index: u32,
-    ) -> Result<Account, KeyError> {
-        let next_index = normal(next_index)?;
+    ) -> Result<SpendAccount, KeyError> {
         let network_index = match network {
             Network::Mainnet => util::MAINNET,
             Network::Testnet => util::TESTNET,
@@ -54,10 +177,79 @@ impl Account {
             .derive_child(HARDENED | util::PURPOSE)?
             .derive_child(HARDENED | network_index)?
             .derive_child(HARDENED)?;
+        Account::new(account, network, next_index)
+    }
+
+    /// `s_n`, the spending scalar at `m/…/branch/n`, by value: the
+    /// [`SpendKey`] it came from zeroizes on drop.
+    pub fn spending_key_at(&self, branch: u32, n: u32) -> Result<DalekScalar, KeyError> {
+        Ok(*self.key_at(branch, n)?.spending_key())
+    }
+}
+
+impl ViewAccount {
+    /// A view account from the view key at `m/35263'/network'/0'`, as
+    /// [`Account::view_key`] exports it, with `next_index` as in
+    /// [`SpendAccount::from_seed`]. Nothing here can check that `view` is
+    /// the account node rather than some other one: a key from elsewhere
+    /// just owns nothing.
+    pub fn from_view_key(
+        view: ViewKey,
+        network: Network,
+        next_index: u32,
+    ) -> Result<ViewAccount, KeyError> {
+        Account::new(view, network, next_index)
+    }
+}
+
+impl ReceiveAccount {
+    /// A receive account from the receiving key at `m/35263'/network'/0'`,
+    /// as [`Account::recv_key`] exports it, with `next_index` as in
+    /// [`SpendAccount::from_seed`]. As with
+    /// [`ViewAccount::from_view_key`], a key from another node just owns
+    /// nothing.
+    pub fn from_recv_key(
+        recv: RecvKey,
+        network: Network,
+        next_index: u32,
+    ) -> Result<ReceiveAccount, KeyError> {
+        Account::new(recv, network, next_index)
+    }
+}
+
+impl<K: ViewingKey> Account<K> {
+    /// `v_n`, the viewing scalar at `m/…/branch/n`, by value: the extended
+    /// key it came from zeroizes on drop.
+    pub fn viewing_key_at(&self, branch: u32, n: u32) -> Result<DalekScalar, KeyError> {
+        Ok(*self.key_at(branch, n)?.viewing_key())
+    }
+
+    /// The account-level view key: what a view account is built from. It
+    /// generates every address below the account and opens their notes, so
+    /// it reads every amount and memo, but it holds no spending scalar.
+    pub fn view_key(&self) -> ViewKey {
+        self.account.to_view()
+    }
+
+    /// This account narrowed to its view key, with the same network and
+    /// counter.
+    pub fn to_view_account(&self) -> ViewAccount {
+        Account {
+            account: self.account.to_view(),
+            network: self.network,
+            next_index: self.next_index,
+        }
+    }
+}
+
+impl<K: AccountKey> Account<K> {
+    /// Every constructor ends here, so each refuses a hardened counter the
+    /// same way.
+    fn new(account: K, network: Network, next_index: u32) -> Result<Account<K>, KeyError> {
         Ok(Account {
             account,
             network,
-            next_index,
+            next_index: normal(next_index)?,
         })
     }
 
@@ -84,27 +276,10 @@ impl Account {
         ))
     }
 
-    /// `s_n`, the spending scalar at `m/…/branch/n`, by value: the
-    /// [`SpendKey`] it came from zeroizes on drop.
-    pub fn spending_key_at(&self, branch: u32, n: u32) -> Result<DalekScalar, KeyError> {
-        Ok(*self.spend_key_at(branch, n)?.spending_key())
-    }
-
-    /// `v_n`, the viewing scalar at `m/…/branch/n`, by value.
-    pub fn viewing_key_at(&self, branch: u32, n: u32) -> Result<DalekScalar, KeyError> {
-        Ok(*self.spend_key_at(branch, n)?.viewing_key())
-    }
-
-    /// The account-level view key: what a watch-only wallet is given. It
-    /// generates every address below the account and opens their notes, so
-    /// it reads every amount and memo, but it holds no spending scalar.
-    pub fn view_key(&self) -> ViewKey {
-        self.account.to_view()
-    }
-
-    /// The account-level receiving key: what an indexer is given. It
-    /// generates every address below the account and links their activity,
-    /// and can neither spend nor read a payment's private contents.
+    /// The account-level receiving key: what a receive account is built
+    /// from. It generates every address below the account and links their
+    /// activity, and can neither spend nor read a payment's private
+    /// contents.
     pub fn recv_key(&self) -> RecvKey {
         self.account.to_recv()
     }
@@ -112,6 +287,16 @@ impl Account {
     /// The receiving key for one branch, `m/…/branch`.
     pub fn recv_key_for(&self, branch: u32) -> Result<RecvKey, KeyError> {
         Ok(self.recv_key().derive_child(normal(branch)?)?)
+    }
+
+    /// This account narrowed to its receiving key, with the same network
+    /// and counter.
+    pub fn to_receive_account(&self) -> ReceiveAccount {
+        Account {
+            account: self.account.to_recv(),
+            network: self.network,
+            next_index: self.next_index,
+        }
     }
 
     /// Reserves the next receiving address and returns it with its index.
@@ -156,12 +341,12 @@ impl Account {
         None
     }
 
-    /// The spending key at `m/…/branch/n`. Private, so no extended key
-    /// escapes the module: the [`SpendKey`] this returns is dropped — and
-    /// zeroized — inside the accessors below. The scalar those accessors
-    /// hand out is itself key material and is not zeroized; protecting the
-    /// copy is the caller's job.
-    fn spend_key_at(&self, branch: u32, n: u32) -> Result<SpendKey, KeyError> {
+    /// The extended key at `m/…/branch/n`. Private, so no extended key
+    /// escapes the module: the key this returns is dropped — and zeroized —
+    /// inside the accessors above. The scalar those accessors hand out is
+    /// itself key material and is not zeroized; protecting the copy is the
+    /// caller's job.
+    fn key_at(&self, branch: u32, n: u32) -> Result<K, KeyError> {
         Ok(self
             .account
             .derive_child(normal(branch)?)?

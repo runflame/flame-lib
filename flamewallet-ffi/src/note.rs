@@ -1,7 +1,7 @@
 //! Opening the note that follows an output: how a recipient learns what it
 //! was paid, and how a sender reads back its own change.
 
-use flamepayments::{Account, NoteError};
+use flamepayments::{Account, NoteError, ViewingKey};
 
 use crate::contract;
 use crate::error::FlameError;
@@ -52,8 +52,8 @@ impl From<NoteError> for NoteFailure {
     }
 }
 
-pub(crate) fn open(
-    account: &Account,
+pub(crate) fn open<K: ViewingKey>(
+    account: &Account<K>,
     contract: &[u8],
     note: Option<&[u8]>,
     path: KeyPath,
