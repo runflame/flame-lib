@@ -1,4 +1,10 @@
 # Flame implementation plan
 
-- cell type language based on TL-B with rust-like syntax. Ignore "linear inversion" operator (~), use byte-oriented syntax. Allow references to earlier-defined variables just like in TL-B. Use built-in types such as u8/u16/u32 (LE) and LEB128. Use "^" for cell references.
-- 
+- Cell Type Language (use "cello" emoji as an icon, .ctl file extension) language based on TL-B with rust-like syntax. Ignore "linear inversion" operator (~), use byte-oriented syntax. Allow references to earlier-defined variables just like in TL-B. Use built-in types such as u8/u16/u32 (LE) and LEB128. Use "^" for cell references.
+- define transaction layout in CTL - top cell's ID is a witness ID, it contains three cells - body, signature and r1cs proof. Body cell defines TxID and contains header (version and timelock), followed by program code.
+- allow longer programs to continue into nested cells with "continue" opcode that takes the cell from stack and finishes with the current cell.
+- make `input` op use cell on the stack as the encoding of a contract. It can be supplied together with the program and placed on stack with "bringcell".
+- define opening of taproot with a "bringcell" operation that takes the cell ref out of the program cell and places it on the stack. Then "open" instruction takes the inner pubkey and the cell hash, verifies taproot commitment and executes the cell as a nested frame (like in a call), so the current cell does not disappear from VM's frame stack and program returns to it. Cell can implement jumps into one of its subcells based on the path provided as an argument, therefore affording merkleization. Cell are virtualized at level 0. If the cell is pruned, it's view can still be used as long as only its hash is request (0-level). Whenever program attempts to read the contents of the virtualized pruned cell (payload or references) - it fails.
+- make sure we have both CellSlice for reading and CellBuilder for building cells and appropriate minimal opcodes in the VM to work with them.
+- think on how to bring pruned txid cell into the tx so it commits to the results explicitly so we can query them in merkleized manner without having to run the VM. Alternatively, the block inclusion may have those results, but those do not depend on the position in the block and fully determined by the transaction's author, so should be precomputed and embedded as a pruned cell.
+
