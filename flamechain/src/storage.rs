@@ -8,10 +8,9 @@ use cells::{
     CellRef, CellResolver, CellSlice, Trie, resolve_cell,
 };
 
-use flamevm::{
-    ActorID, ActorRegistry, Scalar, StoragePurchase, VMError, Value, code_root, empty_state,
-    state_root,
-};
+use flamevm::{ActorID, ActorRegistry, Scalar, StoragePurchase, VMError, Value, empty_state};
+#[cfg(test)]
+use flamevm::{code_root, state_root};
 
 /// Number of sparks in one Flame.
 pub const SPARKS_PER_FLAME: u64 = 100_000_000;
@@ -109,7 +108,7 @@ pub struct ActorInfo {
     pub storage_capacity: u64,
     /// Bytecode, if all its cells are resident.
     pub code: Option<Vec<u8>>,
-    /// State root and reachable resident cells. Descendants may still be pruned.
+    /// State root and reachable resident cells. Descendants may still be unloaded.
     /// Absent if even the state root body is unavailable.
     pub state: Option<CellEnvelope>,
 }
@@ -120,8 +119,8 @@ struct LiveActor {
     code_bytes: u64,
     state: Option<Value>,
     state_bytes: u64,
-    code_root: [u8; 32],
-    state_root: [u8; 32],
+    code_root: CellRef,
+    state_root: CellRef,
     /// Only explicitly retained code/state bodies; transaction resolution never
     /// inserts into this bag. Registry/lease metadata is reconstructed separately.
     cells: Arc<BagOfCells>,
@@ -162,8 +161,8 @@ impl CellEncode for ActorSlot {
             builder
                 .store_u64(live.code_bytes)?
                 .store_u64(live.state_bytes)?
-                .store_ref(CellRef::pruned(live.code_root))?
-                .store_ref(CellRef::pruned(live.state_root))?;
+                .store_ref(live.code_root.clone())?
+                .store_ref(live.state_root.clone())?;
         }
         let mut leases = Trie::new(8)?;
         for (&expiry, &units) in &self.leases {
@@ -194,10 +193,10 @@ fn collect_owned(
             continue;
         }
         for reference in cell.refs() {
-            match reference {
-                CellRef::Resident(child) => pending.push(Arc::clone(child)),
-                CellRef::Pruned(id) => {
-                    if let Some(child) = prior.get(id) {
+            match reference.as_resident_arc() {
+                Some(child) => pending.push(Arc::clone(child)),
+                None => {
+                    if let Some(child) = prior.get(&reference.id()) {
                         pending.push(child);
                     }
                 }
@@ -216,18 +215,19 @@ impl LiveActor {
                 builder.store_snake(code)?;
                 CellRef::resident(builder.build())
             }
-            None => CellRef::pruned(self.code_root),
+            None => self.code_root.clone(),
         };
         let state = match &self.state {
             Some(state) => CellRef::resident(state.to_cell()?),
-            None => CellRef::pruned(self.state_root),
+            None => self.state_root.clone(),
         };
-        let roots = [code, state]
-            .into_iter()
-            .filter_map(|reference| match reference {
-                CellRef::Resident(cell) => Some(cell),
-                CellRef::Pruned(id) => self.cells.get(&id),
-            });
+        let roots =
+            [code, state]
+                .into_iter()
+                .filter_map(|reference| match reference.as_resident_arc() {
+                    Some(cell) => Some(Arc::clone(cell)),
+                    None => self.cells.get(&reference.id()),
+                });
         let cells = collect_owned(roots, &self.cells)?;
         self.resident_bytes = cells.iter().try_fold(0u64, |size, (_, cell)| {
             size.checked_add(cell.encoded_size() as u64)
@@ -588,13 +588,13 @@ impl ActorStore {
 
         let state = live
             .cells
-            .get(&live.state_root)
-            .map(|root| CellEnvelope::new(live.state_root, collect_owned([root], &live.cells)?))
+            .get(&live.state_root.id())
+            .map(|root| CellEnvelope::new(live.state_root.id(), collect_owned([root], &live.cells)?))
             .transpose()?;
 
         Ok(ActorInfo {
-            code_root: live.code_root,
-            state_root: live.state_root,
+            code_root: live.code_root.id(),
+            state_root: live.state_root.id(),
             code_size: live.code_bytes,
             state_size: live.state_bytes,
             storage_used: self.usage_slot(slot)?,
@@ -626,7 +626,11 @@ impl ActorStore {
             entry
                 .store_bytes(&graph.cells.id())
                 .expect("availability ID fits")
-                .store_ref(CellRef::pruned(graph.root))
+                .store_ref(
+                    CellRef::resident(graph.cells.get(&graph.root).expect("stored actor root"))
+                        .to_unloaded()
+                        .expect("stored actor root has a commitment"),
+                )
                 .expect("actor root reference fits");
             trie.insert(id, entry.build(), &mut ())
                 .expect("resident actor trie");
@@ -656,7 +660,7 @@ impl ActorStore {
         let key = actor.to_hash();
         self.require_live(key)?;
         let state_bytes = Self::state_bytes(&state)?;
-        let root = state_root(&state);
+        let root = CellRef::resident(state.to_cell()?).to_unloaded()?;
         self.record_actor(key);
         let live = self.actors.get_mut(&key).unwrap().live.as_mut().unwrap();
         live.state = Some(state);
@@ -709,7 +713,7 @@ impl ActorRegistry for ActorStore {
         if self.checked_out.contains(&key) {
             return Err(VMError::ActorEmpty);
         }
-        let cell = resolve_cell(cells, &CellRef::pruned(live.state_root))?;
+        let cell = resolve_cell(cells, &live.state_root)?;
         // Canonical storage reads never inherit private witnesses or loaded
         // Dict branches from an in-memory cache left by an earlier transaction.
         let state = Value::from_trusted_cell(&cell, cells)?;
@@ -736,7 +740,7 @@ impl ActorRegistry for ActorStore {
             return Err(VMError::SaveWithoutLoad);
         }
         let state_bytes = Self::state_bytes(&state)?;
-        let root = state_root(&state);
+        let root = CellRef::resident(state.to_cell()?).to_unloaded()?;
         self.record_actor(key);
         let live = self.actors.get_mut(&key).unwrap().live.as_mut().unwrap();
         live.state = Some(state);
@@ -762,7 +766,7 @@ impl ActorRegistry for ActorStore {
         if self.checked_out.contains(&actor.to_hash()) {
             return Err(VMError::ActorEmpty);
         }
-        let cell = resolve_cell(cells, &CellRef::pruned(live.code_root))?;
+        let cell = resolve_cell(cells, &live.code_root)?;
         let mut slice = CellSlice::new(&cell);
         let code = slice.load_snake(
             cells,
@@ -804,7 +808,9 @@ impl ActorRegistry for ActorStore {
         self.require_live(key)?;
         self.record_actor(key);
         let live = self.actors.get_mut(&key).unwrap().live.as_mut().unwrap();
-        live.code_root = code_root(&code);
+        let mut builder = CellBuilder::new();
+        builder.store_snake(&code)?;
+        live.code_root = CellRef::resident(builder.build()).to_unloaded()?;
         live.code_bytes = code.len() as u64;
         live.code = Some(code);
         live.retain_changes()?;
@@ -937,9 +943,11 @@ impl ActorRegistry for ActorStore {
             return Err(VMError::ActorAlreadyExists);
         }
         let state_bytes = Self::state_bytes(&state)?;
+        let mut builder = CellBuilder::new();
+        builder.store_snake(&code)?;
         let mut live = LiveActor {
-            code_root: code_root(&code),
-            state_root: state_root(&state),
+            code_root: CellRef::resident(builder.build()).to_unloaded()?,
+            state_root: CellRef::resident(state.to_cell()?).to_unloaded()?,
             code_bytes: code.len() as u64,
             code: Some(code),
             state: Some(state),
@@ -1093,7 +1101,7 @@ mod tests {
     }
 
     #[test]
-    fn actor_info_preserves_pruned_state_references() {
+    fn actor_info_preserves_unloaded_state_references() {
         let mut state = Dict::new();
         state.insert(Scalar::ZERO, Value::Scalar(Scalar::ONE));
         let mut store = ActorStore::new(StorageParams::default()).unwrap();
@@ -1107,10 +1115,10 @@ mod tests {
             .unwrap();
         let mut resident = BagOfCells::new();
         resident
-            .insert(live.cells.get(&live.code_root).unwrap())
+            .insert(live.cells.get(&live.code_root.id()).unwrap())
             .unwrap();
         resident
-            .insert(live.cells.get(&live.state_root).unwrap())
+            .insert(live.cells.get(&live.state_root.id()).unwrap())
             .unwrap();
         live.cells = Arc::new(resident);
         let info = store.actor_info(&actor(), 0).unwrap();
@@ -1296,7 +1304,8 @@ mod tests {
                 .live
                 .as_ref()
                 .unwrap()
-                .state_root,
+                .state_root
+                .id(),
             state_hash
         );
         assert_eq!(store.actor_usage(&actor()).unwrap(), 0);

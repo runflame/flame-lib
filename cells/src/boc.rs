@@ -49,10 +49,12 @@ impl BagOfCells {
             if !visited.insert(Arc::as_ptr(&cell)) {
                 continue;
             }
-            pending.extend(cell.refs().iter().filter_map(|reference| match reference {
-                CellRef::Resident(cell) => Some(Arc::clone(cell)),
-                CellRef::Pruned(_) => None,
-            }));
+            pending.extend(
+                cell.refs()
+                    .iter()
+                    .filter_map(CellRef::as_resident_arc)
+                    .cloned(),
+            );
             bag.insert(cell)?;
         }
 
@@ -131,7 +133,12 @@ impl BagOfCells {
             let before = remaining.len();
             let cell = Cell::decode_record(&mut remaining)?;
             let record_bytes = before - remaining.len();
-            gas.charge(u64::try_from(record_bytes).map_err(|_| CellError::LimitExceeded)?)?;
+            // Account for hashing/checking each significant level, including zero.
+            let hash_work = u64::try_from(record_bytes)
+                .map_err(|_| CellError::LimitExceeded)?
+                .checked_mul(u64::from(cell.commitment().mask().count_ones()) + 1)
+                .ok_or(CellError::LimitExceeded)?;
+            gas.charge(hash_work)?;
             gas.charge(cell.refs().len() as u64)?;
 
             let id = cell.id();
@@ -146,6 +153,7 @@ impl BagOfCells {
             return Err(CellError::TrailingBytes);
         }
 
+        validate_child_commitments(&cells, gas)?;
         validate_acyclic(&cells, gas)?;
         Ok(Self { cells })
     }
@@ -155,22 +163,35 @@ impl CellResolver for BagOfCells {
     fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
         match reference {
             CellRef::Resident(cell) => Ok(Arc::clone(cell)),
-            CellRef::Pruned(id) => self.get(id).ok_or(CellError::MissingCell(*id)),
+            CellRef::Unloaded(_) | CellRef::Unresolved(_) => self
+                .get(&reference.id())
+                .ok_or(CellError::MissingCell(reference.id())),
         }
     }
 }
 
 fn detach(cell: Arc<Cell>) -> Arc<Cell> {
-    if cell.refs().iter().all(CellRef::is_pruned) {
+    if cell.refs().iter().all(CellRef::is_unloaded) {
         return cell;
     }
-    Arc::new(
-        Cell::new(
-            cell.payload().to_vec(),
-            cell.refs().iter().map(CellRef::to_pruned).collect(),
-        )
-        .expect("an existing Cell remains valid when detached"),
-    )
+    Arc::new(cell.detached())
+}
+
+fn validate_child_commitments(
+    cells: &BTreeMap<CellID, Arc<Cell>>,
+    gas: &mut impl GasMeter,
+) -> Result<(), CellError> {
+    for cell in cells.values() {
+        for reference in cell.refs() {
+            if let Some(child) = cells.get(&reference.id()) {
+                gas.charge(u64::from(child.commitment().mask().count_ones()) + 1)?;
+                if reference.commitment()? != child.commitment() {
+                    return Err(CellError::CellCommitmentMismatch(reference.id()));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_acyclic(
@@ -331,7 +352,7 @@ mod tests {
                 .unwrap()
                 .refs()
                 .iter()
-                .all(|reference| matches!(reference, CellRef::Pruned(_)))
+                .all(CellRef::is_unloaded)
         );
     }
 
@@ -364,7 +385,7 @@ mod tests {
         ));
 
         let mut malformed = 1u32.to_le_bytes().to_vec();
-        malformed.extend_from_slice(&(5u16 << 13).to_le_bytes());
+        malformed.extend_from_slice(&(5u16 << 12).to_le_bytes());
         assert!(matches!(
             BagOfCells::decode(&malformed, usize::MAX, &mut plenty_of_gas()),
             Err(CellError::InvalidFormat)
@@ -388,8 +409,9 @@ mod tests {
 
     #[test]
     fn partial_bag_and_envelope() {
-        let missing = [7; 32];
-        let root = Arc::new(Cell::new(vec![], vec![CellRef::Pruned(missing)]).unwrap());
+        let child = CellRef::from(Cell::new(vec![7], vec![]).unwrap());
+        let missing = child.id();
+        let root = Arc::new(Cell::new(vec![], vec![child.to_unloaded().unwrap()]).unwrap());
         let bag = BagOfCells::collect(Arc::clone(&root)).unwrap();
         assert!(bag.contains(&root.id()));
         assert!(!bag.contains(&missing));
@@ -423,7 +445,7 @@ mod tests {
         bag.insert(Arc::clone(&root)).unwrap();
 
         let stored_root = bag.get(&root.id()).unwrap();
-        assert!(stored_root.refs()[0].is_pruned());
+        assert!(stored_root.refs()[0].is_unloaded());
         assert!(matches!(
             crate::resolve_cell(&mut bag, &stored_root.refs()[0]),
             Err(CellError::MissingCell(id)) if id == child.id()
@@ -438,7 +460,7 @@ mod tests {
         let grandchild = Arc::new(Cell::new(vec![1], vec![]).unwrap());
         let rich =
             Arc::new(Cell::new(vec![2], vec![CellRef::Resident(Arc::clone(&grandchild))]).unwrap());
-        let poor = Arc::new(Cell::new(vec![2], vec![CellRef::pruned(grandchild.id())]).unwrap());
+        let poor = Arc::new(rich.detached());
         assert_eq!(rich.id(), poor.id());
 
         let root = Arc::new(
@@ -455,20 +477,168 @@ mod tests {
 
     #[test]
     fn detects_included_cycles() {
-        let a = [1; 32];
-        let b = [2; 32];
+        let a_ref = CellRef::from(Cell::new(vec![1], vec![]).unwrap())
+            .to_unloaded()
+            .unwrap();
+        let b_ref = CellRef::from(Cell::new(vec![2], vec![]).unwrap())
+            .to_unloaded()
+            .unwrap();
+        let a = a_ref.id();
+        let b = b_ref.id();
         let mut cells = BTreeMap::new();
-        cells.insert(
-            a,
-            Arc::new(Cell::new(vec![], vec![CellRef::Pruned(b)]).unwrap()),
-        );
-        cells.insert(
-            b,
-            Arc::new(Cell::new(vec![], vec![CellRef::Pruned(a)]).unwrap()),
-        );
+        cells.insert(a, Arc::new(Cell::new(vec![], vec![b_ref]).unwrap()));
+        cells.insert(b, Arc::new(Cell::new(vec![], vec![a_ref]).unwrap()));
         assert!(matches!(
             validate_acyclic(&cells, &mut plenty_of_gas()),
-            Err(CellError::Cycle(id)) if id == a
+            Err(CellError::Cycle(id)) if id == a.min(b)
         ));
+    }
+
+    #[test]
+    fn explicit_pruned_cells_and_nested_levels_round_trip() {
+        let full = Cell::new(vec![7], vec![]).unwrap();
+        let inner = full.prune(1).unwrap();
+        let transaction = Cell::new(vec![8], vec![CellRef::from(inner.clone())]).unwrap();
+        let outer = transaction.prune(2).unwrap();
+        let root = Arc::new(
+            Cell::new(
+                vec![9],
+                vec![CellRef::from(inner.clone()), CellRef::from(outer.clone())],
+            )
+            .unwrap(),
+        );
+        let bag = BagOfCells::collect(root.clone()).unwrap();
+        assert_eq!(bag.len(), 3);
+        let bytes = bag.encode();
+        let decoded = BagOfCells::decode(&bytes, bytes.len(), &mut plenty_of_gas()).unwrap();
+        assert_eq!(decoded.encode(), bytes);
+        for original in [&inner, &outer] {
+            let restored = decoded.get(&original.id()).unwrap();
+            assert!(restored.is_pruned());
+            assert_eq!(restored.commitment(), original.commitment());
+            assert_eq!(restored.encode(), original.encode());
+        }
+        assert_eq!(inner.hash(0).unwrap(), full.id());
+        assert_eq!(outer.hash(1).unwrap(), transaction.id());
+        assert_eq!(
+            decoded.get(&root.id()).unwrap().commitment(),
+            root.commitment()
+        );
+    }
+
+    #[test]
+    fn rejects_forged_child_summary_despite_matching_child_id() {
+        let child = Arc::new(Cell::new(vec![7], vec![]).unwrap());
+        let root = Cell::new(vec![], vec![CellRef::resident(child.clone())]).unwrap();
+        let mut forged = root.encode();
+        // The final LE16 is the sole child's declared level-zero depth.
+        let depth_offset = forged.len() - 2;
+        forged[depth_offset..].copy_from_slice(&1u16.to_le_bytes());
+        let forged = Cell::decode_exact(&forged).unwrap();
+        assert_eq!(forged.refs()[0].id(), child.id());
+
+        let mut bag = BagOfCells::new();
+        bag.insert(Arc::new(forged)).unwrap();
+        bag.insert(child.clone()).unwrap();
+        assert!(matches!(
+            BagOfCells::decode(&bag.encode(), usize::MAX, &mut plenty_of_gas()),
+            Err(CellError::CellCommitmentMismatch(id)) if id == child.id()
+        ));
+    }
+
+    #[test]
+    fn rejects_forged_lower_hash_and_charges_all_significant_levels() {
+        let child = Arc::new(Cell::new(vec![7], vec![]).unwrap().prune(1).unwrap());
+        let root = Cell::new(vec![], vec![CellRef::resident(child.clone())]).unwrap();
+        let mut forged = root.encode();
+        // Descriptor, child mask, then the lower hash; the child's top ID stays intact.
+        forged[4] ^= 1;
+        let forged = Cell::decode_exact(&forged).unwrap();
+        assert_eq!(forged.refs()[0].id(), child.id());
+        let mut bag = BagOfCells::new();
+        bag.insert(Arc::new(forged)).unwrap();
+        bag.insert(child.clone()).unwrap();
+        assert!(matches!(
+            BagOfCells::decode(&bag.encode(), usize::MAX, &mut plenty_of_gas()),
+            Err(CellError::CellCommitmentMismatch(id)) if id == child.id()
+        ));
+
+        let nested = Arc::new(child.prune(2).unwrap());
+        let old_single_level_budget = nested.encoded_size() as u64 + 2;
+        let bag = BagOfCells::collect(nested).unwrap();
+        assert!(matches!(
+            BagOfCells::decode(
+                &bag.encode(),
+                usize::MAX,
+                &mut LimitedGas(old_single_level_budget)
+            ),
+            Err(CellError::ResourceExhausted)
+        ));
+    }
+
+    #[test]
+    fn decoded_block_proof_preserves_taproot_pruning_in_transaction_view() {
+        let script_a = Cell::new(vec![1], vec![]).unwrap();
+        let script_b = Cell::new(vec![2], vec![]).unwrap();
+        let full_options = Cell::new(
+            vec![],
+            vec![script_a.clone().into(), script_b.clone().into()],
+        )
+        .unwrap();
+        let taproot_cut = script_b.prune(1).unwrap();
+        let options = Cell::new(vec![], vec![script_a.into(), taproot_cut.clone().into()]).unwrap();
+        let other_payload = Cell::new(vec![3], vec![]).unwrap();
+        let transaction = Cell::new(
+            vec![4],
+            vec![options.clone().into(), other_payload.clone().into()],
+        )
+        .unwrap();
+        let other_transaction = Cell::new(vec![5], vec![]).unwrap();
+        let block = Cell::new(
+            vec![6],
+            vec![transaction.clone().into(), other_transaction.clone().into()],
+        )
+        .unwrap();
+
+        // Both fresh cuts use the block's target level + 1, even though the
+        // omitted subtrees themselves are level zero.
+        let partial_transaction = Cell::new(
+            vec![4],
+            vec![options.into(), other_payload.prune(2).unwrap().into()],
+        )
+        .unwrap();
+        let proof = Cell::new(
+            vec![6],
+            vec![
+                partial_transaction.into(),
+                other_transaction.prune(2).unwrap().into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(proof.hash(1).unwrap(), block.id());
+        assert_ne!(proof.id(), block.id());
+
+        let bytes = BagOfCells::collect(Arc::new(proof.clone()))
+            .unwrap()
+            .encode();
+        let mut bag = BagOfCells::decode(&bytes, bytes.len(), &mut plenty_of_gas()).unwrap();
+        let root = bag.get(&proof.id()).unwrap();
+        let block_view = root.virtualize(1).unwrap();
+        assert_eq!(block_view.id(), block.id());
+        assert!(!block_view.reference(1, &mut bag).unwrap().is_available());
+
+        let tx_view = block_view.reference(0, &mut bag).unwrap();
+        assert_eq!(tx_view.id(), transaction.id());
+        assert!(!tx_view.reference(1, &mut bag).unwrap().is_available());
+        let options_view = tx_view.reference(0, &mut bag).unwrap();
+        let old_cut = options_view.reference(1, &mut bag).unwrap();
+        assert_eq!(old_cut.is_pruned(), Ok(true));
+        assert_eq!(old_cut.payload().unwrap(), taproot_cut.payload());
+
+        let semantic_options = options_view.virtualize(0).unwrap();
+        assert_eq!(semantic_options.id(), full_options.id());
+        let hidden_script = semantic_options.reference(1, &mut bag).unwrap();
+        assert!(!hidden_script.is_available());
+        assert_eq!(hidden_script.payload(), Err(CellError::PrunedCell));
     }
 }

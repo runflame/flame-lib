@@ -48,6 +48,9 @@ impl<'a> CellSlice<'a> {
     }
 
     pub fn load_bytes(&mut self, len: usize) -> Result<&'a [u8], CellError> {
+        if self.cell.is_pruned() {
+            return Err(CellError::PrunedCell);
+        }
         let end = self
             .byte_offset
             .checked_add(len)
@@ -93,6 +96,9 @@ impl<'a> CellSlice<'a> {
             let mut reference = slice.load_ref()?;
             loop {
                 let cell = resolve_cell(cells, &reference)?;
+                if cell.is_pruned() {
+                    return Err(CellError::PrunedCell);
+                }
                 let remaining = length - bytes.len();
                 let continues = remaining > MAX_CELL_PAYLOAD;
                 if cell.payload().len() != remaining.min(MAX_CELL_PAYLOAD)
@@ -110,6 +116,9 @@ impl<'a> CellSlice<'a> {
     }
 
     pub fn load_ref(&mut self) -> Result<CellRef, CellError> {
+        if self.cell.is_pruned() {
+            return Err(CellError::PrunedCell);
+        }
         let reference = self
             .cell
             .refs()
@@ -138,6 +147,9 @@ impl<'a> CellSlice<'a> {
     }
 
     pub fn finish(self) -> Result<(), CellError> {
+        if self.cell.is_pruned() {
+            return Err(CellError::PrunedCell);
+        }
         if self.remaining_bytes() != 0 {
             return Err(CellError::TrailingBytes);
         }
@@ -145,5 +157,21 @@ impl<'a> CellSlice<'a> {
             return Err(CellError::TrailingReferences);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pruning_records_cannot_be_read_as_ordinary_payload() {
+        let cell = Cell::from_pruned(1, vec![[7; 32]], vec![0]).unwrap();
+        let mut slice = CellSlice::new(&cell);
+        assert_eq!(slice.load_bytes(0), Err(CellError::PrunedCell));
+        assert_eq!(slice.load_u8(), Err(CellError::PrunedCell));
+        assert!(matches!(slice.load_ref(), Err(CellError::PrunedCell)));
+        assert_eq!(slice.remaining_bytes(), cell.payload().len());
+        assert_eq!(slice.finish(), Err(CellError::PrunedCell));
     }
 }

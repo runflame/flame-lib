@@ -1729,7 +1729,7 @@ mod tests {
         extra_ref
             .store_snake(&[0])
             .unwrap()
-            .store_ref(CellRef::pruned([0; 32]))
+            .store_ref(CellRef::resident(Cell::new(vec![], vec![]).unwrap()))
             .unwrap();
         assert!(matches!(
             decode_proof_cell(&extra_ref.build(), &mut ()),
@@ -1932,7 +1932,7 @@ mod tests {
         empty
             .store_u32(0)
             .unwrap()
-            .store_ref(CellRef::pruned([1; 32]))
+            .store_ref(CellRef::resident(Cell::new(vec![1], vec![]).unwrap()))
             .unwrap();
         assert!(matches!(
             decode_sequence(&empty.build(), &mut (), 1, u64::from_cell),

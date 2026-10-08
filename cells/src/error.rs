@@ -30,6 +30,21 @@ pub enum CellError {
     #[error("invalid Cell encoding")]
     InvalidFormat,
 
+    #[error("invalid Cell hash level")]
+    InvalidLevel,
+
+    #[error("Cell depth exceeds 65535")]
+    DepthOverflow,
+
+    #[error("pruned Cell has no accessible application data")]
+    PrunedCell,
+
+    #[error("Cell reference {0:?} needs hash/depth metadata before encoding")]
+    MissingCellMetadata(CellID),
+
+    #[error("resolved Cell commitment mismatch for {0:?}")]
+    CellCommitmentMismatch(CellID),
+
     #[error("missing Cell {0:?}")]
     MissingCell(CellID),
 

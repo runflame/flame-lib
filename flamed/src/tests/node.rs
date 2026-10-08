@@ -370,8 +370,29 @@ fn the_shipped_devnet_has_the_documented_genesis_hash() {
     let genesis = crate::genesis::derive(&shipped).expect("derive the shipped genesis");
     assert_eq!(
         hex::encode(genesis.genesis_hash.0),
-        "d5363a727a98d2125cd171727b3d2de4a0830a38b26e1887906f4e704067b270",
+        "fc159f2a12e80c2fb711a0075cb7836df207b715d7726407ce2f6a9bdaf5dd25",
         "update flamed.md's recorded session along with this value"
+    );
+    let ids: Vec<_> = genesis
+        .contracts
+        .iter()
+        .map(|contract| contract.id.0)
+        .collect();
+    let (mut chain, _) = Blockchain::devnet_genesis(genesis.chain.params(), &ids).unwrap();
+    assert_eq!(
+        hex::encode(chain.state_commitment().contracts.0),
+        "8669b06a22fe97fcf02268f2d2a24f66dc39cb17c4041ec30195cd764eeed4b2",
+    );
+    assert_eq!(
+        hex::encode(ids[0]),
+        "e870be9e3aa372fd8d338abe54bc4ad6db48e6bbea8c8ca75091bd2693cd948e",
+    );
+    let block = chain
+        .build_block(crate::node::core_block_hash(1), Vec::new())
+        .unwrap();
+    assert_eq!(
+        hex::encode(block.header.id().into_bytes()),
+        "04e8da3d74ea0c67ee5469029f9d296a296721eb94e3429d5836654cee736ccc",
     );
 }
 

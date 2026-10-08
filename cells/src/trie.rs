@@ -35,7 +35,7 @@ impl Trie {
         })
     }
 
-    /// Wraps a resident or pruned root without loading or traversing it.
+    /// Wraps a resident, unloaded, or unresolved root without loading or traversing it.
     /// Accepts `CellRef`, `Cell`, or `Arc<Cell>`. Every node, including the root,
     /// is resolved and validated on access, regardless of residency.
     /// Key width belongs to the owning schema; no entry count is needed.
@@ -392,6 +392,9 @@ fn check_key_width(key_bytes: usize) -> Result<(), CellError> {
 }
 
 fn parse_cell(cell: &Cell, remaining_digits: usize) -> Result<(Vec<u8>, u8), CellError> {
+    if cell.is_pruned() {
+        return Err(CellError::PrunedCell);
+    }
     let payload = cell.payload();
     if payload.len() < NODE_HEADER {
         return Err(CellError::MalformedTrie);
@@ -650,7 +653,7 @@ mod tests {
         }
         let root = trie.into_root().unwrap();
         let mut bag = crate::BagOfCells::collect(root.as_resident_arc().unwrap().clone()).unwrap();
-        let root = root.to_pruned();
+        let root = root.to_unloaded().unwrap();
         for key in [0, 7, 255] {
             assert_eq!(
                 Trie::lookup(&root, &[key], &mut bag)
@@ -774,10 +777,18 @@ mod tests {
     #[test]
     fn ordered_navigation_does_not_load_preceding_siblings_or_value_bodies() {
         let mut trie = Trie::new(1).unwrap();
-        trie.insert_ref(&[0], CellRef::pruned([7; 32]), &mut ())
-            .unwrap();
-        trie.insert_ref(&[255], CellRef::pruned([8; 32]), &mut ())
-            .unwrap();
+        trie.insert_ref(
+            &[0],
+            CellRef::resident(value(7)).to_unloaded().unwrap(),
+            &mut (),
+        )
+        .unwrap();
+        trie.insert_ref(
+            &[255],
+            CellRef::resident(value(8)).to_unloaded().unwrap(),
+            &mut (),
+        )
+        .unwrap();
         let (payload, mut refs) = trie
             .root()
             .unwrap()
@@ -785,7 +796,7 @@ mod tests {
             .unwrap()
             .clone()
             .into_parts();
-        refs[0] = refs[0].to_pruned();
+        refs[0] = refs[0].to_unloaded().unwrap();
         let partial = Trie::from_cell(Cell::new(payload, refs).unwrap(), 1).unwrap();
         assert!(matches!(
             partial.first_key(&mut ()),
@@ -850,11 +861,11 @@ mod tests {
     }
 
     #[test]
-    fn resident_and_pruned_roots_reject_noncanonical_nodes_on_access() {
+    fn resident_and_unresolved_roots_reject_noncanonical_nodes_on_access() {
         let child = CellRef::resident(value(1));
         let root = Cell::new(vec![0b0001, 0, 0], vec![child]).unwrap();
         let mut bag = crate::BagOfCells::collect(Arc::new(root.clone())).unwrap();
-        for reference in [CellRef::pruned(root.id()), root.into()] {
+        for reference in [CellRef::unresolved(root.id()), root.into()] {
             let id = reference.id();
             let mut trie = Trie::from_cell(reference, 1).unwrap();
             assert!(matches!(
@@ -867,6 +878,41 @@ mod tests {
             ));
             assert_eq!(trie.root_id(), Some(id));
         }
+    }
+
+    #[test]
+    fn explicit_pruning_records_cannot_be_traversed_or_replaced() {
+        let root = Cell::from_pruned(1, vec![[7; 32]], vec![0]).unwrap();
+        let id = root.id();
+        let mut trie = Trie::from_cell(root, 1).unwrap();
+        assert!(matches!(
+            trie.get(&[0], &mut ()),
+            Err(CellError::PrunedCell)
+        ));
+        assert!(matches!(
+            trie.first_key(&mut ()),
+            Err(CellError::PrunedCell)
+        ));
+        assert!(matches!(
+            trie.remove(&[0], &mut ()),
+            Err(CellError::PrunedCell)
+        ));
+        assert!(matches!(
+            trie.insert(&[0], value(1), &mut ()),
+            Err(CellError::PrunedCell)
+        ));
+        assert_eq!(trie.root_id(), Some(id));
+    }
+
+    #[test]
+    fn unresolved_value_cannot_be_embedded_in_a_trie() {
+        let mut trie = Trie::new(1).unwrap();
+        let id = [7; 32];
+        assert!(matches!(
+            trie.insert_ref(&[0], CellRef::unresolved(id), &mut ()),
+            Err(CellError::MissingCellMetadata(missing)) if missing == id
+        ));
+        assert!(trie.is_empty());
     }
 
     #[test]
@@ -889,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn pruned_paths_fail_without_changing_the_root() {
+    fn unloaded_paths_fail_without_changing_the_root() {
         let mut trie = Trie::new(1).unwrap();
         let mut resolver = ();
         trie.insert(&[0x00], value(1), &mut resolver).unwrap();
@@ -897,7 +943,7 @@ mod tests {
         let root_ref = trie.into_root().unwrap();
         let root_id = root_ref.id();
         let (payload, mut refs) = resident(&root_ref).clone().into_parts();
-        refs[0] = CellRef::pruned(refs[0].id());
+        refs[0] = refs[0].to_unloaded().unwrap();
         let root = Cell::new(payload, refs).unwrap();
         assert_eq!(root.id(), root_id);
 
@@ -927,14 +973,14 @@ mod tests {
     }
 
     #[test]
-    fn deletion_does_not_collapse_through_a_pruned_survivor() {
+    fn deletion_does_not_collapse_through_an_unloaded_survivor() {
         let mut trie = Trie::new(1).unwrap();
         let mut resolver = ();
         trie.insert(&[0x00], value(1), &mut resolver).unwrap();
         trie.insert(&[0x40], value(2), &mut resolver).unwrap();
         let root_ref = trie.into_root().unwrap();
         let (payload, mut refs) = resident(&root_ref).clone().into_parts();
-        refs[1] = CellRef::pruned(refs[1].id());
+        refs[1] = refs[1].to_unloaded().unwrap();
         let root = Cell::new(payload, refs).unwrap();
 
         let mut trie = Trie::from_cell(root, 1).unwrap();
@@ -982,10 +1028,10 @@ mod tests {
             Err(CellError::TrieKeyTooLong { .. })
         ));
         assert!(matches!(
-            Trie::from_cell(root.to_pruned(), MAX_TRIE_KEY_BYTES + 1),
+            Trie::from_cell(root.to_unloaded().unwrap(), MAX_TRIE_KEY_BYTES + 1),
             Err(CellError::TrieKeyTooLong { .. })
         ));
-        let mut lazy = Trie::from_cell(root.to_pruned(), 1).unwrap();
+        let mut lazy = Trie::from_cell(root.to_unloaded().unwrap(), 1).unwrap();
         assert_eq!(lazy.root_id(), Some(root.id()));
         assert!(matches!(
             lazy.remove(&[0], &mut ()),
@@ -1035,7 +1081,7 @@ mod tests {
         let (payload, mut refs) = resident(&root_ref).clone().into_parts();
         let missing_id = refs[0].id();
         let missing_body = Arc::new(resident(&refs[0]).clone());
-        refs[0] = CellRef::pruned(missing_id);
+        refs[0] = refs[0].to_unloaded().unwrap();
         let root = Cell::new(payload, refs).unwrap();
         let trie = Trie::from_cell(root, 1).unwrap();
         let mut resolver = MapResolver {

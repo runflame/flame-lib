@@ -15,15 +15,15 @@ fn golden_consensus_hashes() {
     let samples = [
         (
             vec![header()],
-            "881bb76904e627c9c79c0a525987f072024033dc78d45743df418b4e601dd62c",
+            "bbdc11ab33c50d53c003b29031345bea4082ad79150e32c854c1f7224f3333c9",
         ),
         (
             vec![header(), TxEntry::Data(vec![1, 2, 3])],
-            "d78b7ff69a8c3f308d1c347460c802f1ad39aad093e54e3f9d7a96bbdb09de84",
+            "984221dd9f0f7790f9d930310e082b87169cba1ca9946ce695850925c49b0d98",
         ),
         (
             vec![header(), TxEntry::Fee(1000)],
-            "191ca034b9a0acd11e92f87accdff54fef6b0d631e81e1d4fc123cfdc3c810f5",
+            "73b3bf8b22b057d6dacd6644300fa86d52f5a7da4f635f88f9b1a7300ef744e9",
         ),
         (
             vec![
@@ -33,7 +33,7 @@ fn golden_consensus_hashes() {
                     state: Value::Scalar(Scalar::from(42u64)),
                 },
             ],
-            "f1ee34ac75a5c37e528ca38cd498860a5aac7c4352dd2d94ecce849121963ebc",
+            "aecd677b8e5e59c3e5dc5bbe3ab0133c9d4ccc000291eb3730c3f15374fb55f8",
         ),
         (
             vec![
@@ -43,7 +43,7 @@ fn golden_consensus_hashes() {
                     code: vec![0x1d],
                 },
             ],
-            "864ce848ec493fe3df21e8b765be7613a65b0f07828bd1dc89c36c24eb25e8f0",
+            "9960bca42b13cba109408f33c4e43040e8ea95a0653d56d97b9235bbfc76b8f7",
         ),
         (
             vec![
@@ -53,7 +53,7 @@ fn golden_consensus_hashes() {
                     code: vec![0x1d],
                 },
             ],
-            "cda8173e68708ad6c830610128d6b329e920b111ea35127df580ed443053791d",
+            "0ad321a9edfe0f1ac5ba625f879636f47f2d4ef981984a1dcaae0dc5dc87b50a",
         ),
     ];
     for (entries, expected) in samples {
@@ -64,15 +64,15 @@ fn golden_consensus_hashes() {
     }
     assert_eq!(
         hex(&state_root(&Value::Scalar(Scalar::from(42u64)))),
-        "4377380d51c730f99228f59486cdd68bfcc79ab9281fc80c249bb8478984ea35"
+        "228e117e651446f12d17e89a542ac6b5af34a88c3cc1fd1e496dfdd94b0cabcf"
     );
     assert_eq!(
         hex(&code_root(&[0x1d])),
-        "9bce55aad1742ba6593542c4e6f8162568c1f7c211e7c46d6ad29542f9150a5c"
+        "0eb1b652895c5e73d79a53885b13cbe62ca1c79d4152a5ddd4b59bc798076fca"
     );
     assert_eq!(
         hex(&ActorID::Constructor(vec![1, 2, 3]).to_hash()),
-        "2ce7935d93d22e90e74c4e780d5fcf361607b431fbb1f8b217dc6fea5da9baff"
+        "e461d3fc97418e23296c184677afb7db33e77234c3bdaf1e8d09aa5c6d28cc34"
     );
     let contract = Contract::new(
         Predicate::opaque(CompressedRistretto([0x77; 32])),
@@ -82,7 +82,7 @@ fn golden_consensus_hashes() {
     .unwrap();
     assert_eq!(
         hex(&contract.id()),
-        "5b4cd468f4a5c19949c7791ecde65394b785b909345195928374114044d078f0"
+        "64627d3704e75e34c296d2718ccb37724cbaf979c766fa06128cb9d717f09ba9"
     );
     assert_eq!(
         hex(TxID::from_log(&[
@@ -91,7 +91,7 @@ fn golden_consensus_hashes() {
             TxEntry::Output(contract)
         ])
         .as_bytes()),
-        "9773ed29353f6b97cce5f516a03aa471c798a9c88f6b58664721e9b205301c2f"
+        "5412d3b07ac33d69caddde19f517fe5cb32772b26348fa6328e81c9af3e50827"
     );
     assert_ne!(
         TxID::from_log(&[header(), TxEntry::Data(vec![1]), TxEntry::Fee(7)]),
@@ -100,14 +100,25 @@ fn golden_consensus_hashes() {
 }
 
 /// A raw record writer independent of CellBuilder and all type codecs.
-fn record(payload: &[u8], refs: &[[u8; 32]]) -> Vec<u8> {
-    let descriptor = payload.len() as u16 | ((refs.len() as u16) << 13);
+fn record(payload: &[u8], refs: &[([u8; 32], u16)]) -> Vec<u8> {
+    let descriptor = payload.len() as u16 | ((refs.len() as u16) << 12);
     let mut bytes = descriptor.to_le_bytes().to_vec();
     bytes.extend_from_slice(payload);
-    for reference in refs {
-        bytes.extend_from_slice(reference);
+    for (hash, depth) in refs {
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // ordinary level mask
+        bytes.extend_from_slice(hash);
+        bytes.extend_from_slice(&depth.to_le_bytes());
     }
     bytes
+}
+
+/// Independent physical-depth calculation for these fully resident, level-zero fixtures.
+fn depth(cell: &Cell) -> u16 {
+    cell.refs()
+        .iter()
+        .map(|child| depth(child.as_resident().unwrap()) + 1)
+        .max()
+        .unwrap_or(0)
 }
 
 #[test]
@@ -118,13 +129,13 @@ fn golden_string_is_raw_bytes_in_one_cell() {
     assert_eq!(hex(&cell.encode()), "0300616263");
     assert_eq!(
         hex(&cell.id()),
-        "c602df104f2bfde94e05197faa97f07dda1d43d559f0c423f93e9bb9669d24ff"
+        "3da9865b43fa2ec490f78da9db16acd5638704dbce5cc7b3df2e3c7a23addf19"
     );
     let value = Value::String(string).to_cell().unwrap();
-    assert_eq!(value.encode(), record(&[1], &[cell.id()]));
+    assert_eq!(value.encode(), record(&[1], &[(cell.id(), 0)]));
     assert_eq!(
         hex(&value.id()),
-        "d2b64a4e5655f7a299aa1898303e2e9024569783fe55527f38cc5624a63d8f0b"
+        "9148045685ff8f24d5a306e327717912730bd3a741306ab3affc59d61c55db93"
     );
 }
 
@@ -235,7 +246,7 @@ fn golden_txlog_wire_encoding() {
         };
         assert_eq!(
             entry.to_cell().unwrap().encode(),
-            record(&payload, &[child])
+            record(&payload, &[(child, 0)])
         );
     }
     let contract = fixture_contract();
@@ -244,12 +255,15 @@ fn golden_txlog_wire_encoding() {
             .to_cell()
             .unwrap()
             .encode(),
-        record(&[4], &[contract.id()])
+        record(
+            &[4],
+            &[(contract.id(), depth(&contract.to_cell().unwrap()))]
+        )
     );
     let message = dummy_message(50);
     assert_eq!(
         TxEntry::Send(message.clone()).to_cell().unwrap().encode(),
-        record(&[11], &[message.to_cell().unwrap().id()])
+        record(&[11], &[(message.to_cell().unwrap().id(), 1)])
     );
 }
 

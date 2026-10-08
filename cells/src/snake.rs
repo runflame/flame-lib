@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use crate::{
-    BagOfCells, Cell, CellBuilder, CellError, CellRef, CellResolver, CellSlice, GasMeter,
-    MAX_CELL_PAYLOAD, MAX_CELL_REFS,
+    BagOfCells, Cell, CellBuilder, CellCommitment, CellError, CellRef, CellResolver, CellSlice,
+    GasMeter, MAX_CELL_PAYLOAD, MAX_CELL_REFS,
 };
+
+const INLINE: usize = MAX_CELL_PAYLOAD - 4;
 
 fn root(length: u32, inline: usize, refs: Vec<CellRef>) -> Cell {
     let mut payload = length.to_le_bytes().to_vec();
@@ -15,18 +17,28 @@ fn child(length: usize, refs: Vec<CellRef>) -> CellRef {
     CellRef::resident(Cell::new(vec![0; length], refs).unwrap())
 }
 
+fn unloaded(id: crate::CellID) -> CellRef {
+    CellRef::Unloaded(Arc::new(CellCommitment::new(0, vec![id], vec![0]).unwrap()))
+}
+
 #[test]
 fn canonical_boundaries_round_trip() {
     for (length, segments) in [
         (0, vec![4]),
         (1, vec![5]),
-        (8186, vec![8190]),
-        (8187, vec![8191]),
-        (8188, vec![8191, 1]),
-        (8191, vec![8191, 4]),
-        (8192, vec![8191, 5]),
-        (16378, vec![8191, 8191]),
-        (16379, vec![8191, 8191, 1]),
+        (INLINE - 1, vec![MAX_CELL_PAYLOAD - 1]),
+        (INLINE, vec![MAX_CELL_PAYLOAD]),
+        (INLINE + 1, vec![MAX_CELL_PAYLOAD, 1]),
+        (MAX_CELL_PAYLOAD, vec![MAX_CELL_PAYLOAD, 4]),
+        (MAX_CELL_PAYLOAD + 1, vec![MAX_CELL_PAYLOAD, 5]),
+        (
+            INLINE + MAX_CELL_PAYLOAD,
+            vec![MAX_CELL_PAYLOAD, MAX_CELL_PAYLOAD],
+        ),
+        (
+            INLINE + MAX_CELL_PAYLOAD + 1,
+            vec![MAX_CELL_PAYLOAD, MAX_CELL_PAYLOAD, 1],
+        ),
     ] {
         let bytes: Vec<_> = (0..length).map(|i| i as u8).collect();
         let mut builder = CellBuilder::new();
@@ -86,7 +98,7 @@ fn inline_strings_allow_later_payload_and_do_not_consume_refs() {
     builder.store_snake(b"hello").unwrap();
     builder.store_u32(0x12345678).unwrap();
     builder.store_snake(b"world").unwrap();
-    let later = CellRef::pruned([7; 32]);
+    let later = unloaded([7; 32]);
     builder.store_ref(later.clone()).unwrap();
     let cell = builder.build();
     let mut slice = CellSlice::new(&cell);
@@ -97,9 +109,9 @@ fn inline_strings_allow_later_payload_and_do_not_consume_refs() {
     assert_eq!(slice.load_ref().unwrap().id(), later.id());
     slice.finish().unwrap();
 
-    let cell = root(8187, 8187, vec![later.clone()]);
+    let cell = root(INLINE as u32, INLINE, vec![later.clone()]);
     let mut slice = CellSlice::new(&cell);
-    assert_eq!(slice.load_snake(&mut (), 8187).unwrap().len(), 8187);
+    assert_eq!(slice.load_snake(&mut (), INLINE).unwrap().len(), INLINE);
     assert_eq!(slice.load_ref().unwrap().id(), later.id());
     slice.finish().unwrap();
 }
@@ -140,15 +152,25 @@ fn capacity_errors_leave_the_builder_unchanged() {
 #[test]
 fn noncanonical_roots_and_continuations_are_rejected_atomically() {
     let tail = child(1, vec![]);
+    let single_tail = (INLINE + 1) as u32;
+    let two_tails = (INLINE + MAX_CELL_PAYLOAD + 1) as u32;
     let malformed = [
         root(2, 1, vec![tail.clone()]), // Short parent cannot be crossed.
         root(1, 0, vec![]),
-        root(8188, 8187, vec![child(0, vec![])]), // Truncated tail.
-        root(8188, 8187, vec![child(2, vec![])]), // Overlong tail.
-        root(8188, 8187, vec![child(1, vec![tail.clone()])]),
-        root(16379, 8187, vec![child(8190, vec![tail.clone()])]),
-        root(16379, 8187, vec![child(8191, vec![])]),
-        root(16379, 8187, vec![child(8191, vec![tail.clone(), tail])]),
+        root(single_tail, INLINE, vec![child(0, vec![])]), // Truncated tail.
+        root(single_tail, INLINE, vec![child(2, vec![])]), // Overlong tail.
+        root(single_tail, INLINE, vec![child(1, vec![tail.clone()])]),
+        root(
+            two_tails,
+            INLINE,
+            vec![child(MAX_CELL_PAYLOAD - 1, vec![tail.clone()])],
+        ),
+        root(two_tails, INLINE, vec![child(MAX_CELL_PAYLOAD, vec![])]),
+        root(
+            two_tails,
+            INLINE,
+            vec![child(MAX_CELL_PAYLOAD, vec![tail.clone(), tail])],
+        ),
     ];
     for cell in malformed {
         let mut slice = CellSlice::new(&cell);
@@ -169,10 +191,10 @@ fn noncanonical_roots_and_continuations_are_rejected_atomically() {
         );
         assert_eq!(slice.remaining_bytes(), prefix_bytes);
     }
-    let cell = root(8188, 8187, vec![]);
+    let cell = root(single_tail, INLINE, vec![]);
     let mut slice = CellSlice::new(&cell);
     assert_eq!(
-        slice.load_snake(&mut (), 8188),
+        slice.load_snake(&mut (), INLINE + 1),
         Err(CellError::InsufficientReferences)
     );
     assert_eq!(slice.remaining_bytes(), MAX_CELL_PAYLOAD);
@@ -188,21 +210,21 @@ fn length_and_resolution_failures_preserve_the_cursor() {
         }
     }
     let missing_id = [7; 32];
-    let cell = root(8188, 8187, vec![CellRef::pruned(missing_id)]);
+    let cell = root((INLINE + 1) as u32, INLINE, vec![unloaded(missing_id)]);
     let mut slice = CellSlice::new(&cell);
     let mut budget = Budget(0);
     assert_eq!(
-        slice.load_snake(&mut budget, 8187),
+        slice.load_snake(&mut budget, INLINE),
         Err(CellError::LimitExceeded)
     );
     assert_eq!(budget.0, 0);
     assert_eq!(
-        slice.load_snake(&mut budget, 8188),
+        slice.load_snake(&mut budget, INLINE + 1),
         Err(CellError::ResourceExhausted)
     );
     assert_eq!(budget.0, 1);
     assert_eq!(
-        slice.load_snake(&mut (), 8188),
+        slice.load_snake(&mut (), INLINE + 1),
         Err(CellError::MissingCell(missing_id))
     );
     assert_eq!(slice.remaining_bytes(), MAX_CELL_PAYLOAD);
@@ -216,7 +238,7 @@ fn length_and_resolution_failures_preserve_the_cursor() {
     }
     let wrong = Arc::new(Cell::new(vec![0], vec![]).unwrap());
     assert_eq!(
-        slice.load_snake(&mut Wrong(wrong.clone()), 8188),
+        slice.load_snake(&mut Wrong(wrong.clone()), INLINE + 1),
         Err(CellError::CellHashMismatch {
             expected: missing_id,
             actual: wrong.id()
@@ -233,23 +255,23 @@ fn length_and_resolution_failures_preserve_the_cursor() {
 
     // Roll back to the current cursor, not the beginning of its parent Cell.
     let mut payload = vec![0xaa];
-    payload.extend_from_slice(&8187u32.to_le_bytes());
+    payload.extend_from_slice(&(INLINE as u32).to_le_bytes());
     payload.resize(MAX_CELL_PAYLOAD, 0);
-    let cell = Cell::new(payload, vec![child(0, vec![]), CellRef::pruned(missing_id)]).unwrap();
+    let cell = Cell::new(payload, vec![child(0, vec![]), unloaded(missing_id)]).unwrap();
     let mut slice = CellSlice::new(&cell);
     assert_eq!(slice.load_u8().unwrap(), 0xaa);
     slice.load_ref().unwrap();
     assert_eq!(
-        slice.load_snake(&mut budget, 8187),
+        slice.load_snake(&mut budget, INLINE),
         Err(CellError::ResourceExhausted)
     );
     assert_eq!(slice.remaining_bytes(), MAX_CELL_PAYLOAD - 1);
     assert_eq!(slice.remaining_refs(), 1);
-    assert_eq!(slice.load_u32().unwrap(), 8187);
+    assert_eq!(slice.load_u32().unwrap(), INLINE as u32);
 }
 
 #[test]
-fn boc_round_trip_resolves_pruned_continuations() {
+fn boc_round_trip_resolves_unloaded_continuations() {
     struct FreeGas;
     impl GasMeter for FreeGas {
         fn charge(&mut self, _: u64) -> Result<(), CellError> {
@@ -263,8 +285,22 @@ fn boc_round_trip_resolves_pruned_continuations() {
     let encoded = BagOfCells::collect(cell.clone()).unwrap().encode();
     let mut bag = BagOfCells::decode(&encoded, encoded.len(), &mut FreeGas).unwrap();
     let detached = bag.get(&cell.id()).unwrap();
-    assert!(detached.refs().iter().all(CellRef::is_pruned));
+    assert!(detached.refs().iter().all(CellRef::is_unloaded));
     let mut slice = CellSlice::new(&detached);
     assert_eq!(slice.load_snake(&mut bag, bytes.len()).unwrap(), bytes);
     slice.finish().unwrap();
+}
+
+#[test]
+fn explicit_pruning_records_are_not_snake_continuations() {
+    let continuation = Cell::from_pruned(1, vec![[7; 32]], vec![0]).unwrap();
+    let length = INLINE + continuation.payload().len();
+    let cell = root(length as u32, INLINE, vec![continuation.into()]);
+    let mut slice = CellSlice::new(&cell);
+    assert_eq!(
+        slice.load_snake(&mut (), length),
+        Err(CellError::PrunedCell)
+    );
+    assert_eq!(slice.remaining_bytes(), MAX_CELL_PAYLOAD);
+    assert_eq!(slice.remaining_refs(), 1);
 }

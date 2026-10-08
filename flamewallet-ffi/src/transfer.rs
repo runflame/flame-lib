@@ -47,7 +47,7 @@ pub struct TransferOutput {
     /// `None` for flames.
     pub flavor: Option<Vec<u8>>,
     /// Sealed into the output's note with the amount; only the recipient
-    /// reads it. At most 8102 bytes; empty for none.
+    /// reads it. At most 4006 bytes; empty for none.
     pub memo: Vec<u8>,
 }
 

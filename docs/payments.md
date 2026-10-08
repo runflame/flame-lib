@@ -224,8 +224,8 @@ The note is:
 | 89 | N | memo | encrypted |
 
 A note is `89 + N` bytes, and the memo's length is public: `N` is the note's
-length minus 89. The memo MUST be at most 8102 bytes. The note travels as a
-single VM `String`, whose limit is one Cell payload, 8191 bytes
+length minus 89. The memo MUST be at most 4006 bytes (4095 minus 89). The note
+travels as a single VM `String`, whose limit is one Cell payload, 4095 bytes
 (`String::MAX_LEN` in `flamevm/src/string.rs`, which flamevm marks as
 temporary).
 

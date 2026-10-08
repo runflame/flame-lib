@@ -346,7 +346,10 @@ mod tests {
         let large = Value::Dict(Dict::from_values(vec![Value::String(String::from(
             vec![7; MAX_CELL_PAYLOAD],
         ))]));
-        assert!(large.encoding_gas().unwrap() > small.encoding_gas().unwrap() + 16_000);
+        assert!(
+            large.encoding_gas().unwrap()
+                > small.encoding_gas().unwrap() + 2 * MAX_CELL_PAYLOAD as u64
+        );
         let mut nested = Value::Scalar(Scalar::ONE);
         for _ in 0..=MAX_VALUE_DEPTH {
             nested = Value::Dict(Dict::from_values(vec![nested]));
@@ -413,7 +416,9 @@ mod tests {
         ));
 
         for reference in [
-            CellRef::pruned([1; 32]),
+            CellRef::resident(Cell::new(vec![1], vec![]).unwrap())
+                .to_unloaded()
+                .unwrap(),
             CellRef::resident(Cell::new(vec![], vec![]).unwrap()),
         ] {
             let cell = Cell::new(vec![0xaa], vec![reference]).unwrap();
@@ -440,7 +445,7 @@ mod tests {
         assert_eq!(cell.refs().len(), 1);
         let mut bag = BagOfCells::collect(Arc::new(cell.clone())).unwrap();
         assert_eq!(
-            read_blob(&CellRef::pruned(cell.id()), &mut bag, bytes.len()).unwrap(),
+            read_blob(&CellRef::unresolved(cell.id()), &mut bag, bytes.len()).unwrap(),
             bytes
         );
     }

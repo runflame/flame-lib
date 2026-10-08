@@ -320,16 +320,9 @@ pub fn signature(
     Ok((signature, unsigned.log().txid()))
 }
 
-/// A field-by-field copy of `tx`, which is not `Clone`.
+/// A copy of `tx`, retaining its full effect-root commitment.
 pub fn copy_tx(tx: &ExternalTx) -> ExternalTx {
-    ExternalTx {
-        header: tx.header,
-        script: tx.script.clone(),
-        signature: tx.signature,
-        proof: tx.proof.clone(),
-        witnesses: tx.witnesses.clone(),
-        txid: tx.txid,
-    }
+    tx.clone()
 }
 
 /// One built shape and everything the benchmarks read from it.

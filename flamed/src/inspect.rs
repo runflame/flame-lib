@@ -19,7 +19,7 @@ pub fn contract(id: ContractId, mut result: ContractResult) -> Result<ContractRe
     if envelope.root() != id.0 {
         return Err(CellError::InvalidFormat);
     }
-    let root = envelope.resolve(&CellRef::pruned(envelope.root()))?;
+    let root = envelope.resolve(&CellRef::unresolved(envelope.root()))?;
     let (contract, decoded) = match Contract::from_cell(&root, &mut envelope) {
         Ok(contract) => {
             let decoded = render_value(contract.payload());
@@ -46,7 +46,7 @@ pub fn actor(mut result: ActorResult) -> ActorResult {
     let decoded = result.state.as_ref().map(|bytes| {
         let mut gas = (bytes.0.len() as u64).saturating_mul(4);
         let mut envelope = CellEnvelope::decode(&bytes.0, bytes.0.len(), &mut gas)?;
-        let reference = CellRef::pruned(envelope.root());
+        let reference = CellRef::unresolved(envelope.root());
         match envelope
             .resolve(&reference)
             .and_then(|cell| Value::from_cell(&cell, &mut envelope))
@@ -414,7 +414,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn archived_effects_preserve_available_cells_and_pruned_references() {
+    fn archived_effects_preserve_available_cells_and_unloaded_references() {
         let source = Dict::from_values(vec![
             Value::Scalar(Scalar::from(42u64)),
             Value::Scalar(Scalar::from(43u64)),
@@ -428,7 +428,7 @@ mod tests {
         let mut builder = CellBuilder::new();
         builder.store_bytes(trie.payload()).unwrap();
         builder
-            .store_ref(CellRef::pruned(trie.refs()[0].id()))
+            .store_ref(trie.refs()[0].to_unloaded().unwrap())
             .unwrap();
         builder.store_ref(trie.refs()[1].clone()).unwrap();
         let partial_trie = builder.build();
@@ -509,14 +509,17 @@ mod tests {
 
     #[test]
     fn absent_state_root_stays_a_hash_reference() {
-        let state = [0xaa; 32];
+        let state_ref = CellRef::resident(Value::Scalar(Scalar::ONE).to_cell().unwrap())
+            .to_unloaded()
+            .unwrap();
+        let state = state_ref.id();
         let mut builder = CellBuilder::new();
         builder
             .store_u8(TxEntry::TAG_ACTOR_SAVE)
             .unwrap()
             .store_bytes(&[0x11; 32])
             .unwrap()
-            .store_ref(CellRef::pruned(state))
+            .store_ref(state_ref)
             .unwrap();
         let mut trie = Trie::new(8).unwrap();
         trie.insert_ref(

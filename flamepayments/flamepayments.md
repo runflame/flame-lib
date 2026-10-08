@@ -113,7 +113,7 @@ follows it and does not restate it.
   `r` from the caller's generator through a Merlin transcript that binds the
   transfer's header, inputs, fee and outputs and is rekeyed with the inputs'
   signing keys. A weak generator then still gives different transfers
-  different `r`. A memo longer than `MEMO_MAX`, 8102 bytes, is
+  different `r`. A memo longer than `MEMO_MAX`, 4006 bytes, is
   `BuilderError::MemoTooLong`.
 - `outputs_with_notes(log)` pairs every output of a log with the entry
   right after it.

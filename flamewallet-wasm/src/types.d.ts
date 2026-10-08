@@ -60,7 +60,7 @@ export interface TransferOutput {
   qty: bigint;
   /** Absent for flames. */
   flavor?: Uint8Array;
-  /** Sealed into the note for the recipient alone; at most 8102 bytes. */
+  /** Sealed into the note for the recipient alone; at most 4006 bytes. */
   memo?: Uint8Array;
 }
 

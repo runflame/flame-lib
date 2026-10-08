@@ -126,8 +126,8 @@ A block has a header and an ordered body of external transactions. Internal
 transactions are execution records derived by the state machine; they are not
 independently submitted or selected by a proposer.
 
-The header is a canonical Cell, identified by plain SHA256 of its unambiguous
-encoding. It commits to:
+The header is a canonical Cell, identified by its factual CellID using the
+[Cell hashing rules](cells.md#identity). It commits to:
 
 - protocol/network version, parent, and height;
 - the authenticated core-block context;

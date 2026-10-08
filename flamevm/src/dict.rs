@@ -14,7 +14,7 @@ use crate::Value;
 /// The sole ordered index is a [`Trie`], using big-endian scalar paths so its
 /// bytewise order agrees with unsigned scalar order. A typed-value cache keeps
 /// live witnesses and nonportable values that cannot be serialized. Unaccessed
-/// authenticated leaves may stay pruned; resolver-aware operations load them.
+/// authenticated leaves may stay unloaded; resolver-aware operations load them.
 ///
 /// Dicts are **never VM-copyable** (avoids variable gas for
 /// `dup`/`getdup` and the linear-leak hazard). They
@@ -83,7 +83,7 @@ impl Dict {
     }
 
     /// Resident path work performed when the encoder installs cached values.
-    /// Values themselves are priced separately; untouched pruned branches need
+    /// Values themselves are priced separately; untouched unloaded branches need
     /// no work. Every cached key must already have a resident authenticated path.
     pub(crate) fn encoding_path_gas(&self) -> Result<u64, CellError> {
         struct Meter(u64);
@@ -126,7 +126,7 @@ impl Dict {
     /// capability flags from the new value.
     pub fn insert(&mut self, key: Scalar, value: Value) -> Option<Value> {
         self.insert_resolved(key, value, &mut ())
-            .expect("use insert_resolved when Dict paths may be pruned")
+            .expect("use insert_resolved when Dict paths may be unloaded")
     }
 
     /// Inserts a key-value pair, failing if the key is already occupied.
@@ -136,33 +136,33 @@ impl Dict {
     #[allow(clippy::result_large_err)]
     pub fn insert_strict(&mut self, key: Scalar, value: Value) -> Result<(), Value> {
         self.insert_strict_resolved(key, value, &mut ())
-            .expect("use insert_strict_resolved when Dict paths may be pruned")
+            .expect("use insert_strict_resolved when Dict paths may be unloaded")
     }
 
     /// Removes a key and returns its value if present.
     /// Does **not** unset the sticky flags — see the struct doc-comment.
     pub fn remove(&mut self, key: &Scalar) -> Option<Value> {
         self.remove_resolved(key, &mut ())
-            .expect("use remove_resolved when Dict paths may be pruned")
+            .expect("use remove_resolved when Dict paths may be unloaded")
     }
 
     /// Smallest key in the dict, or `None` if empty.
     pub fn first_key(&self) -> Option<Scalar> {
         self.first_key_resolved(&mut ())
-            .expect("use first_key_resolved for pruned Dicts")
+            .expect("use first_key_resolved for unloaded Dicts")
     }
 
     /// Largest key in the dict, or `None` if empty.
     pub fn last_key(&self) -> Option<Scalar> {
         self.last_key_resolved(&mut ())
-            .expect("use last_key_resolved for pruned Dicts")
+            .expect("use last_key_resolved for unloaded Dicts")
     }
 
     /// Smallest key strictly greater than `k`, or `None` if no such key
     /// exists.
     pub fn next_key_after(&self, k: &Scalar) -> Option<Scalar> {
         self.next_key_after_resolved(k, &mut ())
-            .expect("use next_key_after_resolved for pruned Dicts")
+            .expect("use next_key_after_resolved for unloaded Dicts")
     }
 
     /// Loads and validates one value without copying its VM ownership.
@@ -533,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_and_pruned_values_have_identical_logical_access_costs() {
+    fn cached_and_unloaded_values_have_identical_logical_access_costs() {
         struct Meter {
             cells: BagOfCells,
             gas: u64,
@@ -555,10 +555,10 @@ mod tests {
         let bag = BagOfCells::collect(root.clone()).unwrap();
         let detached = bag.get(&root.id()).unwrap();
         let mut slice = CellSlice::new(&detached);
-        let mut pruned = Dict::decode_trusted(&mut slice, &mut ()).unwrap();
+        let mut unloaded = Dict::decode_trusted(&mut slice, &mut ()).unwrap();
         slice.finish().unwrap();
         let mut costs = Vec::new();
-        for dictionary in [&mut original, &mut pruned] {
+        for dictionary in [&mut original, &mut unloaded] {
             for _ in 0..2 {
                 let mut meter = Meter {
                     cells: bag.clone(),
@@ -805,8 +805,8 @@ mod tests {
         }
         let full = original.to_cell().unwrap();
         let mut bag = BagOfCells::collect(Arc::new(full.clone())).unwrap();
-        let pruned = Cell::decode_exact(&full.encode()).unwrap();
-        let mut lazy = Dict::from_trusted_cell(&pruned, &mut ()).unwrap();
+        let unloaded = Cell::decode_exact(&full.encode()).unwrap();
+        let mut lazy = Dict::from_trusted_cell(&unloaded, &mut ()).unwrap();
         assert!(lazy.values.is_empty());
         assert_eq!(lazy.to_cell().unwrap().id(), full.id());
         assert!(matches!(
@@ -837,7 +837,7 @@ mod tests {
         let mut bag = BagOfCells::collect(Arc::new(full.clone())).unwrap();
         let root = full.refs()[0].as_resident().unwrap();
         let mut refs = root.refs().to_vec();
-        refs[1] = refs[1].to_pruned();
+        refs[1] = refs[1].to_unloaded().unwrap();
         let partial_root = Cell::new(root.payload().to_vec(), refs).unwrap();
         let partial = Cell::new(
             full.payload().to_vec(),
@@ -867,8 +867,8 @@ mod tests {
     #[test]
     fn failed_insertion_returns_supplied_debt_without_changing_dictionary() {
         let full = Dict::from_values(vec![v(1)]).to_cell().unwrap();
-        let pruned = Cell::decode_exact(&full.encode()).unwrap();
-        let mut dict = Dict::from_trusted_cell(&pruned, &mut ()).unwrap();
+        let unloaded = Cell::decode_exact(&full.encode()).unwrap();
+        let mut dict = Dict::from_trusted_cell(&unloaded, &mut ()).unwrap();
         let (error, returned) = dict
             .insert_resolved(Scalar::ONE, token(-7), &mut ())
             .unwrap_err();

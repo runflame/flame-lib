@@ -1,15 +1,15 @@
 # Flame Cells
 
-Cell is the data encoding format underpinning all data structures in Flame. Each cell is a data structure that can carry 0 to 8191 bytes of binary data (called "payload") and 0 to 4 references to other cells. Nested cells form an immutable directed acyclic graph (DAG).
+Cell is the data encoding format underpinning all data structures in Flame. Each ordinary cell is a data structure that can carry 0 to 4095 bytes of binary data (called "payload") and 0 to 4 references to other cells. Nested cells form an immutable directed acyclic graph (DAG).
 
 Design of cells in Flame is heavily inspired by cells used within TON blockchain designed by Nikolai Durov, with some important differences:
 
 1. Flame Cells store whole bytes instead of bits.
-2. Payload maximum size is considerably larger (8191 bytes vs. 1023 bits).
-3. Flame Cells do not store level information or depth.
+2. Payload maximum size is considerably larger (4095 bytes vs. 1023 bits).
+3. Flame Cells use TON-style significant hash levels and depths, with a 15-bit level mask and two-byte little-endian depths.
 4. Cells are not first-class types exposed in the FlameVM, but instead underpin Strings, Dicts, Contracts, Actors, and canonical encodings.
-5. FlameVM permits transparent loading of pruned branches from an externally provided data source. This is used in decoding of Contracts, pruned Actors, Taproot branches and compressed Dicts.
-6. Bag-of-Cells (BoC) format is much simpler.
+5. FlameVM permits transparent loading of unloaded bodies from an externally provided data source. This is distinct from an explicit pruning record: virtualization cannot recover the omitted body.
+6. Bag-of-Cells (BoC) format is much simpler. Only ordinary and pruned Cells exist; there are no MerkleProof, MerkleUpdate, or library-reference wrappers.
 
 ## Status
 
@@ -18,10 +18,20 @@ unified Dict, witness-backed predicate and actor reads, and per-external
 execution closure are implemented. Exact typed
 layouts are specified in [encoding.md](encoding.md). The architecture below
 also describes constraints on future disk adapters and explicit partial
-pruning APIs; those adapters/opcodes are not implemented.
+pruning VM opcodes; those adapters/opcodes are not implemented.
 `docs/compression.md` records the motivation and broader experiments.
 
-Runtime `String` currently contains at most 8191 bytes. Its expected encoding
+The crate implements explicit pruning, significant-level hashing, and
+read-only `CellView` virtualization. VM codecs continue using physical Cells
+and the existing execution-BoC commitment; they do not automatically virtualize
+Taproot roots or accept virtual views as typed values. Selecting logical versus
+factual roots in those higher-level protocols is a separate integration step.
+
+This format is consensus-breaking: descriptors, reference depths/summaries,
+payload limits, and hash preimages change downstream identities and require
+coordinated activation, not mixed decoding of the old and new formats.
+
+Runtime `String` currently contains at most 4095 bytes. Its expected encoding
 is one Cell with those raw bytes and no references or length prefix; the Cell
 descriptor already supplies the length. Scripts, cryptographic proofs, and
 other potentially longer protocol byte fields still use Snake encoding.
@@ -56,8 +66,8 @@ to rationale and cross-references as this plan lands.
 
 1. One small byte-granular primitive underlies canonical encoding, object
    identity, persistent graphs, authenticated pruning, and witness transport.
-2. A Cell has the same identity whether its descendants are loaded, stored, or
-   pruned.
+2. Residency does not affect identity. Explicit proof pruning changes factual
+   identity while preserving selected lower-level commitments.
 3. Missing data is resolved only from consensus-visible sources. A node's
    private cache or network access must never change execution.
 4. External transactions commit the exact BoC made available to their entire
@@ -65,8 +75,9 @@ to rationale and cross-references as this plan lands.
 5. Cells remain a serialization mechanism. FlameVM, not the `cells` crate,
    decides whether decoded values are portable, linear, valid in a Contract,
    or valid in actor state.
-6. The first format stays deliberately small. It has no TON levels, depths,
-   exotic cell kinds, cache bits, optional indexes, or checksums.
+6. Keep only ordinary and pruned Cell kinds, with absolute-level virtualization.
+   There are no proof/update/library wrappers, cache bits, optional indexes,
+   checksums, or per-type versions.
 
 ## Architecture
 
@@ -74,7 +85,7 @@ The dependency direction is:
 
 ```text
 cells
-  Cell, CellID, CellRef
+  Cell, CellID, CellRef, CellCommitment, CellView
   CellBuilder, CellSlice, CellEncode, CellDecode
   BagOfCells
   Trie
@@ -110,44 +121,64 @@ pub type CellID = [u8; 32];
 
 pub enum CellRef {
     Resident(Arc<Cell>),
-    Pruned(CellID),
+    Unloaded(Arc<CellCommitment>),
+    Unresolved(CellID),
 }
 
 pub struct Cell {
-    id: CellID,
-    payload: Box<[u8]>,
-    refs: Box<[CellRef]>,
+    data: Arc<CellData>,
 }
 ```
 
-`Resident` and `Pruned` are runtime representations of the same reference.
-They are not different Cell kinds and do not hash differently. `Pruned` means
-that the child body is not attached to this in-memory object; whether it is
-available in actor storage or the transaction BoC is determined by the
-execution context.
+There are two physical Cell kinds:
 
-The term is scoped rather than global: pruning is relative to a particular
-stored graph or BoC. A body can be absent from actor storage but present in the
-current transaction BoC.
+- **Ordinary:** payload and ordered references.
+- **Pruned:** no references; retained lower-level hashes and depths stand in
+  for an omitted subtree. The pruning record has its own factual hash.
 
-Cells are immutable after construction. Resolving a `Pruned` reference returns
-an `Arc<Cell>` and may populate an execution-local cache, but it does not mutate
-the parent Cell or change persistent availability. Explicit pruning and
-persistent restoration build a new stored graph/frontier.
+`Resident` and `Unloaded` describe physical availability, not these kinds.
+Both retain the same `CellCommitment`: a level mask, significant hashes, and
+matching depths, including the highest factual pair. Detaching a child keeps
+this summary and does not change any ancestor hash. A reference to a pruned
+Cell can itself be resident or unloaded.
+
+`Unresolved(id)` is only a lookup handle. It has no depth or level metadata and
+cannot be stored in a Cell or Builder. Resolve it first, then store a resident
+reference or obtain `to_unloaded()`. Inventing depth zero for a bare ID would
+make parent identity depend on whether the child happened to be loaded.
+
+Cells are immutable and `Cell::clone()` shares `CellData`; it does not copy the
+payload or descendants. Resolving an unloaded reference returns an `Arc<Cell>`
+and validates its complete summary. It does not mutate a parent, make an
+explicitly pruned subtree available, or persist a fetched body into actor
+storage. `into_parts()` reuses the payload/reference allocations when the body
+is uniquely owned, otherwise it copies the bounded payload and reference
+handles; it is not always a constant-time unwrap of shared storage.
 
 The core immutable API is:
 
 ```rust
 impl CellRef {
     pub fn resident(cell: impl Into<Arc<Cell>>) -> Self;
-    pub fn pruned(id: CellID) -> Self;
+    pub fn unresolved(id: CellID) -> Self;
+    pub fn to_unloaded(&self) -> Result<Self, CellError>;
     pub fn id(&self) -> CellID;
+    pub fn commitment(&self) -> Result<&CellCommitment, CellError>;
     pub fn as_resident(&self) -> Option<&Cell>;
 }
 
 impl Cell {
     pub fn new(payload: Vec<u8>, refs: Vec<CellRef>) -> Result<Self, CellError>;
+    pub fn from_pruned(mask: u16, hashes: Vec<CellID>, depths: Vec<u16>)
+        -> Result<Self, CellError>;
     pub fn id(&self) -> CellID;
+    pub fn level_mask(&self) -> u16;
+    pub fn level(&self) -> u8;
+    pub fn hash(&self, level: u8) -> Result<CellID, CellError>;
+    pub fn depth(&self, level: u8) -> Result<u16, CellError>;
+    pub fn prune(&self, level: u8) -> Result<Self, CellError>;
+    pub fn virtualize(&self, level: u8) -> Result<CellView, CellError>;
+    pub fn is_pruned(&self) -> bool;
     pub fn payload(&self) -> &[u8];
     pub fn refs(&self) -> &[CellRef];
     pub fn into_parts(self) -> (Vec<u8>, Vec<CellRef>);
@@ -156,20 +187,28 @@ impl Cell {
 ```
 
 `Cell` and `Arc<Cell>` implement conversion into `CellRef`: `cell.into()`
-creates a resident reference. Moving a `Cell` preserves its payload/reference
-allocations; converting an `Arc<Cell>` reuses that allocation without copying
-the body.
+creates a resident reference. Converting an `Arc<Cell>` reuses that allocation;
+both conversions preserve the shared body without copying its contents.
 
 There is no mutating `hydrate` method. Hydration belongs to the resolver cache,
-while explicit pruning returns/rebuilds a `Pruned` reference.
+while explicit pruning creates a new Cell with a different factual identity.
 
 ### Limits
 
 ```text
-payload length: 0..=8191 bytes
-reference count: 0..=4
-maximum Cell record: 2 + 8191 + 4*32 = 8321 bytes
+ordinary payload length: 0..=4095 bytes
+ordinary reference count: 0..=4
+level mask: 15 bits, levels 0..=15
+depth: 0..=65535, measured in child edges
+pruned Cell: 1..=15 retained hash/depth pairs, no references
+maximum ordinary record: 2 + 4095 + 4*(2 + 16*34) = 6281 bytes
+maximum pruned record: 2 + 15*34 = 512 bytes
 ```
+
+A level-zero child summary is 36 bytes: mask plus one hash and one depth.
+The maximum ordinary record assumes every child has all 16 significant pairs.
+An ordinary parent cannot reference a child whose depth is 65535 at any level:
+adding its edge would overflow. Level nesting and tree depth are independent.
 
 The four references are ordered. Reordering them changes the Cell ID.
 Duplicate references are valid because a type may use the same child in two
@@ -181,40 +220,158 @@ The compact descriptor is:
 
 ```text
 descriptor: u16 little-endian
-  bits  0..12: payload length
-  bits 13..15: reference count
+  bit 15 = 0: ordinary
+    bits 12..14: reference count, 0..4
+    bits  0..11: payload length, 0..4095
+  bit 15 = 1: pruned
+    bits 0..14: nonzero level mask
 
-record:
+ordinary record:
   descriptor                         2 bytes
   payload                            payload_length bytes
-  child CellIDs, in reference order  32 * reference_count bytes
+  child commitment summaries        one per reference, in reference order
+
+each child summary:
+  child level mask                   2 bytes LE, bit 15 must be zero
+  hashes                             32 * (popcount(mask) + 1) bytes
+  depths                             2 * (popcount(mask) + 1) bytes LE
+
+pruned record:
+  descriptor = 0x8000 | mask          2 bytes LE
+  retained hashes                    32 * popcount(mask) bytes
+  retained depths                    2 * popcount(mask) bytes LE
 ```
 
-The descriptor is computed as:
+Ordinary descriptors are computed as:
 
 ```text
-descriptor = payload_length | (reference_count << 13)
+descriptor = payload_length | (reference_count << 12)
 ```
 
-Reference counts 5, 6, and 7 are invalid, even though the descriptor can
-represent them. A record contains child IDs, never child bodies or loading
-metadata, and is therefore self-delimiting.
+Ordinary reference counts 5..7 are invalid; all twelve payload-length bits are
+used. Pruned descriptor `0x8000` is invalid because its mask is zero. All hashes
+precede all depths within each summary or pruning
+record. Depths are little-endian, unlike TON's encoding.
+
+The summaries include every significant pair, including the factual one; a
+pruning record stores only the lower pairs and computes its own factual pair.
+Records are self-delimiting and contain no child bodies, residency flags,
+schema tags, or versions. Ordinary masks are the OR of their child masks and
+are therefore derived rather than repeated in the ordinary descriptor.
+
+This redundancy in wire summaries permits independent record decoding and
+parent hashing before child bodies arrive. If a body is available, BoC
+validation and `resolve_cell` compare the whole summary, not only its final
+ID. Retained hashes/depths are claims until authenticated against the expected
+root; serialization alone does not prove them.
+
+### Significant levels
+
+Level zero always exists. Mask bit `i` marks another significant hash at level
+`i + 1`. A query in a gap uses the preceding significant pair; queries above a
+Cell's highest level, but no higher than 15, use its highest pair.
+
+For example, mask `0b101` has significant levels 0, 1, and 3:
+
+```text
+query level:   0    1    2    3..15
+selected pair: 0    1    1    2
+```
+
+An ordinary Cell derives its mask by OR-ing its children. At each significant
+level its depth is zero if it has no children, otherwise one plus the maximum
+child depth at that level. A pruned Cell retains lower depths; its own highest
+depth is zero because its physical record has no references. A mask is not a
+history of pruning passes: thinning one proof can repeatedly use the same
+level without adding another bit.
 
 ### Identity
 
 ```text
-CellID = SHA256(canonical_cell_record)
+CellID = highest significant hash = cell.hash(cell.level())
 ```
 
-This is one ordinary SHA-256 invocation: no transcript, namespace, prefix,
-double hash, or out-of-band type label. The descriptor and fixed-width child
-IDs make the record unambiguous and self-delimiting. Encoding changes are
-consensus changes; the hash layer has no separate version.
-Consequently identical canonical Cell bytes always have the same ID regardless
-of which higher-level type refers to them.
+**Wire records and hash preimages are different.** Ordinary records carry all
+child summaries; an ordinary hash selects one child pair per level. Do not
+compute an ordinary `CellID` as `SHA256(cell.encode())`, even at level zero.
 
-Child IDs make the identity recursive without making record decoding
-recursive. A parent can be validated before any child body is available.
+For each significant ordinary level `l`, in ascending order:
+
+```text
+applied_mask = mask & ((1 << l) - 1)
+data = original payload at level 0; previous significant hash otherwise
+
+H(l) = SHA256(
+    ordinary_descriptor:u16 LE
+    || applied_mask:u16 LE
+    || data
+    || each child depth(l):u16 LE, in reference order
+    || each child hash(l):32 bytes, in reference order
+)
+```
+
+The ordinary descriptor always encodes the original payload length, even when
+`data` is the previous 32-byte hash. At level zero the applied mask is zero.
+`hash_preimage(l)` exposes the exact bytes for debugging; a gap selects the
+same preimage as its preceding significant level.
+
+A pruned Cell's highest hash is `SHA256(pruned_record)`; lower hashes are its
+retained claims and have no available preimage. Its highest depth is zero.
+There are no transcript domains, extra namespaced prefixes, double hashes, or
+schema versions. The kind/descriptor and applied mask are structural encoding,
+not application-specific hash namespaces. Identical canonical physical Cell
+records have identical IDs regardless of the higher-level type using them.
+
+Residency never changes these hashes. Explicit pruning preserves selected
+lower hashes while changing the factual hash; callers must specify which
+commitment their protocol expects.
+
+### Pruning and virtualization
+
+`cell.prune(level)` replaces a whole subtree with a pruning record preserving
+its commitments through `level - 1`. It accepts levels 1..15 no lower than the
+source's factual level. Its new mask is the source mask truncated below that
+level, with bit `level - 1` set. Retained pairs come from the corresponding
+source levels. To prune selected descendants, rebuild the ordinary ancestors
+with those replacements. Choose one target level for the whole proof:
+
+- Continue thinning a level-1 proof using `prune(1)`; preserve its level-zero
+  target, not the old proof's factual identity.
+- Prove that level-1 proof as factual data using `prune(2)` for new omissions;
+  preserve its level-1 target. Retained old pruning records are unchanged.
+
+`virtualize(level)` creates a cheap, read-only `CellView` capped at the absolute
+level requested. It accepts zero through the current Cell or view level;
+virtualizing an existing view can only lower its cap. It neither decrements
+every node nor resets masks through a wrapper. Child views inherit the cap;
+lower-level children naturally alias their highest pair.
+
+```rust
+let view = cell.virtualize(level)?;
+let logical_id = view.id();
+let payload = view.payload()?;
+let child = view.reference(index, resolver)?;
+```
+
+Views expose checked payload/reference access, not a raw underlying Cell.
+`reference` resolves using the physical factual ID, checks all committed
+pairs, then returns another view with the inherited cap. If a pruning record's
+physical level exceeds the cap, its hash and depth are known but its contents
+are unavailable: payload/reference access returns `PrunedCell`. At its factual
+level that record is inspectable as a pruning record, not as the hidden
+application payload. A physical `Cell::payload()` intentionally exposes raw
+stored bytes for inspection; `CellSlice` rejects pruning records as ordinary
+data. Virtual views have no physical serialization method.
+
+For a transaction containing a level-1 pruned Taproot tree, an outer block proof
+can introduce level-2 omissions. Its level-1 view preserves the transaction's
+factual commitment and leaves the old level-1 pruning records intact. The
+Taproot consumer can separately request level zero. This needs no wrapper
+Cell, but the business protocol must explicitly select the expected level.
+Virtualization never restores an omitted body, and another resolver cannot
+silently substitute the hidden subtree for the pruning record.
+
+### Expected typed encodings
 
 The operation or containing type that reads a Cell already determines which
 decoder to invoke. An ordinary typed root therefore begins directly with its
@@ -272,9 +429,11 @@ impl CellBuilder {
 Integers are little-endian, matching current Flame encodings. Store methods
 check capacity before mutation. The generic `store` checkpoints the two vector
 lengths and restores them on error, so a failed compound write is atomic.
-Writing to a Cell can fail only because the payload or reference capacity is
-exhausted; business validation happens before encoding. Once all stores have
-succeeded, `build` is infallible.
+Writing checks payload/reference capacity, requires complete reference
+metadata, and rejects child depths that would overflow in the new parent.
+Snake construction checks its continuation depth before allocation. These are
+structural checks, not portability or business validation. Once all stores
+have succeeded, `build` is infallible.
 
 Primitive `CellBuilder` stores never spill automatically into another Cell.
 The containing type explicitly chooses `store_snake` for length-prefixed byte
@@ -322,7 +481,9 @@ impl CellSlice<'_> {
 Payload and references have independent cursors, as they do in TON. `preload`
 parses a cloned cursor without consuming the original. `try_load` commits the
 clone only on success. `finish` rejects either trailing payload bytes or
-trailing references.
+trailing references. Reading bytes or refs, or finishing, on an explicit
+pruning record returns `PrunedCell`; retained hashes must not be parsed as
+application data. `CellSlice` is over a physical Cell, not a `CellView`.
 
 The core typed traits are intentionally small:
 
@@ -347,10 +508,11 @@ when following references. There is no runtime codec factory or type registry.
 
 All crate operations use one `CellError`. It distinguishes payload/reference
 capacity, insufficient input, trailing payload, trailing references, malformed
-type encoding, `MissingCell(CellID)`, and exhausted gas/resource budget. This
+type encoding, `MissingCell(CellID)`, `MissingCellMetadata(CellID)`,
+`CellCommitmentMismatch`, `DepthOverflow`, `InvalidLevel`, `PrunedCell`, and
+exhausted gas/resource budget. This
 lets a composite decoder propagate resolution failures without converting
-between unrelated reader and resolver errors. Builder methods only produce the
-two capacity variants.
+between unrelated reader and resolver errors.
 
 ## Proposal: replace the VM String with a first-class Cell
 
@@ -382,7 +544,7 @@ The simplest combined object would have mutable `payload`, mutable `refs`,
 writes append, never overwrite. Finalizing includes the entire buffers,
 including already-read prefixes. Keeping only the unread remainder would be
 a separate, explicit operation. Opening an existing Cell would copy at most
-8191 payload bytes and four reference handles. Avoiding that copy requires an
+4095 payload bytes and four reference handles. Avoiding that copy requires an
 additional shared-versus-writable representation and detachment on first
 write; merging the public types does not eliminate that internal distinction.
 
@@ -397,7 +559,7 @@ contract code frequently reads and appends to the same bounded buffer.
 An illustrative runtime layout is:
 
 ```text
-Cell value:     CellRef — resident Arc<Cell> or pruned CellID
+Cell value:     CellRef — resident Arc<Cell> or unloaded CellCommitment
 Builder value: owned CellBuilder — payload buffer and reference buffer
 Slice value:   Arc<Cell> + byte cursor + reference cursor
 
@@ -417,7 +579,7 @@ implicitly consume refs. Reading a child reference yields another Cell value;
 opening that child resolves its body using the *current* execution context.
 It neither transfers the parent's cursor nor captures the sender's actor
 storage authority. Missing permitted witness data has the existing hard
-failure/rollback behavior. Copying a pruned reference does not assert that its
+failure/rollback behavior. Copying an unloaded reference does not assert that its
 body is available.
 
 Finalization consumes the Builder and yields a new immutable Cell. Failed
@@ -463,10 +625,10 @@ can have references. Initially, operations such as signatures, fixed-size IDs,
 byte hashing, and concatenation should require a **zero-reference Cell** of
 the appropriate payload length. They must not silently ignore child refs or
 flatten an arbitrary graph. Byte concatenation fails if its result exceeds
-8191 bytes; storing a child reference is a different operation.
+4095 bytes; storing a child reference is a different operation.
 
-`CellID` hashes the complete canonical record, including child IDs. It is not
-the same operation as SHA256 of payload bytes. Advancing a Slice changes
+`CellID` is the factual hash defined in [Identity](#identity), not SHA256 of
+payload bytes or of an ordinary wire record. Advancing a Slice changes
 neither its source Cell nor its ID; computing a commitment to the unread tail
 requires explicitly constructing a new Cell. Typed program loading should
 continue to use the current program/Snake schema, not reinterpret an arbitrary
@@ -521,11 +683,11 @@ The exact layout is:
    Cell's remaining payload. Insufficient prefix space, or a length above
    `u32::MAX`, returns `PayloadCapacity` without changing the builder.
 2. String bytes occupy the available parent payload after the prefix. If they
-   overflow, the parent payload must be exactly 8191 bytes and its next
+   overflow, the parent payload must be exactly 4095 bytes and its next
    reference in serialization order points to the continuation. A missing
    builder reference slot returns `ReferenceCapacity` without mutation.
 3. Continuation Cells belong only to this string. Each nonterminal continuation
-   has exactly 8191 payload bytes and one reference at index zero; the terminal
+   has exactly 4095 payload bytes and one reference at index zero; the terminal
    has exactly the remaining bytes and no references.
 4. Stop when the declared length is satisfied. Empty strings and exact fits
    create/consume no continuation reference and no empty sentinel.
@@ -540,20 +702,20 @@ Examples starting in an empty builder (`len` is the four-byte prefix):
 
 ```text
 0 bytes:       [len=0]
-8187 bytes:    [len=8187 | 8187 bytes]
-8188 bytes:    [len=8188 | 8187 bytes] -> [1 byte]
-16378 bytes:   [len=16378 | 8187 bytes] -> [8191 bytes]
-16379 bytes:   [len=16379 | 8187 bytes] -> [8191 bytes] -> [1 byte]
+4091 bytes:    [len=4091 | 4091 bytes]
+4092 bytes:    [len=4092 | 4091 bytes] -> [1 byte]
+8186 bytes:    [len=8186 | 4091 bytes] -> [4095 bytes]
+8187 bytes:    [len=8187 | 4091 bytes] -> [4095 bytes] -> [1 byte]
 ```
 
-A parent with other references can encode a 9000-byte string as:
+A parent with other references can encode a 6000-byte string as:
 
 ```text
-parent payload: [28 23 00 00 | 8187 string bytes]
+parent payload: [70 17 00 00 | 4091 string bytes]
 parent refs:    [earlier object, continuation, later object]
                                      |
                                      v
-                         [813 string bytes; no refs]
+                         [1909 string bytes; no refs]
 ```
 
 After loading the earlier reference and the string, the next `load_ref` returns
@@ -572,9 +734,10 @@ overflow chain, iteratively from tail to head; it never stages a whole-string
 buffer. Reading checks the declared length against the caller's limit before
 allocation or resolution, then grows the result only from validated data.
 It follows continuation refs through `CellResolver`, checking each resolved
-body's identity and exact payload/reference shape. Short nonterminals, extra
-continuation refs, incorrectly sized terminal payloads, missing bodies, and
-limit overruns fail. Each continuation makes positive progress toward the
+body's commitment and exact payload/reference shape. Short nonterminals, extra
+continuation refs, incorrectly sized terminal payloads, explicit pruning
+records, missing bodies, depth overflows, and limit overruns fail. Each
+continuation makes positive progress toward the
 bounded length; no recursive walk or separate snake cycle set is needed.
 
 A failed read leaves the parent cursor unchanged, but resolver charges and
@@ -616,12 +779,15 @@ pub struct Trie {
 }
 ```
 
-`Trie::from_cell(root, key_bytes)` accepts `impl Into<CellRef>`: a resident or
-pruned `CellRef`, a `Cell`, or an `Arc<Cell>`. It checks the configured key width
+`Trie::from_cell(root, key_bytes)` accepts `impl Into<CellRef>`: a resident,
+unloaded, or unresolved `CellRef`, a `Cell`, or an `Arc<Cell>`. It checks the configured key width
 but does not load or inspect the root. Every visited node, including the root,
 is resolved and its child mask and compressed path label validated on access,
-regardless of residency. One constructor therefore supports a wholly pruned
-Dict without extra pruned/resident bookkeeping in Dict.
+regardless of residency. One constructor therefore supports a wholly unloaded
+Dict without extra resident/unloaded bookkeeping in Dict. An explicit pruning
+record cannot be parsed as an ordinary Trie node: access fails with
+`PrunedCell`. Bare unresolved IDs can name a lookup root, but cannot be inserted
+as value references without first resolving their metadata.
 
 Key width is a separate constant chosen by the owning schema. There is no
 entry count in a raw Trie node, and lookup, insertion, deletion, and ordered
@@ -653,10 +819,12 @@ the Trie unchanged. Resolver-backed `get_ref` and `get` return an owned
 temporary resolution cache.
 
 There is no separate Merkle path object. The committed root `CellID`
-authenticates the root body; each verified body contains the `CellID` of the
+authenticates the root body; each verified body contains the commitment of the
 next child. Loading and hashing the Cells on the requested path therefore
-authenticates the leaf and its position. Sibling subtrees remain as IDs in
-their parent Cells and do not need sibling-hash vectors or the `merkle` crate.
+authenticates the leaf and its position. Sibling subtrees remain as full
+mask/hash/depth summaries in their parent Cells and do not need a separately
+encoded proof path or the `merkle` crate. The current Trie traverses physical Cells; traversal through
+`CellView` with an explicit virtualization cap is not yet integrated.
 
 The low-level Trie knows nothing about Scalar, VM Values, portability, or
 linear types. FlameVM has one `Dict` over this Trie. It reverses the canonical
@@ -713,7 +881,8 @@ information.
 
 The outer protocol supplies the BoC byte length. The decoder rejects trailing
 bytes, invalid Cell descriptors, duplicate IDs, non-increasing record order,
-cycles among included bodies, and any caller-provided bound violation.
+cycles among included bodies, mismatched child commitment summaries when the
+child body is included, and any caller-provided bound violation.
 
 BoC decoding receives the existing outer witness-byte bound and the
 transaction gas meter:
@@ -741,29 +910,37 @@ internal-work weighting remains a transaction-ordering policy, not a Cell gas
 rule.
 
 The decoder validates `max_bytes`, then charges the declared Cell count before
-allocating its lookup table. It also charges record bytes, references, cycle
-validation, and resolution work. This prevents a small bag of two-byte empty
+allocating its lookup table. It also charges record bytes multiplied by the
+number of significant levels, references, included-child summary validation,
+and cycle validation. Resolution is charged by the execution resolver. This
+prevents a small bag of two-byte empty
 Cells from causing disproportionate allocation without introducing a separate
 memory-limit knob. Total references are already bounded by four times the Cell
 count. Traversals are iterative and terminate on exhausted gas. BoC validation
 gas is deducted from the initiating external transaction's gas; later Cell
 resolutions are charged to the VM execution or message that performs them.
 
-### Pruned Cells
+### Unloaded bodies versus explicit pruning
 
-If a Cell references ID `X` and the current bag has no record whose computed
-ID is `X`, that branch is pruned in this bag. No placeholder record, exotic
-Cell tag, depth, proof level, or pruned bit is needed.
+If a Cell references factual ID `X` and the current bag has no matching body,
+that reference is unavailable from this bag. It still carries its complete
+commitment summary. This transport omission is not an explicit pruning record.
 
 ```text
 parent record contains X
 
 BoC contains body X     -> X can be resolved
-BoC omits body X        -> X remains pruned
+BoC omits body X        -> X remains unloaded; resolution may return MissingCell
 ```
 
-The same rule applies to a root ID held outside the bag: if its body is absent,
-the root itself is pruned.
+An explicit pruned Cell, by contrast, is a real record with descriptor bit 15
+set and its own factual ID. If it is included in the bag, it can be resolved
+and inspected as a pruning record; virtualization still cannot read the
+subtree it hides. Supplying the hidden content elsewhere does not change that
+record's kind or its view's availability.
+
+The same missing-body rule applies to a root lookup ID held outside the bag.
+`CellEnvelope` requires its own root body; a generic rootless BoC does not.
 
 Adding body `X` later does not change the parent or any ancestor ID. A bag may
 contain bodies not reachable from one particular root because a transaction's
@@ -771,11 +948,10 @@ bag can serve several Contracts and Actors. Unused bodies are allowed; they
 are still committed and paid for. An exact-used-witness manifest is therefore
 not needed.
 
-The initial format stores 32-byte child IDs in every record rather than TON's
-compact table indexes. With payloads up to 8191 bytes, the simpler single
-record format is the better starting trade-off. Indexed reference compression
-should be considered only after measurements show that child IDs dominate real
-transactions.
+The format stores complete per-child level-mask/hash/depth summaries rather
+than table indexes. This permits independent physical-record parsing at the
+cost of repeating metadata between parents. Indexed reference compression
+would be a separate wire-format change; it is not implemented here.
 
 ### Minimal API
 
@@ -801,8 +977,9 @@ impl BagOfCells {
 ```
 
 `collect` follows only attached `Resident` references and deduplicates them by
-ID. A `Pruned` reference remains absent. BoC decoding creates Cells with
-`Pruned` references and keeps resolved bodies in the bag's lookup table; it
+ID. An `Unloaded` reference remains absent. Explicit pruned Cells are collected
+like any other attached body. BoC decoding creates Cells with `Unloaded`
+references and keeps resolved bodies in the bag's lookup table; it
 need not rebuild the whole DAG eagerly. Construction and insertion reject a
 count that does not fit the wire `u32`, so encoding an already valid bag to a
 `Vec` and computing its ID are infallible.
@@ -894,13 +1071,13 @@ and disk lookup must enforce the same committed-residency scope as RAM lookup.
 Persistent-store authority does not travel with a value. While actor A is
 running, its own state may resolve from A's committed store. If A passes a
 String or Dict into actor B, only recursively attached `Resident` Cells travel
-with the value. A remaining `Pruned` reference may resolve from the external
+with the value. A remaining `Unloaded` reference may resolve from the external
 transaction BoC (or from B's own store if B independently retained that exact
 Cell), but never from A's store merely because A originated the argument.
 
 The same rule applies to synchronous calls and asynchronous sends. A Message's
 collected Cell graph includes all resident Cell bodies carried by its portable
-payload; unresolved descendants remain IDs and require the shared execution
+payload; unloaded descendants retain summaries and require the shared execution
 BoC. On return, the caller's own store scope is restored and returned resident
 Cells travel with the returned value. This permits non-portable values to move
 up the synchronous call chain without granting a callee access to caller
@@ -914,7 +1091,8 @@ some branches are pruned, so portability is never recomputed from only the
 currently loaded subset.
 
 Lookup order cannot affect the decoded value because every source is verified
-against the same CellID. The initial gas rule charges every logical resolution
+against the same CellID and, for an unloaded reference, its full commitment
+summary. The initial gas rule charges every logical resolution
 from the canonical Cell size, including a physical cache hit. It can be refined
 later, but consensus cost must never depend on wall-clock cache behavior.
 
@@ -987,15 +1165,16 @@ pub struct StoredGraph {
 
 The actor-state commitment includes both fields. The root says *what* the
 state is; the BoCID says *which bodies remain resident and rent-bearing*.
-Pruning a branch changes the stored BoC and storage charge but not the content
-root. A fully frozen actor can retain its code/state root IDs while retaining
-no corresponding bodies.
+Evicting a branch's body changes the stored BoC and storage charge but not the
+content root. This is residency pruning, not construction of an explicit
+pruning Cell, which would change the factual root. A fully frozen actor can
+retain its code/state commitments while retaining no corresponding bodies.
 
 Resolving a body from a transaction BoC only puts it in the execution cache.
 It does not silently add it to actor storage or increase rent. A persistent
 restore must be an explicit high-level operation. New or modified Trie paths
-are resident because the actor created their Cell bodies; untouched pruned
-siblings remain pruned.
+are resident because the actor created their Cell bodies; untouched unloaded
+siblings remain unloaded.
 
 Cells do not restrict their payloads to portable data. When a typed Cell is
 decoded into a VM Value, the boundary that consumes it performs the same
@@ -1120,8 +1299,9 @@ temporary exception, not a second codec for these migrated types.
 
 Cell hashing replaces serialization-to-`Vec<u8>` followed by a separate object
 hash for IDs such as Contract, Actor state/code, Message, transaction, and
-block objects. The caller's context selects the root type; the Cell ID remains
-the plain SHA-256 content address of that root record.
+block objects. The caller's context selects the root type and commitment
+level; `CellID` is the highest SHA-256 hash specified in [Identity](#identity),
+not a direct hash of an ordinary wire record.
 
 The ExternalTx envelope root identifies the submitted encoding, while `TxID`
 continues to identify the typed TxLog/effect graph. Under the Cell format that
@@ -1161,7 +1341,7 @@ not valid.
 
 | Area | Implementation |
 | --- | --- |
-| Primitive and streaming API | `cells/src/cell.rs`, `builder.rs`, `slice.rs`, `codec.rs`: immutable Cells, exact expected-type codecs, inline length-prefixed snake operations |
+| Primitive and streaming API | `cells/src/cell.rs`, `builder.rs`, `slice.rs`, `codec.rs`: ordinary/pruned Cells, level masks and depths, shared read-only CellViews, exact codecs, inline length-prefixed snake operations |
 | Transport | `cells/src/boc.rs`: strict CellID ordering, duplicate rejection, bounded parsing, exact body membership, CellEnvelope |
 | Trie | `cells/src/trie.rs`: one radix-4 Patricia format; resolver-backed get/insert/remove/ordered navigation; raw root wrapping/unwrapping |
 | Dict | `flamevm/src/dict.rs`: one Trie index, typed runtime witness cache, sticky summaries, lazy authenticated reads; no Dict2 |
@@ -1183,6 +1363,9 @@ stored in script Cells, not routed through a generic serialization facade.
 
 - Explicit VM operations to prune selected Dict branches or persist selected
   witness bodies. Existing `save`/`setcode` are the persistence boundary.
+- Integration of explicit virtualized proof views into Taproot/Trie and
+  transaction/block proof consumers. The crate's `CellView` is not an implicit
+  replacement for physical typed decoding or the current signed execution bag.
 - Database adapters and archival retrieval outside consensus execution.
 - The first-class raw Cell/Builder/Slice proposal above, replacing String
   opcodes only after review. Runtime String currently has a bounded zero-ref
@@ -1194,7 +1377,9 @@ stored in script Cells, not routed through a generic serialization facade.
 - A coordinated deployment/activation strategy for the changed consensus
   identities; the code does not provide automatic legacy-state migration.
 
-Verification covers canonical Cell/BoC boundaries, partial Trie traversal,
+Verification covers canonical Cell/BoC boundaries, sparse and dense masks,
+multilevel hash/depth commitments, pruning/virtualization, rejection of hidden
+payload access, partial Trie traversal,
 sticky Dict capabilities, public/private witness separation, call-failure
 escrow, execution-bag commitment, actor freeze/recovery, and immediate
 per-external queue draining. Tests should be run together: these encodings
@@ -1202,10 +1387,17 @@ change VM, proof, actor, and block commitments as one format.
 
 ## Security and consensus invariants
 
-- Cell and BoC decoders apply the outer byte bound and precharge declared
-  element counts before allocating.
+- BoC decoding applies the outer byte bound and precharges declared element
+  counts before allocating. Individual Cell records have fixed payload,
+  reference, and significant-level bounds.
 - All lengths, counts, and size sums use checked conversions/arithmetic.
-- Cell identity never depends on resident/pruned state or cache contents.
+- Cell identity never depends on residency or cache contents. Explicit proof
+  pruning changes factual identity and preserves only its designated lower
+  commitments.
+- Level masks and all retained/child hash-depth summaries are validated.
+  An unresolved lookup ID is not a serializable child reference.
+- Virtualization can only lower the cap; unavailable proof data fails reads.
+  It cannot be silently recovered from another record with a semantic hash.
 - The persistent availability set is committed separately from the content
   root.
 - A transaction's BoC is immutable, signed through TxID, and never merged with
@@ -1226,8 +1418,8 @@ change VM, proof, actor, and block commitments as one format.
 ## Non-goals of the implemented migration
 
 - Bit-level payload APIs.
-- TON levels, depths, exotic/pruned-branch Cells, Merkle proof/update Cells,
-  and library-reference Cells.
+- Merkle proof/update wrappers, library-reference Cells, or other Cell kinds
+  beyond ordinary and pruned. Levels/masks and depths are implemented.
 - Multiple BoC variants, optional indexes, CRC, cache bits, or reference-index
   compression.
 - Implicit network/database retrieval during consensus execution.
@@ -1240,9 +1432,15 @@ change VM, proof, actor, and block commitments as one format.
 
 - [TON cell overview and representation](https://docs.ton.org/foundations/serialization/cells)
 - [TON Bag of Cells format](https://docs.ton.org/foundations/serialization/boc)
+- [TON DataCell hashing, significant levels, and depths](https://github.com/ton-blockchain/ton/blob/master/crypto/vm/cells/DataCell.cpp)
+- [TON CellBuilder pruning-record construction and retained-pair ordering](https://github.com/ton-blockchain/ton/blob/master/crypto/vm/cells/CellBuilder.cpp)
 - [ton-swift Cell API](https://github.com/tonkeeper/ton-swift/blob/aacae64c40f40500a9485b6b2d8d060a4777cf72/Source/TonSwift/Cells/Cell.swift)
 - [ton-swift Builder API](https://github.com/tonkeeper/ton-swift/blob/aacae64c40f40500a9485b6b2d8d060a4777cf72/Source/TonSwift/Cells/Builder.swift)
 - [ton-swift Slice API](https://github.com/tonkeeper/ton-swift/blob/aacae64c40f40500a9485b6b2d8d060a4777cf72/Source/TonSwift/Cells/Slice.swift)
 - [ton-swift typed Cell serialization](https://github.com/tonkeeper/ton-swift/blob/aacae64c40f40500a9485b6b2d8d060a4777cf72/Source/TonSwift/Cells/Serialization.swift)
 - [ton-swift snake string encoding](https://github.com/tonkeeper/ton-swift/blob/aacae64c40f40500a9485b6b2d8d060a4777cf72/Source/TonSwift/Cells/SnakeEncoding.swift)
 - [TON canonical BoC declarations](https://github.com/ton-blockchain/ton/blob/master/crypto/tl/boc.tlb)
+
+TON's algorithms inform the level/hash rules; Flame's descriptors, byte payloads,
+15-bit masks, little-endian depths, and reference-summary wire records above
+are adaptations, not TON wire compatibility.

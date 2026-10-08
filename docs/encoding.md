@@ -6,12 +6,13 @@ its accumulator, Merkle paths, and legacy codecs are unchanged.
 Expected types carry no schema tag or version. Sum types have one discriminant;
 existing transaction/block protocol versions remain in their headers.
 
-A Cell record is `descriptor:u16-le || payload || child_ids`, with
-`descriptor = (ref_count << 13) | payload_length`, 0..8191 payload bytes,
-and 0..4 ordered 32-byte references. Its ID is plain SHA-256 of that record.
-Pruning never changes the ID. Standalone transport is a `CellEnvelope`:
-root ID followed by a canonical, strictly CellID-sorted Bag of Cells (BoC).
-Bodies omitted from the bag remain pruned.
+Ordinary Cells carry 0..4095 payload bytes and 0..4 ordered references.
+The physical [Cell record and level-dependent hash preimages](cells.md#canonical-cell-record)
+are distinct: references retain mask/hash/depth summaries, and `CellID` is the
+highest factual hash. Explicit pruning preserves selected lower hashes, not
+the factual ID; unloading a body preserves every commitment. Standalone
+transport is a `CellEnvelope`: root ID followed by a canonical, strictly
+CellID-sorted Bag of Cells (BoC). Bodies omitted from the bag remain unloaded.
 
 ## Transactions and execution witnesses
 
@@ -19,7 +20,7 @@ An ExternalTx root has this layout:
 
 | Payload | Ordered child references |
 | --- | --- |
-| version:u32 LE, locktime:u32 LE, execution BoCID:32 bytes | script container, signature, R1CS proof, **pruned TxLog** |
+| version:u32 LE, locktime:u32 LE, execution BoCID:32 bytes | script container, signature, R1CS proof, **unloaded TxLog** |
 
 The script container stores the script in length-prefixed snake encoding.
 Its next unused reference points to a snake containing the canonical bytes of
@@ -27,7 +28,10 @@ the execution BoC. A long script uses the first reference for its continuation;
 the execution-bag reference follows it. The signature Cell has either zero
 bytes (no TxID-bound authorization) or 64 bytes, and no references. The proof
 is a dedicated snake. UnsignedTx omits the signature and proof references,
-leaving script-container and pruned-TxLog references.
+leaving script-container and unloaded-TxLog references. The effect-root
+reference retains its actual mask, hashes, and depths, including the factual
+TxID; it is not a bare ID or an explicit pruning record. Verification rebuilds
+the effect graph and compares the complete commitment summary as well as TxID.
 
 There are deliberately two bags:
 
@@ -127,7 +131,7 @@ Integers in payloads are little-endian unless explicitly stated otherwise.
 | Point / Predicate | 32-byte compressed Ristretto representation | — |
 | Token | qty commitment:32, flavor commitment:32 | — |
 | ClearToken | qty Scalar:32, flavor Scalar:32 | — |
-| String | raw bytes, 0..8191; no length prefix | — |
+| String | raw bytes, 0..4095; no length prefix | — |
 | Script / proof / arbitrary blob field | snake: u32 LE total length followed by bytes | next continuation when needed |
 | Dict | count:u64 LE, flags:u8 | Trie root unless empty |
 
@@ -141,7 +145,7 @@ The runtime String API is retained temporarily; replacing it with a Cell value
 is a later change. Every String fits in one payload-only Cell: its descriptor
 supplies the length, and references or snake continuations are forbidden.
 The limit also applies to witness-bearing Strings' public bytes. Literal
-parsing and VM string growth reject lengths above 8191 with `StringTooLong`,
+parsing and VM string growth reject lengths above 4095 with `StringTooLong`,
 before allocating the result. Programs, proofs, and other schema-defined blob
 fields remain snakes and may span many Cells; they are not runtime Strings.
 

@@ -610,7 +610,7 @@ pub(crate) struct VM {
     deferred_multiplications: usize,
 }
 
-/// Execution-local resolution, priced identically for resident and pruned refs.
+/// Execution-local resolution, priced identically for resident and unloaded refs.
 /// A cache hit cannot turn an absent transaction witness into an available one.
 struct ExecutionCells<'a> {
     external: &'a BagOfCells,
@@ -635,13 +635,13 @@ impl ExecutionCells<'_> {
 impl CellResolver for ExecutionCells<'_> {
     fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
         self.charge(1)?;
-        let cell = match reference {
-            CellRef::Resident(cell) => Arc::clone(cell),
-            CellRef::Pruned(id) => self
+        let cell = match reference.as_resident_arc() {
+            Some(cell) => Arc::clone(cell),
+            None => self
                 .actor
-                .get(id)
-                .or_else(|| self.external.get(id))
-                .ok_or(CellError::MissingCell(*id))?,
+                .get(&reference.id())
+                .or_else(|| self.external.get(&reference.id()))
+                .ok_or(CellError::MissingCell(reference.id()))?,
         };
         self.charge((cell.encoded_size() as u64).saturating_add(cell.refs().len() as u64))?;
         Ok(cell)
@@ -2627,7 +2627,7 @@ impl VM {
         self.require_external()?;
         let encoded = self.pop_value()?.to_string()?;
         let id = array32(&encoded.to_bytes()).ok_or(VMError::MalformedContractEncoding)?;
-        let cell = resolve_cell(&mut self.resolver(), &CellRef::pruned(id))?;
+        let cell = resolve_cell(&mut self.resolver(), &CellRef::unresolved(id))?;
         let public = Contract::from_trusted_cell(&cell, &mut self.resolver())?;
         self.charge_value_encoding(public.payload(), 3)?;
         if public.id() != id {
@@ -3734,7 +3734,7 @@ mod cell_execution_tests {
             source: BagOfCells::collect(Arc::new(contract.to_cell().unwrap())).unwrap(),
             used: BagOfCells::new(),
         };
-        let root = resolve_cell(&mut recording, &CellRef::pruned(id)).unwrap();
+        let root = resolve_cell(&mut recording, &CellRef::unresolved(id)).unwrap();
         let loaded = Contract::from_trusted_cell(&root, &mut recording).unwrap();
         let mut dict = loaded.into_payload().to_dict().unwrap();
         dict.get_resolved(&Scalar::ONE, &mut recording)
@@ -3861,8 +3861,18 @@ mod cell_execution_tests {
         let mut costs = Vec::new();
         for (reference, actor, external) in [
             (CellRef::Resident(cell.clone()), &empty, &empty),
-            (CellRef::Pruned(cell.id()), &bag, &empty),
-            (CellRef::Pruned(cell.id()), &empty, &bag),
+            (
+                CellRef::resident(cell.clone()).to_unloaded().unwrap(),
+                &bag,
+                &empty,
+            ),
+            (
+                CellRef::resident(cell.clone()).to_unloaded().unwrap(),
+                &empty,
+                &bag,
+            ),
+            (CellRef::unresolved(cell.id()), &bag, &empty),
+            (CellRef::unresolved(cell.id()), &empty, &bag),
         ] {
             let mut gas = 0;
             let mut resolver = ExecutionCells {
@@ -3877,6 +3887,6 @@ mod cell_execution_tests {
             );
             costs.push(gas);
         }
-        assert_eq!(costs, vec![131; 3]);
+        assert_eq!(costs, vec![131; 5]);
     }
 }

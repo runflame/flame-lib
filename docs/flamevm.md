@@ -258,7 +258,7 @@ Implemented generic `Value` Cell encodings:
 | Type | Tag | Representation after the tag |
 | --- | ---: | --- |
 | Scalar | 0 | canonical 32-byte LE residue |
-| String | 1 | one reference to a payload-only Cell of 0..8191 raw bytes |
+| String | 1 | one reference to a payload-only Cell of 0..4095 raw bytes |
 | Dict | 2 | one reference to count/flags/Trie envelope |
 | Point | 3 | compressed Ristretto:32 |
 | Token | 4 | qty commitment:32, flavor commitment:32 |
@@ -370,7 +370,7 @@ bytecode must be regenerated or explicitly migrated before using this format.
 
 ### String
 
-Binary byte-aligned strings of 0..8191 bytes (`String::MAX_LEN`).
+Binary byte-aligned strings of 0..4095 bytes (`String::MAX_LEN`).
 
 The runtime String type and its opcodes remain temporarily; replacing String
 with a Cell value is a later change. Its canonical encoding is one payload-only
@@ -516,7 +516,7 @@ Constructor(code)  = payload: 0x01; refs: [snake(code)]
 
 The constructor form carries the code needed for deployment; the hash form is
 the compact address used afterward. A VM actor-destination operand is a String
-containing a CellEnvelope for either form, subject to String's 8191-byte limit.
+containing a CellEnvelope for either form, subject to String's 4095-byte limit.
 It also accepts a bare 32-byte String as `Hash(bytes)`.
 
 **Deploy-on-first-delivery.** The first message delivered to a not-yet-deployed
@@ -818,7 +818,7 @@ encoding; the negating compact forms do not admit a second encoding for it.
 
 Reads a sub-varint length prefix + payload bytes; pushes them as a [String](#string).
 The bytecode length prefix is not part of the String's Cell encoding. A complete
-literal longer than 8191 bytes hard-fails `StringTooLong` before allocation.
+literal longer than 4095 bytes hard-fails `StringTooLong` before allocation.
 
 ### pushpoint
 
@@ -876,7 +876,7 @@ Immediate-encoded `roll` with `k ∈ 0..=15` taken from the low nibble of the op
 
 ## String instructions
 
-**Failure principle.** Insufficient source bytes and noncanonical scalar residues are **soft fails**. Invalid operation parameters (e.g. `n > 256`) and exceeding String's 8191-byte limit are **hard fails**. `writebits`, `writeint`, `append`, and `writezeros` check prospective growth before allocation and fail with `StringTooLong` if it would exceed the limit.
+**Failure principle.** Insufficient source bytes and noncanonical scalar residues are **soft fails**. Invalid operation parameters (e.g. `n > 256`) and exceeding String's 4095-byte limit are **hard fails**. `writebits`, `writeint`, `append`, and `writezeros` check prospective growth before allocation and fail with `StringTooLong` if it would exceed the limit.
 
 ### readbits
 

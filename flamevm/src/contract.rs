@@ -150,7 +150,7 @@ impl Predicate {
             return Err(VMError::TaprootProofMismatch);
         }
         let leaf = Trie::lookup(
-            &CellRef::pruned(proof.root),
+            &CellRef::unresolved(proof.root),
             &proof.index.to_be_bytes(),
             cells,
         )?
@@ -276,7 +276,7 @@ impl PredicateTree {
     }
 
     /// Records only Cells read to open this program, including snake overflow.
-    /// Unused program/blinding bodies remain pruned in the returned witness bag.
+    /// Unused program/blinding bodies remain unloaded in the returned witness bag.
     pub fn witness_for(&self, program_index: usize) -> Result<(TaprootProof, BagOfCells), VMError> {
         let proof = self.taproot_proof_for(program_index)?;
         let mut recorder = BranchRecorder {
@@ -403,7 +403,7 @@ impl Contract {
     /// "Trusted" refers to the Dict counts/capability summaries checked when the
     /// output was created, not to its sender or a hash alone. The caller must
     /// bind this body to an accepted input commitment (including chain membership
-    /// validation). Unlike ordinary `CellDecode`, hidden branches remain pruned;
+    /// validation). Unlike ordinary `CellDecode`, hidden branches remain unloaded;
     /// accessed nodes and values still undergo their normal decoding checks.
     pub fn from_trusted_cell<R: CellResolver + ?Sized>(
         cell: &cells::Cell,

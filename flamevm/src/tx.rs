@@ -32,6 +32,7 @@ pub struct TxHeader {
     pub locktime: u32,
 }
 
+#[derive(Clone)]
 pub struct ExternalTx {
     /// Header metadata
     pub header: TxHeader,
@@ -50,6 +51,9 @@ pub struct ExternalTx {
     pub witnesses: Arc<BagOfCells>,
     /// Claimed effect root, checked against execution; not the envelope root.
     pub txid: TxID,
+    /// Full unloaded commitment of the claimed effect root. Hash alone cannot
+    /// encode a child reference because parent hashing also commits to depth.
+    effect_root: CellRef,
 }
 
 impl CellEncode for TxHeader {
@@ -141,7 +145,8 @@ impl ExternalTx {
             self.signature,
             &self.witnesses,
         )?;
-        if result.txid != self.txid {
+        let effect_root = log_cell(&result.txlog)?;
+        if result.txid != self.txid || effect_root.commitment() != self.effect_root.commitment()? {
             return Err(CellError::InvalidFormat.into());
         }
         Ok((
@@ -175,7 +180,10 @@ impl CellEncode for ExternalTx {
             .unwrap_or_default();
         b.store_ref(CellRef::resident(Cell::new(signature, vec![])?))?;
         b.store_ref(CellRef::resident(blob_cell(&self.proof.to_bytes())?))?;
-        b.store_ref(CellRef::pruned(self.txid.0))?;
+        if self.effect_root.id() != self.txid.0 {
+            return Err(CellError::InvalidFormat);
+        }
+        b.store_ref(self.effect_root.clone())?;
         Ok(())
     }
 }
@@ -239,7 +247,8 @@ impl ExternalTx {
         };
         let proof = R1CSProof::from_bytes(&read_blob(&s.load_ref()?, r, max_proof_bytes)?)
             .map_err(|_| CellError::InvalidFormat)?;
-        let txid = TxID(s.load_ref()?.id());
+        let effect_root = s.load_ref()?.to_unloaded()?;
+        let txid = TxID(effect_root.id());
         Ok(Self {
             header,
             script,
@@ -247,6 +256,7 @@ impl ExternalTx {
             proof,
             witnesses: Arc::new(witnesses),
             txid,
+            effect_root,
         })
     }
 }
@@ -365,12 +375,20 @@ impl UnsignedTx {
     }
     /// Attaches the aggregate signature → broadcastable [`ExternalTx`].
     pub fn sign(self, signature: Signature) -> ExternalTx {
+        let effect_root = CellRef::resident(
+            self.log
+                .to_cell()
+                .expect("admitted effects have Cell encodings"),
+        )
+        .to_unloaded()
+        .expect("resident effect root has a commitment");
         ExternalTx {
             header: self.header,
             script: self.script,
             signature: Some(signature),
             proof: self.proof,
-            txid: self.log.txid(),
+            txid: TxID(effect_root.id()),
+            effect_root,
             witnesses: self.witnesses,
         }
     }
@@ -380,12 +398,14 @@ impl UnsignedTx {
         if !self.txbound_items.is_empty() {
             return Err(VMError::MissingTxBoundSignature);
         }
+        let effect_root = CellRef::resident(self.log.to_cell()?).to_unloaded()?;
         Ok(ExternalTx {
             header: self.header,
             script: self.script,
             signature: None,
             proof: self.proof,
-            txid: self.log.txid(),
+            txid: TxID(effect_root.id()),
+            effect_root,
             witnesses: self.witnesses,
         })
     }
@@ -833,7 +853,7 @@ impl CellEncode for UnsignedTx {
             &self.script,
             &self.witnesses,
         )?))?;
-        b.store_ref(CellRef::pruned(self.log.txid().0))?;
+        b.store_ref(CellRef::resident(self.log.to_cell()?).to_unloaded()?)?;
         Ok(())
     }
 }
@@ -842,6 +862,37 @@ impl CellEncode for UnsignedTx {
 mod envelope_tests {
     use super::*;
     use crate::{Anchor, Predicate, PredicateTree, String};
+
+    #[test]
+    fn execution_checks_effect_root_depth_not_only_its_hash() {
+        let limits = Limits { gas: 100_000 };
+        let tx = ScriptBuilder::new()
+            .nop()
+            .build_tx(
+                TxHeader {
+                    version: 1,
+                    locktime: 0,
+                },
+                limits,
+            )
+            .unwrap()
+            .without_signature()
+            .unwrap();
+        let mut envelope = tx.to_envelope().unwrap();
+        let mut bytes = tx.to_cell().unwrap().encode();
+        // The last child is the level-zero effect root; its final two bytes
+        // contain depth. Keep the claimed TxID but falsify that commitment.
+        let end = bytes.len();
+        let depth = u16::from_le_bytes([bytes[end - 2], bytes[end - 1]]);
+        bytes[end - 2..].copy_from_slice(&(depth + 1).to_le_bytes());
+        let root = Cell::decode_exact(&bytes).unwrap();
+        let forged = ExternalTx::from_cell(&root, &mut envelope).unwrap();
+        assert_eq!(forged.txid, tx.txid);
+        assert!(matches!(
+            forged.verify(limits),
+            Err(VMError::Cell(CellError::InvalidFormat))
+        ));
+    }
 
     #[test]
     fn embedded_nested_witnesses_roundtrip_from_prover_to_verifier() {
@@ -970,6 +1021,9 @@ mod envelope_tests {
     fn canonical_external_tx_vector_and_bounds() {
         // Fixed R1CS bytes keep this transport/shape vector independent of prover randomness.
         const PROOF: &str = "007e5de4349c5b87f2e1003095aff2e310801e2504b706bc6c062076eee49f90366625b75748908fb2492dd909a6d1428001dfdd201a0a7fae70911cf29112c8319e9d0eba4ca7fe137d5f8026614ab8736204ea46c213d9a20d0d663aa3e8ff1676fcd93dc1cba92d2f820b5b8ae5c99bacce0610dc799f050d1dec5effd5cb6c96950b0ad392e7414252008e6ff97d385437f30c74f106ae586522db4a9d73241ca0ed4f24798b31981e98e96bc121852a567728380ca00d12ee8556c220c13c3ed16d35fca58a3a3773120657b5b49cac1830a472bd083c51f4012ab7de25450a4544cdee6b7577d97a9c3e5a3267da4e13e2ef36a65ce83697cc498f00d005000000000000000000000000000000000000000000000000000000000000000027e4219ec9efc32f50b4b1c8766037a812d135363cbaa38be71527de967eb20839057e9d2324d2932cba8c6a646bb2b9f09661cd1ef8977bbd1df4813803e4040000000000000000000000000000000000000000000000000000000000000000ecd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010";
+        let effect_root = CellRef::resident(Cell::new(vec![0x11], vec![]).unwrap())
+            .to_unloaded()
+            .unwrap();
         let tx = ExternalTx {
             header: TxHeader {
                 version: 1,
@@ -979,14 +1033,15 @@ mod envelope_tests {
             signature: None,
             proof: R1CSProof::from_bytes(&hex_bytes(PROOF)).unwrap(),
             witnesses: Arc::new(BagOfCells::new()),
-            txid: TxID([0x11; 32]),
+            txid: TxID(effect_root.id()),
+            effect_root,
         };
         let root = tx.to_cell().unwrap();
         let mut expected_header = vec![1, 0, 0, 0, 2, 0, 0, 0];
         expected_header.extend_from_slice(&tx.witnesses.id());
         assert_eq!(root.payload(), expected_header);
         assert_eq!(root.refs().len(), 4);
-        assert_eq!(root.refs()[3].id(), [0x11; 32]);
+        assert_eq!(root.refs()[3].id(), tx.txid.0);
         let bytes = tx.to_envelope().unwrap().encode();
         let decoded = ExternalTx::from_bytes_bounded(&bytes, 1, 1, 417).unwrap();
         assert_eq!(decoded.to_envelope().unwrap().encode(), bytes);
@@ -1009,6 +1064,13 @@ mod envelope_tests {
         ));
 
         let mut unknown_version = tx;
+        let original_txid = unknown_version.txid;
+        unknown_version.txid.0[0] ^= 1;
+        assert!(matches!(
+            unknown_version.to_cell(),
+            Err(CellError::InvalidFormat)
+        ));
+        unknown_version.txid = original_txid;
         unknown_version.header.version = 2;
         let bytes = unknown_version.to_envelope().unwrap().encode();
         assert!(matches!(
