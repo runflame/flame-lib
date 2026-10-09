@@ -10,9 +10,9 @@ use corepc_client::{
     client_sync::Error as RpcError,
 };
 use ed25519_dalek::VerifyingKey;
+use flamechain::{BlockHash, FlameNetwork};
 use flamevm::Predicate;
 use thiserror::Error;
-use flamechain::{BlockHash, FlameNetwork};
 
 #[derive(Debug, Error)]
 pub enum MintProofSendError {

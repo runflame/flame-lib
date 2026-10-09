@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use flamechain::FlameNetwork;
+use std::sync::Arc;
 
 use crate::mint_proofs::{
     indexer::{

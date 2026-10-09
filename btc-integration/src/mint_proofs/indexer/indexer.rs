@@ -7,13 +7,13 @@
 //! indexer on startup. This ensures that only one btc block is used in the node, and there is no
 //! conflict between indexer btc block tip and indexer user btc block tip.
 
+use flamechain::{BlockHash, FlameNetwork};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::{
     sync::{Mutex, broadcast, oneshot},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
-use flamechain::{BlockHash, FlameNetwork};
 
 use crate::MintingProof;
 use crate::mint_proofs::indexer::worker::IndexerWorker;

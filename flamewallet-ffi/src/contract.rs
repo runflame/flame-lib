@@ -1,7 +1,7 @@
 //! Reading a contract an indexer served.
 
-use flamevm::Value;
 use flamepayments::InputSpec;
+use flamevm::Value;
 
 use crate::error::FlameError;
 use crate::transfer::Opening;

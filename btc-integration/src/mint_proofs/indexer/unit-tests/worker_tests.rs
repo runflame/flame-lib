@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
+use flamechain::{BlockHash, FlameNetwork};
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
-use flamechain::{BlockHash, FlameNetwork};
 
 use super::{IndexerWorker, IndexerWorkerError};
 use crate::mint_proofs::indexer::{

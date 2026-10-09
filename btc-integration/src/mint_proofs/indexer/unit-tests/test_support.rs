@@ -11,9 +11,9 @@ use corepc_client::{
     client_sync::{Error, Result},
 };
 use ed25519_dalek::SigningKey;
+use flamechain::{BlockHash as FlameBlockHash, FlameNetwork};
 use flamevm::Predicate;
 use tokio::sync::{Mutex, RwLock, Semaphore, broadcast, mpsc, watch};
-use flamechain::{BlockHash as FlameBlockHash, FlameNetwork};
 
 use super::indexer::MintingProofUpdate;
 use crate::{

@@ -1,8 +1,8 @@
 use corepc_client::bitcoin::{Amount, Transaction, TxOut};
 use curve25519_dalek::ristretto::CompressedRistretto;
 use ed25519_dalek::VerifyingKey;
-use flamevm::Predicate;
 use flamechain::{BlockHash, FlameNetwork};
+use flamevm::Predicate;
 
 use crate::mint_proofs::core::constants::{
     MINT_PROOF_DATA_LEN, MINT_PROOF_MAGIC, OP_PUSHDATA1, OP_RETURN,

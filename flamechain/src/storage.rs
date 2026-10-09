@@ -589,7 +589,9 @@ impl ActorStore {
         let state = live
             .cells
             .get(&live.state_root.id())
-            .map(|root| CellEnvelope::new(live.state_root.id(), collect_owned([root], &live.cells)?))
+            .map(|root| {
+                CellEnvelope::new(live.state_root.id(), collect_owned([root], &live.cells)?)
+            })
             .transpose()?;
 
         Ok(ActorInfo {

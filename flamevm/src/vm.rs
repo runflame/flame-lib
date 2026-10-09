@@ -759,7 +759,12 @@ impl VM {
         let mut message_work = 0u64;
         for value in message.payload() {
             message_work = message_work
-                .checked_add(value.encoding_gas()?.checked_mul(4).ok_or(VMError::OutOfGas)?)
+                .checked_add(
+                    value
+                        .encoding_gas()?
+                        .checked_mul(4)
+                        .ok_or(VMError::OutOfGas)?,
+                )
                 .and_then(|gas| gas.checked_add(value.clone_gas().saturating_mul(2)))
                 .ok_or(VMError::OutOfGas)?;
         }
@@ -807,7 +812,8 @@ impl VM {
                 return Err(e);
             }
         };
-        let initial_gas = message_work.saturating_add(alloc_byte_gas(message_bytes)?)
+        let initial_gas = message_work
+            .saturating_add(alloc_byte_gas(message_bytes)?)
             .saturating_add(code_bytes.saturating_mul(GAS_PER_ALLOC_BYTE))
             .saturating_add(alloc_item_gas(message.payload().len())?);
         if initial_gas > message.gas {
@@ -1409,7 +1415,10 @@ impl VM {
     /// Copies includes subsequent effect/identity encoding of an admitted value.
     fn charge_value_encoding(&mut self, value: &Value, copies: u64) -> Result<(), VMError> {
         self.current_call.charge_gas(
-            value.encoding_gas()?.checked_mul(copies).ok_or(VMError::OutOfGas)?,
+            value
+                .encoding_gas()?
+                .checked_mul(copies)
+                .ok_or(VMError::OutOfGas)?,
         )
     }
 
@@ -3677,7 +3686,13 @@ mod cell_execution_tests {
     #[test]
     fn wrapping_existing_dictionaries_prepays_growing_encoding_work() {
         let frame = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 15_000);
-        let mut vm = VM::new(TxHeader { version: 1, locktime: 0 }, frame);
+        let mut vm = VM::new(
+            TxHeader {
+                version: 1,
+                locktime: 0,
+            },
+            frame,
+        );
         vm.push_value(Value::String(String::from(vec![7; 1000])));
         let mut costs = Vec::new();
         for _ in 0..20 {
@@ -3700,7 +3715,13 @@ mod cell_execution_tests {
     #[test]
     fn dictionary_insertion_rejects_unpaid_large_value_encoding() {
         let frame = CallFrame::new(Vec::new(), CallKind::ExternalRoot, 100);
-        let mut vm = VM::new(TxHeader { version: 1, locktime: 0 }, frame);
+        let mut vm = VM::new(
+            TxHeader {
+                version: 1,
+                locktime: 0,
+            },
+            frame,
+        );
         vm.push_value(Value::Dict(Dict::new()));
         vm.push_value(Value::Scalar(Scalar::ZERO));
         vm.push_value(Value::String(String::from(vec![7; String::MAX_LEN])));

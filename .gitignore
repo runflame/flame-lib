@@ -6,3 +6,4 @@ target
 # CycloneDX SBOMs: release artifacts, generated in CI
 
 *.cdx.json
+output

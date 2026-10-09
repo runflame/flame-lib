@@ -47,6 +47,28 @@ impl<'a> CellSlice<'a> {
         ))
     }
 
+    /// Reads a canonical unsigned LEB128 integer, leaving the cursor unchanged
+    /// on truncation, overflow, or a non-shortest representation.
+    pub fn load_leb128(&mut self) -> Result<u64, CellError> {
+        self.try_load(|slice| {
+            let mut value = 0;
+            for index in 0..10 {
+                let byte = slice.load_u8()?;
+                if index == 9 && byte > 1 {
+                    return Err(CellError::InvalidFormat);
+                }
+                value |= u64::from(byte & 0x7f) << (index * 7);
+                if byte & 0x80 == 0 {
+                    if index > 0 && byte == 0 {
+                        return Err(CellError::InvalidFormat);
+                    }
+                    return Ok(value);
+                }
+            }
+            Err(CellError::InvalidFormat)
+        })
+    }
+
     pub fn load_bytes(&mut self, len: usize) -> Result<&'a [u8], CellError> {
         if self.cell.is_pruned() {
             return Err(CellError::PrunedCell);
@@ -163,6 +185,32 @@ impl<'a> CellSlice<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leb128_rejects_invalid_encodings_without_consuming_input() {
+        for (bytes, expected) in [
+            (vec![], CellError::InsufficientBytes),
+            (vec![0x80], CellError::InsufficientBytes),
+            (vec![0x80, 0], CellError::InvalidFormat),
+            (vec![0x81, 0], CellError::InvalidFormat),
+            (vec![0xff; 10], CellError::InvalidFormat),
+            (vec![0x80; 11], CellError::InvalidFormat),
+            (
+                vec![0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 2],
+                CellError::InvalidFormat,
+            ),
+        ] {
+            let child = CellRef::resident(Cell::new(vec![1], vec![]).unwrap());
+            let mut payload = vec![7];
+            payload.extend_from_slice(&bytes);
+            let cell = Cell::new(payload, vec![child]).unwrap();
+            let mut slice = CellSlice::new(&cell);
+            assert_eq!(slice.load_u8(), Ok(7));
+            assert_eq!(slice.load_leb128(), Err(expected));
+            assert_eq!(slice.remaining_bytes(), bytes.len());
+            assert_eq!(slice.remaining_refs(), 1);
+        }
+    }
 
     #[test]
     fn pruning_records_cannot_be_read_as_ordinary_payload() {

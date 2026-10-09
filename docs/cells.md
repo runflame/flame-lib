@@ -21,6 +21,11 @@ also describes constraints on future disk adapters and explicit partial
 pruning VM opcodes; those adapters/opcodes are not implemented.
 `docs/compression.md` records the motivation and broader experiments.
 
+The first [🎻 Cell Type Language (CTL) prototype](../cells/ctl.md) compiles
+byte-oriented `.ctl` schemas into Rust Cell codecs. Its illustrative schemas
+do not replace the existing VM/chain encodings or define a new transaction
+layout.
+
 The crate implements explicit pruning, significant-level hashing, and
 read-only `CellView` virtualization. VM codecs continue using physical Cells
 and the existing execution-BoC commitment; they do not automatically virtualize

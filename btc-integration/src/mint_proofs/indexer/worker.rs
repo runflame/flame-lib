@@ -1,12 +1,12 @@
 use corepc_client::bitcoin::Transaction;
 use corepc_client::client_sync::Error as BitcoinRpcError;
+use flamechain::FlameNetwork;
 use futures_util::future::try_join_all;
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::sync::{broadcast, oneshot};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use flamechain::FlameNetwork;
 
 use crate::MintingProof;
 use crate::mint_proofs::MintingProofData;

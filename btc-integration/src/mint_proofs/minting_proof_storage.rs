@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use corepc_client::bitcoin::{Amount, BlockHash};
-use tokio::sync::RwLock;
 use flamechain::BlockHash as FlameBlockHash;
+use tokio::sync::RwLock;
 
 use crate::mint_proofs::MintingProofData;
 use crate::rpc::BtcBlockTip;
@@ -105,8 +105,8 @@ mod tests {
 
     use corepc_client::bitcoin::{Amount, BlockHash};
     use ed25519_dalek::SigningKey;
-    use flamevm::Predicate;
     use flamechain::FlameNetwork;
+    use flamevm::Predicate;
 
     use super::*;
 

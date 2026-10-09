@@ -47,13 +47,7 @@ fn make_multikey() {
 }
 
 fn multikey_helper(priv_keys: &[Scalar]) -> Multikey {
-    Multikey::new(
-        priv_keys
-            .iter()
-            .map(VerificationKey::from_secret)
-            .collect(),
-    )
-    .unwrap()
+    Multikey::new(priv_keys.iter().map(VerificationKey::from_secret).collect()).unwrap()
 }
 
 #[test]
@@ -75,10 +69,7 @@ fn sign_with_mpc<C: MusigContext + Clone>(
     context: C,
     transcript: Transcript,
 ) -> Result<(Signature, Scalar), MusigError> {
-    let pubkeys: Vec<_> = privkeys
-        .iter()
-        .map(VerificationKey::from_secret)
-        .collect();
+    let pubkeys: Vec<_> = privkeys.iter().map(VerificationKey::from_secret).collect();
 
     let mut transcripts: Vec<_> = pubkeys.iter().map(|_| transcript.clone()).collect();
 

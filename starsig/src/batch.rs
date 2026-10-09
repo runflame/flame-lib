@@ -132,7 +132,6 @@ impl<R: RngCore + CryptoRng> BatchVerifier<R> {
             Err(StarsigError::InvalidBatch)
         }
     }
-
 }
 
 impl<R: RngCore + CryptoRng> BatchCheckpoint for BatchVerifier<R> {

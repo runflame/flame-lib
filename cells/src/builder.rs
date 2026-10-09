@@ -44,6 +44,22 @@ impl CellBuilder {
         self.store_bytes(&value.to_le_bytes())
     }
 
+    /// Stores an unsigned integer in its shortest LEB128 representation.
+    /// Fails without mutation if the complete encoding does not fit.
+    pub fn store_leb128(&mut self, mut value: u64) -> Result<&mut Self, CellError> {
+        let mut bytes = [0; 10];
+        let mut len = 0;
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            bytes[len] = byte | if value == 0 { 0 } else { 0x80 };
+            len += 1;
+            if value == 0 {
+                return self.store_bytes(&bytes[..len]);
+            }
+        }
+    }
+
     pub fn store_bytes(&mut self, value: &[u8]) -> Result<&mut Self, CellError> {
         if value.len() > self.remaining_bytes() {
             return Err(CellError::PayloadCapacity);
@@ -159,5 +175,37 @@ mod tests {
             check_snake_depth(max_overflow + 1),
             Err(CellError::DepthOverflow)
         );
+    }
+
+    #[test]
+    fn leb128_uses_shortest_encoding_and_capacity_failure_is_atomic() {
+        for (value, expected) in [
+            (0, vec![0]),
+            (127, vec![127]),
+            (128, vec![0x80, 1]),
+            (624485, vec![0xe5, 0x8e, 0x26]),
+            (
+                u64::MAX,
+                vec![0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1],
+            ),
+        ] {
+            let mut builder = CellBuilder::new();
+            builder.store_leb128(value).unwrap();
+            let cell = builder.build();
+            assert_eq!(cell.payload(), expected);
+            let mut slice = crate::CellSlice::new(&cell);
+            assert_eq!(slice.load_leb128(), Ok(value));
+            slice.finish().unwrap();
+        }
+
+        let mut builder = CellBuilder::new();
+        builder.store_bytes(&vec![7; MAX_CELL_PAYLOAD - 1]).unwrap();
+        assert!(matches!(
+            builder.store_leb128(128),
+            Err(CellError::PayloadCapacity)
+        ));
+        assert_eq!(builder.used_bytes(), MAX_CELL_PAYLOAD - 1);
+        builder.store_leb128(127).unwrap();
+        assert_eq!(builder.build().payload()[MAX_CELL_PAYLOAD - 1], 127);
     }
 }
