@@ -91,7 +91,7 @@ impl Dict {
             fn resolve(&mut self, reference: &CellRef) -> Result<std::sync::Arc<Cell>, CellError> {
                 let cell = ().resolve(reference)?;
                 // One traversal plus rebuilding/hashing the same path.
-                let cost = 2 * (1 + cell.encoded_size() as u64 + cell.refs().len() as u64);
+                let cost = 2 * (1 + cell.record_size() as u64 + cell.refs().len() as u64);
                 self.0 = self.0.checked_add(cost).ok_or(CellError::LimitExceeded)?;
                 Ok(cell)
             }
@@ -508,7 +508,7 @@ impl Default for Dict {
 mod tests {
     use super::*;
     use crate::{ClearToken, Merlin, String};
-    use cells::{BagOfCells, CellRef};
+    use cells::{CellIndex, CellRef};
     use std::sync::Arc;
 
     #[test]
@@ -535,13 +535,13 @@ mod tests {
     #[test]
     fn cached_and_unloaded_values_have_identical_logical_access_costs() {
         struct Meter {
-            cells: BagOfCells,
+            cells: CellIndex,
             gas: u64,
         }
         impl CellResolver for Meter {
             fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
                 let cell = self.cells.resolve(reference)?;
-                self.gas += 1 + cell.encoded_size() as u64 + cell.refs().len() as u64;
+                self.gas += 1 + cell.record_size() as u64 + cell.refs().len() as u64;
                 Ok(cell)
             }
         }
@@ -552,7 +552,7 @@ mod tests {
         );
         original.insert(Scalar::from(2u64), v(2));
         let root = Arc::new(original.to_cell().unwrap());
-        let bag = BagOfCells::collect(root.clone()).unwrap();
+        let bag = CellIndex::collect(root.clone()).unwrap();
         let detached = bag.get(&root.id()).unwrap();
         let mut slice = CellSlice::new(&detached);
         let mut unloaded = Dict::decode_trusted(&mut slice, &mut ()).unwrap();
@@ -804,8 +804,8 @@ mod tests {
             original.insert(Scalar::from(key), v(key));
         }
         let full = original.to_cell().unwrap();
-        let mut bag = BagOfCells::collect(Arc::new(full.clone())).unwrap();
-        let unloaded = Cell::decode_exact(&full.encode()).unwrap();
+        let mut bag = CellIndex::collect(Arc::new(full.clone())).unwrap();
+        let unloaded = Cell::decode_record_exact(&full.encode_record()).unwrap();
         let mut lazy = Dict::from_trusted_cell(&unloaded, &mut ()).unwrap();
         assert!(lazy.values.is_empty());
         assert_eq!(lazy.to_cell().unwrap().id(), full.id());
@@ -834,7 +834,7 @@ mod tests {
         original.insert(Scalar::ZERO, token(9));
         original.insert(Scalar::from(256u64), v(7));
         let full = original.to_cell().unwrap();
-        let mut bag = BagOfCells::collect(Arc::new(full.clone())).unwrap();
+        let mut bag = CellIndex::collect(Arc::new(full.clone())).unwrap();
         let root = full.refs()[0].as_resident().unwrap();
         let mut refs = root.refs().to_vec();
         refs[1] = refs[1].to_unloaded().unwrap();
@@ -867,7 +867,7 @@ mod tests {
     #[test]
     fn failed_insertion_returns_supplied_debt_without_changing_dictionary() {
         let full = Dict::from_values(vec![v(1)]).to_cell().unwrap();
-        let unloaded = Cell::decode_exact(&full.encode()).unwrap();
+        let unloaded = Cell::decode_record_exact(&full.encode_record()).unwrap();
         let mut dict = Dict::from_trusted_cell(&unloaded, &mut ()).unwrap();
         let (error, returned) = dict
             .insert_resolved(Scalar::ONE, token(-7), &mut ())

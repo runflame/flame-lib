@@ -37,7 +37,7 @@ pub enum StringWitness {
     Script(Vec<Instruction>),
     /// Prover-side contract with witness-bearing `Commitment::Open`
     /// quantities/flavors on its Token payloads. Encodes to the
-    /// 32-byte Contract ID. The body is collected into the transaction BoC;
+    /// 32-byte Contract ID. The body is collected into the transaction Cell hierarchy;
     /// `input` resolves it there before applying this private witness overlay.
     Contract(Contract),
 }
@@ -128,7 +128,7 @@ impl String {
     /// before `op_input` to push a contract whose Token payloads still
     /// carry `Commitment::Open` quantities/flavors. The verifier-side
     /// equivalent is `String::Opaque(contract.id().to_vec())`, with the
-    /// output Cell and required children supplied in the same transaction BoC.
+    /// output Cell and required children supplied in the same transaction Cell hierarchy.
     pub fn contract(c: Contract) -> String {
         String::Witness(Box::new(StringWitness::Contract(c)))
     }

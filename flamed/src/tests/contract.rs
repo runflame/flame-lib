@@ -8,7 +8,7 @@ use flamed_rpc::{
     FlamedApiClient, FlamedApiServer, HttpClientBuilder, PredicatePoint, ProofResult, TipResult,
     TxId, TxValue,
 };
-use flamevm::{Anchor, BagOfCells, CellEncode, CellEnvelope, CellError, Dict, Value};
+use flamevm::{Anchor, CellEncode, CellEnvelope, CellError, CellIndex, Dict, Value};
 use jsonrpsee::{core::client::ClientT, rpc_params};
 use tempfile::TempDir;
 
@@ -179,7 +179,7 @@ fn contract_preserves_full_payloads_and_available_cells() {
     let flamevm::CellRef::Resident(dict) = &root.refs()[0] else {
         panic!("expected a dictionary cell")
     };
-    let mut cells = BagOfCells::new();
+    let mut cells = CellIndex::new();
     cells.insert(dict.clone()).unwrap();
     cells.insert(root.into()).unwrap();
     snapshot.bytes = ContractEnvelope(CellEnvelope::new(source.id(), cells).unwrap().encode());

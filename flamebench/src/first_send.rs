@@ -201,7 +201,7 @@ pub fn contract_bytes(contract: &Contract) -> Result<Vec<u8>, CellError> {
 /// A contract back from those bytes, as `flamed`'s `contract_from_bytes`
 /// decodes it.
 pub fn contract_from_bytes(bytes: &[u8]) -> Result<Contract, CellError> {
-    let mut gas = (bytes.len() as u64).saturating_mul(4);
+    let mut gas = (bytes.len() as u64).saturating_mul(1024);
     let mut envelope = CellEnvelope::decode(bytes, MAX_CONTRACT_BYTES, &mut gas)?;
     let root = envelope
         .cells()

@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use cells::{
-    BagOfCells, Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellID,
-    CellRef, CellResolver, CellSlice, GasMeter, Trie, resolve_cell,
+    Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellID, CellIndex, CellRef,
+    CellResolver, CellSlice, GasMeter, Trie, resolve_cell,
 };
 
 use flamevm::{
@@ -90,7 +90,7 @@ impl BlockTx {
         Ok(self.to_cell()?.id())
     }
 
-    /// Exact transport size, including the typed root and its complete BoC.
+    /// Exact transport size, including the typed root and its complete Cell hierarchy.
     pub fn witness_size(&self) -> Option<usize> {
         self.to_bytes().ok().map(|bytes| bytes.len())
     }
@@ -331,7 +331,7 @@ impl Block {
     }
 
     /// Decodes a typed Cell graph without sharing one transaction's execution
-    /// witness set with another. Each ExternalTx retains its own nested BoC.
+    /// witness set with another. Each ExternalTx retains its own nested Cell hierarchy.
     pub fn from_bytes_bounded(bytes: &[u8], params: ChainParams) -> Result<Self, CellError> {
         let mut envelope = decode_envelope(bytes, params.limits.max_witness_bytes)?;
         let root = envelope
@@ -345,7 +345,7 @@ impl Block {
             params,
         )?;
         slice.finish()?;
-        // Unused bodies belong in the explicitly committed execution BoC,
+        // Unused bodies belong in the explicitly committed execution Cell hierarchy,
         // not in a malleable outer transport graph.
         if block.to_bytes()? != bytes {
             return Err(CellError::InvalidFormat);
@@ -456,7 +456,7 @@ fn empty_sequence_id() -> CellID {
 
 fn encode_envelope(value: &impl CellEncode) -> Result<Vec<u8>, CellError> {
     let root = Arc::new(value.to_cell()?);
-    Ok(CellEnvelope::new(root.id(), BagOfCells::collect(root)?)?.encode())
+    Ok(CellEnvelope::new(root.id(), CellIndex::collect(root)?)?.encode())
 }
 
 struct DecodeBudget(u64);
@@ -497,7 +497,7 @@ impl CellResolver for TypedDecode<'_> {
         self.budget.charge(1)?;
         let cell = self.envelope.resolve(reference)?;
         self.budget
-            .charge(cell.encoded_size() as u64 + cell.refs().len() as u64)?;
+            .charge(cell.record_size() as u64 + cell.refs().len() as u64)?;
         Ok(cell)
     }
 }
@@ -506,7 +506,7 @@ fn decode_envelope(bytes: &[u8], limit: usize) -> Result<CellEnvelope, CellError
     // The record parser's work is linear in canonical bytes, including refs.
     let budget = u64::try_from(bytes.len())
         .map_err(|_| CellError::LimitExceeded)?
-        .checked_mul(4)
+        .checked_mul(1024)
         .ok_or(CellError::LimitExceeded)?;
     CellEnvelope::decode(bytes, limit, &mut DecodeBudget(budget))
 }
@@ -635,7 +635,7 @@ impl Blockchain {
             effects_root: empty_sequence_id(),
             state: StateCommitment {
                 contracts: contract_root,
-                actors: actors.actor_root(),
+                actors: actors.actor_root()?,
                 available_storage_units: actors.available_units(),
             },
         };
@@ -869,7 +869,7 @@ impl Blockchain {
             )?;
             records.push(record);
             // Finish this external transaction's complete FIFO message closure
-            // before advancing; every descendant sees only this execution BoC.
+            // before advancing; every descendant sees only this execution Cell hierarchy.
             while let Some(message) = sends.pop_front() {
                 if message_count >= self.params.limits.max_messages {
                     return Err(ChainError::LimitExceeded);
@@ -885,12 +885,18 @@ impl Blockchain {
                     &context,
                     Arc::clone(&block_tx.tx.witnesses),
                 ) {
-                    Ok(result) => Ok((
-                        ExecutionKind::Internal,
-                        result.into_log(),
-                        Some((self.actors.actor_root(), self.actors.available_units())),
-                        None,
-                    )),
+                    Ok(result) => self
+                        .actors
+                        .actor_root()
+                        .map(|root| {
+                            (
+                                ExecutionKind::Internal,
+                                result.into_log(),
+                                Some((root, self.actors.available_units())),
+                                None,
+                            )
+                        })
+                        .map_err(ChainError::from),
                     Err(error) => Self::bounce_log(failed_message).map(|log| {
                         (
                             ExecutionKind::InternalFailed,
@@ -918,7 +924,7 @@ impl Blockchain {
                     block.header.height,
                 )?;
                 if let Some(expected) = executed_actor_state {
-                    let replayed = (self.actors.actor_root(), self.actors.available_units());
+                    let replayed = (self.actors.actor_root()?, self.actors.available_units());
                     if replayed != expected {
                         return Err(ChainError::CommitmentMismatch);
                     }
@@ -932,7 +938,7 @@ impl Blockchain {
         let (contracts, catchup) = work.normalize(&hasher);
         let state = StateCommitment {
             contracts: contracts.root(&hasher),
-            actors: self.actors.actor_root(),
+            actors: self.actors.actor_root()?,
             available_storage_units: self.actors.available_units(),
         };
         let effects_root = sequence_cell(&records)?.id();
@@ -1523,9 +1529,8 @@ mod tests {
         extra
             .insert(Arc::new(Cell::new(vec![0xfe], vec![]).unwrap()))
             .unwrap();
-        let extra = CellEnvelope::new(envelope.root(), extra).unwrap().encode();
         assert!(matches!(
-            Block::from_bytes_bounded(&extra, ChainParams::default()),
+            CellEnvelope::new(envelope.root(), extra),
             Err(CellError::InvalidFormat)
         ));
         let header_wire = block.header.to_bytes().unwrap();
@@ -1742,7 +1747,7 @@ mod tests {
         fn wire(cell: &Cell) -> Vec<u8> {
             CellEnvelope::new(
                 cell.id(),
-                BagOfCells::collect(Arc::new(cell.clone())).unwrap(),
+                CellIndex::collect(Arc::new(cell.clone())).unwrap(),
             )
             .unwrap()
             .encode()
@@ -1859,7 +1864,7 @@ mod tests {
         let archive = chain.actor_storage(&actor).unwrap().cells;
         let expiry = chain.build_block([1; 32], vec![]).unwrap();
         chain.connect(&expiry).unwrap();
-        let frozen = chain.actor_storage(&actor).unwrap().cells.id();
+        let frozen = chain.actor_storage(&actor).unwrap().cells.id().unwrap();
 
         let send = |input: &Contract| {
             ScriptBuilder::new()
@@ -1910,7 +1915,10 @@ mod tests {
                 ExecutionKind::Internal
             ]
         );
-        assert_eq!(chain.actor_storage(&actor).unwrap().cells.id(), frozen);
+        assert_eq!(
+            chain.actor_storage(&actor).unwrap().cells.id().unwrap(),
+            frozen
+        );
     }
 
     #[test]
@@ -2070,14 +2078,14 @@ mod tests {
             8,
         );
         let pool = store.available_units();
-        let actors = store.actor_root();
+        let actors = store.actor_root().unwrap();
 
         let (error, bounce) = fail_and_bounce(&mut store, original, 0);
 
         assert!(matches!(error, VMError::VerifyFailed));
         assert!(!store.exists(&target));
         assert_eq!(store.available_units(), pool);
-        assert_eq!(store.actor_root(), actors);
+        assert_eq!(store.actor_root().unwrap(), actors);
         store.assert_supply(0).unwrap();
         assert!(!bounce.iter().any(|entry| matches!(
             entry,
@@ -2157,7 +2165,7 @@ mod tests {
             log.iter()
                 .any(|entry| matches!(entry, TxEntry::ActorSave { .. }))
         );
-        let expected_commitment = (executed.actor_root(), executed.available_units());
+        let expected_commitment = (executed.actor_root().unwrap(), executed.available_units());
 
         let mut chain = Blockchain::new(ChainParams::default()).unwrap();
         chain.actors = baseline;
@@ -2179,7 +2187,10 @@ mod tests {
             .expect("committed effects replay");
 
         assert_eq!(
-            (chain.actors.actor_root(), chain.actors.available_units()),
+            (
+                chain.actors.actor_root().unwrap(),
+                chain.actors.available_units()
+            ),
             expected_commitment
         );
         assert!(sends.is_empty());
@@ -2193,7 +2204,7 @@ mod tests {
     #[test]
     fn invalid_effect_shape_rolls_back_every_lane() {
         let mut chain = Blockchain::new(ChainParams::default()).unwrap();
-        let actor_root = chain.actors.actor_root();
+        let actor_root = chain.actors.actor_root().unwrap();
         let pool = chain.actors.available_units();
         let hasher = utreexo::utreexo_hasher::<ContractLeaf>();
         let mut work = chain.contracts.work_forest();
@@ -2224,7 +2235,7 @@ mod tests {
             ),
             Err(ChainError::InvalidEffectLog)
         ));
-        assert_eq!(chain.actors.actor_root(), actor_root);
+        assert_eq!(chain.actors.actor_root().unwrap(), actor_root);
         assert_eq!(chain.actors.available_units(), pool);
         assert_eq!(work.normalize(&hasher).0.count(), 0);
         assert!(sends.is_empty());
@@ -2254,7 +2265,7 @@ mod tests {
             ),
             Err(ChainError::Vm(VMError::StorageCapacityExceeded))
         ));
-        assert_eq!(chain.actors.actor_root(), actor_root);
+        assert_eq!(chain.actors.actor_root().unwrap(), actor_root);
         assert_eq!(chain.actors.available_units(), pool);
         assert_eq!(work.normalize(&hasher).0.count(), 0);
     }
@@ -2297,7 +2308,7 @@ mod tests {
             })
             .collect();
         assert_eq!(saves, vec![parent.to_hash(), child.to_hash()]);
-        let expected = (executed.actor_root(), executed.available_units());
+        let expected = (executed.actor_root().unwrap(), executed.available_units());
 
         let mut chain = Blockchain::new(ChainParams::default()).unwrap();
         chain.actors = baseline;
@@ -2316,7 +2327,10 @@ mod tests {
             )
             .expect("nested effects replay");
         assert_eq!(
-            (chain.actors.actor_root(), chain.actors.available_units()),
+            (
+                chain.actors.actor_root().unwrap(),
+                chain.actors.available_units()
+            ),
             expected
         );
         assert_eq!(
@@ -2348,7 +2362,7 @@ mod tests {
             log.entries().last(),
             Some(TxEntry::ActorDestroy { actor: destroyed }) if destroyed == &actor
         ));
-        let expected = (executed.actor_root(), executed.available_units());
+        let expected = (executed.actor_root().unwrap(), executed.available_units());
 
         let mut chain = Blockchain::new(ChainParams::default()).unwrap();
         chain.actors = baseline;
@@ -2368,7 +2382,10 @@ mod tests {
             .expect("destruction effects replay");
 
         assert_eq!(
-            (chain.actors.actor_root(), chain.actors.available_units()),
+            (
+                chain.actors.actor_root().unwrap(),
+                chain.actors.available_units()
+            ),
             expected
         );
         assert!(!chain.actors.exists(&actor));
@@ -2539,14 +2556,14 @@ mod tests {
             .unwrap()
             .unwrap();
         let before = chain.actor_storage(&actor).unwrap();
-        let before_root = chain.actors.actor_root();
+        let before_root = chain.actors.actor_root().unwrap();
         let block = chain.build_block([10; 32], Vec::new()).unwrap();
         let applied = chain.connect(&block).unwrap();
         assert!(applied.records.is_empty());
         assert!(chain.actors.exists(&actor));
         assert!(chain.actors.load_state(&actor).is_err());
         let frozen = chain.actor_storage(&actor).unwrap();
-        assert_ne!(before.cells.id(), frozen.cells.id());
+        assert_ne!(before.cells.id().unwrap(), frozen.cells.id().unwrap());
         assert_eq!(chain.actors.actor_usage(&actor).unwrap(), 0);
         chain.actors.assert_supply(1).unwrap();
 
@@ -2559,15 +2576,15 @@ mod tests {
         assert_eq!(state_root(&restored), state_root(&state));
         chain.actors.pop_checkpoint_rollback();
         assert_eq!(
-            chain.actor_storage(&actor).unwrap().cells.id(),
-            frozen.cells.id()
+            chain.actor_storage(&actor).unwrap().cells.id().unwrap(),
+            frozen.cells.id().unwrap()
         );
 
         chain.disconnect_tip(applied.id).unwrap();
-        assert_eq!(chain.actors.actor_root(), before_root);
+        assert_eq!(chain.actors.actor_root().unwrap(), before_root);
         assert_eq!(
-            chain.actor_storage(&actor).unwrap().cells.id(),
-            before.cells.id()
+            chain.actor_storage(&actor).unwrap().cells.id().unwrap(),
+            before.cells.id().unwrap()
         );
     }
 

@@ -22,7 +22,7 @@ pub use crate::{
 };
 pub use bulletproofs::PedersenGens;
 pub use cells::{
-    BagOfCells, Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellRef,
+    Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellIndex, CellRef,
     CellSlice,
 };
 pub use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
@@ -55,7 +55,8 @@ pub(crate) fn fixture_vm(program: impl TestProgram, kind: CallKind) -> VM {
         dummy_header(),
         CallFrame::new(program.into_instructions(), kind, 1_000_000),
     )
-    .with_cells(cells);
+    .with_cells(cells)
+    .unwrap();
     vm.contract_witnesses = contracts;
     vm.script_witnesses = scripts;
     vm
@@ -64,7 +65,7 @@ pub(crate) fn fixture_vm(program: impl TestProgram, kind: CallKind) -> VM {
 #[derive(Clone, Debug)]
 pub(crate) struct TestTaprootProof {
     pub proof: TaprootProof,
-    pub cells: BagOfCells,
+    pub cells: CellIndex,
 }
 
 impl std::ops::Deref for TestTaprootProof {
@@ -771,13 +772,13 @@ pub(crate) fn make_open_token(
 //
 //   ┌── per input contract i ───────────────────────────────────┐
 //   │  pushstr <contract_id_i>                               │
-//   │  input  (Contract body from the transaction BoC)       │
+//   │  input  (Contract body from the transaction Cell index)       │
 //   │  pushpoint <internal_key_i>                            │
 //   │  pushstr <program_trie_root_i>                         │
 //   │  push:<program_index_i>                                │
 //   │  push:<gas>                                           │
 //   │  push:0  (k = 0 args)                                  │
-//   │  open   (branch loaded from BoC returns the Token)     │
+//   │  open   (branch loaded from Cell index returns the Token)     │
 //   │  verify; drop  (consume success and return count)      │
 //   └────────────────────────────────────────────────────────┘
 //   ↓  stack now: [Token_0, Token_1, …, Token_{N-1}]

@@ -1,4 +1,4 @@
-use crate::{BagOfCells, Cell, CellBuilder, CellEnvelope, CellError, CellResolver, CellSlice};
+use crate::{Cell, CellBuilder, CellEnvelope, CellError, CellIndex, CellResolver, CellSlice};
 
 /// Canonically writes one expected type into a Cell builder.
 pub trait CellEncode {
@@ -13,7 +13,7 @@ pub trait CellEncode {
     /// Collects the root and its resident descendants for standalone transport.
     fn to_envelope(&self) -> Result<CellEnvelope, CellError> {
         let root = std::sync::Arc::new(self.to_cell()?);
-        CellEnvelope::new(root.id(), BagOfCells::collect(root)?)
+        CellEnvelope::new(root.id(), CellIndex::collect(root)?)
     }
 }
 

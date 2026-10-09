@@ -652,7 +652,7 @@ mod tests {
             trie.insert(&[key], value(key), &mut ()).unwrap();
         }
         let root = trie.into_root().unwrap();
-        let mut bag = crate::BagOfCells::collect(root.as_resident_arc().unwrap().clone()).unwrap();
+        let mut bag = crate::CellIndex::collect(root.as_resident_arc().unwrap().clone()).unwrap();
         let root = root.to_unloaded().unwrap();
         for key in [0, 7, 255] {
             assert_eq!(
@@ -864,7 +864,7 @@ mod tests {
     fn resident_and_unresolved_roots_reject_noncanonical_nodes_on_access() {
         let child = CellRef::resident(value(1));
         let root = Cell::new(vec![0b0001, 0, 0], vec![child]).unwrap();
-        let mut bag = crate::BagOfCells::collect(Arc::new(root.clone())).unwrap();
+        let mut bag = crate::CellIndex::collect(Arc::new(root.clone())).unwrap();
         for reference in [CellRef::unresolved(root.id()), root.into()] {
             let id = reference.id();
             let mut trie = Trie::from_cell(reference, 1).unwrap();
@@ -1038,7 +1038,7 @@ mod tests {
             Err(CellError::MissingCell(id)) if id == root.id()
         ));
         assert_eq!(lazy.root_id(), Some(root.id()));
-        let mut bag = crate::BagOfCells::collect(cell).unwrap();
+        let mut bag = crate::CellIndex::collect(cell).unwrap();
         let removed = lazy.remove(&[0], &mut bag).unwrap().unwrap();
         assert_eq!(resolve_cell(&mut bag, &removed).unwrap().payload(), &[1]);
         assert!(lazy.is_empty());

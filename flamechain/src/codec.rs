@@ -25,7 +25,7 @@ pub fn contract_bytes(contract: &Contract) -> Result<Vec<u8>, CellError> {
 /// A contract, back from those bytes.
 pub fn contract_from_bytes(bytes: &[u8]) -> Result<Contract, CellError> {
     // Four gas per byte is upstream's own rule for decoding an envelope.
-    let mut gas = (bytes.len() as u64).saturating_mul(4);
+    let mut gas = (bytes.len() as u64).saturating_mul(1024);
     let mut envelope = CellEnvelope::decode(bytes, MAX_CONTRACT_BYTES, &mut gas)?;
     // `CellEnvelope::decode` refuses an envelope whose bag lacks its own
     // root, so this lookup cannot fail. It is a lookup rather than an

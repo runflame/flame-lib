@@ -11,8 +11,10 @@ The physical [Cell record and level-dependent hash preimages](cells.md#canonical
 are distinct: references retain mask/hash/depth summaries, and `CellID` is the
 highest factual hash. Explicit pruning preserves selected lower hashes, not
 the factual ID; unloading a body preserves every commitment. Standalone
-transport is a `CellEnvelope`: root ID followed by a canonical, strictly
-CellID-sorted Bag of Cells (BoC). Bodies omitted from the bag remain unloaded.
+transport is a root-last DAG packet: `V128` count followed by ordered Cell
+records with backward reference indexes. Every referenced physical body is
+included; intentional cuts are explicit pruned Cells. Typed `CellEnvelope`
+snapshots are ordinary cap-plus-proof-root Cells, with no root-ID prefix.
 
 ## Transactions and execution witnesses
 
@@ -20,12 +22,12 @@ An ExternalTx root has this layout:
 
 | Payload | Ordered child references |
 | --- | --- |
-| version:u32 LE, locktime:u32 LE, execution BoCID:32 bytes | script container, signature, R1CS proof, **unloaded TxLog** |
+| version:u32 LE, locktime:u32 LE, witness root CellID:32 bytes | script container, signature, R1CS proof, **unloaded TxLog** |
 
 The script container stores the script in length-prefixed snake encoding.
-Its next unused reference points to a snake containing the canonical bytes of
-the execution BoC. A long script uses the first reference for its continuation;
-the execution-bag reference follows it. The signature Cell has either zero
+Its next unused reference points directly to the witness snapshot Cell root.
+A long script uses the first reference for its continuation; the witness-root
+reference follows it. The signature Cell has either zero
 bytes (no TxID-bound authorization) or 64 bytes, and no references. The proof
 is a dedicated snake. UnsignedTx omits the signature and proof references,
 leaving script-container and unloaded-TxLog references. The effect-root
@@ -33,20 +35,20 @@ reference retains its actual mask, hashes, and depths, including the factual
 TxID; it is not a bare ID or an explicit pruning record. Verification rebuilds
 the effect graph and compares the complete commitment summary as well as TxID.
 
-There are deliberately two bags:
+Transport and execution have separate scopes:
 
-- The **transport bag** reconstructs the envelope, script, signature, proof,
-  and nested execution-bag bytes. Its bodies are not implicitly VM witnesses.
-- The **execution bag** is the immutable set available to the external VM and
+- The **transport DAG** reconstructs the typed snapshot, script, signature,
+  proof, and witness hierarchy. Its bodies are not implicitly VM witnesses.
+- The **execution index** is the immutable set available to the external VM and
   every synchronous call and asynchronous descendant it initiates. It contains
   Contract bodies, predicate paths, and optional actor/Dict bodies.
 
-External execution emits `Header`, then `CellWitness(execution_boc.id())`.
+External execution emits `Header`, then `CellWitness(witness_root.id())`.
 That entry participates in TxID and therefore the signature and R1CS transcript.
-Removing even an unused execution body changes the signed statement. The bag
+Removing even an unused execution body changes the signed statement. The index
 is fixed before proving; it never includes its own transaction envelope,
 avoiding a circular commitment. Private commitment openings and prover-only
-instructions do not belong in either public bag.
+instructions do not belong in the public transport or witness snapshot.
 
 ### Prover-to-verifier API
 
@@ -56,7 +58,7 @@ programs, including their allocation assignments and nested witnesses.
 `push_taproot_proof(&tree, logical_index)` emits the short selector and attaches
 the selected public path plus that program's private overlay. Unselected
 programs' witnesses are not collected. Code already present in a literal or
-predicate leaf is not duplicated as a separate code Cell in the execution bag.
+predicate leaf is not duplicated as a separate code Cell in the execution index.
 
 For a Contract protected by `tree`, the public workflow is:
 
@@ -82,10 +84,10 @@ let verified_log = decoded.verify(limits)?;
 ```
 
 This example expects the selected branch to consume its payload and return no
-values. `UnsignedTx::witnesses()` exposes the frozen public bag for inspection;
-both `sign` and `without_signature` preserve it. `ExternalTx` carries the bag
+values. `UnsignedTx::witnesses()` exposes the frozen public index for inspection;
+both `sign` and `without_signature` preserve it. `ExternalTx` carries the index
 through transport and passes it to the verifier automatically. There is no
-separate witness sidecar for the caller to assemble. The bag contains all
+separate witness sidecar for the caller to assemble. The index contains all
 explicitly attached paths, including those in conditional code, and freezes
 before proving; it is not trimmed according to later execution outcomes.
 
@@ -94,7 +96,7 @@ before proving; it is not trimmed according to later execution outcomes.
 The claimed TxID is the **TxLog root CellID**, not the ExternalTx root ID.
 Verification re-executes and checks the claimed effect root. Bounded transport
 decoders reject trailing bytes and unused outer bodies; unused bodies inside
-the committed execution bag are allowed.
+the committed execution index are allowed.
 
 ## TxLog
 
@@ -119,7 +121,7 @@ separate TxEntry Cell. The sum tag is one byte:
 | 12 | StoragePurchase | actor ID:32, bytes:u64, expiry:u64, fee:Scalar | — |
 | 13 | ActorDestroy | actor ID:32 | — |
 | 14 | ActorDeploy | actor ID:32 | constructor code snake |
-| 15 | CellWitness | execution BoCID:32 | — |
+| 15 | CellWitness | execution availability CellID:32 | — |
 
 Integers in payloads are little-endian unless explicitly stated otherwise.
 
@@ -194,7 +196,7 @@ Use a Dict to hold several values. `contract` and `output` take
 `payload predicate`; `signtx` returns that one payload, without an arity.
 
 `input` consumes a 32-byte ContractID, resolves its body from the initiating
-execution bag, and creates the linear Contract handle. The chain verifies
+execution index, and creates the linear Contract handle. The chain verifies
 the spend-once Utreexo proof separately. ScriptBuilder can accept a private
 Contract witness, emit its short ID in bytecode, and collect public Cell bodies
 without revealing private token openings.
@@ -211,7 +213,7 @@ Each logical program is blinded with a second leaf. A leaf is the sum
 A branch selector contains internal_key:32, root_CellID:32, index:u64 LE.
 No sibling-hash array or bit-position string is encoded.
 `PredicateTree::witness_for(logical_index)` returns this selector plus a
-BoC containing only the selected path and its program/continuations.
+Cell hierarchy containing only the selected path and its program/continuations.
 `Predicate::open_branch(selector, resolver, max_program_bytes)` verifies
 the tweaked-key relation and uses `Trie::lookup` to resolve the selected
 program through Cells. Missing indices fail lookup; selecting a blinding leaf
@@ -248,7 +250,7 @@ at every send, so identities are unique by construction.
 
 The actor registry is a 32-byte-key Trie ordered by canonical actor ID.
 Its envelope has count:u64 LE and an optional Trie reference. Each entry
-contains resident_BoCID:32 and one pruned reference to this actor layout:
+contains resident snapshot CellID:32 and one unloaded reference to this actor layout:
 
 | Actor slot | Payload | Ordered references |
 | --- | --- | --- |
@@ -260,8 +262,10 @@ Keys are expiry height:u64 BE; leaves contain units:u64 LE. Same-expiry leases
 are coalesced. `Blockchain::actor_storage` exposes a `StoredActor { root,
 cells }` snapshot for witness construction.
 
-The committed resident BoC contains actor/lease metadata and the explicitly
-retained code/state graph. Rent counts unique resident code/state Cell record
+The committed residency snapshot indexes actor/lease metadata and the explicitly
+retained code/state bodies. Its normal Cell hierarchy represents missing
+descendants with fresh pruning records and preserves the original content IDs
+through its stored projection cap. Rent counts unique resident code/state Cell record
 bytes plus the existing per-lease charge; registry metadata is not charged
 again. Frozen actors retain metadata, code/state IDs, lengths, and leases,
 but discard code/state bodies. They are not literally represented by only
@@ -269,7 +273,7 @@ but discard code/state bodies. They are not literally represented by only
 
 Resolution uses attached resident Cells, then the **current actor's** retained
 code/state bodies from `ActorRegistry::actor_cells`, then the initiating
-execution bag. This VM fallback excludes actor-layout and lease metadata;
+execution index. This VM fallback excludes actor-layout and lease metadata;
 the registry's `StoredActor` export includes that metadata for storage/witness
 construction. Resolution never consults another actor's store or a node-global
 cache. Every logical Cell access is charged, including
@@ -304,7 +308,7 @@ version:u32 | height:u64 | core_block_hash:32 | parent:32
 
 BlockHash is its CellID. Each external transaction immediately drains its
 FIFO actor-message closure before the next external transaction, reusing
-only its own execution bag. A block-wide transport deduplication cannot add
+only its own execution index. A block-wide transport deduplication cannot add
 witnesses to any transaction.
 
 Utreexo's existing `Forest`, `Path`, and `Proof` algorithms, hashing, and byte

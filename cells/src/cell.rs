@@ -318,7 +318,7 @@ impl Cell {
             level,
         })
     }
-    pub fn encoded_size(&self) -> usize {
+    pub fn record_size(&self) -> usize {
         2 + self.payload().len()
             + self
                 .refs()
@@ -339,8 +339,8 @@ impl Cell {
     }
     /// Canonical physical record with complete summaries for unloaded children.
     /// Virtual views are deliberately not serializable as physical cells.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.encoded_size());
+    pub fn encode_record(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.record_size());
         bytes.extend_from_slice(&self.descriptor().to_le_bytes());
         bytes.extend_from_slice(self.payload());
         for reference in self.refs() {
@@ -359,7 +359,7 @@ impl Cell {
             if index + 1 != self.commitment().hashes.len() {
                 return Err(CellError::PrunedCell);
             }
-            return Ok(self.encode());
+            return Ok(self.encode_record());
         }
         let significant = significant_levels(self.level_mask())
             .nth(index)
@@ -395,7 +395,7 @@ impl Cell {
         }
         Self::new(payload, refs)
     }
-    pub fn decode_exact(mut bytes: &[u8]) -> Result<Self, CellError> {
+    pub fn decode_record_exact(mut bytes: &[u8]) -> Result<Self, CellError> {
         let cell = Self::decode_record(&mut bytes)?;
         if !bytes.is_empty() {
             return Err(CellError::TrailingBytes);
@@ -619,10 +619,10 @@ mod tests {
                 }
                 valid
             };
-            let decoded = Cell::decode_exact(&bytes);
+            let decoded = Cell::decode_record_exact(&bytes);
             assert_eq!(decoded.is_ok(), valid, "{descriptor:04x}");
             if let Ok(cell) = decoded {
-                assert_eq!(cell.encode(), bytes);
+                assert_eq!(cell.encode_record(), bytes);
             }
         }
         assert_eq!(ordinary, 5 * 4096);
@@ -633,10 +633,10 @@ mod tests {
     fn ordinary_payload_uses_all_twelve_length_bits() {
         for length in [2048, 4095] {
             let cell = Cell::new(vec![0x5a; length], vec![]).unwrap();
-            let encoded = cell.encode();
+            let encoded = cell.encode_record();
             assert_eq!(&encoded[..2], &(length as u16).to_le_bytes());
             assert_eq!(
-                Cell::decode_exact(&encoded).unwrap().payload(),
+                Cell::decode_record_exact(&encoded).unwrap().payload(),
                 cell.payload()
             );
         }
@@ -653,7 +653,7 @@ mod tests {
     fn pruned_wire_has_all_hashes_then_all_little_endian_depths() {
         let cell =
             Cell::from_pruned(0b101, vec![[0x11; 32], [0x22; 32]], vec![0x1234, 0x5678]).unwrap();
-        let bytes = cell.encode();
+        let bytes = cell.encode_record();
         assert_eq!(&bytes[..2], &[5, 0x80]);
         assert_eq!(&bytes[2..34], &[0x11; 32]);
         assert_eq!(&bytes[34..66], &[0x22; 32]);
@@ -665,7 +665,7 @@ mod tests {
         assert_eq!(cell.depth(3).unwrap(), 0);
         assert_eq!(cell.id(), <CellID>::from(Sha256::digest(&bytes)));
         assert_eq!(
-            Cell::decode_exact(&bytes).unwrap().commitment(),
+            Cell::decode_record_exact(&bytes).unwrap().commitment(),
             cell.commitment()
         );
         assert!(Cell::from_pruned(0, vec![], vec![]).is_err());
@@ -685,15 +685,17 @@ mod tests {
         let reference = CellRef::from(child);
         assert_eq!(reference.as_resident().unwrap().payload().as_ptr(), payload);
         let root = Cell::new(vec![3], vec![reference.clone()]).unwrap();
-        assert_eq!(&root.encode()[..2], &[1, 0x10]);
+        assert_eq!(&root.encode_record()[..2], &[1, 0x10]);
         assert_eq!(root.depth(0).unwrap(), 1);
         let expected_preimage = [&[1, 0x10, 0, 0, 3, 0, 0][..], &reference.id()].concat();
         assert_eq!(root.hash_preimage(0).unwrap(), expected_preimage);
         assert_eq!(root.id(), <CellID>::from(Sha256::digest(expected_preimage)));
         let detached = Cell::new(vec![3], vec![reference.to_unloaded().unwrap()]).unwrap();
-        assert_eq!(detached.encode(), root.encode());
+        assert_eq!(detached.encode_record(), root.encode_record());
         assert_eq!(
-            Cell::decode_exact(&root.encode()).unwrap().commitment(),
+            Cell::decode_record_exact(&root.encode_record())
+                .unwrap()
+                .commitment(),
             root.commitment()
         );
         assert!(matches!(
@@ -773,7 +775,7 @@ mod tests {
         assert!(view.hash(16).is_err());
         assert!(cut.prune(0).is_err());
         let dense = Cell::from_pruned(0x7fff, vec![[8; 32]; 15], vec![0; 15]).unwrap();
-        assert_eq!(dense.encode().len(), 512);
+        assert_eq!(dense.encode_record().len(), 512);
         assert_eq!(dense.commitment().hashes().len(), 16);
     }
 
@@ -826,19 +828,19 @@ mod tests {
     #[test]
     fn decoder_rejects_truncation_trailing_bytes_and_reference_mask_overflow() {
         let cell = parent(vec![leaf(1).prune(1).unwrap()]);
-        let bytes = cell.encode();
+        let bytes = cell.encode_record();
         for end in 0..bytes.len() {
-            assert!(Cell::decode_exact(&bytes[..end]).is_err());
+            assert!(Cell::decode_record_exact(&bytes[..end]).is_err());
         }
         let mut trailing = bytes.clone();
         trailing.push(0);
         assert!(matches!(
-            Cell::decode_exact(&trailing),
+            Cell::decode_record_exact(&trailing),
             Err(CellError::TrailingBytes)
         ));
         let mut bad_mask = bytes;
         bad_mask[4] |= 0x80;
-        assert!(Cell::decode_exact(&bad_mask).is_err());
+        assert!(Cell::decode_record_exact(&bad_mask).is_err());
     }
 
     #[test]

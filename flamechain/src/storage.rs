@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use cells::{
-    BagOfCells, Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellID,
-    CellRef, CellResolver, CellSlice, Trie, resolve_cell,
+    Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellID, CellIndex, CellRef,
+    CellResolver, CellSlice, Trie, resolve_cell,
 };
 
 use flamevm::{ActorID, ActorRegistry, Scalar, StoragePurchase, VMError, Value, empty_state};
@@ -88,7 +88,7 @@ pub struct Lease {
 #[derive(Clone, Debug)]
 pub struct StoredActor {
     pub root: CellID,
-    pub cells: Arc<BagOfCells>,
+    pub cells: Arc<CellIndex>,
 }
 
 /// A read-only view of an actor's committed content and storage at one height.
@@ -123,7 +123,7 @@ struct LiveActor {
     state_root: CellRef,
     /// Only explicitly retained code/state bodies; transaction resolution never
     /// inserts into this bag. Registry/lease metadata is reconstructed separately.
-    cells: Arc<BagOfCells>,
+    cells: Arc<CellIndex>,
     resident_bytes: u64,
 }
 
@@ -183,9 +183,9 @@ impl CellEncode for ActorSlot {
 /// External witnesses are deliberately not a source for persistent collection.
 fn collect_owned(
     roots: impl IntoIterator<Item = Arc<Cell>>,
-    prior: &BagOfCells,
-) -> Result<BagOfCells, CellError> {
-    let mut bag = BagOfCells::new();
+    prior: &CellIndex,
+) -> Result<CellIndex, CellError> {
+    let mut bag = CellIndex::new();
     let mut visited = BTreeSet::new();
     let mut pending: Vec<_> = roots.into_iter().collect();
     while let Some(cell) = pending.pop() {
@@ -230,7 +230,7 @@ impl LiveActor {
                 });
         let cells = collect_owned(roots, &self.cells)?;
         self.resident_bytes = cells.iter().try_fold(0u64, |size, (_, cell)| {
-            size.checked_add(cell.encoded_size() as u64)
+            size.checked_add(cell.record_size() as u64)
                 .ok_or(CellError::LimitExceeded)
         })?;
         self.cells = Arc::new(cells);
@@ -435,7 +435,7 @@ impl ActorStore {
                 // removes body availability; it never retires the contents.
                 live.code = None;
                 live.state = None;
-                live.cells = Arc::new(BagOfCells::new());
+                live.cells = Arc::new(CellIndex::new());
                 live.resident_bytes = 0;
             }
         }
@@ -484,10 +484,10 @@ impl ActorStore {
     }
 
     fn state_bytes(state: &Value) -> Result<u64, VMError> {
-        BagOfCells::collect(Arc::new(state.to_cell()?))?
+        CellIndex::collect(Arc::new(state.to_cell()?))?
             .iter()
             .try_fold(0u64, |size, (_, cell)| {
-                size.checked_add(cell.encoded_size() as u64)
+                size.checked_add(cell.record_size() as u64)
                     .ok_or(VMError::StorageArithmeticOverflow)
             })
     }
@@ -608,7 +608,7 @@ impl ActorStore {
 
     fn stored_slot(slot: &ActorSlot) -> Result<StoredActor, CellError> {
         let root = Arc::new(slot.to_cell()?);
-        let empty = BagOfCells::new();
+        let empty = CellIndex::new();
         let prior = slot
             .live
             .as_ref()
@@ -620,30 +620,28 @@ impl ActorStore {
         })
     }
 
-    pub(crate) fn actor_root(&self) -> CellID {
-        let mut trie = Trie::new(32).expect("actor ID width");
+    pub(crate) fn actor_root(&self) -> Result<CellID, CellError> {
+        let mut trie = Trie::new(32)?;
         for (id, slot) in &self.actors {
-            let graph = Self::stored_slot(slot).expect("admitted actor Cell graph");
+            let graph = Self::stored_slot(slot)?;
             let mut entry = CellBuilder::new();
-            entry
-                .store_bytes(&graph.cells.id())
-                .expect("availability ID fits")
-                .store_ref(
-                    CellRef::resident(graph.cells.get(&graph.root).expect("stored actor root"))
-                        .to_unloaded()
-                        .expect("stored actor root has a commitment"),
+            entry.store_bytes(&graph.cells.id()?)?.store_ref(
+                CellRef::resident(
+                    graph
+                        .cells
+                        .get(&graph.root)
+                        .ok_or(CellError::MissingCell(graph.root))?,
                 )
-                .expect("actor root reference fits");
-            trie.insert(id, entry.build(), &mut ())
-                .expect("resident actor trie");
+                .to_unloaded()?,
+            )?;
+            trie.insert(id, entry.build(), &mut ())?;
         }
         let mut root = CellBuilder::new();
-        root.store_u64(self.actors.len() as u64)
-            .expect("actor count fits");
+        root.store_u64(self.actors.len() as u64)?;
         if let Some(reference) = trie.into_root() {
-            root.store_ref(reference).expect("one actor trie reference");
+            root.store_ref(reference)?;
         }
-        root.build().id()
+        Ok(root.build().id())
     }
 
     pub(crate) fn replay_deploy(&mut self, actor: ActorID, code: Vec<u8>) -> Result<(), VMError> {
@@ -781,7 +779,7 @@ impl ActorRegistry for ActorStore {
         Ok(code)
     }
 
-    fn actor_cells(&self, actor: &ActorID) -> Result<Arc<BagOfCells>, VMError> {
+    fn actor_cells(&self, actor: &ActorID) -> Result<Arc<CellIndex>, VMError> {
         // Refreshed by the VM at instruction boundaries, including after a
         // nested call returns. Reuse the committed code/state body set: the
         // registry's actor/lease metadata is not an execution witness source.
@@ -954,7 +952,7 @@ impl ActorRegistry for ActorStore {
             code: Some(code),
             state: Some(state),
             state_bytes,
-            cells: Arc::new(BagOfCells::new()),
+            cells: Arc::new(CellIndex::new()),
             resident_bytes: 0,
         };
         live.retain_changes()?;
@@ -996,9 +994,37 @@ mod tests {
             root.refs()[1].id(),
             state_root(&Value::Scalar(Scalar::from(42u64)))
         );
-        let before = store.actor_root();
+        let before = store.actor_root().unwrap();
         store.purchase_storage(&actor(), 1_024, 1).unwrap().unwrap();
-        assert_ne!(before, store.actor_root());
+        assert_ne!(before, store.actor_root().unwrap());
+    }
+
+    #[test]
+    fn exhausted_snapshot_levels_return_an_actor_commitment_error() {
+        let dict = Dict::from_values(vec![Value::Scalar(Scalar::from(7u64))]);
+        let root = dict.to_cell().unwrap();
+        let trie = resolve_cell(&mut (), &root.refs()[0]).unwrap();
+        let root = Cell::new(
+            root.payload().to_vec(),
+            vec![trie.prune(15).unwrap().into()],
+        )
+        .unwrap();
+        let state = Value::Dict(Dict::from_trusted_cell(&root, &mut ()).unwrap());
+        let mut store = ActorStore::new(StorageParams::default()).unwrap();
+        store.deploy(actor(), vec![0], state).unwrap();
+        assert!(store.actor_root().is_ok());
+
+        let live = store
+            .actors
+            .get_mut(&actor().to_hash())
+            .unwrap()
+            .live
+            .as_mut()
+            .unwrap();
+        live.cells = Arc::new(CellIndex::new());
+        live.code = None;
+        live.state = None;
+        assert_eq!(store.actor_root(), Err(CellError::InvalidLevel));
     }
 
     #[test]
@@ -1047,7 +1073,7 @@ mod tests {
             .unwrap();
         live.code = None;
         live.state = None;
-        assert_eq!(warm.actor_root(), cold.actor_root());
+        assert_eq!(warm.actor_root().unwrap(), cold.actor_root().unwrap());
         let warm_state = warm.load_state(&actor()).unwrap();
         let cold_state = cold.load_state(&actor()).unwrap();
         assert_eq!(state_root(&warm_state), state_root(&cold_state));
@@ -1073,7 +1099,7 @@ mod tests {
         let token = flamevm::Token::cleartext(Scalar::from(7u64), FLAME_FLAVOR).unwrap();
         let mut store = ActorStore::new(StorageParams::default()).unwrap();
         store.deploy(actor(), vec![0], Value::Token(token)).unwrap();
-        let root_before = store.actor_root();
+        let root_before = store.actor_root().unwrap();
         for _ in 0..2 {
             let info = store.actor_info(&actor(), 0).unwrap();
             assert_eq!(info.code, Some(vec![0]));
@@ -1085,7 +1111,7 @@ mod tests {
             assert_eq!(token.qty().assignment(), None);
             assert_eq!(token.flv().assignment(), None);
         }
-        assert_eq!(store.actor_root(), root_before);
+        assert_eq!(store.actor_root().unwrap(), root_before);
         assert!(store.checked_out.is_empty());
 
         // Cached code/state must not substitute for absent committed bodies.
@@ -1097,7 +1123,7 @@ mod tests {
             .as_mut()
             .unwrap();
         assert!(live.code.is_some() && live.state.is_some());
-        live.cells = Arc::new(BagOfCells::new());
+        live.cells = Arc::new(CellIndex::new());
         let info = store.actor_info(&actor(), 0).unwrap();
         assert!(info.code.is_none() && info.state.is_none());
     }
@@ -1115,7 +1141,7 @@ mod tests {
             .live
             .as_mut()
             .unwrap();
-        let mut resident = BagOfCells::new();
+        let mut resident = CellIndex::new();
         resident
             .insert(live.cells.get(&live.code_root.id()).unwrap())
             .unwrap();
@@ -1323,7 +1349,7 @@ mod tests {
         store.deploy(actor(), vec![0], empty_state()).unwrap();
         store.deploy(other.clone(), vec![0], empty_state()).unwrap();
         let before_pool = store.available_units();
-        let before_root = store.actor_root();
+        let before_root = store.actor_root().unwrap();
 
         store.push_checkpoint();
         store.purchase_storage(&actor(), 1_024, 0).unwrap().unwrap();
@@ -1334,7 +1360,7 @@ mod tests {
 
         store.pop_checkpoint_rollback();
         assert_eq!(store.available_units(), before_pool);
-        assert_eq!(store.actor_root(), before_root);
+        assert_eq!(store.actor_root().unwrap(), before_root);
         assert_eq!(store.actor_capacity(&actor(), 0).unwrap(), 0);
         assert_eq!(store.actor_capacity(&other, 0).unwrap(), 0);
         store.assert_supply(0).unwrap();
@@ -1350,7 +1376,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let before_pool = store.available_units();
-        let before_root = store.actor_root();
+        let before_root = store.actor_root().unwrap();
         let before_expiries = store.expiries.clone();
 
         store.push_checkpoint();
@@ -1365,7 +1391,7 @@ mod tests {
         store.pop_checkpoint_rollback();
         assert!(store.exists(&actor()));
         assert_eq!(store.available_units(), before_pool);
-        assert_eq!(store.actor_root(), before_root);
+        assert_eq!(store.actor_root().unwrap(), before_root);
         assert_eq!(store.expiries, before_expiries);
         assert_eq!(
             store.actor_capacity(&actor(), 0).unwrap(),

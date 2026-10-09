@@ -94,7 +94,7 @@ pub(crate) fn publish(tx: &ExternalTx) -> (Vec<u8>, TxLog) {
 }
 
 /// The contracts a log created, in order. Entries are counted by variant:
-/// every external log begins `Header, CellWitness(BoCID)`, so the length of
+/// every external log begins `Header, CellWitness(CellID)`, so the length of
 /// `entries()` says nothing on its own.
 pub(crate) fn outputs(log: &TxLog) -> Vec<Contract> {
     log.entries()

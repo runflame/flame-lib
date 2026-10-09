@@ -122,7 +122,7 @@ fn compiler_output_builds_and_roundtrips() {
 }
 
 const ROUNDTRIP: &str = r#"
-use cells::{Cell, CellBuilder, CellSlice, CellEncode, CellDecode, CellError, CellRef, BagOfCells};
+use cells::{Cell, CellBuilder, CellSlice, CellEncode, CellDecode, CellError, CellRef, CellIndex};
 use cells::ctl::Ref;
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 
@@ -235,7 +235,7 @@ fn main() -> ::core::result::Result<(), CellError> {
     let data = Node::Data { size:3, data:vec![1,2,3] };
     let node = Node::Branch { left:Ref::from_value(&data)?, right:Ref::from_value(&Node::Empty)? };
     let root = node.to_cell()?;
-    let mut bag = BagOfCells::collect(std::sync::Arc::new(root.clone()))?;
+    let mut bag = CellIndex::collect(std::sync::Arc::new(root.clone()))?;
     let detached = root.detached();
     let Node::Branch { left, right } = Node::from_cell(&detached, &mut ())? else { panic!() };
     assert!(matches!(left.load(&mut ()), ::core::result::Result::Err(CellError::MissingCell(_))));

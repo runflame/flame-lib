@@ -57,7 +57,7 @@ pub enum CellError {
     #[error("resource budget exhausted")]
     ResourceExhausted,
 
-    #[error("Bag of Cells count does not fit u32")]
+    #[error("Cell index count does not fit u32")]
     CellCountOverflow,
 
     #[error("cycle through Cell {0:?}")]

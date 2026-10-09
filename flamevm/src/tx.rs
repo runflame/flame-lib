@@ -1,7 +1,7 @@
 use bulletproofs::r1cs::R1CSProof;
 use bulletproofs::PedersenGens;
 use cells::{
-    BagOfCells, Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellRef,
+    Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellIndex, CellRef,
     CellResolver, CellSlice, Trie,
 };
 use core::convert::TryFrom;
@@ -48,7 +48,7 @@ pub struct ExternalTx {
     pub proof: R1CSProof,
 
     /// Immutable public bodies available to this execution and all its descendants.
-    pub witnesses: Arc<BagOfCells>,
+    pub witnesses: Arc<CellIndex>,
     /// Claimed effect root, checked against execution; not the envelope root.
     pub txid: TxID,
     /// Full unloaded commitment of the claimed effect root. Hash alone cannot
@@ -74,12 +74,11 @@ impl CellDecode for TxHeader {
     }
 }
 
-/// Script bytes and the separately committed execution BoC share a container.
-/// Its bag does not include the transaction envelope itself (no circular hash).
-fn transaction_script(script: &[u8], witnesses: &BagOfCells) -> Result<Cell, CellError> {
+/// Script bytes and the committed witness Cell hierarchy share a container.
+fn transaction_script(script: &[u8], witnesses: &CellIndex) -> Result<Cell, CellError> {
     let mut b = CellBuilder::new();
     b.store_snake(script)?;
-    b.store_ref(CellRef::resident(blob_cell(&witnesses.encode())?))?;
+    b.store_ref(CellRef::resident(witnesses.to_cell()?))?;
     Ok(b.build())
 }
 
@@ -90,7 +89,7 @@ impl ExternalTx {
     pub fn script(&self) -> &[u8] {
         &self.script
     }
-    pub fn witnesses(&self) -> &BagOfCells {
+    pub fn witnesses(&self) -> &CellIndex {
         &self.witnesses
     }
     pub fn signature_bytes(&self) -> Option<[u8; 64]> {
@@ -108,7 +107,9 @@ impl ExternalTx {
     ) -> Result<Self, CellError> {
         // Outer network admission bounds bytes before this function. Decode work
         // is additionally linear-bounded here, including the nested witness bag.
-        let mut gas = (bytes.len() as u64).saturating_mul(16).saturating_add(1024);
+        let mut gas = (bytes.len() as u64)
+            .saturating_mul(1024)
+            .saturating_add(1024);
         let mut envelope = CellEnvelope::decode(bytes, bytes.len(), &mut gas)?;
         let root = envelope
             .cells()
@@ -124,7 +125,7 @@ impl ExternalTx {
         )?;
         slice.finish()?;
         // Extra transport bodies must not create a second encoding of this tx.
-        // Extras inside the execution BoC are allowed: their presence is signed.
+        // Extras inside the execution Cell hierarchy are allowed: their presence is signed.
         let canonical = tx.to_envelope()?;
         if canonical.root() != envelope.root() || canonical.cells().id() != envelope.cells().id() {
             return Err(CellError::InvalidFormat);
@@ -169,7 +170,7 @@ impl ExternalTx {
 
 impl CellEncode for ExternalTx {
     fn encode(&self, b: &mut CellBuilder) -> Result<(), CellError> {
-        b.store(&self.header)?.store_bytes(&self.witnesses.id())?;
+        b.store(&self.header)?.store_bytes(&self.witnesses.id()?)?;
         b.store_ref(CellRef::resident(transaction_script(
             &self.script,
             &self.witnesses,
@@ -190,7 +191,7 @@ impl CellEncode for ExternalTx {
 
 impl ExternalTx {
     /// Reads one transaction root with limits checked before snake allocation.
-    /// The surrounding transport owns the total byte bound and canonical BoC.
+    /// The surrounding transport owns the total byte bound and canonical Cell hierarchy.
     pub fn from_cell_bounded<R: CellResolver + ?Sized>(
         cell: &Cell,
         resolver: &mut R,
@@ -225,13 +226,10 @@ impl ExternalTx {
         let script_cell = cells::resolve_cell(r, &s.load_ref()?)?;
         let mut script_slice = CellSlice::new(&script_cell);
         let script = script_slice.load_snake(r, max_script_bytes)?;
-        let witness_bytes = read_blob(&script_slice.load_ref()?, r, u32::MAX as usize)?;
+        let witness_root = cells::resolve_cell(r, &script_slice.load_ref()?)?;
         script_slice.finish()?;
-        let mut gas = (witness_bytes.len() as u64)
-            .saturating_mul(16)
-            .saturating_add(1024);
-        let witnesses = BagOfCells::decode(&witness_bytes, witness_bytes.len(), &mut gas)?;
-        if witnesses.id() != witness_id {
+        let witnesses = CellIndex::from_cell(&witness_root, r)?;
+        if witnesses.id()? != witness_id {
             return Err(CellError::InvalidFormat);
         }
         let signature_cell = cells::resolve_cell(r, &s.load_ref()?)?;
@@ -344,7 +342,7 @@ pub struct SigningInstructions {
 pub struct UnsignedTx {
     header: TxHeader,
     script: Vec<u8>,
-    witnesses: Arc<BagOfCells>,
+    witnesses: Arc<CellIndex>,
     proof: R1CSProof,
     log: TxLog,
     metrics: TxMetrics,
@@ -354,7 +352,7 @@ pub struct UnsignedTx {
 impl UnsignedTx {
     /// Exact public witness set frozen by the prover. Private assignments and
     /// openings are absent; signing preserves this same bag in `ExternalTx`.
-    pub fn witnesses(&self) -> &BagOfCells {
+    pub fn witnesses(&self) -> &CellIndex {
         &self.witnesses
     }
 
@@ -415,7 +413,7 @@ impl ScriptBuilder {
     /// Lifecycle step 1: build an unsigned external transaction by
     /// running the witness-bearing program through the prover. Embedded Contract
     /// bodies, selected predicate paths, and nested witnesses are collected into
-    /// the frozen BoC carried through `UnsignedTx` to `ExternalTx::verify`.
+    /// the frozen Cell hierarchy carried through `UnsignedTx` to `ExternalTx::verify`.
     /// Bulletproof generators are managed inside the crate.
     pub fn build_tx(self, header: TxHeader, limits: Limits) -> Result<UnsignedTx, VMError> {
         let pc_gens = PedersenGens::default();
@@ -479,7 +477,7 @@ impl Message {
         registry: &mut dyn ActorRegistry,
         block: &BlockContext,
     ) -> Result<InternalTx, VMError> {
-        self.execute_tx_with_cells(registry, block, Arc::new(BagOfCells::new()))
+        self.execute_tx_with_cells(registry, block, Arc::new(CellIndex::new()))
     }
 
     /// Executes a descendant with its initiating external transaction's exact
@@ -488,7 +486,7 @@ impl Message {
         self,
         registry: &mut dyn ActorRegistry,
         block: &BlockContext,
-        cells: Arc<BagOfCells>,
+        cells: Arc<CellIndex>,
     ) -> Result<InternalTx, VMError> {
         // Internal-tx header: fixed default for now — its source is part
         // of the block envelope design.
@@ -525,7 +523,7 @@ pub enum TxEntry {
     Header(TxHeader),
 
     /// Exact execution-body availability, fixed before proving or signing.
-    CellWitness(cells::BoCID),
+    CellWitness(cells::CellID),
 
     /// Plain data entry created by `log` instruction. Contains arbitrary binary string.
     Data(Vec<u8>),
@@ -848,7 +846,7 @@ impl CellDecode for TxLog {
 
 impl CellEncode for UnsignedTx {
     fn encode(&self, b: &mut CellBuilder) -> Result<(), CellError> {
-        b.store(&self.header)?.store_bytes(&self.witnesses.id())?;
+        b.store(&self.header)?.store_bytes(&self.witnesses.id()?)?;
         b.store_ref(CellRef::resident(transaction_script(
             &self.script,
             &self.witnesses,
@@ -879,13 +877,13 @@ mod envelope_tests {
             .without_signature()
             .unwrap();
         let mut envelope = tx.to_envelope().unwrap();
-        let mut bytes = tx.to_cell().unwrap().encode();
+        let mut bytes = tx.to_cell().unwrap().encode_record();
         // The last child is the level-zero effect root; its final two bytes
         // contain depth. Keep the claimed TxID but falsify that commitment.
         let end = bytes.len();
         let depth = u16::from_le_bytes([bytes[end - 2], bytes[end - 1]]);
         bytes[end - 2..].copy_from_slice(&(depth + 1).to_le_bytes());
-        let root = Cell::decode_exact(&bytes).unwrap();
+        let root = Cell::decode_record_exact(&bytes).unwrap();
         let forged = ExternalTx::from_cell(&root, &mut envelope).unwrap();
         assert_eq!(forged.txid, tx.txid);
         assert!(matches!(
@@ -991,7 +989,7 @@ mod envelope_tests {
         );
 
         let mut missing = decoded;
-        let mut bag = BagOfCells::new();
+        let mut bag = CellIndex::new();
         for (id, cell) in missing.witnesses().iter() {
             if *id != outer.root_id() {
                 bag.insert(Arc::clone(cell)).unwrap();
@@ -1032,13 +1030,13 @@ mod envelope_tests {
             script: vec![0x42],
             signature: None,
             proof: R1CSProof::from_bytes(&hex_bytes(PROOF)).unwrap(),
-            witnesses: Arc::new(BagOfCells::new()),
+            witnesses: Arc::new(CellIndex::new()),
             txid: TxID(effect_root.id()),
             effect_root,
         };
         let root = tx.to_cell().unwrap();
         let mut expected_header = vec![1, 0, 0, 0, 2, 0, 0, 0];
-        expected_header.extend_from_slice(&tx.witnesses.id());
+        expected_header.extend_from_slice(&tx.witnesses.id().unwrap());
         assert_eq!(root.payload(), expected_header);
         assert_eq!(root.refs().len(), 4);
         assert_eq!(root.refs()[3].id(), tx.txid.0);
@@ -1082,7 +1080,7 @@ mod envelope_tests {
     #[test]
     fn execution_bag_is_committed_and_transport_extras_are_rejected() {
         let limits = Limits { gas: 100_000 };
-        let mut witnesses = BagOfCells::new();
+        let mut witnesses = CellIndex::new();
         witnesses
             .insert(Arc::new(Cell::new(vec![9], vec![]).unwrap()))
             .unwrap();
@@ -1099,7 +1097,9 @@ mod envelope_tests {
             .without_signature()
             .unwrap();
         let log = tx.verify(limits).unwrap();
-        assert!(matches!(log.entries()[1], TxEntry::CellWitness(id) if id == tx.witnesses.id()));
+        assert!(
+            matches!(log.entries()[1], TxEntry::CellWitness(id) if id == tx.witnesses.id().unwrap())
+        );
         let bytes = tx.to_envelope().unwrap().encode();
         ExternalTx::from_bytes_bounded(&bytes, 1, 0, tx.proof_bytes().len())
             .unwrap()
@@ -1110,13 +1110,12 @@ mod envelope_tests {
         transport
             .insert(Arc::new(Cell::new(vec![99], vec![]).unwrap()))
             .unwrap();
-        let extra = CellEnvelope::new(root, transport).unwrap().encode();
         assert!(matches!(
-            ExternalTx::from_bytes_bounded(&extra, 1, 0, tx.proof_bytes().len()),
+            CellEnvelope::new(root, transport),
             Err(CellError::InvalidFormat)
         ));
 
-        tx.witnesses = Arc::new(BagOfCells::new());
+        tx.witnesses = Arc::new(CellIndex::new());
         assert!(
             tx.verify(limits).is_err(),
             "stripping an unused witness must still invalidate the proof/TxID"
@@ -1130,7 +1129,7 @@ mod envelope_tests {
                 version: 1,
                 locktime: 0,
             }),
-            TxEntry::CellWitness(BagOfCells::new().id()),
+            TxEntry::CellWitness(CellIndex::new().id().unwrap()),
             TxEntry::Data(vec![42; 20_000]),
             TxEntry::Fee(17),
         ]);

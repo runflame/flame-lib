@@ -2,7 +2,7 @@
 //!
 //! The prover pushes `String::contract(c)` carrying private Token openings.
 //! Bytecode contains only the ContractID, while the public Contract body is
-//! included in the transaction's BoC. Both paths authenticate that body first;
+//! included in the transaction's Cell index. Both paths authenticate that body first;
 //! the prover then restores its matching private witnesses.
 
 #![allow(unused_imports)]
@@ -45,7 +45,7 @@ fn input_string_contract_preserves_open_commitments() {
     }
 }
 
-/// Verifier path: push `String::Opaque(contract_id)` and provide its BoC. After
+/// Verifier path: push `String::Opaque(contract_id)` and provide its Cell index. After
 /// `op_input` the Token has `Commitment::Closed` (no witness).
 #[test]
 fn input_string_opaque_yields_closed_commitments() {

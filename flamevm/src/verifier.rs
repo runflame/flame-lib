@@ -80,7 +80,7 @@ impl Verifier {
             header,
             gas_limit,
             txbound_signature,
-            &cells::BagOfCells::new(),
+            &cells::CellIndex::new(),
         )
     }
 
@@ -93,7 +93,7 @@ impl Verifier {
         header: TxHeader,
         gas_limit: u64,
         txbound_signature: Option<musig::Signature>,
-        cells: &cells::BagOfCells,
+        cells: &cells::CellIndex,
     ) -> Result<TxResult, VMError> {
         let mut verifier = Verifier::new();
         // Verifier-side: stream the wire bytecode directly — decode one

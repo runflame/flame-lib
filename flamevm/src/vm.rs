@@ -3,8 +3,8 @@
 use bulletproofs::r1cs;
 use bulletproofs::r1cs::R1CSProof;
 use cells::{
-    resolve_cell, BagOfCells, Cell, CellBuilder, CellDecode, CellEncode, CellError, CellID,
-    CellRef, CellResolver, CellSlice,
+    resolve_cell, Cell, CellBuilder, CellDecode, CellEncode, CellError, CellID, CellIndex, CellRef,
+    CellResolver, CellSlice,
 };
 use core::convert::TryFrom;
 use core::mem;
@@ -408,7 +408,7 @@ pub struct CallFrame {
     pub(crate) stack: Vec<Value>,
 
     /// Only this actor's committed storage bodies; never another actor's cache.
-    actor_cells: Arc<BagOfCells>,
+    actor_cells: Arc<CellIndex>,
 
     /// The frame's executable code (decoded instructions or raw bytecode).
     code: Script,
@@ -499,7 +499,7 @@ impl CallFrame {
     pub(crate) fn from_code(code: Script, kind: CallKind, gas_limit: u64) -> Self {
         Self {
             stack: Vec::new(),
-            actor_cells: Arc::new(BagOfCells::new()),
+            actor_cells: Arc::new(CellIndex::new()),
             code,
             cursor: 0,
             labels: Vec::new(),
@@ -546,7 +546,7 @@ pub struct TxResult {
     pub bytecode: Vec<u8>,
 
     /// The immutable witness set committed by the initiating external transaction.
-    pub cells: Arc<BagOfCells>,
+    pub cells: Arc<CellIndex>,
 
     /// R1CS proof. `Some` on the prover side, `None` on the verifier
     /// side (the verifier consumed it during `cs.verify`).
@@ -579,7 +579,7 @@ impl core::fmt::Debug for TxResult {
 pub(crate) struct VM {
     header: TxHeader,
     block_height: u64,
-    cells: Arc<BagOfCells>,
+    cells: Arc<CellIndex>,
     contract_witnesses: BTreeMap<ContractID, Contract>,
     script_witnesses: BTreeMap<CellID, Vec<Instruction>>,
     value_witnesses: BTreeMap<CellID, Value>,
@@ -613,8 +613,8 @@ pub(crate) struct VM {
 /// Execution-local resolution, priced identically for resident and unloaded refs.
 /// A cache hit cannot turn an absent transaction witness into an available one.
 struct ExecutionCells<'a> {
-    external: &'a BagOfCells,
-    actor: &'a BagOfCells,
+    external: &'a CellIndex,
+    actor: &'a CellIndex,
     gas_used: &'a mut u64,
     gas_limit: u64,
 }
@@ -643,7 +643,7 @@ impl CellResolver for ExecutionCells<'_> {
                 .or_else(|| self.external.get(&reference.id()))
                 .ok_or(CellError::MissingCell(reference.id()))?,
         };
-        self.charge((cell.encoded_size() as u64).saturating_add(cell.refs().len() as u64))?;
+        self.charge((cell.record_size() as u64).saturating_add(cell.refs().len() as u64))?;
         Ok(cell)
     }
 }
@@ -658,12 +658,12 @@ impl VM {
         }
     }
 
-    fn with_cells(mut self, cells: Arc<BagOfCells>) -> Self {
+    fn with_cells(mut self, cells: Arc<CellIndex>) -> Result<Self, CellError> {
         if matches!(self.current_call.kind, CallKind::ExternalRoot) {
-            self.txlog[1] = TxEntry::CellWitness(cells.id());
+            self.txlog[1] = TxEntry::CellWitness(cells.id()?);
         }
         self.cells = cells;
-        self
+        Ok(self)
     }
     /// Executes an external transaction script with the given delegate,
     /// then calls `delegate.finalize`. Crate-internal: the public path
@@ -704,7 +704,7 @@ impl VM {
         );
         frame.charge_gas(alloc_byte_gas(bytecode.len())?)?;
         frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
-        let mut vm = Self::new(header, frame).with_cells(cells);
+        let mut vm = Self::new(header, frame).with_cells(cells)?;
         vm.contract_witnesses = contract_witnesses;
         vm.script_witnesses = script_witnesses;
         while vm.step_external(delegate)? {}
@@ -718,13 +718,13 @@ impl VM {
         bytecode: Vec<u8>,
         gas_limit: u64,
         delegate: &mut D,
-        cells: &BagOfCells,
+        cells: &CellIndex,
     ) -> Result<TxResult, VMError> {
         let mut frame =
             CallFrame::from_bytecode(bytecode.clone(), CallKind::ExternalRoot, gas_limit);
         frame.charge_gas(alloc_byte_gas(bytecode.len())?)?;
         frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
-        let mut vm = Self::new(header, frame).with_cells(Arc::new(cells.clone()));
+        let mut vm = Self::new(header, frame).with_cells(Arc::new(cells.clone()))?;
         while vm.step_external(delegate)? {}
         Ok(vm.into_result(bytecode, None))
     }
@@ -743,7 +743,7 @@ impl VM {
             message,
             registry,
             block,
-            Arc::new(BagOfCells::new()),
+            Arc::new(CellIndex::new()),
         )
     }
 
@@ -752,7 +752,7 @@ impl VM {
         message: Message,
         registry: &mut dyn ActorRegistry,
         block: &BlockContext,
-        cells: Arc<BagOfCells>,
+        cells: Arc<CellIndex>,
     ) -> Result<TxResult, VMError> {
         // Admission and MessageID/transport construction re-encode arguments.
         // Price that work before cloning or traversing any of their Cell graphs.
@@ -870,7 +870,7 @@ impl VM {
         for v in payload {
             frame.stack.push(v);
         }
-        let mut vm = Self::new(header, frame).with_cells(cells);
+        let mut vm = Self::new(header, frame).with_cells(cells)?;
         vm.block_height = block.height;
         // Commit the triggering MessageID into the Internal TxID merkle
         // root. Symmetric with `op_input` for external txs: the first
@@ -914,10 +914,12 @@ impl VM {
 
     fn new(header: TxHeader, initial_call: CallFrame) -> Self {
         // Header is the first txlog entry so TxID binds to version + locktime.
-        let cells = Arc::new(BagOfCells::new());
+        let cells = Arc::new(CellIndex::new());
         let mut txlog = vec![TxEntry::Header(header)];
         if matches!(initial_call.kind, CallKind::ExternalRoot) {
-            txlog.push(TxEntry::CellWitness(cells.id()));
+            txlog.push(TxEntry::CellWitness(
+                cells.id().expect("empty witness hierarchy"),
+            ));
         }
         // Seed last_anchor from the root frame's kind: ExternalRoot →
         // None (op_input must seed); InternalRoot → Some(Message.anchor)
@@ -2630,7 +2632,7 @@ impl VM {
 
     /// _contract-id:string32_ **input** → _contract_
     ///
-    /// The public body must resolve in the frozen transaction BoC. Private
+    /// The public body must resolve in the frozen transaction Cell hierarchy. Private
     /// witnesses may replace its typed values only after matching this identity.
     fn op_input(&mut self) -> Result<(), VMError> {
         self.require_external()?;
@@ -2932,7 +2934,7 @@ impl VM {
         // re-entrant call into an actor that's mid-update lands here
         // too: its state is checked out, so `resolve_method` returns
         // `ActorEmpty` (ADR 0017 — the state is the re-entrancy lock).
-        let pre_frame: Result<(Vec<u8>, ActorID, u64, Arc<BagOfCells>), VMError> = (|| {
+        let pre_frame: Result<(Vec<u8>, ActorID, u64, Arc<CellIndex>), VMError> = (|| {
             if self.call_stack.len() >= MAX_CALL_DEPTH {
                 return Err(VMError::CallDepthExceeded);
             }
@@ -3731,8 +3733,8 @@ mod cell_execution_tests {
     #[test]
     fn input_dict_loads_only_the_requested_path_even_with_private_witnesses() {
         struct Recording {
-            source: BagOfCells,
-            used: BagOfCells,
+            source: CellIndex,
+            used: CellIndex,
         }
         impl CellResolver for Recording {
             fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
@@ -3752,8 +3754,8 @@ mod cell_execution_tests {
         .unwrap();
         let id = contract.id();
         let mut recording = Recording {
-            source: BagOfCells::collect(Arc::new(contract.to_cell().unwrap())).unwrap(),
-            used: BagOfCells::new(),
+            source: CellIndex::collect(Arc::new(contract.to_cell().unwrap())).unwrap(),
+            used: CellIndex::new(),
         };
         let root = resolve_cell(&mut recording, &CellRef::unresolved(id)).unwrap();
         let loaded = Contract::from_trusted_cell(&root, &mut recording).unwrap();
@@ -3774,7 +3776,8 @@ mod cell_execution_tests {
                 },
                 frame,
             )
-            .with_cells(Arc::clone(&cells));
+            .with_cells(Arc::clone(&cells))
+            .unwrap();
             if private_overlay {
                 vm.contract_witnesses.insert(id, contract.clone());
             }
@@ -3854,7 +3857,9 @@ mod cell_execution_tests {
         .unwrap();
         assert_eq!(result.txid, verified.txid);
         assert_eq!(result.gas_used, verified.gas_used);
-        assert!(matches!(result.txlog[1], TxEntry::CellWitness(id) if id == result.cells.id()));
+        assert!(
+            matches!(result.txlog[1], TxEntry::CellWitness(id) if id == result.cells.id().unwrap())
+        );
         assert!(
             Verifier::verify(&pc, result.bytecode.clone(), proof, header, 1_000_000, None).is_err()
         );
@@ -3877,8 +3882,8 @@ mod cell_execution_tests {
     #[test]
     fn cell_resolution_has_identical_gas_for_ram_actor_storage_and_witnesses() {
         let cell = Arc::new(Cell::new(vec![7; 128], vec![]).unwrap());
-        let bag = BagOfCells::collect(cell.clone()).unwrap();
-        let empty = BagOfCells::new();
+        let bag = CellIndex::collect(cell.clone()).unwrap();
+        let empty = CellIndex::new();
         let mut costs = Vec::new();
         for (reference, actor, external) in [
             (CellRef::Resident(cell.clone()), &empty, &empty),

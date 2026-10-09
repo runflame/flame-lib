@@ -1,6 +1,7 @@
 # Flame implementation plan
 
 - 🎻 Cell Type Language: first prototype implemented; see the [CTL specification and examples](../cells/ctl.md). Byte-oriented `.ctl` schemas use Rust-like syntax, earlier-field array lengths, `U8`/`U16`/`U32`/`U64` little-endian integers, canonical unsigned LEB128 as `V128`, and `^` Cell references. The compiler generates Rust Cell codecs; TL-B linear inversion (`~`) is excluded.
+- Root-last graph transport implemented: see [the format and APIs](cells.md#root-last-graph-transport). One rooted DAG in children-first order, deduplicated Cells, backward `V128` reference indexes, and the final Cell as root. Hash preimages remain independent; availability and typed snapshots are ordinary Cell hierarchies with explicit pruning. The flat bag commitment and root-ID prefix are removed.
 - define transaction layout in CTL - top cell's ID is a witness ID, it contains three cells - body, signature and r1cs proof. Body cell defines TxID and contains header (version and timelock), followed by program code.
 - allow longer programs to continue into nested cells with "continue" opcode that takes the cell from stack and finishes with the current cell.
 - make `input` op use cell on the stack as the encoding of a contract. It can be supplied together with the program and placed on stack with "bringcell".

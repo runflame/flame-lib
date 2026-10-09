@@ -8,7 +8,7 @@ describe implemented behavior.
 The concrete implementation is now specified in [cells.md](cells.md) and
 [encoding.md](encoding.md). Those documents supersede the provisional
 Tree/Link, request-manifest, and ContractRef API sketches below. The code uses
-Cell Tries, a whole execution BoC committed through TxID, ID-only Contract
+Cell Tries, a whole execution witness hierarchy committed through TxID, ID-only Contract
 inputs, lazy authenticated Dict paths, and actor freezing. Utreexo alone
 retains specialized accumulator proofs. The sketches here remain design
 rationale, not additional APIs to implement alongside Cells.

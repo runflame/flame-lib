@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    BagOfCells, Cell, CellBuilder, CellCommitment, CellError, CellRef, CellResolver, CellSlice,
+    Cell, CellBuilder, CellCommitment, CellError, CellIndex, CellRef, CellResolver, CellSlice,
     GasMeter, MAX_CELL_PAYLOAD, MAX_CELL_REFS,
 };
 
@@ -271,7 +271,7 @@ fn length_and_resolution_failures_preserve_the_cursor() {
 }
 
 #[test]
-fn boc_round_trip_resolves_unloaded_continuations() {
+fn transport_round_trip_resolves_unloaded_continuations() {
     struct FreeGas;
     impl GasMeter for FreeGas {
         fn charge(&mut self, _: u64) -> Result<(), CellError> {
@@ -282,8 +282,9 @@ fn boc_round_trip_resolves_unloaded_continuations() {
     let mut builder = CellBuilder::new();
     builder.store_snake(&bytes).unwrap();
     let cell = Arc::new(builder.build());
-    let encoded = BagOfCells::collect(cell.clone()).unwrap().encode();
-    let mut bag = BagOfCells::decode(&encoded, encoded.len(), &mut FreeGas).unwrap();
+    let encoded = cell.encode_transport(&mut ()).unwrap();
+    let decoded = Cell::decode_transport(&encoded, encoded.len(), &mut FreeGas).unwrap();
+    let mut bag = CellIndex::collect(decoded.into()).unwrap();
     let detached = bag.get(&cell.id()).unwrap();
     assert!(detached.refs().iter().all(CellRef::is_unloaded));
     let mut slice = CellSlice::new(&detached);

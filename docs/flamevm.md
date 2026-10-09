@@ -91,7 +91,7 @@ External transactions produce the following effects:
 5. Issuance and retirement — creation and removal of tokens to/from circulation.
 6. Data entry — for data logging that does not occupy permanent storage.
 
-Transaction ID (”TxID”) is the CellID of the ordered TxLog Trie envelope. External logs begin with `Header`, then `CellWitness(BoCID)` committing the exact initiating execution bag. Transaction signatures and ZK proofs bind to TxID and therefore to the effects **and witness availability**.
+Transaction ID (”TxID”) is the CellID of the ordered TxLog Trie envelope. External logs begin with `Header`, then `CellWitness(availability CellID)` committing the exact initiating execution index. Transaction signatures and ZK proofs bind to TxID and therefore to the effects **and witness availability**.
 
 ## Internal transactions
 
@@ -115,17 +115,17 @@ Like external, internal transactions produce effects:
 
 Lease expiry freezes actor code/state bodies instead of destroying their
 linear contents. Actor roots and lease metadata survive. A later execution
-may recover data from its committed BoC; reading does not implicitly persist
+may recover data from its committed Cell hierarchy; reading does not implicitly persist
 it. Explicit dismantling can still emit `ActorDestroy`. See
 [Actor storage](storage.md#global-state-and-block-order).
 
 Each external transaction immediately drains its FIFO message descendants
-before the next external transaction, with the same immutable execution BoC.
+before the next external transaction, with the same immutable execution witness hierarchy.
 Witness bodies from another external transaction are never added to that bag.
 
 Calls themselves are intra-transaction control flow, not effects. Anything a callee does that the outer world cares about appears through one of the effects above.
 
-Canonical internal log shapes are enforced by the state machine. Success is `Header, Receive, [ActorDeploy], effects...`, where deployment is permitted only immediately after `Receive` and any `ActorDestroy` entries form a suffix. Failed delivery is exactly `Header, Receive, Output(refund)`. Lease expiry freezes bodies without emitting retirement/destruction effects. External logs start with `Header, CellWitness(BoCID)` and cannot contain internal-only actor effects.
+Canonical internal log shapes are enforced by the state machine. Success is `Header, Receive, [ActorDeploy], effects...`, where deployment is permitted only immediately after `Receive` and any `ActorDestroy` entries form a suffix. Failed delivery is exactly `Header, Receive, Output(refund)`. Lease expiry freezes bodies without emitting retirement/destruction effects. External logs start with `Header, CellWitness(availability CellID)` and cannot contain internal-only actor effects.
 
 **TxLog transport.** Effects are **re-derived by re-executing** the bytecode under the proof/signature binding; a supplied log does not authorize effects. `TxEntry` and `TxLog` implement `CellEncode` and `CellDecode` for archival and light-client transport. The log envelope holds a u64-LE count and a Trie of consecutive u64 big-endian indices, whose leaves reference tagged TxEntry Cells. Existing tags 0–14 are retained and tag 15 is `CellWitness`. Blob fields use snakes; typed fields use their expected Cell layouts. See [Data encoding](encoding.md#txlog).
 
@@ -300,7 +300,7 @@ admitted count/capability summaries; a requested missing branch is an error,
 not an absent key.
 
 The VM resolves resident references first, then the current actor's explicitly
-retained code/state bodies, then the initiating transaction's immutable BoC.
+retained code/state bodies, then the initiating transaction's immutable Cell hierarchy.
 Actor-layout and lease metadata are included in registry storage exports, not
 in the `actor_cells` execution fallback. No other actor or global cache supplies
 implicit witnesses.
@@ -718,7 +718,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | a4 | [return](#return) | | a\_{k-1} … a\_0 k → ø | Exit current call frame, returning `k` items to the parent. |
 | a5 | [type](#type) | | x → x code | Push the type code of the top value (peek). |
 |    | **Contracts & predicates** | | | |
-| c0 | [input](#input) | ext. | id → contract | Resolve a Utreexo-validated ContractID through the execution BoC. |
+| c0 | [input](#input) | ext. | id → contract | Resolve a Utreexo-validated ContractID through the execution witness hierarchy. |
 | c1 | [contract](#contract) | | payload pred → contract | Lock one portable Value under the predicate. |
 | c2 | [output](#output) | | payload pred → ø | Like `contract`, but emits an Output. |
 | c3 | [open](#open) | | contract ik root index gas args… k → {results… k' 1 \| contract args… k 0} | Resolve a predicate program through its Cell Trie and run an isolated frame. |
@@ -1429,7 +1429,7 @@ Pushes the type code of the top value as `Scalar`, leaving the value on the stac
 
 _contract_id:string32_ → _contract_
 
-Resolves the 32-byte ContractID from the initiating execution BoC and decodes
+Resolves the 32-byte ContractID from the initiating execution witness hierarchy and decodes
 the authenticated Contract: predicate, anchor, and one payload Value. Dict
 branches can remain pruned. Sets `last_anchor = Anchor(contract_id)` and
 emits `TxEntry::Input(contract_id)`.
@@ -1478,7 +1478,7 @@ or scanning a total program count.
 The prover can build branches with `PredicateTree::from_scripts` and emit a
 selector with `ScriptBuilder::push_taproot_proof(&tree, logical_index)`. This
 attaches the selected path, private assignments, and nested program witnesses
-to the builder. `build_tx` packages public bodies into the frozen execution BoC;
+to the builder. `build_tx` packages public bodies into the frozen execution witness hierarchy;
 `UnsignedTx` preserves it through signing and `ExternalTx::verify` consumes it
 directly, including after a CellEnvelope transport roundtrip.
 

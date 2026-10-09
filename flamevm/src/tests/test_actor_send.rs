@@ -98,8 +98,8 @@ fn send_rejects_malformed_addresses() {
         if malformed_refund {
             assert!(matches!(error, VMError::MalformedAddress));
         } else {
-            // Non-hash destinations are decoded as ActorID Cell envelopes.
-            assert!(matches!(error, VMError::Cell(CellError::InsufficientBytes)));
+            // Non-hash destinations use rooted packets; zero cells is invalid.
+            assert!(matches!(error, VMError::Cell(CellError::InvalidFormat)));
         }
     }
 }

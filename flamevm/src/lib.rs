@@ -50,6 +50,6 @@ pub use tx::{
 pub use vm::{Anchor, BlockContext};
 
 pub use cells::{
-    BagOfCells, Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellID,
-    CellRef, CellResolver, CellSlice, Trie,
+    Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellID, CellIndex, CellRef,
+    CellResolver, CellSlice, Trie,
 };

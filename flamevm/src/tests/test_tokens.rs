@@ -486,7 +486,7 @@ fn issuepriv_prove_then_verify_end_to_end() {
     .expect("empty payload is portable");
 
     // Outer:
-    //   pushstr(contract_id); input (body from the BoC);
+    //   pushstr(contract_id); input (body from the Cell index);
     //   pushpoint(internal_key);
     //   pushstr(program_trie_root); push(program_index);
     //   branch cells and private script witnesses attached to the builder;

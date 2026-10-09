@@ -502,8 +502,7 @@ fn multi_leaf_predicate_blinding_leaf_cannot_be_opened() {
         .to_bytecode();
     let (tree, mut proof) = build_multi_leaf_predicate(vec![program.clone(), program], 0, 7);
     proof.proof.index ^= 1; // Each program is paired with one non-program blinding leaf.
-    proof.cells =
-        BagOfCells::collect(Arc::new(tree.root().as_resident().unwrap().clone())).unwrap();
+    proof.cells = CellIndex::collect(Arc::new(tree.root().as_resident().unwrap().clone())).unwrap();
     let p = ScriptBuilder::new()
         .push_int(5u64)
         .push_point(*tree.point.as_bytes())
@@ -741,7 +740,7 @@ fn input_via_step_external_dispatch() {
     let expected = contract.id();
     let mut vm = vm_external_with_script(
         ScriptBuilder::new()
-            .with_cells(BagOfCells::collect(Arc::new(contract.to_cell().unwrap())).unwrap())
+            .with_cells(CellIndex::collect(Arc::new(contract.to_cell().unwrap())).unwrap())
             .input(),
     );
     vm.push_value(Value::String(String::from(expected.to_vec())));

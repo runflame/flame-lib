@@ -93,7 +93,7 @@ transaction is generated and no token or other linear value is retired.
 Unexpired leases recycle only at their original expiration heights.
 
 A later transaction can recover missing bodies from its committed execution
-BoC. This is not redeployment: the existing actor identity and linear ownership
+Cell index. This is not redeployment: the existing actor identity and linear ownership
 remain intact. The current implementation retains registry metadata and both
 code/state roots, not literally one 32-byte record. Explicit self-destruction
 after dismantling checked-out state remains a separate operation.
@@ -145,10 +145,10 @@ body into the current execution is not a storage purchase or persistent restore.
 Actor layouts and their ordered lease Tries are specified in
 [encoding.md](encoding.md). `code_root` and `state_root` are ordinary CellIDs
 for snake-encoded bytecode and one encoded Value. The actor registry commits
-both its actor-layout root and the exact resident graph's `BoCID`.
+both its actor-layout root and the exact resident graph's `snapshot CellID`.
 
 The VM resolver is scoped to the current actor's resident code/state body set
-and the initiating external transaction's frozen execution BoC. Actor-layout
+and the initiating external transaction's frozen execution Cell index. Actor-layout
 and lease-index metadata belong to the registry commitment and archival export,
 not this implicit execution source. Instruction-boundary scope refreshes share
 the immutable body set rather than copying or rebuilding it. Loaded bodies do not
@@ -166,7 +166,7 @@ checkout ownership: successful `load` checks out the state once, `save` requires
 that checkout, and enclosing call/transaction rollback restores it.
 
 `Blockchain::actor_storage` returns a read-only `StoredActor` snapshot containing
-the layout root and exact resident BoC for archival and witness construction.
+the layout root and exact resident Cell index for archival and witness construction.
 Expiry freezing is implemented; a dedicated VM operation for arbitrary partial
 pruning or persistent restoration is not yet provided.
 

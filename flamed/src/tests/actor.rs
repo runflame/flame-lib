@@ -8,7 +8,7 @@ use flamed_rpc::{
     FlamedApiClient, HttpClientBuilder, TxValue,
 };
 use flamevm::{
-    BagOfCells, CellEncode, CellEnvelope, Dict, ScriptBuilder, String as VmString, Value,
+    CellEncode, CellEnvelope, CellIndex, Dict, ScriptBuilder, String as VmString, Value,
 };
 use jsonrpsee::{core::client::ClientT, rpc_params};
 use tempfile::TempDir;
@@ -47,7 +47,7 @@ async fn actor_tracks_updates_expiry_and_replay() {
     assert_eq!(flamevm::code_root(code), deployed.code_hash);
     assert_eq!(code.len() as u64, deployed.code_size);
     let state = &deployed.state.as_ref().unwrap().0;
-    let mut gas = state.len() as u64 * 4;
+    let mut gas = state.len() as u64 * 1024;
     let envelope = CellEnvelope::decode(state, state.len(), &mut gas).unwrap();
     assert_eq!(envelope.root(), deployed.state_hash);
     let Some(TxValue::Dict { entries }) = &deployed.decoded_state else {
@@ -193,7 +193,7 @@ fn actor_keeps_full_data_and_reports_unavailable_or_malformed_bodies() {
         .unwrap()
         .starts_with(&format!("Byte {error_offset}: ")));
 
-    let mut cells = BagOfCells::new();
+    let mut cells = CellIndex::new();
     cells.insert(state_cell.into()).unwrap();
     snapshot.state = Some(ActorStateEnvelope(
         CellEnvelope::new(snapshot.state_hash, cells)

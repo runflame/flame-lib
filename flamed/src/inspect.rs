@@ -14,7 +14,7 @@ use flamevm::{
 /// Decodes an archived contract's public payload.
 pub fn contract(id: ContractId, mut result: ContractResult) -> Result<ContractResult, CellError> {
     let bytes = &result.bytes.0;
-    let mut gas = (bytes.len() as u64).saturating_mul(4);
+    let mut gas = (bytes.len() as u64).saturating_mul(1024);
     let mut envelope = CellEnvelope::decode(bytes, bytes.len(), &mut gas)?;
     if envelope.root() != id.0 {
         return Err(CellError::InvalidFormat);
@@ -44,7 +44,7 @@ pub fn contract(id: ContractId, mut result: ContractResult) -> Result<ContractRe
 /// Decodes the available state and code from a current actor snapshot.
 pub fn actor(mut result: ActorResult) -> ActorResult {
     let decoded = result.state.as_ref().map(|bytes| {
-        let mut gas = (bytes.0.len() as u64).saturating_mul(4);
+        let mut gas = (bytes.0.len() as u64).saturating_mul(1024);
         let mut envelope = CellEnvelope::decode(&bytes.0, bytes.0.len(), &mut gas)?;
         let reference = CellRef::unresolved(envelope.root());
         match envelope
@@ -102,7 +102,7 @@ fn disassemble(code: &[u8]) -> (Vec<InstructionView>, Option<String>) {
 
 /// Reads public effects from an archived log.
 pub fn effects(bytes: &[u8]) -> Result<Vec<RpcTxEntry>, CellError> {
-    let mut gas = (bytes.len() as u64).saturating_mul(4);
+    let mut gas = (bytes.len() as u64).saturating_mul(1024);
     let mut envelope = CellEnvelope::decode(bytes, bytes.len(), &mut gas)?;
     let root = envelope
         .cells()
@@ -409,7 +409,7 @@ mod tests {
     use super::*;
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED;
     use flamevm::{
-        BagOfCells, CellBuilder, ClearToken, Dict, Message, String as VmString, TxHeader, TxLog,
+        CellBuilder, CellIndex, ClearToken, Dict, Message, String as VmString, TxHeader, TxLog,
     };
     use serde_json::json;
 
@@ -439,7 +439,7 @@ mod tests {
         let dict = Dict::decode_trusted(&mut CellSlice::new(&cell), &mut ()).unwrap();
         let state = Value::Dict(dict);
         let state_cell = state.to_cell().unwrap();
-        let expected_cells = BagOfCells::collect(state_cell.clone().into()).unwrap();
+        let expected_cells = CellIndex::collect(state_cell.clone().into()).unwrap();
         let actor = ActorID::Hash([0x11; 32]);
         let predicate = Predicate::opaque(RISTRETTO_BASEPOINT_COMPRESSED);
         let entries = vec![
@@ -464,7 +464,7 @@ mod tests {
         ];
         for entry in entries {
             let bytes = crate::cells::log_bytes(&TxLog::from(vec![entry])).unwrap();
-            let mut gas = (bytes.len() as u64) * 4;
+            let mut gas = (bytes.len() as u64) * 1024;
             let mut envelope = CellEnvelope::decode(&bytes, bytes.len(), &mut gas).unwrap();
             let root = envelope.cells().get(&envelope.root()).unwrap();
             assert!(matches!(
@@ -536,7 +536,7 @@ mod tests {
             .unwrap();
         let root = builder.build();
         let envelope =
-            CellEnvelope::new(root.id(), BagOfCells::collect(root.into()).unwrap()).unwrap();
+            CellEnvelope::new(root.id(), CellIndex::collect(root.into()).unwrap()).unwrap();
         assert_eq!(
             effects(&envelope.encode()).unwrap(),
             vec![RpcTxEntry::ActorSave {

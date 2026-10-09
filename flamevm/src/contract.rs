@@ -2,7 +2,7 @@
 
 use bulletproofs::PedersenGens;
 use cells::{
-    BagOfCells, CellBuilder, CellDecode, CellEncode, CellError, CellID, CellRef, CellResolver,
+    CellBuilder, CellDecode, CellEncode, CellError, CellID, CellIndex, CellRef, CellResolver,
     CellSlice, Trie,
 };
 use core::{any::Any, fmt};
@@ -277,11 +277,11 @@ impl PredicateTree {
 
     /// Records only Cells read to open this program, including snake overflow.
     /// Unused program/blinding bodies remain unloaded in the returned witness bag.
-    pub fn witness_for(&self, program_index: usize) -> Result<(TaprootProof, BagOfCells), VMError> {
+    pub fn witness_for(&self, program_index: usize) -> Result<(TaprootProof, CellIndex), VMError> {
         let proof = self.taproot_proof_for(program_index)?;
         let mut recorder = BranchRecorder {
             root: &self.root,
-            recorded: BagOfCells::new(),
+            recorded: CellIndex::new(),
         };
         Predicate::opaque(self.point).open_branch(&proof, &mut recorder, u32::MAX as usize)?;
         Ok((proof, recorder.recorded))
@@ -290,7 +290,7 @@ impl PredicateTree {
 
 struct BranchRecorder<'a> {
     root: &'a CellRef,
-    recorded: BagOfCells,
+    recorded: CellIndex,
 }
 
 impl CellResolver for BranchRecorder<'_> {
@@ -337,7 +337,7 @@ fn create_blinded_leaves(programs: &[Vec<u8>], blinding_key: &[u8; 32]) -> Vec<P
 }
 
 /// An authenticated root and leaf selector. Path Cells live in the transaction
-/// BoC; this contains neither a parallel proof encoding nor a copy of the code.
+/// Cell hierarchy; this contains neither a parallel proof encoding nor a copy of the code.
 #[derive(Clone, Debug)]
 pub struct TaprootProof {
     pub internal_key: CompressedRistretto,
@@ -538,7 +538,7 @@ mod tests {
         );
         assert!(predicate.open_branch(&proof, &mut bag, 19_999).is_err());
         assert!(predicate
-            .open_branch(&proof, &mut BagOfCells::new(), 20_000)
+            .open_branch(&proof, &mut CellIndex::new(), 20_000)
             .is_err());
         let other = tree.taproot_proof_for(0).unwrap();
         assert!(predicate.open_branch(&other, &mut bag, 20_000).is_err());
@@ -556,7 +556,7 @@ mod tests {
         ));
         forged = proof;
         forged.index ^= 1;
-        let mut all = BagOfCells::collect(tree.root.as_resident_arc().unwrap().clone()).unwrap();
+        let mut all = CellIndex::collect(tree.root.as_resident_arc().unwrap().clone()).unwrap();
         assert!(matches!(
             predicate.open_branch(&forged, &mut all, 20_000),
             Err(VMError::TaprootProofMismatch)

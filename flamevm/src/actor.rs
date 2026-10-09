@@ -1,7 +1,7 @@
 //! Actor data model: identity, state, lifecycle counters, registry.
 
 use cells::{
-    BagOfCells, CellBuilder, CellDecode, CellEncode, CellError, CellRef, CellResolver, CellSlice,
+    CellBuilder, CellDecode, CellEncode, CellError, CellIndex, CellRef, CellResolver, CellSlice,
 };
 use std::sync::Arc;
 
@@ -147,10 +147,10 @@ pub fn code_root(code: &[u8]) -> [u8; 32] {
 /// authoritative storage gate; this reports the rare case of a portable
 /// value that lacks an encoder.
 pub fn code_state_bytes(code: &[u8], state: &Value) -> Result<u64, VMError> {
-    let mut graph = BagOfCells::collect(Arc::new(blob_cell(code)?))?;
-    graph.extend(&BagOfCells::collect(Arc::new(state.to_cell()?))?)?;
+    let mut graph = CellIndex::collect(Arc::new(blob_cell(code)?))?;
+    graph.extend(&CellIndex::collect(Arc::new(state.to_cell()?))?)?;
     let size = graph.iter().try_fold(0u64, |size, (_, cell)| {
-        size.checked_add(cell.encoded_size() as u64)
+        size.checked_add(cell.record_size() as u64)
             .ok_or(VMError::StorageArithmeticOverflow)
     });
     size
@@ -174,11 +174,11 @@ pub struct StoragePurchase {
 ///
 pub trait ActorRegistry {
     /// Bodies committed as resident for this actor, never a node-global cache.
-    fn actor_cells(&self, _id: &ActorID) -> Result<Arc<BagOfCells>, VMError> {
-        Ok(Arc::new(BagOfCells::new()))
+    fn actor_cells(&self, _id: &ActorID) -> Result<Arc<CellIndex>, VMError> {
+        Ok(Arc::new(CellIndex::new()))
     }
 
-    /// Execution-only recovery from the initiating transaction's immutable BoC.
+    /// Execution-only recovery from the initiating transaction's immutable Cell hierarchy.
     /// Implementations must not implicitly persist externally supplied bodies.
     fn load_code_with_cells(
         &self,

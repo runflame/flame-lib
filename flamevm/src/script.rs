@@ -6,7 +6,7 @@ use std::{
 };
 
 use cells::{
-    BagOfCells, CellBuilder, CellDecode, CellEncode, CellError, CellID, CellResolver, CellSlice,
+    CellBuilder, CellDecode, CellEncode, CellError, CellID, CellIndex, CellResolver, CellSlice,
 };
 
 use crate::contract::{Contract, ContractID, PredicateTree};
@@ -18,12 +18,12 @@ use crate::string::{compile_instructions, String, StringWitness};
 
 /// A program is a list of [`Instruction`]s. Build with the fluent
 /// methods (`alloc`, `add`, `eq`, `verify`, …) and call `build_tx` to package
-/// bytecode, proof, and the public witness BoC for the verifier. `to_bytecode`
+/// bytecode, proof, and the public witness Cell hierarchy for the verifier. `to_bytecode`
 /// alone deliberately omits witnesses and is not a standalone transaction.
 #[derive(Clone, Debug, Default)]
 pub struct ScriptBuilder {
     instructions: Vec<Instruction>,
-    cells: Vec<BagOfCells>,
+    cells: Vec<CellIndex>,
     scripts: BTreeMap<CellID, Vec<Instruction>>,
     /// Build-time only: active loop scopes for `build_break` /
     /// `build_continue`. Balanced (pushed/popped) by `build_loop` /
@@ -51,8 +51,8 @@ impl ScriptBuilder {
         }
     }
 
-    /// Adds public witness bodies before the transaction freezes its BoC.
-    pub fn with_cells(mut self, cells: BagOfCells) -> Self {
+    /// Adds public witness bodies before the transaction freezes its Cell hierarchy.
+    pub fn with_cells(mut self, cells: CellIndex) -> Self {
         self.cells.push(cells);
         self
     }
@@ -70,14 +70,14 @@ impl ScriptBuilder {
     /// Public bodies only. Secret commitment/assignment witnesses never enter
     /// this bag. Nested scripts contribute their embedded Contract witnesses;
     /// their bytecode already lives in literals or selected predicate leaves.
-    pub fn cell_witnesses(&self) -> Result<BagOfCells, CellError> {
-        let mut bag = BagOfCells::new();
+    pub fn cell_witnesses(&self) -> Result<CellIndex, CellError> {
+        let mut bag = CellIndex::new();
         for cells in &self.cells {
             bag.extend(cells)?;
         }
         for witness in self.witnesses() {
             if let StringWitness::Contract(contract) = witness {
-                bag.extend(&BagOfCells::collect(Arc::new(contract.to_cell()?))?)?;
+                bag.extend(&CellIndex::collect(Arc::new(contract.to_cell()?))?)?;
             }
         }
         Ok(bag)
@@ -758,7 +758,7 @@ impl ScriptBuilder {
     /// payloads) rides on the pushed String value — call
     /// `push_str(String::contract(c))` before this on the prover side;
     /// verifiers push `String::Opaque(contract.id().to_vec())` and resolve
-    /// the body from the transaction's public witness BoC.
+    /// the body from the transaction's public witness Cell hierarchy.
     pub fn input(mut self) -> Self {
         self.instructions.push(Instruction::Input);
         self

@@ -9,7 +9,7 @@ Design of cells in Flame is heavily inspired by cells used within TON blockchain
 3. Flame Cells use TON-style significant hash levels and depths, with a 15-bit level mask and two-byte little-endian depths.
 4. Cells are not first-class types exposed in the FlameVM, but instead underpin Strings, Dicts, Contracts, Actors, and canonical encodings.
 5. FlameVM permits transparent loading of unloaded bodies from an externally provided data source. This is distinct from an explicit pruning record: virtualization cannot recover the omitted body.
-6. Bag-of-Cells (BoC) format is much simpler. Only ordinary and pruned Cells exist; there are no MerkleProof, MerkleUpdate, or library-reference wrappers.
+6. Graph transport is a single root-last list with short backward reference indexes. Only ordinary and pruned Cells exist; there are no MerkleProof, MerkleUpdate, or library-reference wrappers.
 
 ## Status
 
@@ -21,6 +21,12 @@ also describes constraints on future disk adapters and explicit partial
 pruning VM opcodes; those adapters/opcodes are not implemented.
 `docs/compression.md` records the motivation and broader experiments.
 
+The implemented transport is specified in
+[Root-last graph transport](#root-last-graph-transport). It packs a
+single rooted DAG using backward reference indexes and commits through the
+root's highest hash. Sparse indexes and typed-object snapshots are ordinary
+Cell hierarchies carried through that same transport.
+
 The first [🎻 Cell Type Language (CTL) prototype](../cells/ctl.md) compiles
 byte-oriented `.ctl` schemas into Rust Cell codecs. Its illustrative schemas
 do not replace the existing VM/chain encodings or define a new transaction
@@ -28,7 +34,7 @@ layout.
 
 The crate implements explicit pruning, significant-level hashing, and
 read-only `CellView` virtualization. VM codecs continue using physical Cells
-and the existing execution-BoC commitment; they do not automatically virtualize
+and the signed execution-witness snapshot; they do not automatically virtualize
 Taproot roots or accept virtual views as typed values. Selecting logical versus
 factual roots in those higher-level protocols is a separate integration step.
 
@@ -55,9 +61,9 @@ This design replaces several provisional mechanisms in
 
 - Cell graphs and the radix-4 Trie replace the generic `Tree`/`Link`/`Node`
   proposal.
-- A stored graph's exact `BoCID` replaces a separate availability tree.
-- The transaction BoC replaces request-keyed witness manifests and tables.
-- Committing the complete provided bag makes an exact-used-data manifest
+- A Cell-based snapshot's highest root hash commits to exact stored availability.
+- The transaction witness hierarchy replaces request-keyed witness manifests and tables.
+- Committing the complete provided index makes an exact-used-data manifest
   unnecessary; unused bodies are allowed and paid for.
 - Immediate draining of each external transaction's actor descendants replaces
   per-message witness submanifests.
@@ -75,7 +81,7 @@ to rationale and cross-references as this plan lands.
    identity while preserving selected lower-level commitments.
 3. Missing data is resolved only from consensus-visible sources. A node's
    private cache or network access must never change execution.
-4. External transactions commit the exact BoC made available to their entire
+4. External transactions commit the exact Cell hierarchy made available to their entire
    execution, including synchronous calls and descendant asynchronous sends.
 5. Cells remain a serialization mechanism. FlameVM, not the `cells` crate,
    decides whether decoded values are portable, linear, valid in a Contract,
@@ -92,7 +98,7 @@ The dependency direction is:
 cells
   Cell, CellID, CellRef, CellCommitment, CellView
   CellBuilder, CellSlice, CellEncode, CellDecode
-  BagOfCells
+  CellIndex
   Trie
 
 flamechain --depends on--> flamevm --depends on--> cells
@@ -108,9 +114,9 @@ Responsibilities are split as follows:
 
 | Layer | Responsibility |
 | --- | --- |
-| `cells` | Cell construction, canonical records and IDs, bounded reading/writing including snake strings, BoC validation, content lookup, and generic fixed-key Trie traversal |
+| `cells` | Cell construction, canonical records and IDs, bounded reading/writing including snake strings, Cell hierarchy validation, content lookup, and generic fixed-key Trie traversal |
 | `flamevm` | Cell encodings for VM values and instructions; Contract, Actor, Predicate, and Dict semantics; portability and linearity checks; execution-time Cell access |
-| `flamechain` | Persistent actor Cell stores, transaction BoC commitment, per-external execution scheduling, block limits, and state commitments |
+| `flamechain` | Persistent actor Cell stores, transaction witness hierarchy commitment, per-external execution scheduling, block limits, and state commitments |
 | `merkle` | The specialized Utreexo accumulator only; it is not a dependency of `cells` or `flamevm` |
 
 There is no generic storage framework in `cells`. Persistent databases and
@@ -187,7 +193,16 @@ impl Cell {
     pub fn payload(&self) -> &[u8];
     pub fn refs(&self) -> &[CellRef];
     pub fn into_parts(self) -> (Vec<u8>, Vec<CellRef>);
-    pub fn encoded_size(&self) -> usize;
+    pub fn record_size(&self) -> usize;
+    pub fn encode_record(&self) -> Vec<u8>;
+    pub fn decode_record_exact(bytes: &[u8]) -> Result<Self, CellError>;
+    pub fn encode(&self) -> Result<Vec<u8>, CellError>;
+    pub fn encode_transport<R: CellResolver + ?Sized>(
+        &self, resolver: &mut R,
+    ) -> Result<Vec<u8>, CellError>;
+    pub fn decode_transport(
+        bytes: &[u8], max_bytes: usize, gas: &mut impl GasMeter,
+    ) -> Result<Self, CellError>;
 }
 ```
 
@@ -220,6 +235,12 @@ Duplicate references are valid because a type may use the same child in two
 positions.
 
 ### Canonical Cell record
+
+This standalone summary record is used for storage accounting, debugging,
+and independent metadata reconstruction. `encode_record` and
+`decode_record_exact` operate on it. Network transport instead uses the
+[indexed rooted DAG](#root-last-graph-transport); it does not repeat child
+commitment summaries.
 
 The compact descriptor is:
 
@@ -264,9 +285,9 @@ Records are self-delimiting and contain no child bodies, residency flags,
 schema tags, or versions. Ordinary masks are the OR of their child masks and
 are therefore derived rather than repeated in the ordinary descriptor.
 
-This redundancy in wire summaries permits independent record decoding and
-parent hashing before child bodies arrive. If a body is available, BoC
-validation and `resolve_cell` compare the whole summary, not only its final
+This redundancy in standalone summaries permits independent record decoding and
+parent hashing before child bodies arrive. When a body is resolved,
+`resolve_cell` compares the whole summary, not only its final
 ID. Retained hashes/depths are claims until authenticated against the expected
 root; serialization alone does not prove them.
 
@@ -298,7 +319,8 @@ CellID = highest significant hash = cell.hash(cell.level())
 
 **Wire records and hash preimages are different.** Ordinary records carry all
 child summaries; an ordinary hash selects one child pair per level. Do not
-compute an ordinary `CellID` as `SHA256(cell.encode())`, even at level zero.
+compute an ordinary `CellID` by hashing either `encode_record()` or the graph
+transport returned by `encode()`, even at level zero.
 
 For each significant ordinary level `l`, in ascending order:
 
@@ -671,7 +693,7 @@ must not change consensus gas or which bodies are visible.
    to manufacture or duplicate linear values through raw bytes. Only then
    remove the obsolete String API and update the VM specification.
 
-This proposal does not change the current Cell record, BoC, Trie, actor
+This proposal does not change the current Cell record, Cell hierarchy, Trie, actor
 availability commitments, or Utreexo encoding. It changes the VM-facing data
 and execution interface; those changes require their own reviewed activation.
 
@@ -851,191 +873,247 @@ the complete typed payload; chain membership checks must still establish that
 an input Contract actually exists. A Cell hash alone grants no linear ownership.
 
 
-## Bag of Cells
+## Root-last graph transport
 
-### Purpose
+Hashing and graph transport are separate encodings. The highest significant
+hash commits to the factual Cell graph, including the explicit pruning
+records it contains. Lower hashes describe virtualized views whose hidden
+contents are represented by retained commitments. A submitted graph is
+identified by its root's highest hash; packet indexes never enter a hash
+preimage.
 
-A `BagOfCells` is a canonical, bounded lookup table from `CellID` to Cell body.
-Unlike TON's general graph transport, Flame's first BoC has one job: carry a
-set of bodies that may satisfy otherwise unloaded references.
+This codec is implemented in `cells/src/transport.rs` and exposed on `Cell`.
+`encode()` packs its resident graph, while `encode_transport(resolver)` can
+also resolve unloaded references from a caller-supplied source.
 
-It is deliberately rootless. Contracts, actor records, Predicate fields,
-typed object envelopes, and Trie wrappers already carry their root IDs. A
-helper that transports one standalone object returns the pair `(root_id,
-bag_of_cells)` rather than putting another root table inside the bag.
+### One root, children before parents
 
-### Canonical format
+The packet contains one nonempty list of distinct physical Cell records.
+References run from a Cell to its children, so reverse topological order
+places children before their parents. The last record is the sole root.
+There is no separate root index, root hash, root list, or bag commitment.
+
+All listed Cells must be reachable from that root. To send several top-level
+objects, join them with an ordinary envelope Cell or Cell tree before packing.
+The envelope's shape belongs to its application schema; the transport needs
+no multi-root mode.
 
 ```text
-cell_count:  u32 little-endian      4 bytes
-records:     canonical Cell records, strictly sorted by computed CellID
+graph:             root -> [A, B]
+                   A -> [leaf]
+                   B -> [leaf]
+
+record order:      leaf, A, B, root
+record indexes:      0   1  2     3
 ```
 
-Cell records do not repeat their own IDs: the decoder computes each ID from
-the record. The descriptor makes every record self-delimiting. Identical Cells
-are emitted once.
+A shared child is emitted once. References retain their original order,
+including repeated references to the same child.
+
+### Indexed wire format
 
 ```text
-BoCID = SHA256(canonical_boc_bytes)
+packet:
+  cell_count                          V128, at least 1
+  cell records                        cell_count records
+  root                                implicit: final record
+
+ordinary record at index i:
+  descriptor                          U16 LE, existing ordinary descriptor
+  payload                             descriptor's payload_length bytes
+  backward reference distances        V128, one per ordered reference
+
+pruned record:
+  descriptor                          U16 LE, 0x8000 | nonzero level_mask
+  retained hashes                     32 * popcount(mask) bytes
+  retained depths                     2 * popcount(mask) bytes, U16 LE
 ```
 
-This is also direct SHA-256 with no hash namespace. The caller already expects
-a BoC, and its count plus sorted self-delimiting records form an unambiguous
-exact-set preimage; a magic tag and dormant format version would add no
-information.
+For an ordinary record at position `i`, each distance `d` names record
+`i - d`, and must satisfy `1 <= d <= i`. `V128` uses canonical unsigned
+LEB128. A distance is a relative index, not a hash or an instruction to find
+data outside this packet. Relative indexes keep immediate-child references
+at one byte even in a long Snake or large graph.
 
-The outer protocol supplies the BoC byte length. The decoder rejects trailing
-bytes, invalid Cell descriptors, duplicate IDs, non-increasing record order,
-cycles among included bodies, mismatched child commitment summaries when the
-child body is included, and any caller-provided bound violation.
+The example above has these references:
 
-BoC decoding receives the existing outer witness-byte bound and the
-transaction gas meter:
+```text
+record 0: leaf       no references
+record 1: A          distance 1       -> record 0
+record 2: B          distance 2       -> record 0
+record 3: root       distances 2, 1   -> records 1, 2
+```
+
+An ordinary wire reference contains no child mask, hashes, or depths. Those
+are reconstructed from the earlier child record. Pruned Cells retain their
+hash/depth payload because that information cannot be recovered from their
+hidden subtrees.
+
+### Hash encoding remains independent
+
+The [hash preimage](#identity) continues to use the ordinary descriptor,
+applied level mask, original payload or previous significant hash, and the
+selected child depths and hashes. Hashes never use table indexes or their
+variable-length representation. Pruned Cells' highest hashes use their
+descriptor and retained hash/depth payload as already specified.
+
+Decoding proceeds from the first record to the last:
+
+1. Decode the descriptor and payload.
+2. Resolve ordinary references by backward index into the decoded list.
+3. Derive the ordinary level mask and compute every significant hash/depth
+   pair, or reconstruct the retained pairs and highest hash of a pruned Cell.
+4. Append the completed Cell to the list.
+5. Return the final Cell as the root, together with a lookup index if the
+   application needs one.
+
+No forward-reference placeholders or second hashing pass are needed. The
+root and its metadata arrive last, so execution begins after the packet has
+been read and validated.
+
+### Canonical ordering and validation
+
+The encoder uses iterative, ordered depth-first postorder: visit child
+references in their declared order, emit each Cell after its children, and
+deduplicate by highest CellID. First occurrence determines the position of
+a shared subtree. The decoder enforces this order as well as reachability,
+so there is one packing of the supplied rooted graph.
+
+The decoder rejects zero count, overlong or overflowing `V128`, invalid
+descriptors, zero/out-of-range distances, duplicate CellIDs, unreachable
+records, noncanonical order, trailing bytes, and depth overflow. Backward
+references guarantee physical acyclicity by construction. Record counts,
+bytes, references, and hashing work are bounded and charged before allocating
+or performing the corresponding work.
+
+Every physical child in the submitted view must have a record. A missing
+ordinary body is malformed transport, not a permissible omission that can
+change execution results. To hide a subtree, transmit an explicit pruned
+Cell in its place; that changes the factual root while retaining the selected
+lower commitments. Storage residency outside a submitted packet remains a
+separate concern.
+
+The protocol chooses the root and commitment level it expects. For the
+planned transaction layout, the signed body must include every execution
+witness that can influence its execution. The transaction envelope then
+references that body, the signature, and the R1CS proof. The decoder never
+grants execution access to extra uncommitted records.
+
+### Integration
+
+`hash_preimage(level)` and hash/depth computation are independent of transport.
+The flat bag codec, independent bag hash, and root-ID packet prefix are
+removed. Transactions carry their execution witness hierarchy by Cell
+reference, rather than embedding serialized bag bytes in a Snake.
+
+The in-memory `CellIndex` retains exact lookup scopes; snapshots of its bodies
+are normal Cell hierarchies. Standalone summary records retain their existing
+role in actor rent and logical-resolution gas accounting. Their `record_size`
+is independent of index compression and transport order.
+
+## Cell indexes and typed snapshots
+
+### In-memory availability
+
+`CellIndex` is a lookup map from original CellID to a detached Cell body.
+It has no independent wire format. Its `collect` method visits attached
+resident descendants and unions resident frontiers of equivalent Cells.
+Insertion detaches references so an indexed body cannot silently grant
+access to descendants absent from the index.
 
 ```rust
-pub trait GasMeter {
-    fn charge(&mut self, amount: u64) -> Result<(), CellError>;
-}
+pub struct CellIndex { /* CellID -> Arc<Cell> */ }
 
-impl BagOfCells {
-    pub fn decode(
-        bytes: &[u8],
-        max_bytes: usize,
-        gas: &mut impl GasMeter,
-    ) -> Result<Self, CellError>;
-}
-```
-
-`GasMeter` is the minimal charge interface defined by `cells`; FlameVM adapts
-its existing per-execution gas counter to it. It is not a memory limit or a
-second resource budget. Per-Cell, per-byte, and per-reference rates belong to
-the consensus gas schedule and are independent of the storage source.
-The VM charges the same rates in external and internal execution; any 4x
-internal-work weighting remains a transaction-ordering policy, not a Cell gas
-rule.
-
-The decoder validates `max_bytes`, then charges the declared Cell count before
-allocating its lookup table. It also charges record bytes multiplied by the
-number of significant levels, references, included-child summary validation,
-and cycle validation. Resolution is charged by the execution resolver. This
-prevents a small bag of two-byte empty
-Cells from causing disproportionate allocation without introducing a separate
-memory-limit knob. Total references are already bounded by four times the Cell
-count. Traversals are iterative and terminate on exhausted gas. BoC validation
-gas is deducted from the initiating external transaction's gas; later Cell
-resolutions are charged to the VM execution or message that performs them.
-
-### Unloaded bodies versus explicit pruning
-
-If a Cell references factual ID `X` and the current bag has no matching body,
-that reference is unavailable from this bag. It still carries its complete
-commitment summary. This transport omission is not an explicit pruning record.
-
-```text
-parent record contains X
-
-BoC contains body X     -> X can be resolved
-BoC omits body X        -> X remains unloaded; resolution may return MissingCell
-```
-
-An explicit pruned Cell, by contrast, is a real record with descriptor bit 15
-set and its own factual ID. If it is included in the bag, it can be resolved
-and inspected as a pruning record; virtualization still cannot read the
-subtree it hides. Supplying the hidden content elsewhere does not change that
-record's kind or its view's availability.
-
-The same missing-body rule applies to a root lookup ID held outside the bag.
-`CellEnvelope` requires its own root body; a generic rootless BoC does not.
-
-Adding body `X` later does not change the parent or any ancestor ID. A bag may
-contain bodies not reachable from one particular root because a transaction's
-bag can serve several Contracts and Actors. Unused bodies are allowed; they
-are still committed and paid for. An exact-used-witness manifest is therefore
-not needed.
-
-The format stores complete per-child level-mask/hash/depth summaries rather
-than table indexes. This permits independent physical-record parsing at the
-cost of repeating metadata between parents. Indexed reference compression
-would be a separate wire-format change; it is not implemented here.
-
-### Minimal API
-
-```rust
-pub struct BagOfCells { /* sorted CellID -> Arc<Cell> */ }
-
-pub type BoCID = [u8; 32];
-
-impl BagOfCells {
+impl CellIndex {
     pub fn new() -> Self;
     pub fn collect(root: Arc<Cell>) -> Result<Self, CellError>;
     pub fn insert(&mut self, cell: Arc<Cell>) -> Result<(), CellError>;
+    pub fn extend(&mut self, other: &Self) -> Result<(), CellError>;
     pub fn get(&self, id: &CellID) -> Option<Arc<Cell>>;
     pub fn contains(&self, id: &CellID) -> bool;
-    pub fn id(&self) -> BoCID;
-    pub fn encode(&self) -> Vec<u8>;
-    pub fn decode(
-        bytes: &[u8],
-        max_bytes: usize,
-        gas: &mut impl GasMeter,
+    pub fn iter(&self) -> impl Iterator<Item = (&CellID, &Arc<Cell>)>;
+    pub fn to_cell(&self) -> Result<Cell, CellError>;
+    pub fn id(&self) -> Result<CellID, CellError>;
+    pub fn from_cell<R: CellResolver + ?Sized>(
+        root: &Cell, resolver: &mut R,
     ) -> Result<Self, CellError>;
 }
 ```
 
-`collect` follows only attached `Resident` references and deduplicates them by
-ID. An `Unloaded` reference remains absent. Explicit pruned Cells are collected
-like any other attached body. BoC decoding creates Cells with `Unloaded`
-references and keeps resolved bodies in the bag's lookup table; it
-need not rebuild the whole DAG eagerly. Construction and insertion reject a
-count that does not fit the wire `u32`, so encoding an already valid bag to a
-`Vec` and computing its ID are infallible.
+The index is used for actor-owned residency and for the initiating
+transaction's immutable execution witnesses. Those two scopes remain
+separate. Cache residency does not expand either scope.
 
-### Root framing
+### A snapshot is an ordinary Cell hierarchy
 
-A rootless bag still needs a root when transporting one typed object. The
-canonical bootstrap wrapper is:
-
-```rust
-pub struct CellEnvelope {
-    root: CellID,
-    cells: BagOfCells,
-}
-
-impl CellEnvelope {
-    pub fn new(root: CellID, cells: BagOfCells) -> Result<Self, CellError>;
-    pub fn root(&self) -> CellID;
-    pub fn cells(&self) -> &BagOfCells;
-    pub fn encode(&self) -> Vec<u8>;
-    pub fn decode(
-        bytes: &[u8],
-        max_bytes: usize,
-        gas: &mut impl GasMeter,
-    ) -> Result<Self, CellError>;
-}
-```
+When an application needs to commit or carry an exact set of bodies, it
+constructs a normal snapshot hierarchy:
 
 ```text
-CellEnvelope bytes = root CellID || canonical BagOfCells bytes
+snapshot root:
+  payload: body_count:U32 LE, original_level_cap:U8
+  refs:    one Trie root for a nonempty index, none for an empty index
+
+Trie:
+  key:     original CellID, 32 bytes
+  value:   reference to that body's physical proof tree
 ```
 
-The enclosing network framing or containing type supplies the envelope byte
-boundary.
-Decoding a complete object requires the root body to be present in `cells` and
-then runs the expected typed decoder. This small wrapper is sufficient to
-replace the old flat top-level codecs; the BoC itself remains reusable as a
-rootless witness lookup set.
+The highest hash of this root is the availability commitment. There is no
+separate bag hash and no flat list embedded as a byte blob. The hierarchy
+travels through the same indexed Cell transport as any other root.
 
-An external transaction has two distinct graphs:
+Only bodies explicitly indexed are supplied in the proof trees. A reference
+to an absent body becomes an explicit pruning record at one fresh level
+above the original cap. Its retained pairs preserve the original child
+commitment. Existing pruning records at or below that cap remain literal
+data. The resulting physical DAG is complete.
 
-1. Its own canonical `CellEnvelope`, which identifies and transports the
-   ExternalTx object.
-2. Exactly one **execution BoC**, whose canonical bytes are a length-prefixed
-   snake field in a Cell referenced by the ExternalTx root.
+Snapshot decoding projects each listed proof body back to its original cap,
+verifies its ID against the Trie key, and recreates detached original bodies.
+New cuts are not indexed as available original data. As a result, restoring
+a snapshot preserves exactly which lookups succeed or fail; it does not
+hydrate missing descendants from other storage or from a transport cache.
+The reconstructed snapshot must have the same factual root ID.
 
-The execution BoC excludes Cells used solely to encode the ExternalTx
-envelope. Its `BoCID` is stored in the root payload and checked against the
-decoded bytes. Only this nested execution BoC is exposed to Contract and Actor
-resolution. This avoids a circular attempt to place a BoC commitment inside a
-root that is itself a member of the same BoC.
+The fresh level consumes one of the available fifteen pruning levels when
+there are missing bodies; a sparse snapshot already at the maximum level
+fails explicitly. Complete graphs can always use direct Cell transport.
+Actor commitment and block processing propagate these encoding errors through
+their rollback paths rather than panicking while computing a state root.
+
+### Typed-object snapshots
+
+The existing typed-object helpers retain a small ordinary snapshot root:
+
+```text
+typed snapshot root:
+  payload: original_level_cap:U8
+  refs:    one physical proof root of the object
+```
+
+`CellEnvelope` is a convenience object for this schema, not a packet header.
+Its `encode()` packs that ordinary root-last DAG. Its `transport_root()`
+exposes the factual root being carried; `root()` names the original content
+view used by typed decoders. It contains no root-ID prefix and no rootless
+bag. Unreachable extras are rejected.
+
+`CellEncode::to_envelope()` remains useful for transporting partial actor or
+Dict views while preserving the original content IDs. For a complete graph,
+`cell.encode()` transports the Cell itself directly. Multiple roots require
+an ordinary application-defined envelope hierarchy.
+
+### Transactions
+
+The script container holds script bytes and a direct reference to the
+execution witness snapshot root. The same highest root CellID is included
+in the ExternalTx payload and in `TxEntry::CellWitness`, making the exact
+availability set part of the signed TxID and proof transcript.
+
+The outer typed transaction snapshot can carry script, signature, proof,
+and its embedded witness hierarchy together. Only the decoded execution
+index is exposed to VM witness resolution. Its snapshot is frozen before
+proving and is shared unchanged with all calls and asynchronous descendants.
 
 ## Resolution and witness context
 
@@ -1054,7 +1132,7 @@ The concrete VM resolver may use exactly these sources:
 1. a body already attached to the value in RAM;
 2. a body present in the current Contract or Actor's consensus-committed
    persistent Cell store;
-3. a body present in the initiating external transaction's committed BoC.
+3. a body present in the initiating external transaction's committed Cell hierarchy.
 
 It must not use an unrelated actor's store, a node-wide content cache, an
 archive, a database record not committed as resident for the current object,
@@ -1062,11 +1140,11 @@ or the network. A physical cache may avoid decoding a body again only after
 the resolver has established that the ID belongs to source 2 or 3.
 
 The current `ExecutionCells` implementation already combines attached bodies,
-the current actor's retained `BagOfCells`, and the external transaction's BoC,
+the current actor's retained `CellIndex`, and the external transaction's Cell hierarchy,
 in that order. `ActorStore` is currently RAM-backed. There is no disk backend
 or general-purpose resolver-composition adapter yet. The `CellResolver` trait
 allows a composite implementation to consult actor-scoped disk storage and
-then the transaction BoC. Such a fallback must continue only on a missing
+then the transaction witness hierarchy. Such a fallback must continue only on a missing
 requested ID, not suppress integrity, resource-limit, or storage errors. It
 must charge logical access once, regardless of which source supplies the body,
 and disk lookup must enforce the same committed-residency scope as RAM lookup.
@@ -1077,13 +1155,13 @@ Persistent-store authority does not travel with a value. While actor A is
 running, its own state may resolve from A's committed store. If A passes a
 String or Dict into actor B, only recursively attached `Resident` Cells travel
 with the value. A remaining `Unloaded` reference may resolve from the external
-transaction BoC (or from B's own store if B independently retained that exact
+transaction witness hierarchy (or from B's own store if B independently retained that exact
 Cell), but never from A's store merely because A originated the argument.
 
 The same rule applies to synchronous calls and asynchronous sends. A Message's
 collected Cell graph includes all resident Cell bodies carried by its portable
 payload; unloaded descendants retain summaries and require the shared execution
-BoC. On return, the caller's own store scope is restored and returned resident
+Cell hierarchy. On return, the caller's own store scope is restored and returned resident
 Cells travel with the returned value. This permits non-portable values to move
 up the synchronous call chain without granting a callee access to caller
 storage.
@@ -1102,7 +1180,7 @@ from the canonical Cell size, including a physical cache hit. It can be refined
 later, but consensus cost must never depend on wall-clock cache behavior.
 
 `MissingCell(CellID)` means no permitted source contains the requested body.
-A malformed generic Cell record invalidates the BoC before VM execution. A
+A malformed generic Cell record invalidates the Cell hierarchy before VM execution. A
 valid Cell whose payload is invalid for the type expected by the caller fails
 at that typed operation; `cells` does not know the business meaning.
 
@@ -1133,18 +1211,18 @@ The same resolver boundary supports discovery and consensus execution:
 
 - An optional recording resolver reads from the submitter's full local graph
   and inserts every externally needed body it loads into a candidate
-  `BagOfCells`.
+  `CellIndex`.
 - A verifier resolver reads from committed actor/Contract storage and the
-  immutable BoC carried by the external transaction.
+  immutable Cell hierarchy carried by the external transaction.
 
-The candidate BoC must be frozen **before the proof-producing execution**, not
+The candidate Cell hierarchy must be frozen **before the proof-producing execution**, not
 merely before signing. `Prover::prove` derives the TxLog/TxID and binds TxID
-into the R1CS transcript, so learning `BoCID` during that same run would be
+into the R1CS transcript, so learning `availability CellID` during that same run would be
 circular. Transaction construction is therefore:
 
-1. assemble a conservative BoC directly, or run an optional discovery pass;
-2. freeze the canonical bag and its `BoCID`;
-3. run the real prover against that frozen bag using verifier-equivalent
+1. assemble a conservative Cell hierarchy directly, or run an optional discovery pass;
+2. freeze the canonical snapshot and its `availability CellID`;
+3. run the real prover against that frozen index using verifier-equivalent
    lookup rules;
 4. produce signing instructions from the resulting TxID.
 
@@ -1162,20 +1240,20 @@ Actor storage must commit both content and availability:
 ```rust
 pub struct StoredGraph {
     pub root: CellID,
-    pub cells: BagOfCells,
+    pub cells: CellIndex,
 }
 
 // Actor commitment includes (stored.root, stored.cells.id()).
 ```
 
 The actor-state commitment includes both fields. The root says *what* the
-state is; the BoCID says *which bodies remain resident and rent-bearing*.
-Evicting a branch's body changes the stored BoC and storage charge but not the
+state is; the availability CellID says *which bodies remain resident and rent-bearing*.
+Evicting a branch's body changes the stored Cell hierarchy and storage charge but not the
 content root. This is residency pruning, not construction of an explicit
 pruning Cell, which would change the factual root. A fully frozen actor can
 retain its code/state commitments while retaining no corresponding bodies.
 
-Resolving a body from a transaction BoC only puts it in the execution cache.
+Resolving a body from a transaction witness hierarchy only puts it in the execution cache.
 It does not silently add it to actor storage or increase rent. A persistent
 restore must be an explicit high-level operation. New or modified Trie paths
 are resident because the actor created their Cell bodies; untouched unloaded
@@ -1193,12 +1271,12 @@ In the implemented interface, Cells stay below the FlameVM Value layer:
 
 | Use | Root held by | Body source when accessed |
 | --- | --- | --- |
-| Contract | `ContractID` / UTXO input | External transaction BoC |
-| Actor code and state | Actor registry record | Actor's stored BoC, then external transaction BoC for pruned bodies |
-| Predicate program branch | Predicate commitment | External transaction BoC |
-| Dict | Typed Dict wrapper with key width, length, and Trie root | Current resident graph/store, then external transaction BoC |
-| Bounded VM String | Its zero-ref raw-byte Cell | Current resident graph/store, then external transaction BoC |
-| Snake-encoded bytes | Typed program/protocol-proof/blob field | Current resident graph/store, then external transaction BoC |
+| Contract | `ContractID` / UTXO input | External transaction witness hierarchy |
+| Actor code and state | Actor registry record | Actor's stored Cell hierarchy, then external transaction witness hierarchy for pruned bodies |
+| Predicate program branch | Predicate commitment | External transaction witness hierarchy |
+| Dict | Typed Dict wrapper with key width, length, and Trie root | Current resident graph/store, then external transaction witness hierarchy |
+| Bounded VM String | Its zero-ref raw-byte Cell | Current resident graph/store, then external transaction witness hierarchy |
+| Snake-encoded bytes | Typed program/protocol-proof/blob field | Current resident graph/store, then external transaction witness hierarchy |
 | Utreexo proof data | Existing Utreexo format, unchanged | Explicit legacy proof input; specialized accumulator verification applies; Cell migration deferred |
 
 Current opcodes do not load an arbitrary Cell Value. They perform a typed action
@@ -1209,20 +1287,20 @@ branch; that implementation follows Cells through the current resolver.
 
 ### Committing availability
 
-Each external transaction carries one immutable execution `BagOfCells`. Its
-`BoCID` must be included in the transaction's canonical effect prefix and
+Each external transaction carries one immutable execution `CellIndex`. Its
+`availability CellID` must be included in the transaction's canonical effect prefix and
 therefore in the `TxID` and every `signtx` signature. A concrete migration is a
-mandatory `TxEntry::CellWitness(BoCID)` immediately after `TxEntry::Header` for
-external execution. The full canonical BoC remains in the external transaction
-envelope.
+mandatory `TxEntry::CellWitness(availability CellID)` immediately after `TxEntry::Header` for
+external execution. The witness snapshot remains an ordinary Cell hierarchy
+referenced directly from the transaction's script container.
 
 The current `BlockTx::witness_hash` is not enough: it is a block-level
 commitment assembled by the minter, while Cell availability must already be
 bound to the submitted transaction.
 
-Because the BoC encoding is canonical, removing, adding, or changing a body
-changes `BoCID`. Consensus execution must expose every body in that committed
-bag to resolution. A minter cannot choose to ignore a present body and obtain
+Removing, adding, or changing an indexed body changes the snapshot's highest
+root CellID. Consensus execution must expose every indexed body
+to resolution. A minter cannot choose to ignore a present body and obtain
 a different branch result.
 
 Unused bodies are permitted. They increase transaction bytes and fees but do
@@ -1235,7 +1313,7 @@ Block execution is:
 
 ```text
 for each external transaction in block order:
-    validate its BoC and create one Cell execution context
+    validate its Cell hierarchy and create one Cell execution context
     execute and apply the external transaction
     enqueue its Send effects
 
@@ -1250,13 +1328,13 @@ perform block-boundary actor maintenance
 ```
 
 Synchronous calls naturally borrow the same context. Messages do not carry or
-copy a BoC. Every asynchronous descendant is processed before the next
+copy a Cell hierarchy. Every asynchronous descendant is processed before the next
 external transaction and therefore has exactly one unambiguous witness source.
-The per-external queue is FIFO in Send-effect order. BoCs are never coalesced
+The per-external queue is FIFO in Send-effect order. Witness indexes are never coalesced
 at block scope.
 
 The existing block-global gas, multiplication, and message-count limits remain
-outside the loop. Each BoC is bounded by the existing witness-byte limit and
+outside the loop. Each Cell hierarchy is bounded by the existing witness-byte limit and
 gas-charged decoding/resolution. An infinite send chain or Cell walk is
 therefore bounded by consensus costs and limits.
 
@@ -1268,7 +1346,7 @@ Failure behavior follows the existing execution boundary:
 - missing data in an asynchronous message produces the ordinary failed-message
   bounce;
 - effects and actor mutations from a failed scope roll back, while the shared
-  read-only BoC and its cache remain unchanged.
+  read-only Cell hierarchy and its cache remain unchanged.
 
 ## Universal Flame encoding and hashing
 
@@ -1279,9 +1357,10 @@ The end state is:
 3. Unbounded protocol byte fields use length-prefixed Snake encoding; keyed
    collections use `Trie`. VM String uses one zero-ref Cell with raw bytes;
    fixed and small fields stay in the parent payload or explicit child Cells.
-4. A standalone graph is transported as a `CellEnvelope`; persistent types
-   commit a root `CellID` and the `BoCID` of their retained bodies.
-5. Exact encoded size comes from Cell records and BoC bytes, not a parallel
+4. A standalone graph is transported from its root Cell. Typed snapshots may
+   use `CellEnvelope`; persistent types commit a content root `CellID` and the
+   availability snapshot's root `CellID`.
+5. Exact encoded size comes from Cell records and graph transport bytes, not a parallel
    `SizeWriter` pass.
 6. No consensus code uses `serde` as a canonical format.
 7. Cell-based VM/chain formats replace `readerwriter`; the legacy crate remains
@@ -1296,8 +1375,9 @@ snake encoding for bytes, and a fixed-width Trie for unbounded keyed or
 ordinal collections. Add a generic list wrapper only if several real types
 would otherwise duplicate the same layout.
 
-The two-byte Cell record and the small BoC/CellEnvelope headers are the
-bootstrap framing for this system, implemented directly inside `cells`.
+The graph record count and two-byte Cell descriptors are the transport framing,
+implemented directly inside `cells`. Snapshot headers belong to normal Cell
+payloads, not a separate packet format.
 Above that boundary, the migrated types are typed Cell graphs with no generic
 flat Reader/Writer layer. Utreexo's existing codec boundary is an explicit
 temporary exception, not a second codec for these migrated types.
@@ -1336,26 +1416,28 @@ loading a persistent Cell path. Its algorithms remain in `merkle`, scoped to
 Flamechain's Utreexo module. Its forest, proof, and path serialization is
 deliberately deferred and retains the existing format and Reader/Writer API.
 
-This migration changes every downstream consensus hash whose preimage changes,
+The overall Cell migration changes every downstream consensus hash whose preimage changes,
 including ContractID, MessageID, actor code/state roots, TxID, block witness
 and effects roots, and BlockHash. All formats must switch together in one
 coordinated consensus activation with golden vectors; mixed old/new hashing is
-not valid.
+not valid. The root-last transport replacement does not change Cell hash
+preimages; it changes transaction witness and actor availability commitments
+because those sets are now committed by ordinary snapshot Cell roots.
 
 ## Implementation map
 
 | Area | Implementation |
 | --- | --- |
 | Primitive and streaming API | `cells/src/cell.rs`, `builder.rs`, `slice.rs`, `codec.rs`: ordinary/pruned Cells, level masks and depths, shared read-only CellViews, exact codecs, inline length-prefixed snake operations |
-| Transport | `cells/src/boc.rs`: strict CellID ordering, duplicate rejection, bounded parsing, exact body membership, CellEnvelope |
+| Transport | `cells/src/transport.rs`: root-last ordered DAG, deduplication, backward indexes, bounded and metered decoding; `index.rs`: exact availability and typed Cell snapshots |
 | Trie | `cells/src/trie.rs`: one radix-4 Patricia format; resolver-backed get/insert/remove/ordered navigation; raw root wrapping/unwrapping |
 | Dict | `flamevm/src/dict.rs`: one Trie index, typed runtime witness cache, sticky summaries, lazy authenticated reads; no Dict2 |
 | VM codecs | `flamevm/src/encoding.rs` plus type-owned codecs: fixed scalars/points/tokens, tagged Values, single-Value Contracts, actors, messages, scripts |
 | Predicates | `flamevm/src/contract.rs`: program Trie, index selector, path-only witness collection and resolver-based branch opening |
-| Execution | `flamevm/src/vm.rs`: fixed BoC before proving, scoped and metered resolution, public-path validation before restoring private witnesses |
-| Transactions | `flamevm/src/tx.rs`: separate transport/execution bags, CellWitness effect, TxLog Trie and claimed TxID validation |
-| Actor storage | `flamechain/src/storage.rs`: content roots plus retained BoCID, leases Trie, freeze instead of bulk destruction, explicit persistence only |
-| Scheduling and blocks | `flamechain/src/block.rs`: external then FIFO descendants with one bag, Cell-backed block/record commitments and exact transport decoding |
+| Execution | `flamevm/src/vm.rs`: fixed Cell hierarchy before proving, scoped and metered resolution, public-path validation before restoring private witnesses |
+| Transactions | `flamevm/src/tx.rs`: direct witness-root reference, separate execution index, CellWitness effect, TxLog Trie and claimed TxID validation |
+| Actor storage | `flamechain/src/storage.rs`: content roots plus retained availability CellID, leases Trie, freeze instead of bulk destruction, explicit persistence only |
+| Scheduling and blocks | `flamechain/src/block.rs`: external then FIFO descendants with one witness index, Cell-backed block/record commitments and exact transport decoding |
 | Utreexo | `merkle` plus `flamechain/src/utreexo`: specialized accumulator and legacy forest/proof/path serialization retained; Cell migration deferred |
 
 The old `flamevm/src/chunk.rs`, local Trie, and Dict2 are deleted.
@@ -1370,7 +1452,7 @@ stored in script Cells, not routed through a generic serialization facade.
   witness bodies. Existing `save`/`setcode` are the persistence boundary.
 - Integration of explicit virtualized proof views into Taproot/Trie and
   transaction/block proof consumers. The crate's `CellView` is not an implicit
-  replacement for physical typed decoding or the current signed execution bag.
+  replacement for physical typed decoding or the current signed execution index.
 - Database adapters and archival retrieval outside consensus execution.
 - The first-class raw Cell/Builder/Slice proposal above, replacing String
   opcodes only after review. Runtime String currently has a bounded zero-ref
@@ -1382,17 +1464,17 @@ stored in script Cells, not routed through a generic serialization facade.
 - A coordinated deployment/activation strategy for the changed consensus
   identities; the code does not provide automatic legacy-state migration.
 
-Verification covers canonical Cell/BoC boundaries, sparse and dense masks,
+Verification covers canonical Cell/Cell hierarchy boundaries, sparse and dense masks,
 multilevel hash/depth commitments, pruning/virtualization, rejection of hidden
 payload access, partial Trie traversal,
 sticky Dict capabilities, public/private witness separation, call-failure
-escrow, execution-bag commitment, actor freeze/recovery, and immediate
+escrow, witness-snapshot commitment, actor freeze/recovery, and immediate
 per-external queue draining. Tests should be run together: these encodings
 change VM, proof, actor, and block commitments as one format.
 
 ## Security and consensus invariants
 
-- BoC decoding applies the outer byte bound and precharges declared element
+- Cell hierarchy decoding applies the outer byte bound and precharges declared element
   counts before allocating. Individual Cell records have fixed payload,
   reference, and significant-level bounds.
 - All lengths, counts, and size sums use checked conversions/arithmetic.
@@ -1405,8 +1487,8 @@ change VM, proof, actor, and block commitments as one format.
   It cannot be silently recovered from another record with a semantic hash.
 - The persistent availability set is committed separately from the content
   root.
-- A transaction's BoC is immutable, signed through TxID, and never merged with
-  another transaction's bag.
+- A transaction's Cell hierarchy is immutable, signed through TxID, and never merged with
+  another transaction's index.
 - A present valid body is always visible; an absent body is never supplied by
   private node state.
 - Generic Cell decoding never decides portability or linear ownership.
@@ -1425,8 +1507,7 @@ change VM, proof, actor, and block commitments as one format.
 - Bit-level payload APIs.
 - Merkle proof/update wrappers, library-reference Cells, or other Cell kinds
   beyond ordinary and pruned. Levels/masks and depths are implemented.
-- Multiple BoC variants, optional indexes, CRC, cache bits, or reference-index
-  compression.
+- Multiple packet variants, optional index tables, CRC, or cache bits.
 - Implicit network/database retrieval during consensus execution.
 - Implementing the proposed first-class raw Cell Value or Cell-manipulation
   opcodes before their separate design review.
@@ -1447,5 +1528,5 @@ change VM, proof, actor, and block commitments as one format.
 - [TON canonical BoC declarations](https://github.com/ton-blockchain/ton/blob/master/crypto/tl/boc.tlb)
 
 TON's algorithms inform the level/hash rules; Flame's descriptors, byte payloads,
-15-bit masks, little-endian depths, and reference-summary wire records above
+15-bit masks, little-endian depths, and backward-index graph transport above
 are adaptations, not TON wire compatibility.

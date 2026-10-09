@@ -308,7 +308,7 @@ fn decode_value_at<R: CellResolver + ?Sized>(
 mod tests {
     use super::*;
     use crate::Merlin;
-    use cells::{BagOfCells, Trie, MAX_CELL_PAYLOAD};
+    use cells::{CellIndex, Trie, MAX_CELL_PAYLOAD};
     use std::sync::Arc;
 
     #[test]
@@ -377,21 +377,21 @@ mod tests {
     }
 
     #[test]
-    fn strings_use_one_raw_payload_cell_and_load_from_boc() {
+    fn strings_use_one_raw_payload_cell_and_load_from_index() {
         for length in [0, 1, MAX_CELL_PAYLOAD - 1, MAX_CELL_PAYLOAD] {
             let bytes = vec![0xa5; length];
             let string_cell = String::from(bytes.clone()).to_cell().unwrap();
             assert_eq!(string_cell.payload(), bytes);
             assert!(string_cell.refs().is_empty());
-            assert_eq!(string_cell.encoded_size(), length + 2);
+            assert_eq!(string_cell.record_size(), length + 2);
             let cell = Value::String(String::from(bytes.clone()))
                 .to_cell()
                 .unwrap();
             assert_eq!(cell.payload(), &[1]);
             assert_eq!(cell.refs().len(), 1);
             assert_eq!(cell.refs()[0].id(), string_cell.id());
-            let mut bag = BagOfCells::collect(Arc::new(cell.clone())).unwrap();
-            let root = Cell::decode_exact(&cell.encode()).unwrap();
+            let mut bag = CellIndex::collect(Arc::new(cell.clone())).unwrap();
+            let root = Cell::decode_record_exact(&cell.encode_record()).unwrap();
             assert!(
                 matches!(Value::from_cell(&root, &mut bag).unwrap(), Value::String(s) if s.to_bytes_vec() == bytes)
             );
@@ -443,7 +443,7 @@ mod tests {
         let cell = blob_cell(&bytes).unwrap();
         assert_eq!(cell.payload().len(), MAX_CELL_PAYLOAD);
         assert_eq!(cell.refs().len(), 1);
-        let mut bag = BagOfCells::collect(Arc::new(cell.clone())).unwrap();
+        let mut bag = CellIndex::collect(Arc::new(cell.clone())).unwrap();
         assert_eq!(
             read_blob(&CellRef::unresolved(cell.id()), &mut bag, bytes.len()).unwrap(),
             bytes

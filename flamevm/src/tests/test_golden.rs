@@ -125,14 +125,14 @@ fn depth(cell: &Cell) -> u16 {
 fn golden_string_is_raw_bytes_in_one_cell() {
     let string = String::from(b"abc".to_vec());
     let cell = string.to_cell().unwrap();
-    assert_eq!(cell.encode(), record(b"abc", &[]));
-    assert_eq!(hex(&cell.encode()), "0300616263");
+    assert_eq!(cell.encode_record(), record(b"abc", &[]));
+    assert_eq!(hex(&cell.encode_record()), "0300616263");
     assert_eq!(
         hex(&cell.id()),
         "3da9865b43fa2ec490f78da9db16acd5638704dbce5cc7b3df2e3c7a23addf19"
     );
     let value = Value::String(string).to_cell().unwrap();
-    assert_eq!(value.encode(), record(&[1], &[(cell.id(), 0)]));
+    assert_eq!(value.encode_record(), record(&[1], &[(cell.id(), 0)]));
     assert_eq!(
         hex(&value.id()),
         "9148045685ff8f24d5a306e327717912730bd3a741306ab3affc59d61c55db93"
@@ -151,7 +151,7 @@ fn golden_txlog_wire_encoding() {
         })
         .to_cell()
         .unwrap()
-        .encode(),
+        .encode_record(),
         record(&header, &[])
     );
     for (entry, tag, data) in [
@@ -167,7 +167,7 @@ fn golden_txlog_wire_encoding() {
         ),
     ] {
         assert_eq!(
-            entry.to_cell().unwrap().encode(),
+            entry.to_cell().unwrap().encode_record(),
             record(&[&[tag][..], &data].concat(), &[])
         );
     }
@@ -192,7 +192,7 @@ fn golden_txlog_wire_encoding() {
         ),
     ] {
         assert_eq!(
-            entry.to_cell().unwrap().encode(),
+            entry.to_cell().unwrap().encode_record(),
             record(&[&[tag][..], &first, &second].concat(), &[])
         );
     }
@@ -207,7 +207,7 @@ fn golden_txlog_wire_encoding() {
         .concat()
     );
     assert_eq!(
-        TxEntry::Fee(1000).to_cell().unwrap().encode(),
+        TxEntry::Fee(1000).to_cell().unwrap().encode_record(),
         record(&[&[8][..], &1000u64.to_le_bytes()].concat(), &[])
     );
 
@@ -245,7 +245,7 @@ fn golden_txlog_wire_encoding() {
             [&[tag][..], &[7; 32]].concat()
         };
         assert_eq!(
-            entry.to_cell().unwrap().encode(),
+            entry.to_cell().unwrap().encode_record(),
             record(&payload, &[(child, 0)])
         );
     }
@@ -254,7 +254,7 @@ fn golden_txlog_wire_encoding() {
         TxEntry::Output(contract.clone())
             .to_cell()
             .unwrap()
-            .encode(),
+            .encode_record(),
         record(
             &[4],
             &[(contract.id(), depth(&contract.to_cell().unwrap()))]
@@ -262,7 +262,10 @@ fn golden_txlog_wire_encoding() {
     );
     let message = dummy_message(50);
     assert_eq!(
-        TxEntry::Send(message.clone()).to_cell().unwrap().encode(),
+        TxEntry::Send(message.clone())
+            .to_cell()
+            .unwrap()
+            .encode_record(),
         record(&[11], &[(message.to_cell().unwrap().id(), 1)])
     );
 }
@@ -283,5 +286,8 @@ fn golden_storage_effect_wire_encoding() {
         Scalar::from(1_000_007_630u64).as_bytes(),
     ]
     .concat();
-    assert_eq!(purchase.to_cell().unwrap().encode(), record(&payload, &[]));
+    assert_eq!(
+        purchase.to_cell().unwrap().encode_record(),
+        record(&payload, &[])
+    );
 }
