@@ -25,13 +25,22 @@ build time. The layout is:
 | --- | --- | --- |
 | Tx | signature:64 bytes, r1cs_length:u16 LE, r1cs_proof:r1cs_length bytes | TxBody |
 | TxBody | version:u32 LE, locktime:u32 LE | program, pruned TxLog |
+| program graph container | empty | executable code Cell, execution-witness snapshot |
 | pruned TxLog | retained hash(0):32 bytes, depth(0):u16 LE | none |
 
-The program contains bytecode and the necessary execution subcells. The current
-bytecode API stores bytes as a length-prefixed Snake, followed by a reference
-to its ordinary execution-witness snapshot hierarchy. There is no separate
-witness field or witness hash in Tx or TxBody. Native Cell-operand opcodes and
-instruction-stream continuation are separate work in the plan.
+The executable code Cell contains raw bytecode and up to four literal refs;
+there is no program length prefix or Snake decoder. `pushcell` consumes the
+next reference, and `exec` replaces the current code Cell in the same frame.
+The container keeps lookup availability outside that consuming ref stream.
+There is no separate witness field or witness hash in Tx or TxBody.
+The execution read context is the union of that snapshot and all inline supplied
+program bodies; `ExternalTx::execution_cells()` shares it with induced actor work.
+Resident/unloaded normalization during transport cannot change failure behavior.
+Transaction decoding restores the complete supplied program graph, even through
+an outer block CellEnvelope. Explicit pruned bodies remain pruned. Missing
+ordinary bodies are not accepted as an alternative transaction witness set.
+`ExternalTx::script()` and the script-byte admission limit refer to the root
+code payload. Total transport bytes and execution gas bound the rest of the graph.
 
 An all-zero 64-byte signature means absent authorization; it is decoded as
 `None`, never verified as a signature. Any other field must parse as a Schnorr
@@ -140,11 +149,11 @@ separate TxEntry Cell. The sum tag is one byte:
 | 7 | Retire | qty point:32, flavor point:32 | — |
 | 8 | Fee | sparks:u64 | — |
 | 9 | ActorSave | actor ID:32 | state Value |
-| 10 | SetCode | actor ID:32 | code snake |
+| 10 | SetCode | actor ID:32 | executable code Cell |
 | 11 | Send | — | Message |
 | 12 | StoragePurchase | actor ID:32, bytes:u64, expiry:u64, fee:Scalar | — |
 | 13 | ActorDestroy | actor ID:32 | — |
-| 14 | ActorDeploy | actor ID:32 | constructor code snake |
+| 14 | ActorDeploy | actor ID:32 | constructor code Cell |
 
 Integers in payloads are little-endian unless explicitly stated otherwise.
 
@@ -157,22 +166,27 @@ Integers in payloads are little-endian unless explicitly stated otherwise.
 | Token | qty commitment:32, flavor commitment:32 | — |
 | ClearToken | qty Scalar:32, flavor Scalar:32 | — |
 | String | raw bytes, 0..4095; no length prefix | — |
-| Script / arbitrary blob field | snake: u32 LE total length followed by bytes | next continuation when needed |
+| Script | raw instruction bytes, 0..4095; no length prefix | literal refs, including explicit continuation targets |
+| Arbitrary blob field | snake: u32 LE total length followed by bytes | next continuation when needed |
 | Dict | count:u64 LE, flags:u8 | Trie root unless empty |
 
 Only `Value` adds a tag: Scalar=0, String=1, Dict=2, Point=3,
-Token=4, ClearToken=6. Fixed-width contents follow inline; String and Dict
-contents are in one child Cell. Other tags are rejected. WideToken, the
+Token=4, ClearToken=6, Cell=13. Fixed-width contents follow inline; String, Dict,
+and raw Cell contents are in one child reference. A raw Cell is serialized data,
+not authority to instantiate bearer assets. Other tags are rejected. WideToken, the
 Contract stack handle, Merlin, Variable, Expression, Constraint, and MSM
 have no Value encoding.
 
-The runtime String API is retained temporarily; replacing it with a Cell value
-is a later change. Every String fits in one payload-only Cell: its descriptor
+The runtime String API is retained temporarily alongside the raw Cell value.
+Every String fits in one payload-only Cell: its descriptor
 supplies the length, and references or snake continuations are forbidden.
 The limit also applies to witness-bearing Strings' public bytes. Literal
 parsing and VM string growth reject lengths above 4095 with `StringTooLong`,
-before allocating the result. Programs, proofs, and other schema-defined blob
-fields remain snakes and may span many Cells; they are not runtime Strings.
+before allocating the result. Native byte literals use `pushcell` and a child
+Cell with up to 4095 payload bytes; no inline string opcode remains. The temporary
+byte-only host-source format still has a literal marker, lowered before execution.
+Programs span Cells only by executing `pushcell exec`; instructions do not
+straddle Cells. Proofs and other schema-defined blob fields may still use Snakes.
 The external Tx's R1CS proof is the explicitly inline exception above.
 
 Dict has a single implementation over `cells::Trie`, including small and
@@ -232,15 +246,17 @@ ordered eight-byte-key Trie whose raw root CellID is used directly in the
 Taproot tweak. There is no intermediate root/count envelope. Branch lookup
 needs only the fixed key width and selected index, not the total leaf count.
 Each logical program is blinded with a second leaf. A leaf is the sum
-`0 | snake(program)` or `1 | blinding_bytes:32`.
+payload `0` plus a program Cell reference, or payload `1 | blinding_bytes:32`
+with no references.
 
 A branch selector contains internal_key:32, root_CellID:32, index:u64 LE.
 No sibling-hash array or bit-position string is encoded.
 `PredicateTree::witness_for(logical_index)` returns this selector plus a
 Cell hierarchy containing only the selected path and its program/continuations.
-`Predicate::open_branch(selector, resolver, max_program_bytes)` verifies
-the tweaked-key relation and uses `Trie::lookup` to resolve the selected
-program through Cells. Missing indices fail lookup; selecting a blinding leaf
+`Predicate::open_program(selector, resolver)` verifies the tweaked-key relation
+and returns the selected native program Cell. `open_branch` is a bytecode-only
+inspection helper returning that Cell's payload, not flattening its graph.
+Execution reads further Cells only if instructions request them. Missing indices fail lookup; selecting a blinding leaf
 fails the program-tag check. Unvisited sibling bodies are not decoded.
 
 Removing the old count envelope changes predicate roots and tweaked points,
@@ -264,7 +280,7 @@ binding, not for raw content addresses.
 ## Actors and messages
 
 ActorID is a sum: `0 | hash:32`, or `1` with a reference to constructor
-code as a snake. Both normalize to the constructor code's CellID.
+code as a native program Cell. Both normalize to the constructor code's CellID.
 
 A Message contains anchor:32, ActorID, caller-presence:u8 and optional raw
 caller ID:32, refund Predicate:32, gas:u64, and a reference to a Dict of
@@ -278,7 +294,7 @@ contains resident snapshot CellID:32 and one unloaded reference to this actor la
 
 | Actor slot | Payload | Ordered references |
 | --- | --- | --- |
-| Live or frozen | 1:u8, code byte length:u64, state encoded byte size:u64 | code snake, state Value, lease envelope |
+| Live or frozen | 1:u8, code byte length:u64, state encoded byte size:u64 | executable code Cell, state Value, lease envelope |
 | Explicitly destroyed, leases remain | 0:u8 | lease envelope |
 
 The lease envelope contains count:u32 LE and an optional Trie reference.
@@ -341,7 +357,7 @@ that isolated subsystem. Only outer block transport wraps each unchanged
 `Proof` byte encoding in a snake Cell, as a leaf of the block's proof sequence.
 FlameVM no longer depends on those crates; its duplicate Chunk/Trie/Dict2
 implementations are removed in favor of `cells`. Compact **instruction bytecode** is still
-parsed directly and stored in snake-encoded script Cells; it is not a second
+parsed directly from raw program Cell payloads; it is not a second
 general-purpose serialization framework.
 
 These are consensus-breaking changes to the migrated encodings and identities.

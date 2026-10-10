@@ -1,5 +1,6 @@
 mod actor;
 mod address;
+mod cell_value;
 mod constraints;
 mod contract;
 mod crypto;
@@ -13,6 +14,7 @@ mod ops;
 mod prover;
 mod scalar;
 mod script;
+mod slice;
 mod string;
 mod token;
 mod tx;
@@ -21,9 +23,11 @@ mod verifier;
 mod vm;
 
 pub use actor::{
-    code_root, code_state_bytes, empty_state, state_root, ActorID, ActorRegistry, StoragePurchase,
+    code_cell, code_from_cell, code_root, code_state_bytes, empty_state, state_root, ActorID,
+    ActorRegistry, StoragePurchase,
 };
 pub use address::Address;
+pub use cell_value::CellValue;
 pub use constraints::{
     Commitment, CommitmentWitness, Constraint, Expression, SecretConstraint, Variable,
 };
@@ -38,6 +42,7 @@ pub use ops::Instruction;
 pub use prover::Prover;
 pub use scalar::Scalar;
 pub use script::{Script, ScriptBuilder};
+pub use slice::Slice;
 pub use string::{String, StringWitness};
 pub use token::{flavor_from_actor, ClearToken, Token, WideToken, FLAME_FLAVOR};
 pub use value::Value;

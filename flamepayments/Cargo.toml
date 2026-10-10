@@ -12,6 +12,7 @@ curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility",
 flamechain = { path = "../flamechain" }
 flamekd = { path = "../flamekd" }
 flamevm = { path = "../flamevm" }
+cells = { path = "../cells" }
 merlin = "3"
 musig = { path = "../musig" }
 rand_core = { version = "0.6", default-features = false }

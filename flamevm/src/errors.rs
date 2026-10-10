@@ -5,6 +5,16 @@ use thiserror::Error;
 /// Represents an error in proof creation, verification, or parsing.
 #[derive(Error, Debug)]
 pub enum VMError {
+    #[error("Item is not a Cell")]
+    TypeNotCell,
+    #[error("Item is not a Slice")]
+    TypeNotSlice,
+    #[error("Item is not a Builder")]
+    TypeNotBuilder,
+    #[error("Item is not a Cell, Slice, or Builder")]
+    TypeNotByteSource,
+    #[error("Item is not a Cell or Slice")]
+    TypeNotCellOrSlice,
     /// A Cell was missing, malformed, or exceeded the execution budget.
     #[error(transparent)]
     Cell(#[from] cells::CellError),

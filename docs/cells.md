@@ -7,7 +7,7 @@ Design of cells in Flame is heavily inspired by cells used within TON blockchain
 1. Flame Cells store whole bytes instead of bits.
 2. Payload maximum size is considerably larger (4095 bytes vs. 1023 bits).
 3. Flame Cells use TON-style significant hash levels and depths, with a 15-bit level mask and two-byte little-endian depths.
-4. Cells are not first-class types exposed in the FlameVM, but instead underpin Strings, Dicts, Contracts, Actors, and canonical encodings.
+4. Cells underpin Strings, Dicts, Contracts, Actors, and canonical encodings. A raw Cell handle is also exposed to FlameVM by `pushcell`; `exec` executes its payload without exposing or duplicating the program cursor.
 5. FlameVM permits transparent loading of unloaded bodies from an externally provided data source. This is distinct from an explicit pruning record: virtualization cannot recover the omitted body.
 6. Graph transport is a single root-last list with short backward reference indexes. Only ordinary and pruned Cells exist; there are no MerkleProof, MerkleUpdate, or library-reference wrappers.
 
@@ -44,15 +44,51 @@ coordinated activation, not mixed decoding of the old and new formats.
 
 Runtime `String` currently contains at most 4095 bytes. Its expected encoding
 is one Cell with those raw bytes and no references or length prefix; the Cell
-descriptor already supplies the length. Scripts, cryptographic proofs, and
-other potentially longer protocol byte fields still use Snake encoding.
-Replacing the VM String type with a first-class Cell is a proposal below,
-not part of the implemented migration. Utreexo forest, proof, and path
+descriptor already supplies the length. Cryptographic proofs and other
+potentially longer protocol byte fields may still use Snake encoding, but
+programs do not. A first-class raw Cell handle is implemented; replacing
+remaining String operations with Builder/Slice is still a proposal below.
+Utreexo forest, proof, and path
 serialization also remains unchanged for now.
 
 The word **Cell** in this document always means the low-level encoding object.
 It does not reintroduce the old FlameVM UTXO `Cell` type, which has been renamed
 to `Contract`.
+
+### Native program Cells
+
+An executable Cell has raw instruction bytes as payload, with no length prefix,
+and zero to four literal references. Every execution frame retains an immutable
+Cell plus independent consuming byte/ref cursors. `pushcell` (0xa6) consumes
+the next ref without loading its body. `exec` (0xa7) consumes a stack Cell,
+reads it through the metered execution context, and replaces the current code
+Cell. It resets cursors and Cell-local labels, but preserves stack, identity,
+permissions, gas, anchor and call failure escrow. It is not a nested call.
+
+Programs choose when to continue: `pushcell exec`. Reaching the end of payload
+does not read a child implicitly. Missing or pruned execution targets fail at
+access, using ordinary argument recovery in a child frame. The raw Cell stack
+handle is portable, droppable and copyable through `dup`; it owns encoded data,
+not decoded bearer assets. Copies share immutable allocations and do not expose
+the current program's cursor.
+
+The builder packs straight-line code into whole-instruction Cells, reserving
+two opcode bytes and one ref for explicit continuation. Instructions cannot
+straddle Cells. A byte literal is a separate child Cell and can use all 4095
+payload bytes; its program instruction is just `pushcell`. Automatic splitting of labeled code
+is rejected because its jumps would change scope. Construct those scopes and
+tail transfers explicitly.
+
+External TxBody's program graph container has empty payload and two refs:
+executable root and availability snapshot. The snapshot is not consumable via
+the program cursor, leaving all four code refs available to literal operands.
+TxID retains the original graph commitment after any number of `exec` transfers.
+Actor code roots and selected Taproot programs are native executable Cells too.
+At a complete transaction transport boundary, `Cell::load_graph(reader)` restores
+resident refs from the supplied body table, preserving every hash/depth and
+explicit prune. It shares already resident nodes and does not materialize actors
+or state implicitly during execution. Missing ordinary program bodies reject
+the transport; intentional omissions must be explicit pruned Cells.
 
 ### Relationship to `compression.md`
 
@@ -543,8 +579,10 @@ between unrelated reader and resolver errors.
 
 ## Proposal: replace the VM String with a first-class Cell
 
-This section is a design proposal, not an instruction to introduce new VM
-types yet. The current `CellBuilder` and `CellSlice` remain codec helpers.
+The raw Cell handle and native program cursors above are implemented. This
+section describes the initial Builder/Slice migration and the still-deferred
+operations. VM Builder and owned Slice Values now exist alongside the borrowed
+codec `CellSlice`.
 The goal is to expose their byte/reference operations to programs without
 adding a second graph format or weakening the ownership rules of typed Values.
 
@@ -586,7 +624,7 @@ contract code frequently reads and appends to the same bounded buffer.
 An illustrative runtime layout is:
 
 ```text
-Cell value:     CellRef — resident Arc<Cell> or unloaded CellCommitment
+Cell value:     CellRef + optional shared private prover annotation
 Builder value: owned CellBuilder — payload buffer and reference buffer
 Slice value:   Arc<Cell> + byte cursor + reference cursor
 
@@ -594,8 +632,8 @@ new builder --store bytes/refs--> builder --finalize--> immutable Cell
 immutable Cell --resolve/open--> Slice --load bytes/refs--> advanced Slice
 ```
 
-`CellSlice<'a>` currently borrows a Cell and therefore cannot itself live on
-the VM stack independently of that borrow. A VM Slice would own an `Arc<Cell>`
+`CellSlice<'a>` borrows a Cell and therefore cannot itself live on
+the VM stack independently of that borrow. The VM Slice owns an `Arc<Cell>`
 and its offsets; it should not use self-referential pointers or unsafe lifetime
 extensions. Offset updates can reuse the existing checked parsing logic.
 Small cursor fields fit the established payload/ref limits; the canonical
@@ -645,21 +683,100 @@ its sticky portability flag, just like other transient non-portable Values.
 They may return upward through a synchronous call, but may not be arguments
 moving downward or cross an asynchronous send boundary.
 
+### Agreed initial instruction replacements
+
+The following instructions are implemented for the String-to-Cell migration.
+The remaining String-oriented instructions are still under review. `pushcell`
+already exists and replaces `pushstr`: literal bytes belong in a program's
+child Cell, not in an inline string operand.
+
+`s` denotes a Slice, `b` a Builder, `x` a Scalar, and `n` a byte count.
+The stack effects retain the read-success convention (`1` on success, `0` on
+short input or a noncanonical scalar). `builder` (0x4f) creates an empty Builder;
+`slice` (0xa8) opens an ordinary Cell through the current metered resolver;
+`endcell` (0xa9) consumes a Builder and produces an immutable Cell. The renamed
+operations retain 0x40/41/42/44/45/46, and `appendrefs` uses 0x4e.
+
+| Previous instruction | Replacement | Stack effect | Behavior |
+| --- | --- | --- | --- |
+| `pushstr` | `pushcell` | `-> c` | Consume the next program reference and push its Cell handle; no implicit body loading. |
+| `readbits` | `readuint` | `s n -> s' x 1` or `s 0` | Read `0..=32` bytes, little-endian, into a canonical Scalar. Zero bytes produce zero. Do not reduce an out-of-range integer modulo the scalar order. |
+| `readint` | `readscalar` | `s -> s' x 1` or `s 0` | Read the full canonical 32-byte little-endian Scalar; equivalent to `readuint` with `n = 32`. |
+| `readstr` | `readbytes` | `s b n -> s' b' 1` or `s b 0` | Copy exactly `n` unread payload bytes into the Builder, advancing only the Slice's byte cursor. |
+| `writebits` | `writeuint` | `b x n -> b'` | Append the first `n` bytes of the Scalar's canonical little-endian representation, for `0..=32` bytes. This selects low bytes, not a fit-checked integer encoding. |
+| `writeint` | `writescalar` | `b x -> b'` | Append the full canonical 32-byte little-endian Scalar; equivalent to `writeuint` with `n = 32`. |
+| Byte concatenation (`append`) | `appendbytes` | `s b -> s' b'` | Copy all remaining payload bytes into the Builder; exhaust the byte cursor but preserve the reference cursor. |
+| No previous equivalent | `appendrefs` | `s b -> s' b'` | Append all remaining reference handles to the Builder; exhaust the reference cursor but preserve the byte cursor. Do not resolve child bodies. |
+
+Reads never automatically descend to child Cells. For `readbytes`, short
+source input restores both operands and yields `0`; insufficient Builder
+capacity hard-fails. All writes and appends hard-fail on capacity overflow,
+without partially changing the Builder or Slice. Invalid counts, reference
+metadata/depth errors, missing/pruned bodies, and exhausted gas remain hard
+failures. Precharge copying and reference work before mutation; gas is not
+refunded on failure.
+
+There is no `fork` instruction. Existing `dup` and `getdup` handle copyable
+Cells and Slices: immutable backing data is shared, Slice cursors are copied
+independently, and neither operation loads a body. Builders remain
+non-copyable. Slice/Builder Values have runtime type codes 14/15 and no stored
+Value encoding. Cell type/wire tag 13 is unchanged.
+
+The old `pushstr` opcode (0x19) is unassigned. The temporary host `push_str`
+helper accepts legacy byte-only source, compiles it to `pushcell` plus a child
+Cell, and retains private annotations outside the public bytes. VM `CellValue`
+holds the annotation per handle, shared by `dup`, not in a global hash-keyed
+table: identical bytes can have distinct private Scalar/Point/Script witnesses.
+Byte-only host
+APIs still use a source-only 0x19 literal marker; this is never a native VM
+instruction. Unmigrated byte consumers accept only ordinary zero-ref Cells
+through a metered compatibility adapter and may still produce String Values.
+Programs must preload/duplicate constants used in loops or skipped branches;
+`pushcell`'s reference cursor is neither rewound nor advanced by a skip scan.
+
+### In-place transforms, size, equality and hashes
+
+The next byte-oriented subset is implemented:
+
+| Instruction | Stack effect | Meaning |
+| --- | --- | --- |
+| `bitnot` | `b -> b'` | Invert existing payload bytes in place. |
+| `bitor / bitand / bitxor` | `b s -> b'` | Transform Builder bytes with equal-length Cell/Slice payload bytes; consume source. |
+| `shiftleft / shiftright` | `b n -> b'` | Fixed-width big-endian bit shift in place, for 0..256 bits; discard displaced bits. |
+| `size` | `x -> x n` | Cell payload bytes, Slice unread bytes, Builder used bytes, or Dict entries. |
+| `eq` | `a b -> a b boolean` | Compare any Cell/Slice/Builder pair by its factual highest-level hash. |
+| `sha256 / sha512 / sha3 / keccak256` | `s b -> b'` | Append the source's raw-byte digest to the supplied Builder. |
+| `cellhash` (0x88) | `c level b -> b'` | Append a cached Cell hash at an explicit level without resolving its body. |
+
+Mutable operations preserve Builder length, capacity and references. Bitwise
+sources are Cells or Slices; raw hash sources may also be Builders. Only source
+payload bytes participate, with zero remaining source refs required. Cell reads
+must resolve a non-pruned body; destination refs are preserved. All byte work,
+commitment computation, and digest storage are charged before mutation.
+
+A Slice's equality commitment describes its unread byte/ref streams as a new
+ordinary Cell, not its original backing Cell or consumed prefix. Builder
+commitments describe their current byte/ref contents without finalization.
+Both reuse `Cell::compute_commitment` over borrowed slices; they do not copy
+payload/ref buffers or resolve child bodies. Cells use cached factual IDs.
+Pruning can preserve a lower-level hash while changing the factual hash:
+semantic comparisons must select their level explicitly via `cellhash`.
+
 ### Bytes, identity, and gas
 
 Existing byte-oriented instructions need an explicit rule when their operand
-can have references. Initially, operations such as signatures, fixed-size IDs,
-byte hashing, and concatenation should require a **zero-reference Cell** of
+can have references. Initially, operations such as signatures and fixed-size IDs
+should require a **zero-reference Cell** of
 the appropriate payload length. They must not silently ignore child refs or
-flatten an arbitrary graph. Byte concatenation fails if its result exceeds
-4095 bytes; storing a child reference is a different operation.
+flatten an arbitrary graph. Appending bytes fails if its result exceeds 4095 bytes; `appendrefs` explicitly
+copies refs and leaves the byte cursor intact.
 
 `CellID` is the factual hash defined in [Identity](#identity), not SHA256 of
 payload bytes or of an ordinary wire record. Advancing a Slice changes
-neither its source Cell nor its ID; computing a commitment to the unread tail
-requires explicitly constructing a new Cell. Typed program loading should
-continue to use the current program/Snake schema, not reinterpret an arbitrary
-Cell graph as concatenated bytecode.
+neither its source Cell nor its ID; a Slice's factual equality hash is computed from its unread tail without
+materializing a new Cell. Typed program loading should
+use raw program payloads and explicit `exec`, never flatten an arbitrary graph
+or interpret its references as implicit bytecode continuations.
 
 Charge before allocation, copying, hashing, or path rebuilding: bytes appended
 or copied, refs stored, Cell finalization, and every logical child resolution.
@@ -672,9 +789,10 @@ must not change consensus gas or which bodies are visible.
 
 ### Minimal migration sequence
 
-1. Agree on the separate-type interface and byte/ref semantics above. Specify
-   the primitive stack transitions, capacities, error results, and capability
-   table before assigning opcode numbers. Keep String unchanged meanwhile.
+1. Complete the separate-type interface around the agreed instruction
+   replacements above. Review the proposed stack transitions and failure
+   results, then decide the remaining String-oriented operations before
+   assigning opcode numbers. Keep String unchanged meanwhile.
 2. Replace the plain byte-string VM variant with immutable Cell/reference.
    Preserve the existing zero-ref raw-byte encoding as that subset. Decide
    deliberately whether its existing Value discriminant can be reused in the
@@ -769,7 +887,7 @@ bounded length; no recursive walk or separate snake cycle set is needed.
 
 A failed read leaves the parent cursor unchanged, but resolver charges and
 read-only cache entries do not roll back. The successful result is a `Vec<u8>`.
-Snake is used for program/proof blobs and other explicitly unbounded byte
+Snake is used for proof blobs and other explicitly unbounded byte
 fields, not for the bounded single-Cell VM String.
 
 ## Trie
@@ -1110,13 +1228,17 @@ inline R1CS proof. The body holds the header, a program reference, and a
 canonical mask-one pruned log reference containing the log's hash(0)/depth(0).
 TxID is the body's factual ID; WitnessID is the Tx root's factual ID.
 
-The program contains bytecode and its supplied execution subcells. In the
-current bytecode API these subcells use an ordinary witness snapshot hierarchy
-referenced from the Snake container. No separate body witness field or
+The program graph container has empty payload and references the native
+executable root and its ordinary witness snapshot hierarchy. Code payloads
+have no length prefix and traverse refs only through `pushcell`/`exec`.
+No separate body witness field or
 `CellWitness` effect is needed: the program's factual hash commits availability.
-Only the decoded execution
-index is exposed to VM witness resolution. Its snapshot is frozen before
-proving and is shared unchanged with all calls and asynchronous descendants.
+VM witness resolution exposes the decoded lookup index plus all resident bodies
+supplied by the executable program graph. This union is frozen before execution
+and shared unchanged with calls and asynchronous descendants. Normalizing
+transport refs from unloaded to resident must not change access success/failure.
+The union is a read context, not a second serialized snapshot: its inline bodies
+are already committed by the program graph, and need no extra pruning level.
 
 ## Resolution and witness context
 
@@ -1294,7 +1416,7 @@ In the implemented interface, Cells stay below the FlameVM Value layer:
 | Predicate program branch | Predicate commitment | External transaction witness hierarchy |
 | Dict | Typed Dict wrapper with key width, length, and Trie root | Current resident graph/store, then external transaction witness hierarchy |
 | Bounded VM String | Its zero-ref raw-byte Cell | Current resident graph/store, then external transaction witness hierarchy |
-| Snake-encoded bytes | Typed program/protocol-proof/blob field | Current resident graph/store, then external transaction witness hierarchy |
+| Snake-encoded bytes | Typed protocol-proof/blob field, not executable code | Current resident graph/store, then external transaction witness hierarchy |
 | Utreexo proof data | Existing Utreexo format, unchanged | Explicit legacy proof input; specialized accumulator verification applies; Cell migration deferred |
 
 Current opcodes do not load an arbitrary Cell Value. They perform a typed action
@@ -1305,8 +1427,9 @@ branch; that implementation follows Cells through the current resolver.
 
 ### Committing availability
 
-Each external transaction's program carries one immutable execution `CellIndex`
-as subcells. The body's factual CellID includes the program's supplied graph,
+Each external transaction's program carries an immutable lookup `CellIndex`
+and its inline resident graph. `ExternalTx::execution_cells()` exposes their
+union to subsequent actor processing. The body's factual CellID includes the program's supplied graph,
 so availability is bound by TxID, every `signtx` signature, and the R1CS proof.
 No separate witness hash field or log entry is needed. The program's ordinary
 snapshot hierarchy preserves exactly which logical body lookups succeed.
@@ -1471,8 +1594,8 @@ stored in script Cells, not routed through a generic serialization facade.
   transaction/block proof consumers. The crate's `CellView` is not an implicit
   replacement for physical typed decoding or the current signed execution index.
 - Database adapters and archival retrieval outside consensus execution.
-- The first-class raw Cell/Builder/Slice proposal above, replacing String
-  opcodes only after review. Runtime String currently has a bounded zero-ref
+- The remaining String/crypto/typed-conversion migration above, beyond the
+  implemented Builder/Slice subset. Runtime String currently has a bounded zero-ref
   Cell encoding; no standalone Snake or buffering SnakeWriter is introduced.
 - Utreexo forest, proof, and path encoding. Keep its current serialization
   until that separate migration is requested.

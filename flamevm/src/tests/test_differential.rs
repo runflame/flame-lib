@@ -86,8 +86,11 @@ fn backends_agree_across_sample_programs() {
         // String growth (charges allocation gas identically) + type probe.
         ScriptBuilder::new()
             .push_str(String::from(b"ab".to_vec()))
-            .push_str(String::from(b"cd".to_vec()))
-            .append()
+            .slice()
+            .builder()
+            .append_bytes()
+            .endcell()
+            .drop_()
             .drop_(),
         ScriptBuilder::new().push_int(5u64).type_().drop_().drop_(),
         // Failing programs must fail identically.

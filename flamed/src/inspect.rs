@@ -22,7 +22,7 @@ pub fn contract(id: ContractId, mut result: ContractResult) -> Result<ContractRe
     let root = resolve_cell(&mut envelope, id.0)?;
     let (contract, decoded) = match Contract::from_cell(&root, &mut envelope) {
         Ok(contract) => {
-            let decoded = render_value(contract.payload());
+            let decoded = render_value(contract.payload(), &mut envelope);
             (contract, decoded)
         }
         Err(CellError::MissingCell(_)) => {
@@ -50,7 +50,7 @@ pub fn actor(mut result: ActorResult) -> ActorResult {
         let root = resolve_cell(&mut envelope, id)?;
         let reference = CellRef::resident(root.clone());
         match Value::from_cell(&root, &mut envelope) {
-            Ok(value) => render_value(&value),
+            Ok(value) => render_value(&value, &mut envelope),
             Err(CellError::MissingCell(_)) => available_cells(&reference, &mut envelope),
             Err(error) => Err(error),
         }
@@ -75,7 +75,7 @@ fn disassemble(code: &[u8]) -> (Vec<InstructionView>, Option<String>) {
     let mut remaining = code;
     while !remaining.is_empty() {
         let offset = (code.len() - remaining.len()) as u64;
-        let op = match Instruction::parse(&mut remaining) {
+        let op = match Instruction::parse_source(&mut remaining) {
             Ok(op) => op,
             Err(error) => {
                 return (instructions, Some(format!("Byte {offset}: {error}")));
@@ -83,7 +83,9 @@ fn disassemble(code: &[u8]) -> (Vec<InstructionView>, Option<String>) {
         };
         let text = match op {
             Instruction::PushInt(n) => format!("push {}", scalar(n)),
-            Instruction::PushStr(s) => format!("pushstr 0x{}", hex::encode(s.to_bytes())),
+            Instruction::BytesLiteral(s) => {
+                format!("pushcell bytes 0x{}", hex::encode(s.to_bytes_vec()))
+            }
             Instruction::PushPoint(p) => format!("pushpoint 0x{}", hex::encode(p.to_bytes())),
             Instruction::DupK(k) => format!("dup:{k}"),
             Instruction::RollK(k) => format!("roll:{k}"),
@@ -134,7 +136,7 @@ pub fn effects(bytes: &[u8]) -> Result<Vec<RpcTxEntry>, CellError> {
 
 fn effect_from_cell(cell: &Cell, envelope: &mut CellEnvelope) -> Result<RpcTxEntry, CellError> {
     match TxEntry::from_cell(cell, envelope) {
-        Ok(entry) => return render_effect(&entry),
+        Ok(entry) => return render_effect(&entry, envelope),
         Err(CellError::MissingCell(_)) => {}
         Err(error) => return Err(error),
     }
@@ -220,7 +222,7 @@ fn message_effect(cell: &Cell, envelope: &mut CellEnvelope) -> Result<RpcTxEntry
             }
             match read_cell(envelope, &reference).and_then(|cell| Value::from_cell(&cell, envelope))
             {
-                Ok(value) => render_value(&value),
+                Ok(value) => render_value(&value, envelope),
                 Err(CellError::MissingCell(_)) => available_cells(&reference, envelope),
                 Err(error) => Err(error),
             }
@@ -262,7 +264,7 @@ fn actor_target(actor: &ActorID) -> ActorTarget {
     }
 }
 
-fn render_effect(entry: &TxEntry) -> Result<RpcTxEntry, CellError> {
+fn render_effect(entry: &TxEntry, envelope: &mut CellEnvelope) -> Result<RpcTxEntry, CellError> {
     Ok(match entry {
         TxEntry::Header(h) => RpcTxEntry::Header {
             version: h.version,
@@ -279,7 +281,7 @@ fn render_effect(entry: &TxEntry) -> Result<RpcTxEntry, CellError> {
             contract: ContractId(c.id()),
             predicate: PredicatePoint(c.predicate.to_point().to_bytes()),
             anchor: c.anchor.0,
-            payload: render_value(c.payload())?,
+            payload: render_value(c.payload(), envelope)?,
         },
         TxEntry::ActorDeploy { actor, code } => RpcTxEntry::ActorDeploy {
             actor: ActorId(actor.to_hash()),
@@ -289,7 +291,7 @@ fn render_effect(entry: &TxEntry) -> Result<RpcTxEntry, CellError> {
         TxEntry::ActorSave { actor, state } => RpcTxEntry::ActorSave {
             actor: ActorId(actor.to_hash()),
             state_hash: flamevm::state_root(state),
-            state: render_value(state)?,
+            state: render_value(state, envelope)?,
         },
         TxEntry::SetCode { actor, code } => RpcTxEntry::SetCode {
             actor: ActorId(actor.to_hash()),
@@ -307,7 +309,7 @@ fn render_effect(entry: &TxEntry) -> Result<RpcTxEntry, CellError> {
             payload: m
                 .payload()
                 .iter()
-                .map(render_value)
+                .map(|value| render_value(value, envelope))
                 .collect::<Result<_, _>>()?,
             gas_limit: m.gas.to_string(),
             refund_predicate: PredicatePoint(m.refund_predicate.to_point().to_bytes()),
@@ -341,12 +343,13 @@ fn render_effect(entry: &TxEntry) -> Result<RpcTxEntry, CellError> {
     })
 }
 
-fn render_value(value: &Value) -> Result<TxValue, CellError> {
+fn render_value(value: &Value, envelope: &mut CellEnvelope) -> Result<TxValue, CellError> {
     Ok(match value {
         Value::Scalar(n) => TxValue::Scalar { value: scalar(*n) },
         Value::String(s) => TxValue::String {
             bytes: s.clone().to_bytes(),
         },
+        Value::Cell(cell) => available_cells(cell, envelope)?,
         Value::Point(p) => TxValue::Point { hex: p.to_bytes() },
         Value::ClearToken(t) => TxValue::ClearToken {
             quantity: scalar(t.qty()),
@@ -362,7 +365,7 @@ fn render_value(value: &Value) -> Result<TxValue, CellError> {
                 .map(|(key, value)| {
                     Ok(DictEntry {
                         key: scalar(*key),
-                        value: render_value(value)?,
+                        value: render_value(value, envelope)?,
                     })
                 })
                 .collect::<Result<_, CellError>>()?,
@@ -403,6 +406,29 @@ fn available_cells(reference: &CellRef, envelope: &mut CellEnvelope) -> Result<T
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_cell_effect_values_render_their_available_graph() {
+        let child = Cell::new(vec![9], vec![]).unwrap();
+        let root = Cell::new(vec![7], vec![child.clone().into()]).unwrap();
+        let log = flamevm::TxLog::from(vec![flamevm::TxEntry::ActorSave {
+            actor: flamevm::ActorID::Hash([1; 32]),
+            state: Value::Cell(root.clone().into()),
+        }]);
+        let entries = effects(&log.to_envelope().unwrap().encode()).unwrap();
+        let RpcTxEntry::ActorSave {
+            state: TxValue::Cells { root: id, cells },
+            ..
+        } = &entries[0]
+        else {
+            panic!("expected raw Cell graph");
+        };
+        assert_eq!(*id, CellId(root.id()));
+        assert_eq!(cells.len(), 2);
+        assert!(cells
+            .iter()
+            .any(|cell| cell.id == CellId(child.id()) && cell.data == [9]));
+    }
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED;
     use flamevm::{
         CellBuilder, CellIndex, ClearToken, Dict, Message, String as VmString, TxHeader, TxLog,
@@ -639,9 +665,10 @@ mod tests {
             TxEntry::Retire(point, point),
             TxEntry::ActorDestroy { actor },
         ];
+        let mut envelope = Value::Scalar(Scalar::ZERO).to_envelope().unwrap();
         let expected = entries
             .iter()
-            .map(render_effect)
+            .map(|entry| render_effect(entry, &mut envelope))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         let bytes = crate::cells::log_bytes(&TxLog::from(entries)).unwrap();

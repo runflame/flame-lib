@@ -18,6 +18,7 @@
 //! after receipt. This module never emits that opcode; `flamepayments.md`
 //! names it and explains the difference.
 
+use cells::Cell;
 use core::fmt;
 
 use curve25519_dalek::ristretto::CompressedRistretto;
@@ -177,7 +178,7 @@ pub struct OutputSpec {
 /// per output:   push_str(commitment(qty))  push_str(commitment(flv))
 ///               push_int(m)  push_int(n)  mix
 /// per output i: roll_k(n-1-i) if > 0;  push_point(S_i)  output
-///               push_str(note_i)  log
+///               pushcell(note_i)  log
 /// ```
 ///
 /// `signtx` pushes the contract's single payload Value and no count, so with
@@ -187,7 +188,7 @@ pub struct OutputSpec {
 /// that order says nothing about which output is the change. The roll before
 /// each `output` keeps every commitment, predicate and note in that one
 /// order: `mix` leaves the tokens in the order they were pushed and `output`
-/// pops from the top, which would otherwise reverse them. `push_str(note)
+/// pops from the top, which would otherwise reverse them. `pushcell(note)
 /// log` leaves the stack as it found it.
 ///
 /// `rng` draws each output's `r`, hedged as `payments.md` "Sender
@@ -259,7 +260,7 @@ pub fn build_transfer<R: RngCore + CryptoRng>(
         program = program
             .push_point(predicate.to_bytes())
             .output()
-            .push_str(VmString::from(note))
+            .push_cell(Cell::new(note, vec![]).map_err(VMError::from)?)
             .log();
     }
 

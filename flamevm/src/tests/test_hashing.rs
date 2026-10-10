@@ -62,6 +62,7 @@ fn keccak256_differs_from_sha3() {
     let mut a = vm_with_script(
         ScriptBuilder::new()
             .push_str(s(b"abc"))
+            .builder()
             .sha3()
             .to_bytecode(),
     );
@@ -69,13 +70,14 @@ fn keccak256_differs_from_sha3() {
     let mut b = vm_with_script(
         ScriptBuilder::new()
             .push_str(s(b"abc"))
+            .builder()
             .keccak256()
             .to_bytecode(),
     );
     run_to_end(&mut b).unwrap();
     match (&a.current_call.stack[0], &b.current_call.stack[0]) {
-        (Value::String(sa), Value::String(sb)) => {
-            assert_ne!(sa.as_opaque().unwrap(), sb.as_opaque().unwrap());
+        (Value::Builder(sa), Value::Builder(sb)) => {
+            assert_ne!(sa.payload(), sb.payload());
         }
         _ => panic!(),
     }
@@ -95,13 +97,19 @@ fn calibrated_hash_cost_tracks_compression_blocks() {
 #[test]
 fn sha256_debits_the_calibrated_work_before_hashing() {
     let mut vm = vm_with_script(ScriptBuilder::new().sha256().to_bytecode());
-    vm.current_call.stack = vec![Value::String(String::from(vec![0x5a; 64]))];
-    vm.current_call.gas_limit = GAS_PER_INSTRUCTION + hash_gas(64, 64).unwrap();
+    let mut source = CellBuilder::new();
+    source.store_bytes(&[0x5a; 64]).unwrap();
+    vm.current_call.stack = vec![
+        Value::Builder(source.clone()),
+        Value::Builder(CellBuilder::new()),
+    ];
+    vm.current_call.gas_limit =
+        GAS_PER_INSTRUCTION + hash_gas(64, 64).unwrap() + alloc_byte_gas(32).unwrap();
     assert!(vm.step_internal().expect("exact budget succeeds"));
     assert_eq!(vm.current_call.gas_used, vm.current_call.gas_limit);
 
     let mut short = vm_with_script(ScriptBuilder::new().sha256().to_bytecode());
-    short.current_call.stack = vec![Value::String(String::from(vec![0x5a; 64]))];
-    short.current_call.gas_limit = GAS_PER_INSTRUCTION + hash_gas(64, 64).unwrap() - 1;
+    short.current_call.stack = vec![Value::Builder(source), Value::Builder(CellBuilder::new())];
+    short.current_call.gas_limit = vm.current_call.gas_limit - 1;
     assert!(matches!(short.step_internal(), Err(VMError::OutOfGas)));
 }

@@ -80,7 +80,7 @@ fee > 0:      push_int(fee)  fee                     one more mix input
 per output:   push_str(commitment(qty))  push_str(commitment(flv))
               push_int(m)  push_int(n)  mix
 per output i: roll_k(n-1-i) if > 0;  push_point(S_i)  output
-              push_str(note_i)  log
+              pushcell(note_i)  log
 ```
 
 The outputs are sorted by their quantity commitment, compared as bytes,
@@ -98,7 +98,7 @@ zero fee emits no `fee` opcode at all.
 The roll before each `output` is not decoration. `mix` leaves the output
 tokens in the order their commitments were pushed and `output` pops from the
 top, so without it every multi-output transfer would pair the first
-predicate and note with the last amount. `push_str(note) log` leaves the
+predicate and note with the last amount. `pushcell(note) log` leaves the
 stack as it found it, so the notes change no roll depth.
 
 ## Notes

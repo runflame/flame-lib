@@ -6,7 +6,8 @@ use std::{
 };
 
 use cells::{
-    CellBuilder, CellDecode, CellEncode, CellError, CellID, CellIndex, CellReader, CellSlice,
+    Cell, CellBuilder, CellDecode, CellEncode, CellError, CellID, CellIndex, CellReader, CellRef,
+    CellSlice,
 };
 
 use crate::contract::{Contract, ContractID, PredicateTree};
@@ -14,7 +15,7 @@ use crate::crypto::Point;
 use crate::errors::VMError;
 use crate::ops::Instruction;
 use crate::scalar::Scalar;
-use crate::string::{compile_instructions, String, StringWitness};
+use crate::string::{String, StringWitness};
 
 /// A program is a list of [`Instruction`]s. Build with the fluent
 /// methods (`alloc`, `add`, `eq`, `verify`, …) and call `build_tx` to package
@@ -58,12 +59,12 @@ impl ScriptBuilder {
     }
 
     /// Attaches prover-only instructions for a branch opened from authenticated
-    /// Cells. The key is the canonical snake-code Cell ID, not a caller label.
+    /// Cells. Keys are canonical executable Cell IDs, not caller labels.
     pub fn with_script_witness(mut self, script: ScriptBuilder) -> Result<Self, CellError> {
-        let id = script_cell(&script.to_bytecode())?.id();
+        let (_, compiled) = compile_program(&script.instructions)?;
         self.cells.extend(script.cells);
         self.scripts.extend(script.scripts);
-        self.scripts.insert(id, script.instructions);
+        self.scripts.extend(compiled);
         Ok(self)
     }
 
@@ -100,8 +101,7 @@ impl ScriptBuilder {
         let mut scripts = self.scripts.clone();
         for witness in self.witnesses() {
             if let StringWitness::Script(instructions) = witness {
-                let id = script_cell(&compile_instructions(instructions))?.id();
-                scripts.insert(id, instructions.clone());
+                scripts.extend(compile_program(instructions)?.1);
             }
         }
         Ok(scripts)
@@ -113,7 +113,10 @@ impl ScriptBuilder {
         let mut witnesses = Vec::new();
         while let Some(instructions) = pending.pop() {
             for instruction in instructions {
-                if let Instruction::PushStr(String::Witness(witness)) = instruction {
+                if let Instruction::BytesLiteral(literal) = instruction {
+                    let String::Witness(witness) = literal.as_ref() else {
+                        continue;
+                    };
                     witnesses.push(witness.as_ref());
                     if let StringWitness::Script(nested) = witness.as_ref() {
                         pending.push(nested);
@@ -132,7 +135,7 @@ impl ScriptBuilder {
         let mut r: &[u8] = bytes;
         let mut p = Self::new();
         while !r.is_empty() {
-            let instr = Instruction::parse(&mut r)?;
+            let instr = Instruction::parse_source(&mut r)?;
             p.instructions.push(instr);
         }
         Ok(p)
@@ -175,15 +178,22 @@ impl ScriptBuilder {
         Ok(self)
     }
 
-    /// Serializes the program's bytecode (canonical; matches what the
-    /// VM dispatcher expects).
+    /// Compatibility source for byte-only host APIs. Byte literals use a
+    /// source-only marker and are compiled into child Cells; use `to_cell`
+    /// for the native executable graph. Explicit Cell refs are omitted.
     pub fn to_bytecode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for instr in &self.instructions {
             // `Vec<u8>` writer is infallible.
-            instr.encode(&mut out);
+            instr.encode_source(&mut out);
         }
         out
+    }
+
+    /// Executable bytecode and literal Cell references. Bytecode
+    /// alone omits these operands, just as it omits public lookup witnesses.
+    pub fn to_cell(&self) -> Result<Cell, CellError> {
+        instruction_cell(&self.instructions)
     }
 
     /// Builds the witness queue in opcode order. Each witness-bearing
@@ -205,13 +215,27 @@ impl ScriptBuilder {
         self
     }
 
-    /// `pushstr` (0x19).
+    /// Compatibility host helper: compile bytes into a literal Cell and `pushcell`.
     pub fn push_str<T: Into<String>>(mut self, s: T) -> Self {
-        self.instructions.push(Instruction::PushStr(s.into()));
+        self.instructions
+            .push(Instruction::BytesLiteral(Arc::new(s.into())));
         self
     }
 
-    /// `pushstr` (0x19) carrying a witness-bearing sub-script. The
+    /// `pushcell` (0xa6): consumes the next literal ref of the executing program.
+    pub fn push_cell(mut self, cell: impl Into<CellRef>) -> Self {
+        self.instructions
+            .push(Instruction::PushCell(Some(cell.into())));
+        self
+    }
+
+    /// `exec` (0xa7): replaces the program Cell without creating a call frame.
+    pub fn exec(mut self) -> Self {
+        self.instructions.push(Instruction::Exec);
+        self
+    }
+
+    /// Host byte literal carrying a witness-bearing compatibility sub-script. The
     /// prover pushes the inner ScriptBuilder's instructions (witness
     /// slots intact) wrapped in `String::Witness(StringWitness::Script)`;
     /// downstream `op_open` / `op_signcall` walk those
@@ -222,7 +246,9 @@ impl ScriptBuilder {
         self.cells.extend(inner.cells);
         self.scripts.extend(inner.scripts);
         self.instructions
-            .push(Instruction::PushStr(String::script(inner.instructions)));
+            .push(Instruction::BytesLiteral(Arc::new(String::script(
+                inner.instructions,
+            ))));
         self
     }
 
@@ -285,34 +311,50 @@ impl ScriptBuilder {
         self
     }
 
-    // ── String ops ──────────────────────────────────────
+    // ── Cell byte/ref operations and remaining byte consumers ─────
 
-    pub fn read_bits(mut self) -> Self {
-        self.instructions.push(Instruction::ReadBits);
+    pub fn builder(mut self) -> Self {
+        self.instructions.push(Instruction::Builder);
         self
     }
-    pub fn read_int(mut self) -> Self {
-        self.instructions.push(Instruction::ReadInt);
+    pub fn slice(mut self) -> Self {
+        self.instructions.push(Instruction::Slice);
         self
     }
-    pub fn read_str(mut self) -> Self {
-        self.instructions.push(Instruction::ReadStr);
+    pub fn endcell(mut self) -> Self {
+        self.instructions.push(Instruction::EndCell);
+        self
+    }
+    pub fn read_uint(mut self) -> Self {
+        self.instructions.push(Instruction::ReadUint);
+        self
+    }
+    pub fn read_scalar(mut self) -> Self {
+        self.instructions.push(Instruction::ReadScalar);
+        self
+    }
+    pub fn read_bytes(mut self) -> Self {
+        self.instructions.push(Instruction::ReadBytes);
         self
     }
     pub fn read_point(mut self) -> Self {
         self.instructions.push(Instruction::ReadPoint);
         self
     }
-    pub fn write_bits(mut self) -> Self {
-        self.instructions.push(Instruction::WriteBits);
+    pub fn write_uint(mut self) -> Self {
+        self.instructions.push(Instruction::WriteUint);
         self
     }
-    pub fn write_int(mut self) -> Self {
-        self.instructions.push(Instruction::WriteInt);
+    pub fn write_scalar(mut self) -> Self {
+        self.instructions.push(Instruction::WriteScalar);
         self
     }
-    pub fn append(mut self) -> Self {
-        self.instructions.push(Instruction::Append);
+    pub fn append_bytes(mut self) -> Self {
+        self.instructions.push(Instruction::AppendBytes);
+        self
+    }
+    pub fn append_refs(mut self) -> Self {
+        self.instructions.push(Instruction::AppendRefs);
         self
     }
     pub fn write_zeros(mut self) -> Self {
@@ -489,6 +531,10 @@ impl ScriptBuilder {
     }
     pub fn sha256(mut self) -> Self {
         self.instructions.push(Instruction::Sha256);
+        self
+    }
+    pub fn cell_hash(mut self) -> Self {
+        self.instructions.push(Instruction::CellHash);
         self
     }
     pub fn sha512(mut self) -> Self {
@@ -885,33 +931,35 @@ impl ScriptBuilder {
 // ── Script ──────────────────────────────────────────────────────────
 
 /// A compiled script — the immutable value/exec form a [`ScriptBuilder`]
-/// produces and a [`CallFrame`](crate::vm) runs. Two representations of
-/// the same bytecode (todo #1–3 — unifies the former `Code` and
-/// `ProgramItem`):
+/// produces and a [`CallFrame`](crate::vm) runs. Three representations:
 ///
 /// - `Transparent(Vec<Instruction>)` — prover's view; carries
 ///   witness-bearing instructions, ready to execute without re-decoding.
-/// - `Opaque(Vec<u8>)` — verifier / actor view; raw bytecode decoded one
-///   instruction at a time, never materializing a `Vec<Instruction>`.
+/// - `Opaque(Vec<u8>)` — compatibility source bytecode.
+/// - `Cell(Cell)` — native code payload and literal refs, decoded on demand.
 ///
-/// Both yield identical canonical bytecode via [`to_bytecode`](Self::to_bytecode).
+/// `Cell` retains the native graph. `to_bytecode` exposes only its root payload;
+/// use `CellEncode::to_cell` for complete executable code and literal operands.
 #[derive(Clone, Debug)]
 pub enum Script {
     /// Prover's pre-decoded, witness-bearing instructions.
     Transparent(Vec<Instruction>),
     /// Verifier's raw bytecode, decoded on demand.
     Opaque(Vec<u8>),
+    /// Native executable Cell, including its consuming literal-ref stream.
+    Cell(Cell),
 }
 
 impl Script {
-    /// Canonical bytecode. Allocates only for the `Transparent` case.
+    /// Bytecode only (the root payload for a native Cell). Omits literal refs.
     pub fn to_bytecode(&self) -> Vec<u8> {
         match self {
             Script::Opaque(b) => b.clone(),
+            Script::Cell(cell) => cell.payload().to_vec(),
             Script::Transparent(instrs) => {
                 let mut out = Vec::new();
                 for instr in instrs {
-                    instr.encode(&mut out);
+                    instr.encode_source(&mut out);
                 }
                 out
             }
@@ -924,13 +972,34 @@ impl Script {
         match self {
             Script::Transparent(instrs) => Ok(instrs),
             Script::Opaque(b) => Ok(ScriptBuilder::parse(&b)?.into_instructions()),
+            Script::Cell(cell) => {
+                let mut instructions = ScriptBuilder::parse(cell.payload())?.into_instructions();
+                let mut refs = cell.refs().iter();
+                for instruction in &mut instructions {
+                    if matches!(instruction, Instruction::PushCell(_)) {
+                        *instruction = Instruction::PushCell(refs.next().cloned());
+                    }
+                }
+                if refs.next().is_some() {
+                    return Err(CellError::TrailingReferences.into());
+                }
+                Ok(instructions)
+            }
         }
     }
 }
 
 impl CellEncode for Script {
     fn encode(&self, builder: &mut CellBuilder) -> Result<(), CellError> {
-        builder.store_snake(&self.to_bytecode())?;
+        let cell = match self {
+            Self::Transparent(instructions) => instruction_cell(instructions)?,
+            Self::Opaque(bytes) => script_cell(bytes)?,
+            Self::Cell(cell) => cell.clone(),
+        };
+        builder.store_bytes(cell.payload())?;
+        for reference in cell.refs() {
+            builder.store_ref(reference.clone())?;
+        }
         Ok(())
     }
 }
@@ -940,15 +1009,185 @@ impl CellDecode for Script {
         slice: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError> {
-        Ok(Self::Opaque(slice.load_snake(cells, u32::MAX as usize)?))
+        let mut builder = CellBuilder::new();
+        builder.store_bytes(slice.load_bytes(slice.remaining_bytes())?)?;
+        while slice.remaining_refs() != 0 {
+            builder.store_ref(slice.load_ref()?)?;
+        }
+        let _ = cells;
+        Ok(Self::Cell(builder.build()))
     }
 }
 
 /// Canonical code identity shared by scripts and prover overlays.
 pub(crate) fn script_cell(bytecode: &[u8]) -> Result<cells::Cell, CellError> {
-    let mut builder = CellBuilder::new();
-    builder.store_snake(bytecode)?;
-    Ok(builder.build())
+    script_cell_with_refs(bytecode, &[])
+}
+
+pub(crate) fn script_cell_with_refs(bytecode: &[u8], refs: &[CellRef]) -> Result<Cell, CellError> {
+    if !refs.is_empty() {
+        return Cell::new(bytecode.to_vec(), refs.to_vec());
+    }
+    let mut reader = bytecode;
+    let mut instructions = Vec::new();
+    while !reader.is_empty() {
+        let remainder = reader;
+        match Instruction::parse_source(&mut reader) {
+            Ok(instruction) => instructions.push(instruction),
+            Err(_) => {
+                // Invalid bytecode is still storable/inspectable. Keep its
+                // malformed tail verbatim, so execution fails when it gets there.
+                let tail = Cell::new(remainder.to_vec(), vec![])?;
+                instructions.extend([Instruction::PushCell(Some(tail.into())), Instruction::Exec]);
+                break;
+            }
+        }
+    }
+    instruction_cell(&instructions)
+}
+
+pub(crate) fn instruction_cell(instructions: &[Instruction]) -> Result<Cell, CellError> {
+    Ok(compile_program(instructions)?.0)
+}
+
+/// Packs whole instructions, reserving `pushcell exec` and one continuation
+/// ref in nonterminal Cells. Labels are local to a Cell: do not silently split
+/// a labeled program into new jump scopes.
+pub(crate) fn compile_program(
+    instructions: &[Instruction],
+) -> Result<(Cell, BTreeMap<CellID, Vec<Instruction>>), CellError> {
+    let total_bytes = instructions.iter().fold(0usize, |sum, instruction| {
+        sum.saturating_add(instruction.encoded_size())
+    });
+    let total_refs = instructions
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                instruction,
+                Instruction::PushCell(Some(_)) | Instruction::BytesLiteral(_)
+            )
+        })
+        .count();
+    let mut groups = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0;
+    let mut refs = 0;
+    let mut remaining_bytes = total_bytes;
+    let mut remaining_refs = total_refs;
+    if total_bytes <= cells::MAX_CELL_PAYLOAD && total_refs <= cells::MAX_CELL_REFS {
+        groups.push(instructions.to_vec());
+    } else {
+        for (index, instruction) in instructions.iter().enumerate() {
+            let size = instruction.encoded_size();
+            let count = usize::from(matches!(
+                instruction,
+                Instruction::PushCell(Some(_)) | Instruction::BytesLiteral(_)
+            ));
+            let mut continues = bytes + remaining_bytes > cells::MAX_CELL_PAYLOAD
+                || refs + remaining_refs > cells::MAX_CELL_REFS;
+            let byte_limit = cells::MAX_CELL_PAYLOAD - if continues { 2 } else { 0 };
+            let ref_limit = cells::MAX_CELL_REFS - usize::from(continues);
+            if bytes + size > byte_limit || refs + count > ref_limit {
+                if index == start {
+                    return Err(CellError::PayloadTooLarge {
+                        actual: size + if continues { 2 } else { 0 },
+                        max: cells::MAX_CELL_PAYLOAD,
+                    });
+                }
+                groups.push(instructions[start..index].to_vec());
+                start = index;
+                bytes = 0;
+                refs = 0;
+                continues = remaining_bytes > cells::MAX_CELL_PAYLOAD
+                    || remaining_refs > cells::MAX_CELL_REFS;
+                let byte_limit = cells::MAX_CELL_PAYLOAD - if continues { 2 } else { 0 };
+                if size > byte_limit {
+                    return Err(CellError::PayloadTooLarge {
+                        actual: size + if continues { 2 } else { 0 },
+                        max: cells::MAX_CELL_PAYLOAD,
+                    });
+                }
+            }
+            bytes += size;
+            refs += count;
+            remaining_bytes -= size;
+            remaining_refs -= count;
+        }
+        groups.push(instructions[start..].to_vec());
+    }
+    if groups.len() > 1
+        && instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instruction::Label(_) | Instruction::Jump(_) | Instruction::JumpIf(_)
+            )
+        })
+    {
+        return Err(CellError::InvalidFormat);
+    }
+    let mut next: Option<Cell> = None;
+    let mut overlays = BTreeMap::new();
+    for mut group in groups.into_iter().rev() {
+        let mut refs = group
+            .iter()
+            .map(|instruction| match instruction {
+                Instruction::PushCell(Some(reference)) => Ok(Some(reference.clone())),
+                Instruction::BytesLiteral(value) => value.to_cell().map(|cell| Some(cell.into())),
+                _ => Ok(None),
+            })
+            .collect::<Result<Vec<_>, CellError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        if let Some(cell) = next {
+            let reference: CellRef = cell.into();
+            refs.push(reference.clone());
+            group.extend([Instruction::PushCell(Some(reference)), Instruction::Exec]);
+        }
+        let mut bytecode = Vec::new();
+        for instruction in &group {
+            instruction.encode(&mut bytecode);
+        }
+        let cell = Cell::new(bytecode, refs)?;
+        overlays.insert(cell.id(), group);
+        next = Some(cell);
+    }
+    Ok((next.unwrap(), overlays))
+}
+
+/// Independent consuming byte and reference streams over the current Cell.
+pub(crate) struct Program {
+    pub root: Cell,
+    pub len: usize,
+    ref_cursor: usize,
+}
+
+impl Program {
+    pub fn new(root: Cell) -> Result<Self, CellError> {
+        if root.is_pruned() {
+            return Err(CellError::PrunedCell);
+        }
+        Ok(Self {
+            len: root.payload().len(),
+            root,
+            ref_cursor: 0,
+        })
+    }
+
+    pub fn load_ref(&mut self) -> Result<CellRef, CellError> {
+        let reference = self
+            .root
+            .refs()
+            .get(self.ref_cursor)
+            .ok_or(CellError::InsufficientReferences)?
+            .clone();
+        self.ref_cursor += 1;
+        Ok(reference)
+    }
+
+    pub fn bytes(&self, offset: usize) -> &[u8] {
+        &self.root.payload()[offset..]
+    }
 }
 
 #[cfg(test)]

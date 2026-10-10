@@ -55,7 +55,7 @@ impl StringWitness {
     fn len(&self) -> usize {
         match self {
             Self::Point(_) | Self::Scalar(_) | Self::Contract(_) => 32,
-            Self::Script(instrs) => instrs.iter().map(Instruction::encoded_size).sum(),
+            Self::Script(instrs) => instrs.iter().map(Instruction::source_size).sum(),
         }
     }
 
@@ -241,7 +241,16 @@ impl String {
     pub(crate) fn into_script(self) -> Result<Script, VMError> {
         match self {
             String::Witness(w) => match *w {
-                StringWitness::Script(instrs) => Ok(Script::Transparent(instrs)),
+                StringWitness::Script(instrs) => {
+                    // A String/signcall commits bytes, not hidden literal refs.
+                    if instrs
+                        .iter()
+                        .any(|instruction| matches!(instruction, Instruction::PushCell(Some(_))))
+                    {
+                        return Err(cells::CellError::InvalidFormat.into());
+                    }
+                    Ok(Script::Transparent(instrs))
+                }
                 _ => Err(VMError::TypeNotString),
             },
             String::Opaque(data) => Ok(Script::Opaque(data)),
@@ -314,93 +323,6 @@ impl String {
         let tail = bytes[n..].to_vec();
         Some((String::Opaque(tail), String::Opaque(head)))
     }
-
-    /// Returns a new String with every bit inverted. Used by `0x48 bitnot`.
-    pub fn bit_not(self) -> String {
-        let bytes = self.to_bytes();
-        String::Opaque(bytes.iter().map(|b| !b).collect())
-    }
-
-    fn zip_bytes(self, other: &String, op: impl Fn(u8, u8) -> u8) -> Option<String> {
-        let a = self.to_bytes();
-        let b = other.to_bytes_vec();
-        if a.len() != b.len() {
-            return None;
-        }
-        Some(String::Opaque(
-            a.iter().zip(b.iter()).map(|(x, y)| op(*x, *y)).collect(),
-        ))
-    }
-
-    /// Bitwise OR. `None` if operand lengths differ.
-    pub fn bit_or(self, other: &String) -> Option<String> {
-        self.zip_bytes(other, |x, y| x | y)
-    }
-
-    /// Bitwise AND. `None` if operand lengths differ.
-    pub fn bit_and(self, other: &String) -> Option<String> {
-        self.zip_bytes(other, |x, y| x & y)
-    }
-
-    /// Bitwise XOR. `None` if operand lengths differ.
-    pub fn bit_xor(self, other: &String) -> Option<String> {
-        self.zip_bytes(other, |x, y| x ^ y)
-    }
-
-    /// Shifts bits left by `n` (treating the string as a big-endian
-    /// bigint: byte 0 holds the most significant bits). Returns
-    /// `(shifted, removed)`.
-    ///
-    /// See `bit_at` / `set_bit` for the bit-numbering convention. Used
-    /// by `0x4c shiftleft`.
-    pub fn shift_left(self, n: usize) -> (String, String) {
-        let inner = self.to_bytes();
-        let total = 8 * inner.len();
-        let mut shifted = vec![0u8; inner.len()];
-        for i in 0..total {
-            if let Some(src) = i.checked_add(n) {
-                if src < total {
-                    let bit = bit_at(&inner, src);
-                    set_bit(&mut shifted, i, bit);
-                }
-            }
-        }
-        let removed_bytes = n.div_ceil(8);
-        let pad = removed_bytes * 8 - n;
-        let mut removed = vec![0u8; removed_bytes];
-        for i in 0..n {
-            if i < total {
-                let bit = bit_at(&inner, i);
-                set_bit(&mut removed, pad + i, bit);
-            }
-        }
-        (String::Opaque(shifted), String::Opaque(removed))
-    }
-
-    /// Shifts bits right by `n`. Mirror of [`String::shift_left`]; used
-    /// by `0x4d shiftright`.
-    pub fn shift_right(self, n: usize) -> (String, String) {
-        let inner = self.to_bytes();
-        let total = 8 * inner.len();
-        let mut shifted = vec![0u8; inner.len()];
-        for i in 0..total {
-            if let Some(src) = i.checked_sub(n) {
-                let bit = bit_at(&inner, src);
-                set_bit(&mut shifted, i, bit);
-            }
-        }
-        let removed_bytes = n.div_ceil(8);
-        let mut removed = vec![0u8; removed_bytes];
-        for i in 0..n {
-            if let Some(src) = (total + i).checked_sub(n) {
-                if src < total {
-                    let bit = bit_at(&inner, src);
-                    set_bit(&mut removed, i, bit);
-                }
-            }
-        }
-        (String::Opaque(shifted), String::Opaque(removed))
-    }
 }
 
 impl From<Vec<u8>> for String {
@@ -416,7 +338,7 @@ impl From<Vec<u8>> for String {
 pub(crate) fn compile_instructions(instrs: &[Instruction]) -> Vec<u8> {
     let mut out = Vec::new();
     for instr in instrs {
-        instr.encode(&mut out);
+        instr.encode_source(&mut out);
     }
     out
 }
@@ -428,29 +350,4 @@ pub(crate) fn array32(data: &[u8]) -> Option<[u8; 32]> {
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(data);
     Some(bytes)
-}
-
-// ── Internal bit helpers (MSB-first numbering) ───────────────────
-
-fn bit_at(bytes: &[u8], pos: usize) -> u8 {
-    let byte = pos / 8;
-    let bit = 7 - (pos % 8);
-    if byte >= bytes.len() {
-        0
-    } else {
-        (bytes[byte] >> bit) & 1
-    }
-}
-
-fn set_bit(bytes: &mut [u8], pos: usize, value: u8) {
-    let byte = pos / 8;
-    let bit = 7 - (pos % 8);
-    if byte >= bytes.len() {
-        return;
-    }
-    if value & 1 != 0 {
-        bytes[byte] |= 1 << bit;
-    } else {
-        bytes[byte] &= !(1 << bit);
-    }
 }

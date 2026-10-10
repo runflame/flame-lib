@@ -186,7 +186,7 @@ fn actor_keeps_full_data_and_reports_unavailable_or_malformed_bodies() {
     assert_eq!(detail.instructions.len(), 10_002);
     assert_eq!(
         detail.instructions[10_001].text,
-        format!("pushstr 0x{}", "cd".repeat(257))
+        format!("pushcell bytes 0x{}", "cd".repeat(257))
     );
     assert!(detail
         .code_error

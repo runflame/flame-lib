@@ -43,7 +43,7 @@ fn golden_consensus_hashes() {
                     code: vec![0x1d],
                 },
             ],
-            "9960bca42b13cba109408f33c4e43040e8ea95a0653d56d97b9235bbfc76b8f7",
+            "411a403392920265ced1a4b4ece87e380286d4a4ac6e63e7b13e53b739e070e0",
         ),
         (
             vec![
@@ -53,7 +53,7 @@ fn golden_consensus_hashes() {
                     code: vec![0x1d],
                 },
             ],
-            "0ad321a9edfe0f1ac5ba625f879636f47f2d4ef981984a1dcaae0dc5dc87b50a",
+            "bc7376d7341da1dc9ea6bad893b54e2372d5f7f7e38ac726707256670c416dbc",
         ),
     ];
     for (entries, expected) in samples {
@@ -68,11 +68,11 @@ fn golden_consensus_hashes() {
     );
     assert_eq!(
         hex(&code_root(&[0x1d])),
-        "0eb1b652895c5e73d79a53885b13cbe62ca1c79d4152a5ddd4b59bc798076fca"
+        "7e72188b8144c3677a63d3f2c2d70e33934c7a6767a55b81bf639bd1467c48ed"
     );
     assert_eq!(
         hex(&ActorID::Constructor(vec![1, 2, 3]).to_hash()),
-        "e461d3fc97418e23296c184677afb7db33e77234c3bdaf1e8d09aa5c6d28cc34"
+        "98cf202457011106ee0345b2b2b5cd239ce36b57997d4398614c03211139dfde"
     );
     let contract = Contract::new(
         Predicate::opaque(CompressedRistretto([0x77; 32])),
@@ -212,7 +212,11 @@ fn golden_txlog_wire_encoding() {
 
     let actor = ActorID::Hash([7; 32]);
     for (entry, tag, child) in [
-        (TxEntry::Data(vec![1, 2, 3]), 1, code_root(&[1, 2, 3])),
+        (
+            TxEntry::Data(vec![1, 2, 3]),
+            1,
+            crate::encoding::blob_cell(&[1, 2, 3]).unwrap().id(),
+        ),
         (
             TxEntry::ActorSave {
                 actor: actor.clone(),

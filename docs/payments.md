@@ -243,10 +243,10 @@ per output:   push_str(commitment(qty, qty_blinding))
               push_int(m)  push_int(n)  mix
 per output i: roll_k(n-1-i) if > 0
               push_point(enc(S_i))  output
-              push_str(note_i)  log
+              pushcell(note_i)  log
 ```
 
-`push_str(note) log` leaves the stack as it found it, so the roll depths
+`pushcell(note) log` leaves the stack as it found it, so the roll depths
 before each `output` are unchanged.
 
 ### Pairing

@@ -144,7 +144,7 @@ body into the current execution is not a storage purchase or persistent restore.
 
 Actor layouts and their ordered lease Tries are specified in
 [encoding.md](encoding.md). `code_root` and `state_root` are ordinary CellIDs
-for snake-encoded bytecode and one encoded Value. The actor registry commits
+for native executable code and one encoded Value. The actor registry commits
 both its actor-layout root and the exact resident graph's `snapshot CellID`.
 
 The VM resolver is scoped to the current actor's resident code/state body set

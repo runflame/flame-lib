@@ -178,6 +178,11 @@ fn encode_value_at(
         Value::ClearToken(value) => {
             builder.store_u8(6)?.store(value)?;
         }
+        Value::Cell(reference) => {
+            builder
+                .store_u8(13)?
+                .store_ref(reference.reference.clone())?;
+        }
         // No encoding exists for computation-only witnesses, WideToken, or
         // the linear Contract handle. Portability of encodable types is a
         // separate domain-boundary check: negative ClearTokens still encode.
@@ -217,6 +222,7 @@ impl Value {
                 match value {
                     Value::Scalar(_) | Value::Point(_) => 35,
                     Value::Token(_) | Value::ClearToken(_) => 67,
+                    Value::Cell(_) => 35,
                     Value::String(string) => {
                         string.check_len()?;
                         // Copy/hash one raw String Cell, plus the tagged Value
@@ -298,6 +304,7 @@ fn decode_value_at<R: CellReader + ?Sized>(
             3 => Value::Point(Point::decode(slice, resolver)?),
             4 => Value::Token(Token::decode(slice, resolver)?),
             6 => Value::ClearToken(ClearToken::decode(slice, resolver)?),
+            13 => Value::Cell(slice.load_ref()?.into()),
             _ => return Err(CellError::InvalidFormat),
         })
     })

@@ -162,6 +162,22 @@ impl Drop for CellData {
 
 impl Cell {
     pub fn new(payload: Vec<u8>, refs: Vec<CellRef>) -> Result<Self, CellError> {
+        let commitment = Self::compute_commitment(&payload, &refs)?;
+        Ok(Self {
+            data: Arc::new(CellData {
+                pruned: false,
+                payload: payload.into(),
+                refs: refs.into(),
+                commitment,
+            }),
+        })
+    }
+
+    /// Hashes a borrowed ordinary Cell body without copying it or loading children.
+    pub fn compute_commitment(
+        payload: &[u8],
+        refs: &[CellRef],
+    ) -> Result<CellCommitment, CellError> {
         if payload.len() > MAX_CELL_PAYLOAD {
             return Err(CellError::PayloadTooLarge {
                 actual: payload.len(),
@@ -175,7 +191,7 @@ impl Cell {
             });
         }
         let mut mask = 0;
-        for reference in &refs {
+        for reference in refs {
             reference.validate_child()?;
             mask |= reference.commitment().mask;
         }
@@ -183,21 +199,14 @@ impl Cell {
         let mut depths = Vec::with_capacity(hashes.capacity());
         for level in significant_levels(mask) {
             let mut depth = 0;
-            for reference in &refs {
+            for reference in refs {
                 depth = depth.max(reference.commitment().depth(level)? + 1);
             }
-            let preimage = ordinary_preimage(&payload, &refs, mask, level, hashes.last())?;
+            let preimage = ordinary_preimage(payload, refs, mask, level, hashes.last())?;
             hashes.push(Sha256::digest(preimage).into());
             depths.push(depth);
         }
-        Ok(Self {
-            data: Arc::new(CellData {
-                pruned: false,
-                payload: payload.into(),
-                refs: refs.into(),
-                commitment: CellCommitment::new(mask, hashes, depths)?,
-            }),
-        })
+        CellCommitment::new(mask, hashes, depths)
     }
 
     /// Constructs a pruning record. Retained hashes are claims until checked

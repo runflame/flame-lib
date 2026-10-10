@@ -1,7 +1,7 @@
 use crate::{Cell, CellEncode, CellError, CellRef, MAX_CELL_PAYLOAD, MAX_CELL_REFS};
 
 /// Incrementally builds one bounded [`Cell`].
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CellBuilder {
     payload: Vec<u8>,
     refs: Vec<CellRef>,
@@ -10,6 +10,24 @@ pub struct CellBuilder {
 impl CellBuilder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// Edit existing bytes without changing capacity, length, or references.
+    pub fn payload_mut(&mut self) -> &mut [u8] {
+        &mut self.payload
+    }
+
+    pub fn refs(&self) -> &[CellRef] {
+        &self.refs
+    }
+
+    /// Factual commitment of the current contents, without finalizing the Builder.
+    pub fn commitment(&self) -> Result<crate::CellCommitment, CellError> {
+        Cell::compute_commitment(&self.payload, &self.refs)
     }
 
     pub fn used_bytes(&self) -> usize {
@@ -144,6 +162,25 @@ mod tests {
     use super::*;
     use crate::CellCommitment;
     use std::sync::Arc;
+
+    #[test]
+    fn borrowed_commitments_match_finalization_after_in_place_payload_edits() {
+        let child = Cell::new(vec![9], vec![]).unwrap().prune(2).unwrap();
+        let mut builder = CellBuilder::new();
+        builder
+            .store_bytes(&[1, 2])
+            .unwrap()
+            .store_ref(child.into())
+            .unwrap();
+        let first = builder.commitment().unwrap();
+        assert_eq!(&first, builder.clone().build().commitment());
+        let pointer = builder.payload().as_ptr();
+        builder.payload_mut()[0] = 3;
+        assert_eq!(pointer, builder.payload().as_ptr());
+        let edited = builder.commitment().unwrap();
+        assert_ne!(first.id(), edited.id());
+        assert_eq!(&edited, builder.build().commitment());
+    }
 
     #[test]
     fn reference_validation_is_atomic_and_checks_every_level() {

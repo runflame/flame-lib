@@ -276,6 +276,9 @@ pub(crate) fn value_kind(v: &Value) -> &'static str {
         Value::Expression(_) => "Expression",
         Value::Constraint(_) => "Constraint",
         Value::MultiscalarMul(_) => "MultiscalarMul",
+        Value::Cell(_) => "Cell",
+        Value::Slice(_) => "Slice",
+        Value::Builder(_) => "Builder",
     }
 }
 
@@ -440,13 +443,28 @@ pub(crate) fn dispatch_code(arms: &[(u64, Vec<u8>)]) -> Vec<u8> {
     }
     p = p.drop_().push_int(0u64).verify(); // no match: drop S, revert
     for (i, (_, handler)) in arms.iter().enumerate() {
-        p = p
-            .label(i as u32)
-            .drop_()
-            .drop_() // drop arm value + selector
-            .raw_bytes(handler)
+        p = p.label(i as u32).drop_().drop_(); // drop arm value + selector
+        for instruction in ScriptBuilder::parse(handler)
             .expect("handler parses")
-            .jump(n);
+            .into_instructions()
+        {
+            if let Instruction::BytesLiteral(bytes) = instruction {
+                // A skipped/repeated handler cannot consume a positional program ref.
+                p = p.builder();
+                for chunk in bytes.to_bytes_vec().chunks(31) {
+                    let mut scalar = [0; 32];
+                    scalar[..chunk.len()].copy_from_slice(chunk);
+                    p = p
+                        .push_int(Scalar::from_bytes(scalar).unwrap())
+                        .push_int(chunk.len() as u64)
+                        .write_uint();
+                }
+                p = p.endcell();
+            } else {
+                p.push_instr(instruction);
+            }
+        }
+        p = p.jump(n);
     }
     p.label(n).to_bytecode()
 }
@@ -479,6 +497,15 @@ pub(crate) fn vm_with_nested_child_script(script: Vec<u8>) -> VM {
 pub(crate) fn assert_str(v: &Value, expected: &[u8]) {
     match v {
         Value::String(s) => assert_eq!(s.as_opaque().unwrap(), expected),
+        Value::Cell(reference) => assert_eq!(
+            reference
+                .as_resident()
+                .expect("resident byte Cell")
+                .payload(),
+            expected
+        ),
+        Value::Slice(slice) => assert_eq!(slice.bytes(), expected),
+        Value::Builder(builder) => assert_eq!(builder.payload(), expected),
         other => panic!("expected String, got {}", value_kind(other)),
     }
 }

@@ -59,6 +59,8 @@ pub struct ExternalTx {
     pub txid: TxID,
     /// Canonical mask-one pruning record for the log's level-zero hash/depth.
     log_commitment: Cell,
+    /// Literal refs, including explicit continuations, excluding the lookup index.
+    program_root: Cell,
 }
 
 impl CellEncode for TxHeader {
@@ -79,12 +81,11 @@ impl CellDecode for TxHeader {
     }
 }
 
-/// Script bytes and the committed witness Cell hierarchy share a container.
-fn transaction_script(script: &[u8], witnesses: &CellIndex) -> Result<Cell, CellError> {
-    let mut b = CellBuilder::new();
-    b.store_snake(script)?;
-    b.store_ref(CellRef::resident(witnesses.to_cell()?))?;
-    Ok(b.build())
+fn transaction_program(program: &Cell, witnesses: &CellIndex) -> Result<Cell, CellError> {
+    Cell::new(
+        Vec::new(),
+        vec![program.clone().into(), witnesses.to_cell()?.into()],
+    )
 }
 
 pub(crate) fn pruned_log(entries: &[TxEntry]) -> Result<Cell, CellError> {
@@ -92,9 +93,19 @@ pub(crate) fn pruned_log(entries: &[TxEntry]) -> Result<Cell, CellError> {
     Cell::from_pruned(1, vec![log.hash(0)?], vec![log.depth(0)?])
 }
 
+#[cfg(test)]
 fn body_cell(
     header: TxHeader,
     script: &[u8],
+    witnesses: &CellIndex,
+    log: &Cell,
+) -> Result<Cell, CellError> {
+    program_body(header, &crate::script::script_cell(script)?, witnesses, log)
+}
+
+fn program_body(
+    header: TxHeader,
+    program: &Cell,
     witnesses: &CellIndex,
     log: &Cell,
 ) -> Result<Cell, CellError> {
@@ -106,19 +117,19 @@ fn body_cell(
             version: header.version,
             locktime: header.locktime,
         },
-        program: transaction_script(script, witnesses)?.into(),
+        program: transaction_program(program, witnesses)?.into(),
         log: cells::ctl::Ref::from_reference(log.clone().into()),
     }
     .to_cell()
 }
 
-pub(crate) fn external_body(
+pub(crate) fn external_program_body(
     header: TxHeader,
-    script: &[u8],
+    program: &Cell,
     witnesses: &CellIndex,
     entries: &[TxEntry],
 ) -> Result<Cell, CellError> {
-    body_cell(header, script, witnesses, &pruned_log(entries)?)
+    program_body(header, program, witnesses, &pruned_log(entries)?)
 }
 
 impl ExternalTx {
@@ -128,8 +139,19 @@ impl ExternalTx {
     pub fn script(&self) -> &[u8] {
         &self.script
     }
+    /// Executable program, including literal operands but not the lookup index.
+    pub fn program(&self) -> Result<Cell, CellError> {
+        Cell::new(self.script.clone(), self.program_root.refs().to_vec())
+    }
     pub fn witnesses(&self) -> &CellIndex {
         &self.witnesses
+    }
+    /// All supplied execution bodies: the lookup snapshot plus resident program
+    /// subcells. Share this exact context with every induced actor transaction.
+    pub fn execution_cells(&self) -> Result<Arc<CellIndex>, CellError> {
+        let mut available = self.witnesses.as_ref().clone();
+        available.extend(&CellIndex::collect(Arc::new(self.program()?))?)?;
+        Ok(Arc::new(available))
     }
     pub fn signature_bytes(&self) -> Option<[u8; 64]> {
         self.signature.map(|s| s.to_bytes())
@@ -142,9 +164,9 @@ impl ExternalTx {
     }
 
     pub fn body(&self) -> Result<Cell, CellError> {
-        let body = body_cell(
+        let body = program_body(
             self.header,
-            &self.script,
+            &self.program()?,
             &self.witnesses,
             &self.log_commitment,
         )?;
@@ -160,7 +182,8 @@ impl ExternalTx {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, CellError> {
-        self.to_cell()?.encode()
+        self.to_cell()?
+            .encode_transport(&mut self.witnesses.as_ref().clone())
     }
 
     pub fn from_bytes_bounded(
@@ -194,9 +217,9 @@ impl ExternalTx {
     }
     pub fn verify_with_metrics(&self, limits: Limits) -> Result<(TxLog, TxMetrics), VMError> {
         self.body()?;
-        let result = Verifier::verify_with_cells(
+        let result = Verifier::verify_cell_with_cells(
             &PedersenGens::default(),
-            self.script.clone(),
+            self.program()?,
             &self.proof,
             self.header,
             limits.gas,
@@ -243,7 +266,7 @@ impl CellEncode for ExternalTx {
 }
 
 impl ExternalTx {
-    /// Reads one transaction root with limits checked before snake allocation.
+    /// Reads one transaction root with bounded root-code and inline-proof sizes.
     /// The surrounding transport owns the total byte bound and canonical Cell hierarchy.
     pub fn from_cell_bounded<R: CellReader + ?Sized>(
         cell: &Cell,
@@ -297,7 +320,15 @@ impl ExternalTx {
         }
         let script_cell = cells::read_cell(r, &body.program)?;
         let mut script_slice = CellSlice::new(&script_cell);
-        let script = script_slice.load_snake(r, max_script_bytes)?;
+        let program = cells::read_cell(r, &script_slice.load_ref()?)?;
+        if program.is_pruned() {
+            return Err(CellError::PrunedCell);
+        }
+        if program.payload().len() > max_script_bytes {
+            return Err(CellError::LimitExceeded);
+        }
+        let script = program.payload().to_vec();
+        let program_root = program.load_graph(r)?;
         let witness_root = cells::read_cell(r, &script_slice.load_ref()?)?;
         script_slice.finish()?;
         let witnesses = CellIndex::from_cell(&witness_root, r)?;
@@ -311,6 +342,7 @@ impl ExternalTx {
             witnesses: Arc::new(witnesses),
             txid,
             log_commitment,
+            program_root,
         };
         decoded.body()?;
         Ok(decoded)
@@ -409,6 +441,7 @@ pub struct UnsignedTx {
     txbound_items: Vec<(CompressedRistretto, ContractID)>,
     txid: TxID,
     log_commitment: Cell,
+    program_root: Cell,
 }
 
 impl UnsignedTx {
@@ -446,6 +479,7 @@ impl UnsignedTx {
             txid: self.txid,
             log_commitment: self.log_commitment,
             witnesses: self.witnesses,
+            program_root: self.program_root,
         }
     }
 
@@ -462,6 +496,7 @@ impl UnsignedTx {
             txid: self.txid,
             log_commitment: self.log_commitment,
             witnesses: self.witnesses,
+            program_root: self.program_root,
         })
     }
 }
@@ -490,7 +525,10 @@ impl ScriptBuilder {
             txid: result.txid,
             log_commitment: pruned_log(&result.txlog)?,
             header,
-            script: result.bytecode,
+            script: result.program.payload().to_vec(),
+            program_root: result
+                .program
+                .load_graph(&mut result.cells.as_ref().clone())?,
             witnesses: result.cells,
             proof: result.proof.expect("prover always sets the proof"),
             metrics: TxMetrics {
@@ -656,7 +694,7 @@ pub enum TxEntry {
 
     /// Actor-code replacement recorded by `setcode`. Carries the full
     /// new code blob for state-machine replay; the entry Cell contains the
-    /// actor hash and a reference to snake-encoded code. Symmetric with
+    /// actor hash and a reference to native executable code. Symmetric with
     /// `ActorSave`. See ADR 0018.
     SetCode { actor: ActorID, code: Vec<u8> },
 
@@ -781,7 +819,7 @@ impl CellEncode for TxEntry {
                     Self::TAG_SET_CODE
                 })?
                 .store_bytes(&actor.to_hash())?
-                .store_ref(CellRef::resident(blob_cell(code)?))?;
+                .store_ref(CellRef::resident(crate::code_cell(code)?))?;
             }
             Self::Send(message) => {
                 b.store_u8(Self::TAG_SEND)?
@@ -839,7 +877,8 @@ impl CellDecode for TxEntry {
             }
             tag @ (Self::TAG_ACTOR_DEPLOY | Self::TAG_SET_CODE) => {
                 let actor = ActorID::Hash(<[u8; 32]>::decode(s, r)?);
-                let code = read_blob(&s.load_ref()?, r, u32::MAX as usize)?;
+                let cell = cells::read_cell(r, &s.load_ref()?)?;
+                let code = crate::code_from_cell(&cell, r, u32::MAX as usize)?;
                 if tag == Self::TAG_ACTOR_DEPLOY {
                     Self::ActorDeploy { actor, code }
                 } else {
@@ -897,9 +936,9 @@ impl CellDecode for TxLog {
 
 impl CellEncode for UnsignedTx {
     fn encode(&self, b: &mut CellBuilder) -> Result<(), CellError> {
-        let body = body_cell(
+        let body = program_body(
             self.header,
-            &self.script,
+            &Cell::new(self.script.clone(), self.program_root.refs().to_vec())?,
             &self.witnesses,
             &self.log_commitment,
         )?;
@@ -1292,6 +1331,7 @@ mod envelope_tests {
             witnesses: Arc::new(CellIndex::new()),
             txid: TxID([0; 32]),
             log_commitment,
+            program_root: Cell::new(vec![0x42], vec![]).unwrap(),
         };
         tx.txid = TxID(
             body_cell(tx.header, &tx.script, &tx.witnesses, &tx.log_commitment)
@@ -1314,11 +1354,11 @@ mod envelope_tests {
         };
         assert_eq!(
             hex(&tx.txid.0),
-            "19b8d736e048c0485ddac0c659041b8b4f719c5f053fba55883fcbbe25ba5f9e"
+            "a68e7ba79558ee8405ebe8dfbe6fb86880fd28d9a4e70abe5d02ce997755e15e"
         );
         assert_eq!(
             hex(&root.id()),
-            "22f31e978bcb93a7f6d832323eeb1cc7d30f609701e4c5f142ed00c03b65d406"
+            "4aa568dabfb40a5ad6251fbbc67bd021cee5574f4c96553ca60f0e74b0db8ae1"
         );
         let bytes = tx.to_bytes().unwrap();
         let decoded = ExternalTx::from_bytes_bounded(&bytes, 1, 1, 417).unwrap();

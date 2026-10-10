@@ -1,12 +1,11 @@
 //! Actor data model: identity, state, lifecycle counters, registry.
 
 use cells::{
-    CellBuilder, CellDecode, CellEncode, CellError, CellIndex, CellReader, CellRef, CellSlice,
+    Cell, CellBuilder, CellDecode, CellEncode, CellError, CellIndex, CellReader, CellRef, CellSlice,
 };
 use std::sync::Arc;
 
 use crate::dict::Dict;
-use crate::encoding::{blob_cell, read_blob};
 use crate::errors::VMError;
 use crate::value::Value;
 
@@ -32,7 +31,7 @@ use crate::value::Value;
 ///
 /// Wire form: a tag byte (`0x00` Hash, `0x01` Constructor) followed
 /// by the payload. The Hash variant's payload is a bare 32 bytes;
-/// the Constructor variant has one reference to snake-encoded code.
+/// the Constructor variant has one reference to native executable code.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ActorID {
     /// Canonical 32-byte hash of the constructor script.
@@ -69,7 +68,7 @@ impl ActorID {
 }
 
 /// Canonical wire form (tag byte + payload). `Hash` writes a 32-byte
-/// payload; `Constructor` stores one reference to snake-encoded code.
+/// payload; `Constructor` stores one reference to native executable code.
 impl CellEncode for ActorID {
     fn encode(&self, w: &mut CellBuilder) -> Result<(), CellError> {
         match self {
@@ -78,7 +77,7 @@ impl CellEncode for ActorID {
             }
             ActorID::Constructor(bytes) => {
                 w.store_u8(Self::TAG_CONSTRUCTOR)?;
-                w.store_ref(CellRef::resident(blob_cell(bytes)?))?;
+                w.store_ref(CellRef::resident(code_cell(bytes)?))?;
             }
         }
         Ok(())
@@ -97,7 +96,8 @@ impl CellDecode for ActorID {
                 Ok(ActorID::Hash(h))
             }
             Self::TAG_CONSTRUCTOR => {
-                let bytes = read_blob(&r.load_ref()?, cells, u32::MAX as usize)?;
+                let cell = cells::read_cell(cells, &r.load_ref()?)?;
+                let bytes = code_from_cell(&cell, cells, u32::MAX as usize)?;
                 Ok(ActorID::Constructor(bytes))
             }
             _ => Err(CellError::InvalidFormat),
@@ -130,10 +130,76 @@ pub fn state_root(state: &Value) -> [u8; 32] {
         .id()
 }
 
-/// Canonical snake Cell ID of an actor's code, referenced by `TxEntry::SetCode`.
+/// Compiles legacy flat code to native program Cells with explicit continuations.
+pub fn code_cell(code: &[u8]) -> Result<Cell, CellError> {
+    crate::script::script_cell(code)
+}
+
+/// Compatibility decoding for bytecode-only actor APIs, not execution. Only
+/// canonical compiler-produced continuation chains can be flattened safely.
+pub fn code_from_cell<R: CellReader + ?Sized>(
+    root: &Cell,
+    reader: &mut R,
+    limit: usize,
+) -> Result<Vec<u8>, CellError> {
+    let mut cell = root.clone();
+    let mut bytes = Vec::new();
+    loop {
+        if cell.is_pruned() {
+            return Err(CellError::PrunedCell);
+        }
+        let mut payload = cell.payload();
+        let mut refs = cell.refs().iter();
+        let mut next = None;
+        while !payload.is_empty() {
+            let instruction =
+                crate::Instruction::parse(&mut payload).map_err(|_| CellError::InvalidFormat)?;
+            let mut encoded = Vec::new();
+            if matches!(instruction, crate::Instruction::PushCell(_)) {
+                let reference = refs.next().ok_or(CellError::InsufficientReferences)?;
+                if payload == [0xa7] && refs.len() == 0 {
+                    next = Some(cells::read_cell(reader, reference)?.as_ref().clone());
+                    break;
+                }
+                let literal = cells::read_cell(reader, reference)?;
+                if literal.is_pruned() || !literal.refs().is_empty() {
+                    return Err(CellError::InvalidFormat);
+                }
+                crate::Instruction::BytesLiteral(std::sync::Arc::new(crate::String::from(
+                    literal.payload().to_vec(),
+                )))
+                .encode_source(&mut encoded);
+            } else {
+                instruction.encode_source(&mut encoded);
+            }
+            if encoded.len() > limit.saturating_sub(bytes.len()) {
+                return Err(CellError::LimitExceeded);
+            }
+            bytes.extend_from_slice(&encoded);
+        }
+        if refs.len() != 0 {
+            return Err(CellError::TrailingReferences);
+        }
+        match next {
+            Some(child) => {
+                if cell.payload().len() <= 2 {
+                    return Err(CellError::InvalidFormat);
+                }
+                cell = child;
+            }
+            None => break,
+        }
+    }
+    if code_cell(&bytes)?.id() != root.id() {
+        return Err(CellError::InvalidFormat);
+    }
+    Ok(bytes)
+}
+
+/// Canonical program Cell ID of an actor's code, referenced by `TxEntry::SetCode`.
 pub fn code_root(code: &[u8]) -> [u8; 32] {
-    blob_cell(code)
-        .expect("actor code fits the byte-string format")
+    code_cell(code)
+        .expect("actor code is representable as native program Cells")
         .id()
 }
 
@@ -147,7 +213,7 @@ pub fn code_root(code: &[u8]) -> [u8; 32] {
 /// authoritative storage gate; this reports the rare case of a portable
 /// value that lacks an encoder.
 pub fn code_state_bytes(code: &[u8], state: &Value) -> Result<u64, VMError> {
-    let mut graph = CellIndex::collect(Arc::new(blob_cell(code)?))?;
+    let mut graph = CellIndex::collect(Arc::new(code_cell(code)?))?;
     graph.extend(&CellIndex::collect(Arc::new(state.to_cell()?))?)?;
     let size = graph.iter().try_fold(0u64, |size, (_, cell)| {
         size.checked_add(cell.record_size() as u64)
@@ -173,6 +239,15 @@ pub struct StoragePurchase {
 /// transaction.
 ///
 pub trait ActorRegistry {
+    /// Native execution entry. Hosts with committed program Cells should return
+    /// their root directly; the default adapts legacy bytecode-only registries.
+    fn load_program_with_cells(
+        &self,
+        id: &ActorID,
+        cells: &mut dyn CellReader,
+    ) -> Result<Cell, VMError> {
+        Ok(code_cell(&self.load_code_with_cells(id, cells)?)?)
+    }
     /// Bodies committed as resident for this actor, never a node-global cache.
     fn actor_cells(&self, _id: &ActorID) -> Result<Arc<CellIndex>, VMError> {
         Ok(Arc::new(CellIndex::new()))

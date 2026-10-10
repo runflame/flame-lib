@@ -151,7 +151,7 @@ execution witness hierarchy. Body TxID commits the program and canonical pruned
 log; Tx WitnessID additionally commits the inline signature and R1CS proof.
 Its restored execution Cell index is immutable. The
 outer block transport graph is not an execution witness pool. Bounded decoders
-check script length before loading its snake, enforce counts/depths and exact
+check root code payload length before execution, enforce counts/depths and exact
 typed payload/reference consumption, and reject malformed signatures/proofs.
 Re-encoding must reproduce the exact outer envelope, rejecting unused transport
 bodies. Unused bodies inside an execution Cell index are permitted because their

@@ -8,6 +8,7 @@ use crate::Scalar;
 use crate::String;
 use crate::{ClearToken, Token, WideToken};
 use crate::{Constraint, Expression, SecretConstraint, Variable};
+use cells::CellEncode;
 
 /// Possible values on the stack machine.
 ///
@@ -30,6 +31,10 @@ pub enum Value {
     Expression(Expression),
     Constraint(Constraint),
     MultiscalarMul(MultiscalarMul),
+    /// Copyable immutable serialized data; it grants no bearer ownership.
+    Cell(crate::CellValue),
+    Slice(crate::Slice),
+    Builder(cells::CellBuilder),
 }
 
 #[rustfmt::skip]
@@ -53,6 +58,9 @@ impl Value {
             | Value::Expression(_)
             | Value::Constraint(_)
             | Value::MultiscalarMul(_) => Err(VMError::TypeNotCopyable),
+            Value::Cell(cell) => Ok(Value::Cell(cell.clone())),
+            Value::Slice(slice) => Ok(Value::Slice(slice.clone())),
+            Value::Builder(_) => Err(VMError::TypeNotCopyable),
         }
     }
 
@@ -60,7 +68,7 @@ impl Value {
     /// Plain-data and copyable containers; never linear types.
     pub fn is_copyable(&self) -> bool {
         match self {
-            Value::Scalar(_) | Value::String(_) | Value::Point(_) => true,
+            Value::Scalar(_) | Value::String(_) | Value::Point(_) | Value::Cell(_) | Value::Slice(_) => true,
             Value::Dict(d) => d.is_copyable(),
             _ => false,
         }
@@ -77,7 +85,7 @@ impl Value {
     /// placed into another contract's payload (sealing a contract-in-a-contract).
     pub fn is_portable(&self) -> bool {
         match self {
-            Value::Scalar(_) | Value::String(_) | Value::Point(_) => true,
+            Value::Scalar(_) | Value::String(_) | Value::Point(_) | Value::Cell(_) => true,
             Value::Dict(d) => d.is_portable(),
             Value::ClearToken(t) => t.is_portable(),
             // `Token` is portable by construction: public cleartext
@@ -106,8 +114,8 @@ impl Value {
     ///   destroy value or break linearity.
     pub fn is_droppable(&self) -> bool {
         match self {
-            // Copyable plain-data.
-            Value::Scalar(_) | Value::String(_) | Value::Point(_) => true,
+            // Plain data; Cell handles are consuming but hold no bearer asset.
+            Value::Scalar(_) | Value::String(_) | Value::Point(_) | Value::Cell(_) | Value::Slice(_) | Value::Builder(_) => true,
             // Dict: droppable iff its sticky flag is set (every value
             // ever inserted was droppable).
             Value::Dict(d) => d.is_droppable(),
@@ -126,14 +134,19 @@ impl Value {
 
     /// Equality across two stack values.
     ///
-    /// - Cross-variant: always `Ok(false)` (different types are not equal).
+    /// - Cell/Slice/Builder pairs may match across variants; other mixed types
+    ///   are unequal except the transitional String/byte-Cell pair.
     /// - Same-variant for plain-data types (`Scalar`, `String`, `Point`):
     ///   bitwise / by-value comparison.
-    /// - Same-variant for `Dict`: recursive entry-wise comparison.
+    /// - Cell/Slice/Builder pairs compare factual hashes of their current contents.
+    /// - Dicts are not comparable.
     /// - Same-variant for linear types (tokens, contracts, variables,
     ///   expressions, constraints, transcripts): `Err(TypeNotComparable)`
     ///   — linear types have no stable identity for `eq`.
     pub fn try_eq(&self, other: &Value) -> Result<bool, VMError> {
+        if self.is_cell_container() && other.is_cell_container() {
+            return Ok(self.factual_hash()? == other.factual_hash()?);
+        }
         match (self, other) {
             (Value::Scalar(a), Value::Scalar(b)) => Ok(a == b),
             // Compare by canonical wire bytes so witness-bearing
@@ -141,12 +154,43 @@ impl Value {
             // verifier's view of the same string.
             (Value::String(a), Value::String(b)) => Ok(a.to_bytes_vec() == b.to_bytes_vec()),
             (Value::Point(a), Value::Point(b)) => Ok(a.to_bytes() == b.to_bytes()),
+            // Transitional byte consumers still produce String results.
+            (Value::Cell(cell), Value::String(bytes)) | (Value::String(bytes), Value::Cell(cell)) => Ok(cell.id() == bytes.to_cell()?.id()),
             // Cross-variant always unequal.
             (sa, sb) if core::mem::discriminant(sa) != core::mem::discriminant(sb) => Ok(false),
             // Same-variant non-primitives (Dict, tokens, contracts, linear types):
             // dicts require recursion + non-trivial gas; linear types have
             // no defined equality. All hard-fail.
             _ => Err(VMError::TypeNotComparable),
+        }
+    }
+
+    pub(crate) fn is_cell_container(&self) -> bool {
+        matches!(self, Self::Cell(_) | Self::Slice(_) | Self::Builder(_))
+    }
+
+    fn factual_hash(&self) -> Result<cells::CellID, VMError> {
+        match self {
+            Self::Cell(cell) => Ok(cell.id()),
+            Self::Slice(slice) => Ok(slice.commitment()?.id()),
+            Self::Builder(builder) => Ok(builder.commitment()?.id()),
+            _ => Err(VMError::TypeNotByteSource),
+        }
+    }
+
+    pub(crate) fn byte_payload(&self) -> Result<&[u8], VMError> {
+        match self {
+            Self::Slice(slice) => Ok(slice.bytes()),
+            Self::Builder(builder) => Ok(builder.payload()),
+            _ => Err(VMError::TypeNotByteSource),
+        }
+    }
+
+    pub(crate) fn byte_refs(&self) -> Result<usize, VMError> {
+        match self {
+            Self::Slice(slice) => Ok(slice.remaining_refs()),
+            Self::Builder(builder) => Ok(builder.used_refs()),
+            _ => Err(VMError::TypeNotByteSource),
         }
     }
 
@@ -169,6 +213,9 @@ impl Value {
             Value::Expression(_) => 10,
             Value::Constraint(_) => 11,
             Value::MultiscalarMul(_) => 12,
+            Value::Cell(_) => 13,
+            Value::Slice(_) => 14,
+            Value::Builder(_) => 15,
         }
     }
 
@@ -204,6 +251,8 @@ impl Value {
             Value::String(s) => s.len() as u64,
             Value::Dict(d) => d.clone_gas(),
             Value::Point(_) | Value::Token(_) | Value::Merlin(_) => 1,
+            Value::Cell(_) | Value::Slice(_) => 1,
+            Value::Builder(builder) => (builder.used_bytes() + builder.used_refs()) as u64,
             // Charge the same logical item on prover (assigned) and verifier
             // (unassigned); gas must never depend on secret witness presence.
             Value::WideToken(_) => 1,
@@ -227,6 +276,10 @@ impl Value {
     pub fn to_point(self)       -> Result<Point, VMError>      { match self { Value::Point(x) => Ok(x),      _ => Err(VMError::TypeNotPoint) } }
     /// Downcast to Contract.
     pub fn to_contract(self)        -> Result<Contract, VMError>       { match self { Value::Contract(x) => Ok(*x),      _ => Err(VMError::TypeNotContract) } }
+    /// Downcast to the raw serialized Cell handle, without resolving its body.
+    pub fn into_cell_ref(self) -> Result<cells::CellRef, VMError> { match self { Value::Cell(x) => Ok(x.reference), _ => Err(VMError::TypeNotCell) } }
+    pub fn into_slice(self) -> Result<crate::Slice, VMError> { match self { Value::Slice(x) => Ok(x), _ => Err(VMError::TypeNotSlice) } }
+    pub fn into_builder(self) -> Result<cells::CellBuilder, VMError> { match self { Value::Builder(x) => Ok(x), _ => Err(VMError::TypeNotBuilder) } }
     /// Downcast to Merlin transcript.
     pub fn to_merlin(self)      -> Result<Merlin, VMError>     { match self { Value::Merlin(x) => Ok(x),     _ => Err(VMError::TypeNotMerlin) } }
     /// Downcast to Variable.

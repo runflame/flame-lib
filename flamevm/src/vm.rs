@@ -21,7 +21,7 @@ use crate::errors::VMError;
 use crate::fees::CheckedFee;
 use crate::message::Message;
 use crate::ops::Instruction;
-use crate::script::{Script, ScriptBuilder};
+use crate::script::{Program, Script, ScriptBuilder};
 use crate::string::array32;
 use crate::token::{flavor_from_actor, flavor_from_predicate, FLAME_FLAVOR};
 use crate::tx::TxHeader;
@@ -216,6 +216,52 @@ fn hash_gas(n: usize, block_bytes: usize) -> Result<u64, VMError> {
     linear_gas(GAS_HASH_BASE, GAS_HASH_BLOCK, blocks)
 }
 
+// Conservatively bound all sixteen significant-level SHA256 preimages.
+fn cell_hash_gas(bytes: usize, refs: usize) -> Result<u64, VMError> {
+    hash_gas(bytes + 4 + 34 * refs, 64)?
+        .checked_add(15 * hash_gas(36 + 34 * refs, 64)?)
+        .ok_or(VMError::OutOfGas)
+}
+
+fn factual_hash_gas(value: &Value) -> Result<u64, VMError> {
+    match value {
+        Value::Slice(slice) => cell_hash_gas(slice.remaining_bytes(), slice.remaining_refs()),
+        Value::Builder(builder) => cell_hash_gas(builder.used_bytes(), builder.used_refs()),
+        _ => Ok(0),
+    }
+}
+
+fn shift_bytes(bytes: &mut [u8], count: usize, left: bool) {
+    if count >= bytes.len() * 8 {
+        bytes.fill(0);
+        return;
+    }
+    let whole = count / 8;
+    let bits = count % 8;
+    if left {
+        for index in 0..bytes.len() {
+            let source = index + whole;
+            let first = bytes.get(source).copied().unwrap_or(0);
+            let second = bytes.get(source + 1).copied().unwrap_or(0);
+            bytes[index] = (first << bits) | if bits == 0 { 0 } else { second >> (8 - bits) };
+        }
+    } else {
+        for index in (0..bytes.len()).rev() {
+            let first = index
+                .checked_sub(whole)
+                .and_then(|i| bytes.get(i))
+                .copied()
+                .unwrap_or(0);
+            let second = index
+                .checked_sub(whole + 1)
+                .and_then(|i| bytes.get(i))
+                .copied()
+                .unwrap_or(0);
+            bytes[index] = (first >> bits) | if bits == 0 { 0 } else { second << (8 - bits) };
+        }
+    }
+}
+
 fn r1cs_gas(items: usize) -> Result<u64, VMError> {
     linear_gas(0, GAS_R1CS_ITEM, items)
 }
@@ -232,43 +278,27 @@ const MAX_CALL_DEPTH: usize = 64;
 impl CallFrame {
     // The frame's code + cursor + lazy label table (fields `code` /
     // `cursor` / `labels`) are walked directly by these methods — exactly
-    // one stream per frame, no Run nesting. `Script::Opaque` decodes on
-    // demand and never builds a `Vec<Instruction>`. See ADR 0015.
+    // Payload fetch and literal-reference consumption are independent streams.
 
     /// Returns the next instruction; `Ok(None)` at end of program. For
     /// `Script::Opaque` this decodes one instruction at the cursor and
     /// advances by its encoded length.
     pub(crate) fn next_instruction(&mut self) -> Result<Option<Instruction>, VMError> {
+        self.prepare_program()?;
+        if self.cursor >= self.program.as_ref().unwrap().len {
+            return Ok(None);
+        }
         let cursor = self.cursor;
-        let allocation_bytes = match &self.code {
-            Script::Transparent(instrs) => {
-                let Some(instr) = instrs.get(cursor) else {
-                    return Ok(None);
-                };
-                match instr {
-                    Instruction::PushStr(s) => {
-                        s.check_len()?;
-                        s.len()
-                    }
-                    _ => 0,
-                }
-            }
-            Script::Opaque(bytes) => {
-                if cursor >= bytes.len() {
-                    return Ok(None);
-                }
-                Instruction::decoded_allocation_bytes(&bytes[cursor..])?
-            }
-        };
-        self.charge_gas(alloc_byte_gas(allocation_bytes)?)?;
-        match &self.code {
-            Script::Transparent(instrs) => {
-                let instr = instrs[cursor].clone();
-                self.cursor = cursor + 1;
+        match &self.instructions {
+            Some(instrs) => {
+                let instr = instrs[self.instruction_cursor].clone();
+                self.instruction_cursor += 1;
+                self.cursor += instr.encoded_size();
                 Ok(Some(instr))
             }
-            Script::Opaque(bytes) => {
-                let mut reader: &[u8] = &bytes[cursor..];
+            None => {
+                let bytes = self.program.as_ref().unwrap().bytes(cursor);
+                let mut reader: &[u8] = bytes;
                 let before = reader.len();
                 let instr = Instruction::parse(&mut reader)?;
                 let consumed = before - reader.len();
@@ -282,9 +312,13 @@ impl CallFrame {
     /// code drives to completion via the dispatch loop.
     #[cfg(test)]
     pub(crate) fn is_finished(&self) -> bool {
-        match &self.code {
-            Script::Transparent(instrs) => self.cursor >= instrs.len(),
-            Script::Opaque(bytes) => self.cursor >= bytes.len(),
+        match &self.program {
+            Some(program) => self.cursor >= program.len,
+            None => match self.code.as_ref().unwrap() {
+                Script::Transparent(instructions) => instructions.is_empty(),
+                Script::Opaque(bytes) => bytes.is_empty(),
+                Script::Cell(cell) => !cell.is_pruned() && cell.payload().is_empty(),
+            },
         }
     }
 
@@ -308,10 +342,10 @@ impl CallFrame {
         use core::cmp::Ordering;
         match n.cmp(&self.labels.len()) {
             Ordering::Equal => {
-                self.labels.push(self.cursor);
+                self.labels.push((self.cursor, self.instruction_cursor));
                 Ok(())
             }
-            Ordering::Less if self.labels[n] == self.cursor => Ok(()),
+            Ordering::Less if self.labels[n] == (self.cursor, self.instruction_cursor) => Ok(()),
             _ => Err(VMError::LabelOutOfOrder),
         }
     }
@@ -322,7 +356,7 @@ impl CallFrame {
     /// ADR 0015.
     fn jump_to_label(&mut self, n: usize) -> Result<(), VMError> {
         if n < self.labels.len() {
-            self.cursor = self.labels[n];
+            (self.cursor, self.instruction_cursor) = self.labels[n];
             return Ok(());
         }
         // Scan forward via `next_instruction` (representation-agnostic:
@@ -411,14 +445,18 @@ pub struct CallFrame {
     /// Only this actor's committed storage bodies; never another actor's cache.
     actor_cells: Arc<CellIndex>,
 
-    /// The frame's executable code (decoded instructions or raw bytecode).
-    code: Script,
-    /// Cursor into `code`: instruction index for `Instrs`, byte offset for
-    /// `Bytes`.
+    /// Source consumed on first fetch; private instructions are only an overlay.
+    code: Option<Script>,
+    program: Option<Program>,
+    entry_program: Option<Cell>,
+    private_scripts: BTreeMap<CellID, Vec<Instruction>>,
+    instructions: Option<Vec<Instruction>>,
+    instruction_cursor: usize,
+    /// Byte cursor into the program's Cell payloads.
     cursor: usize,
-    /// `labels[n]` = cursor position just after `label n`; filled lazily
+    /// `labels[n]` = (byte offset, private overlay index) after `label n`; filled lazily
     /// in appearance order. See ADR 0015.
-    labels: Vec<usize>,
+    labels: Vec<(usize, usize)>,
 
     /// Identity / dispatch context for this frame.
     pub(crate) kind: CallKind,
@@ -477,15 +515,15 @@ pub struct CallFrame {
 }
 
 impl CallFrame {
-    /// Builds a fresh CallFrame over pre-decoded `instructions` (prover
-    /// and pre-parsed paths). The verifier / internal execution uses
-    /// [`CallFrame::from_bytecode`] to stream raw bytecode instead.
+    /// Test/compatibility entry: compiles source instructions to Cell code,
+    /// retaining their private witness overlay.
+    #[cfg(test)]
     pub fn new(instructions: Vec<Instruction>, kind: CallKind, gas_limit: u64) -> Self {
         Self::from_code(Script::Transparent(instructions), kind, gas_limit)
     }
 
-    /// Builds a CallFrame that decodes raw `bytecode` on demand — no
-    /// `Vec<Instruction>` is materialized. See ADR 0015.
+    /// Compatibility source-bytecode entry. Production transaction and actor
+    /// entry points use `from_cell`; bounded String/signcall code also adapts here.
     pub(crate) fn from_bytecode(bytecode: Vec<u8>, kind: CallKind, gas_limit: u64) -> Self {
         Self::from_code(Script::Opaque(bytecode), kind, gas_limit)
     }
@@ -501,7 +539,12 @@ impl CallFrame {
         Self {
             stack: Vec::new(),
             actor_cells: Arc::new(CellIndex::new()),
-            code,
+            code: Some(code),
+            program: None,
+            entry_program: None,
+            private_scripts: BTreeMap::new(),
+            instructions: None,
+            instruction_cursor: 0,
             cursor: 0,
             labels: Vec::new(),
             kind,
@@ -518,6 +561,36 @@ impl CallFrame {
             snap_batch: None,
             snap_cs: None,
         }
+    }
+
+    /// Enters authenticated program Cells without flattening their bytecode.
+    pub(crate) fn from_cell(root: Cell, kind: CallKind, gas_limit: u64) -> Result<Self, VMError> {
+        let program = Program::new(root.clone())?;
+        let mut frame = Self::from_bytecode(Vec::new(), kind, gas_limit);
+        frame.code = None;
+        frame.entry_program = Some(root);
+        frame.program = Some(program);
+        Ok(frame)
+    }
+
+    fn prepare_program(&mut self) -> Result<(), VMError> {
+        if self.program.is_none() {
+            let code = self.code.as_ref().expect("unprepared frame has source");
+            let root = match code {
+                Script::Transparent(instructions) => {
+                    let (root, scripts) = crate::script::compile_program(instructions)?;
+                    self.private_scripts = scripts;
+                    root
+                }
+                _ => code.to_cell()?,
+            };
+            self.instructions = self.private_scripts.get(&root.id()).cloned();
+            let program = Program::new(root.clone())?;
+            self.entry_program = Some(root);
+            self.code = None;
+            self.program = Some(program);
+        }
+        Ok(())
     }
 }
 
@@ -540,13 +613,15 @@ pub struct TxResult {
     /// Exact number of multiplication gates in the final constraint system.
     pub multiplications: usize,
 
-    /// Canonical bytecode of the executed script. The prover supplies
-    /// this from the `ScriptBuilder`; the verifier echoes back the bytecode
-    /// it received. Useful when downstream code wants to re-hash or
-    /// re-broadcast without re-encoding.
+    /// Compatibility byte-only source when representable, otherwise root
+    /// payload only. Never a standalone native graph; verify using `program`.
     pub bytecode: Vec<u8>,
+    /// Executed root program, with literal Cell operands and explicit continuations.
+    pub program: Cell,
 
-    /// The immutable witness set committed by the initiating external transaction.
+    /// The immutable lookup snapshot committed by the external transaction.
+    /// Inline program bodies are also available; use ExternalTx::execution_cells
+    /// when delivering induced actor transactions.
     pub cells: Arc<CellIndex>,
 
     /// R1CS proof. `Some` on the prover side, `None` on the verifier
@@ -581,6 +656,9 @@ pub(crate) struct VM {
     header: TxHeader,
     block_height: u64,
     cells: Arc<CellIndex>,
+    /// Serialized lookup snapshot, separate from the inline program bodies.
+    witnesses: Arc<CellIndex>,
+    program_scope_ready: bool,
     contract_witnesses: BTreeMap<ContractID, Contract>,
     script_witnesses: BTreeMap<CellID, Vec<Instruction>>,
     value_witnesses: BTreeMap<CellID, Value>,
@@ -664,6 +742,7 @@ impl VM {
             // Reject unencodable program data before executing private witnesses.
             cells.to_cell()?;
         }
+        self.witnesses = Arc::clone(&cells);
         self.cells = cells;
         Ok(self)
     }
@@ -698,14 +777,19 @@ impl VM {
         let cells = Arc::new(program.cell_witnesses()?);
         let contract_witnesses = program.contract_witnesses();
         let script_witnesses = program.script_witnesses()?;
-        let bytecode = program.to_bytecode();
-        let mut frame = CallFrame::new(
-            program.into_instructions(),
-            CallKind::ExternalRoot,
-            gas_limit,
-        );
-        frame.charge_gas(alloc_byte_gas(bytecode.len())?)?;
-        frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
+        let (root, private_scripts) = crate::script::compile_program(program.instructions())?;
+        let bytecode = root.payload().to_vec();
+        let initial_gas =
+            alloc_byte_gas(bytecode.len())?.saturating_add(GAS_EXTERNAL_FINALIZE_BASE);
+        if initial_gas > gas_limit {
+            return Err(VMError::OutOfGas);
+        }
+        let mut frame = CallFrame::from_cell(root, CallKind::ExternalRoot, gas_limit)?;
+        frame.instructions = private_scripts
+            .get(&frame.entry_program.as_ref().unwrap().id())
+            .cloned();
+        frame.private_scripts = private_scripts;
+        frame.charge_gas(initial_gas)?;
         let mut vm = Self::new(header, frame).with_cells(cells)?;
         vm.contract_witnesses = contract_witnesses;
         vm.script_witnesses = script_witnesses;
@@ -713,19 +797,22 @@ impl VM {
         vm.into_result(bytecode, None)
     }
 
-    /// Verifier entry: decodes external-root bytecode on demand using the
-    /// immutable body set committed by its initiating transaction.
-    pub(crate) fn run_bytecode_with_cells<D: Delegate>(
+    /// Verifier entry: fetches instructions from Cell payloads on demand.
+    pub(crate) fn run_program_with_cells<D: Delegate>(
         header: TxHeader,
-        bytecode: Vec<u8>,
+        program: Cell,
         gas_limit: u64,
         delegate: &mut D,
         cells: &CellIndex,
     ) -> Result<TxResult, VMError> {
-        let mut frame =
-            CallFrame::from_bytecode(bytecode.clone(), CallKind::ExternalRoot, gas_limit);
-        frame.charge_gas(alloc_byte_gas(bytecode.len())?)?;
-        frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
+        let bytecode = program.payload().to_vec();
+        let initial_gas =
+            alloc_byte_gas(bytecode.len())?.saturating_add(GAS_EXTERNAL_FINALIZE_BASE);
+        if initial_gas > gas_limit {
+            return Err(VMError::OutOfGas);
+        }
+        let mut frame = CallFrame::from_cell(program, CallKind::ExternalRoot, gas_limit)?;
+        frame.charge_gas(initial_gas)?;
         let mut vm = Self::new(header, frame).with_cells(Arc::new(cells.clone()))?;
         while vm.step_external(delegate)? {}
         vm.into_result(bytecode, None)
@@ -836,7 +923,7 @@ impl VM {
             gas_used: &mut initial_gas,
             gas_limit: message.gas,
         };
-        let script = match registry.load_code_with_cells(&message.target, &mut resolver) {
+        let script = match registry.load_program_with_cells(&message.target, &mut resolver) {
             Ok(script) => script,
             Err(e) => {
                 registry.pop_checkpoint_rollback();
@@ -859,7 +946,13 @@ impl VM {
             actor: target.clone(),
             caller,
         };
-        let mut frame = CallFrame::from_bytecode(script, kind, gas).with_anchor(anchor);
+        let mut frame = match CallFrame::from_cell(script, kind, gas) {
+            Ok(frame) => frame.with_anchor(anchor),
+            Err(error) => {
+                registry.pop_checkpoint_rollback();
+                return Err(error);
+            }
+        };
         frame.actor_cells = actor_cells;
         if let Err(e) = frame.charge_gas(initial_gas) {
             registry.pop_checkpoint_rollback();
@@ -925,7 +1018,9 @@ impl VM {
         Self {
             header,
             block_height: 0,
+            witnesses: Arc::clone(&cells),
             cells,
+            program_scope_ready: false,
             contract_witnesses: BTreeMap::new(),
             script_witnesses: BTreeMap::new(),
             value_witnesses: BTreeMap::new(),
@@ -978,10 +1073,21 @@ impl VM {
     ) -> Result<TxResult, VMError> {
         let txlog = mem::take(&mut self.txlog);
         let deferred_sigs = mem::take(&mut self.deferred_sigs);
+        self.current_call.prepare_program()?;
+        let program = self.current_call.entry_program.as_ref().unwrap().clone();
         let txid = if matches!(self.current_call.kind, CallKind::ExternalRoot) {
-            TxID(crate::tx::external_body(self.header, &bytecode, &self.cells, &txlog)?.id())
+            TxID(
+                crate::tx::external_program_body(self.header, &program, &self.witnesses, &txlog)?
+                    .id(),
+            )
         } else {
             TxID::from_log(&txlog)
+        };
+        let bytecode = if matches!(self.current_call.kind, CallKind::ExternalRoot) {
+            crate::code_from_cell(&program, &mut (), usize::MAX)
+                .unwrap_or_else(|_| program.payload().to_vec())
+        } else {
+            bytecode
         };
         Ok(TxResult {
             txid,
@@ -991,7 +1097,8 @@ impl VM {
             gas_used: self.current_call.gas_used,
             multiplications: self.deferred_multiplications,
             bytecode,
-            cells: self.cells,
+            program,
+            cells: self.witnesses,
             proof,
             deferred_sigs,
         })
@@ -1147,6 +1254,16 @@ impl VM {
         registry: Option<&mut dyn ActorRegistry>,
     ) -> Result<bool, VMError> {
         self.current_call.charge_gas(GAS_PER_INSTRUCTION)?;
+        if !self.program_scope_ready && matches!(self.current_call.kind, CallKind::ExternalRoot) {
+            self.current_call.prepare_program()?;
+            let inline = CellIndex::collect(Arc::new(
+                self.current_call.entry_program.as_ref().unwrap().clone(),
+            ))?;
+            let mut available = self.witnesses.as_ref().clone();
+            available.extend(&inline)?;
+            self.cells = Arc::new(available);
+            self.program_scope_ready = true;
+        }
         let Some(instr) = self.current_call.next_instruction()? else {
             return self.finish_call();
         };
@@ -1156,9 +1273,17 @@ impl VM {
                 self.push_value(Value::Scalar(i));
                 Ok(())
             }
-            I::PushStr(s) => {
-                s.check_len()?;
-                self.push_value(Value::String(s));
+            I::BytesLiteral(literal) => {
+                let reference = self.current_call.program.as_mut().unwrap().load_ref()?;
+                let witness = if matches!(literal.as_ref(), String::Witness(_)) {
+                    if literal.to_cell()?.id() != reference.id() {
+                        return Err(VMError::TaprootProofMismatch);
+                    }
+                    Some(literal)
+                } else {
+                    None
+                };
+                self.push_value(Value::Cell(crate::CellValue { reference, witness }));
                 Ok(())
             }
             I::PushPoint(p) => {
@@ -1168,6 +1293,12 @@ impl VM {
                 Ok(())
             }
             I::PushToken => self.op_pushtoken(),
+            I::PushCell(_) => {
+                let reference = self.current_call.program.as_mut().unwrap().load_ref()?;
+                self.push_value(Value::Cell(reference.into()));
+                Ok(())
+            }
+            I::Exec => self.op_exec(),
             I::Drop => self.op_drop(),
             I::Nop => self.op_nop(),
             I::Dup => self.op_dup(),
@@ -1175,20 +1306,33 @@ impl VM {
             I::DupK(k) => self.op_dup_k(k as usize),
             I::RollK(k) => self.op_roll_k(k as usize),
 
-            I::ReadBits => self.op_read_bits(),
-            I::ReadInt => self.op_read_int(),
-            I::ReadStr => self.op_read_str(),
+            I::Builder => {
+                self.push_value(Value::Builder(CellBuilder::new()));
+                Ok(())
+            }
+            I::Slice => self.op_slice(),
+            I::EndCell => self.op_endcell(),
+            I::ReadUint => {
+                let n = self.pop_byte_count(32)?;
+                self.op_read_uint(n)
+            }
+            I::ReadScalar => self.op_read_uint(32),
+            I::ReadBytes => self.op_read_bytes(),
             I::ReadPoint => self.op_read_point(),
-            I::WriteBits => self.op_write_bits(),
-            I::WriteInt => self.op_write_int(),
-            I::Append => self.op_append(),
+            I::WriteUint => {
+                let n = self.pop_byte_count(32)?;
+                self.op_write_uint(n)
+            }
+            I::WriteScalar => self.op_write_uint(32),
+            I::AppendBytes => self.op_append_bytes(),
+            I::AppendRefs => self.op_append_refs(),
             I::WriteZeros => self.op_write_zeros(),
             I::BitNot => self.op_bit_not(),
-            I::BitOr => self.op_bit_or(),
-            I::BitAnd => self.op_bit_and(),
-            I::BitXor => self.op_bit_xor(),
-            I::ShiftLeft => self.op_shift_left(),
-            I::ShiftRight => self.op_shift_right(),
+            I::BitOr => self.op_bitwise(|a, b| a | b),
+            I::BitAnd => self.op_bitwise(|a, b| a & b),
+            I::BitXor => self.op_bitwise(|a, b| a ^ b),
+            I::ShiftLeft => self.op_shift(true),
+            I::ShiftRight => self.op_shift(false),
             I::Keccak256 => self.op_hash::<sha3::Keccak256>(136),
 
             I::Abs => self.op_abs(),
@@ -1219,6 +1363,7 @@ impl VM {
             I::Sha256 => self.op_hash::<sha2::Sha256>(64),
             I::Sha512 => self.op_hash::<sha2::Sha512>(128),
             I::Sha3 => self.op_hash::<sha3::Sha3_256>(136),
+            I::CellHash => self.op_cell_hash(),
             I::Log => self.op_log(),
 
             I::Amount => self.op_amount(),
@@ -1525,7 +1670,7 @@ impl VM {
     /// `transcript` — `label → merlin`. Pops a label string,
     /// creates a fresh Merlin transcript bound to it.
     fn op_transcript(&mut self) -> Result<(), VMError> {
-        let label = self.pop_value()?.to_string()?;
+        let label = self.pop_string()?;
         self.charge_alloc_bytes(label.len())?;
         self.push_value(Value::Merlin(Merlin::new(&label.to_bytes())));
         Ok(())
@@ -1535,8 +1680,8 @@ impl VM {
     /// `label`, and the merlin; absorbs `(label, str)` into the
     /// transcript; pushes merlin back.
     fn op_twrite(&mut self) -> Result<(), VMError> {
-        let data = self.pop_value()?.to_string()?;
-        let label = self.pop_value()?.to_string()?;
+        let data = self.pop_string()?;
+        let label = self.pop_string()?;
         self.charge_alloc_bytes(
             label
                 .len()
@@ -1556,7 +1701,7 @@ impl VM {
         let n = self.pop_byte_count(usize::MAX)?;
         String::check_length(n)?;
         self.charge_alloc_bytes(n)?;
-        let label = self.pop_value()?.to_string()?;
+        let label = self.pop_string()?;
         self.charge_alloc_bytes(label.len())?;
         let mut m = self.pop_value()?.to_merlin()?;
         let out = m.read_bytes(&label.to_bytes(), n);
@@ -1565,26 +1710,78 @@ impl VM {
         Ok(())
     }
 
-    /// Pops a String and pushes its hash digest. Dispatch selects
-    /// `sha256`, `sha512`, `sha3` (FIPS-202), or `keccak256`
-    /// (pre-FIPS Keccak, Ethereum-compatible).
+    /// Hashes source payload bytes and appends the digest to the provided Builder.
     fn op_hash<H: sha2::Digest>(&mut self, block_bytes: usize) -> Result<(), VMError> {
-        let s = self.pop_value()?.to_string()?;
+        let mut builder = self.pop_value()?.into_builder()?;
+        let source = self.pop_byte_source()?;
+        let length = <H as sha2::Digest>::output_size();
+        if length > builder.remaining_bytes() {
+            return Err(CellError::PayloadCapacity.into());
+        }
         self.current_call
-            .charge_gas(hash_gas(s.len(), block_bytes)?)?;
-        let digest = H::digest(s.to_bytes());
-        self.push_value(Value::String(String::from(digest.to_vec())));
+            .charge_gas(hash_gas(source.byte_payload()?.len(), block_bytes)?)?;
+        self.charge_alloc_bytes(length)?;
+        let digest = H::digest(source.byte_payload()?);
+        builder.store_bytes(&digest)?;
+        self.push_value(Value::Builder(builder));
         Ok(())
     }
 
-    /// `log` — `str → ø`. Pops a String, emits
+    /// Resolve plain Cell bytes in the current scope; preserve owned Slice/Builder data.
+    fn pop_byte_source(&mut self) -> Result<Value, VMError> {
+        let source = match self.pop_value()? {
+            Value::Cell(reference) => {
+                let cell = cells::read_cell(&mut self.resolver(), &reference)?;
+                Value::Slice(crate::Slice::new(cell)?)
+            }
+            value @ (Value::Slice(_) | Value::Builder(_)) => value,
+            _ => return Err(VMError::TypeNotByteSource),
+        };
+        if source.byte_refs()? != 0 {
+            return Err(CellError::InvalidFormat.into());
+        }
+        Ok(source)
+    }
+
+    /// Append a cached hash at an explicit level, without loading the Cell body.
+    fn op_cell_hash(&mut self) -> Result<(), VMError> {
+        let mut builder = self.pop_value()?.into_builder()?;
+        let level = self.pop_byte_count(cells::MAX_CELL_LEVEL as usize)? as u8;
+        let reference = self.pop_value()?.into_cell_ref()?;
+        if builder.remaining_bytes() < 32 {
+            return Err(CellError::PayloadCapacity.into());
+        }
+        self.charge_alloc_bytes(32)?;
+        builder.store_bytes(&reference.commitment().hash(level)?)?;
+        self.push_value(Value::Builder(builder));
+        Ok(())
+    }
+
+    /// `log` — `str | cell → ø`. A Cell must be a payload-only byte container.
+    /// Emits
     /// `TxEntry::Data(bytes)` into the txlog. Witness-bearing String
     /// variants serialize via `to_bytes` so prover and verifier emit
     /// the same canonical bytes.
     fn op_log(&mut self) -> Result<(), VMError> {
-        let s = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(s.len())?;
-        self.txlog.push(TxEntry::Data(s.to_bytes()));
+        let bytes = match self.pop_value()? {
+            Value::Cell(reference) => {
+                let cell = cells::read_cell(&mut self.resolver(), &reference)?;
+                if cell.is_pruned() {
+                    return Err(CellError::PrunedCell.into());
+                }
+                if !cell.refs().is_empty() {
+                    return Err(CellError::InvalidFormat.into());
+                }
+                self.charge_alloc_bytes(cell.payload().len())?;
+                cell.payload().to_vec()
+            }
+            value => {
+                let string = value.to_string()?;
+                self.charge_alloc_bytes(string.len())?;
+                string.to_bytes()
+            }
+        };
+        self.txlog.push(TxEntry::Data(bytes));
         Ok(())
     }
 
@@ -1772,86 +1969,62 @@ impl VM {
         self.push_value(Value::Scalar(Scalar::ZERO));
     }
 
-    /// _s n_ **readbits** → _s' x 1_ | _s 0_
-    ///
-    /// Reads `n ≤ 256` bits LSB-first into a fresh `Scalar`. A count outside
-    /// `[0, 256]` hard-fails `IndexOutOfRange`; short input or a value at
-    /// least the scalar modulus soft-fails.
-    fn op_read_bits(&mut self) -> Result<(), VMError> {
-        let n = self.pop_byte_count(256)?;
-        let s = self.pop_value()?.to_string()?;
-        let n_bytes = n.div_ceil(8);
-        if s.len() < n_bytes {
-            self.push_read_failure(s); // restore original (witness-preserving)
-            return Ok(());
-        }
-        self.charge_alloc_bytes(s.len())?;
-        let bytes = s.to_bytes(); // canonical, owned
-        let mut int_bytes = [0u8; 32];
-        if n_bytes > 0 {
-            int_bytes[..n_bytes].copy_from_slice(&bytes[..n_bytes]);
-            // Mask off bits above position n-1 within the final byte so
-            // that bits `n..n_bytes*8` are forced to zero.
-            let tail_bits = n % 8;
-            if tail_bits != 0 {
-                int_bytes[n_bytes - 1] &= (1u8 << tail_bits) - 1;
-            }
-        }
-        // `Scalar::from_bytes` rejects non-canonical residues (values ≥ ℓ).
-        let value = match Scalar::from_bytes(int_bytes) {
-            Some(v) => v,
-            None => {
-                self.push_read_failure(String::from(bytes)); // bytes untouched
-                return Ok(());
-            }
-        };
-        self.push_value(Value::String(String::from(bytes[n_bytes..].to_vec())));
-        self.push_value(Value::Scalar(value));
-        self.push_value(Value::Scalar(Scalar::from(1u64)));
+    fn op_slice(&mut self) -> Result<(), VMError> {
+        let reference = self.pop_value()?.into_cell_ref()?;
+        let cell = cells::read_cell(&mut self.resolver(), &reference)?;
+        self.push_value(Value::Slice(crate::Slice::new(cell)?));
         Ok(())
     }
 
-    /// `readint` — `s → s' x 1 | s 0`. Reads the canonical
-    /// 32-byte little-endian `Scalar` from
-    /// the front of `s`. Equivalent to `readbits(s, 256)`. Soft-fails
-    /// on insufficient bytes or a residue ≥ ℓ.
-    fn op_read_int(&mut self) -> Result<(), VMError> {
-        let s = self.pop_value()?.to_string()?;
-        if s.len() < 32 {
-            self.push_read_failure(s);
-            return Ok(());
-        }
-        self.charge_alloc_bytes(s.len())?;
-        let bytes = s.to_bytes();
-        let mut int_bytes = [0u8; 32];
-        int_bytes.copy_from_slice(&bytes[..32]);
-        let value = match Scalar::from_bytes(int_bytes) {
-            Some(v) => v,
-            None => {
-                self.push_read_failure(String::from(bytes));
-                return Ok(());
-            }
-        };
-        self.push_value(Value::String(String::from(bytes[32..].to_vec())));
-        self.push_value(Value::Scalar(value));
-        self.push_value(Value::Scalar(Scalar::from(1u64)));
+    fn op_endcell(&mut self) -> Result<(), VMError> {
+        let builder = self.pop_value()?.into_builder()?;
+        self.current_call
+            .charge_gas(cell_hash_gas(builder.used_bytes(), builder.used_refs())?)?;
+        self.push_value(Value::Cell(builder.build().into()));
         Ok(())
     }
 
-    /// `readstr` — `s n → s' s'' 1 | s 0`. Splits off the first
-    /// `n` bytes of `s` as a new String.
-    fn op_read_str(&mut self) -> Result<(), VMError> {
-        let n = self.pop_byte_count(usize::MAX)?;
-        let s = self.pop_value()?.to_string()?;
-        if s.len() < n {
-            self.push_read_failure(s);
+    /// Short/noncanonical input leaves the cursor unchanged and returns zero.
+    fn op_read_uint(&mut self, count: usize) -> Result<(), VMError> {
+        let mut slice = self.pop_value()?.into_slice()?;
+        let mut bytes = [0; 32];
+        let value = if slice.remaining_bytes() >= count {
+            bytes[..count].copy_from_slice(&slice.bytes()[..count]);
+            Scalar::from_bytes(bytes)
+        } else {
+            None
+        };
+        if let Some(value) = value {
+            slice.advance_bytes(count);
+            self.push_value(Value::Slice(slice));
+            self.push_value(Value::Scalar(value));
+            self.push_value(Value::Scalar(Scalar::ONE));
+        } else {
+            self.push_value(Value::Slice(slice));
+            self.push_value(Value::Scalar(Scalar::ZERO));
+        }
+        Ok(())
+    }
+
+    fn op_read_bytes(&mut self) -> Result<(), VMError> {
+        let count = self.pop_byte_count(usize::MAX)?;
+        let mut builder = self.pop_value()?.into_builder()?;
+        let mut slice = self.pop_value()?.into_slice()?;
+        if slice.remaining_bytes() < count {
+            self.push_value(Value::Slice(slice));
+            self.push_value(Value::Builder(builder));
+            self.push_value(Value::Scalar(Scalar::ZERO));
             return Ok(());
         }
-        self.charge_alloc_bytes(s.len())?;
-        let (remainder, consumed) = s.split_at(n).expect("length checked");
-        self.push_value(Value::String(remainder));
-        self.push_value(Value::String(consumed));
-        self.push_value(Value::Scalar(Scalar::from(1u64)));
+        if count > builder.remaining_bytes() {
+            return Err(CellError::PayloadCapacity.into());
+        }
+        self.charge_alloc_bytes(count)?;
+        builder.store_bytes(&slice.bytes()[..count])?;
+        slice.advance_bytes(count);
+        self.push_value(Value::Slice(slice));
+        self.push_value(Value::Builder(builder));
+        self.push_value(Value::Scalar(Scalar::ONE));
         Ok(())
     }
 
@@ -1859,7 +2032,7 @@ impl VM {
     /// 32 bytes of `s` as a `Point` (decompressability not validated
     /// here; later opcodes that consume the point may reject it).
     fn op_read_point(&mut self) -> Result<(), VMError> {
-        let s = self.pop_value()?.to_string()?;
+        let s = self.pop_string()?;
         if s.len() < 32 {
             self.push_read_failure(s);
             return Ok(());
@@ -1875,46 +2048,50 @@ impl VM {
         Ok(())
     }
 
-    /// _s x n_ **writebits** → _s'_
-    ///
-    /// Appends the low `n` bits of `x` (LSB-first) to `s`. `n` must be
-    /// a multiple of 8 and ≤ 256. Bytes come from the canonical scalar encoding.
-    fn op_write_bits(&mut self) -> Result<(), VMError> {
-        // Out-of-range counts fail through `pop_byte_count`; byte
-        // misalignment has the more specific error below.
-        let n = self.pop_byte_count(256)?;
-        if n % 8 != 0 {
-            return Err(VMError::BitCountOutOfRange);
+    fn op_write_uint(&mut self, count: usize) -> Result<(), VMError> {
+        let value = self.pop_value()?.to_scalar()?;
+        let mut builder = self.pop_value()?.into_builder()?;
+        if count > builder.remaining_bytes() {
+            return Err(CellError::PayloadCapacity.into());
         }
-        let n_bytes = n / 8;
-        let x = self.pop_value()?.to_scalar()?;
-        let s = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(s.appended_len(n_bytes)?)?;
-        // Canonical 32-byte scalar; low `n` bits = first `n_bytes`.
-        let raw = x.to_bytes();
-        let appended = s.append_bytes(&raw[..n_bytes])?;
-        self.push_value(Value::String(appended));
+        self.charge_alloc_bytes(count)?;
+        builder.store_bytes(&value.to_bytes()[..count])?;
+        self.push_value(Value::Builder(builder));
         Ok(())
     }
 
-    /// `writeint` — `s x → s'`. Appends the canonical 32-byte
-    /// little-endian `Scalar` representation of `x` to `s`.
-    /// Equivalent to `writebits(s, x, 256)`.
-    fn op_write_int(&mut self) -> Result<(), VMError> {
-        let x = self.pop_value()?.to_scalar()?;
-        let s = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(s.appended_len(32)?)?;
-        let appended = s.append_bytes(&x.to_bytes())?;
-        self.push_value(Value::String(appended));
+    fn op_append_bytes(&mut self) -> Result<(), VMError> {
+        let mut builder = self.pop_value()?.into_builder()?;
+        let mut slice = self.pop_value()?.into_slice()?;
+        let count = slice.remaining_bytes();
+        if count > builder.remaining_bytes() {
+            return Err(CellError::PayloadCapacity.into());
+        }
+        self.charge_alloc_bytes(count)?;
+        builder.store_bytes(slice.bytes())?;
+        slice.advance_bytes(count);
+        self.push_value(Value::Slice(slice));
+        self.push_value(Value::Builder(builder));
         Ok(())
     }
 
-    /// `append` — `s s' → s''`. Concatenates two strings.
-    fn op_append(&mut self) -> Result<(), VMError> {
-        let s2 = self.pop_value()?.to_string()?;
-        let s1 = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(s1.appended_len(s2.len())?)?;
-        self.push_value(Value::String(s1.append_bytes(&s2.to_bytes())?));
+    fn op_append_refs(&mut self) -> Result<(), VMError> {
+        let mut builder = self.pop_value()?.into_builder()?;
+        let mut slice = self.pop_value()?.into_slice()?;
+        let count = slice.remaining_refs();
+        if count > builder.remaining_refs() {
+            return Err(CellError::ReferenceCapacity.into());
+        }
+        for reference in slice.refs() {
+            reference.validate_child()?;
+        }
+        self.charge_alloc_items(count)?;
+        for reference in slice.refs() {
+            builder.store_ref(reference.clone())?;
+        }
+        slice.advance_refs(count);
+        self.push_value(Value::Slice(slice));
+        self.push_value(Value::Builder(builder));
         Ok(())
     }
 
@@ -1933,90 +2110,48 @@ impl VM {
     /// `writezeros` — `s n → s'`. Appends `n` zero bytes.
     fn op_write_zeros(&mut self) -> Result<(), VMError> {
         let n = self.pop_byte_count(usize::MAX)?;
-        let s = self.pop_value()?.to_string()?;
+        let s = self.pop_string()?;
         self.charge_alloc_bytes(s.appended_len(n)?)?;
         let appended = s.append_zeros(n)?;
         self.push_value(Value::String(appended));
         Ok(())
     }
 
-    /// `bitnot` — `s → s'`. Inverts every bit.
+    /// In-place payload transform; references and payload length never change.
     fn op_bit_not(&mut self) -> Result<(), VMError> {
-        let s = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(s.len())?;
-        self.push_value(Value::String(s.bit_not()));
+        let mut builder = self.pop_value()?.into_builder()?;
+        self.current_call.charge_gas(builder.used_bytes() as u64)?;
+        for byte in builder.payload_mut() {
+            *byte = !*byte;
+        }
+        self.push_value(Value::Builder(builder));
         Ok(())
     }
 
-    /// `bitor` — `a b → c`. Bitwise OR. Fails if sizes differ.
-    fn op_bit_or(&mut self) -> Result<(), VMError> {
-        let b = self.pop_value()?.to_string()?;
-        let a = self.pop_value()?.to_string()?;
-        if a.len() != b.len() {
+    fn op_bitwise(&mut self, operation: fn(u8, u8) -> u8) -> Result<(), VMError> {
+        if matches!(self.current_call.stack.last(), Some(Value::Builder(_))) {
+            return Err(VMError::TypeNotCellOrSlice);
+        }
+        let source = self.pop_byte_source()?;
+        let mut builder = self.pop_value()?.into_builder()?;
+        if builder.used_bytes() != source.byte_payload()?.len() {
             return Err(VMError::BitwiseSizeMismatch);
         }
-        self.charge_alloc_bytes(a.len())?;
-        let c = a.bit_or(&b).ok_or(VMError::BitwiseSizeMismatch)?;
-        self.push_value(Value::String(c));
-        Ok(())
-    }
-
-    /// `bitand` — `a b → c`. Bitwise AND. Fails on size mismatch.
-    fn op_bit_and(&mut self) -> Result<(), VMError> {
-        let b = self.pop_value()?.to_string()?;
-        let a = self.pop_value()?.to_string()?;
-        if a.len() != b.len() {
-            return Err(VMError::BitwiseSizeMismatch);
+        self.current_call.charge_gas(builder.used_bytes() as u64)?;
+        for (byte, other) in builder.payload_mut().iter_mut().zip(source.byte_payload()?) {
+            *byte = operation(*byte, *other);
         }
-        self.charge_alloc_bytes(a.len())?;
-        let c = a.bit_and(&b).ok_or(VMError::BitwiseSizeMismatch)?;
-        self.push_value(Value::String(c));
+        self.push_value(Value::Builder(builder));
         Ok(())
     }
 
-    /// `bitxor` — `a b → c`. Bitwise XOR. Fails on size mismatch.
-    fn op_bit_xor(&mut self) -> Result<(), VMError> {
-        let b = self.pop_value()?.to_string()?;
-        let a = self.pop_value()?.to_string()?;
-        if a.len() != b.len() {
-            return Err(VMError::BitwiseSizeMismatch);
-        }
-        self.charge_alloc_bytes(a.len())?;
-        let c = a.bit_xor(&b).ok_or(VMError::BitwiseSizeMismatch)?;
-        self.push_value(Value::String(c));
-        Ok(())
-    }
-
-    /// `shiftleft` — `a n → b c`. Shifts `a` left by `n ≤ 256`
-    /// bits; pushes the shifted string and the removed bits (zero-padded
-    /// on the left).
-    fn op_shift_left(&mut self) -> Result<(), VMError> {
-        let n = self.pop_byte_count(256)?;
-        let a = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(
-            a.len()
-                .checked_add(n.div_ceil(8))
-                .ok_or(VMError::OutOfGas)?,
-        )?;
-        let (shifted, removed) = a.shift_left(n);
-        self.push_value(Value::String(shifted));
-        self.push_value(Value::String(removed));
-        Ok(())
-    }
-
-    /// `shiftright` — `a n → b c`. Mirror of `shiftleft`; removed
-    /// bits are zero-padded on the right.
-    fn op_shift_right(&mut self) -> Result<(), VMError> {
-        let n = self.pop_byte_count(256)?;
-        let a = self.pop_value()?.to_string()?;
-        self.charge_alloc_bytes(
-            a.len()
-                .checked_add(n.div_ceil(8))
-                .ok_or(VMError::OutOfGas)?,
-        )?;
-        let (shifted, removed) = a.shift_right(n);
-        self.push_value(Value::String(shifted));
-        self.push_value(Value::String(removed));
+    /// Fixed-width, big-endian payload shift. Displaced bits are discarded.
+    fn op_shift(&mut self, left: bool) -> Result<(), VMError> {
+        let count = self.pop_byte_count(256)?;
+        let mut builder = self.pop_value()?.into_builder()?;
+        self.current_call.charge_gas(builder.used_bytes() as u64)?;
+        shift_bytes(builder.payload_mut(), count, left);
+        self.push_value(Value::Builder(builder));
         Ok(())
     }
 
@@ -2054,6 +2189,16 @@ impl VM {
             let a = self.pop_value()?.to_expression()?;
             self.push_value(Value::Constraint(Constraint::eq(a, b)));
         } else {
+            if self.current_call.stack[n - 1].is_cell_container()
+                && self.current_call.stack[n - 2].is_cell_container()
+            {
+                let gas = factual_hash_gas(&self.current_call.stack[n - 1])?
+                    .checked_add(factual_hash_gas(&self.current_call.stack[n - 2])?)
+                    .ok_or(VMError::OutOfGas)?;
+                self.current_call.charge_gas(gas)?;
+            } else {
+                self.charge_top_value_growth(2)?;
+            }
             let eq = self.current_call.stack[n - 1].try_eq(&self.current_call.stack[n - 2])?;
             let bit = if eq { 1u64 } else { 0u64 };
             self.push_value(Value::Scalar(Scalar::from(bit)));
@@ -2143,7 +2288,7 @@ impl VM {
     /// as a little-endian unsigned integer, reduces it modulo ℓ, and
     /// pushes the canonical `Scalar` residue.
     fn op_mod252(&mut self) -> Result<(), VMError> {
-        let s = self.pop_value()?.to_string()?;
+        let s = self.pop_string()?;
         let bytes = s.to_bytes();
         if bytes.len() > 64 {
             return Err(VMError::StringTooLongForModReduction);
@@ -2184,17 +2329,33 @@ impl VM {
     }
 
     /// `size` — peeks the top value and pushes its length as an
-    /// `Scalar` (String byte count, Dict entry count). Other types
+    /// `Scalar` (Cell/Slice/Builder byte count, Dict entry count). Other types
     /// error with `TypeHasNoLength`.
     fn op_size(&mut self) -> Result<(), VMError> {
+        if matches!(self.current_call.stack.last(), Some(Value::Cell(_))) {
+            let reference = self
+                .current_call
+                .stack
+                .last()
+                .unwrap()
+                .clone()
+                .into_cell_ref()?;
+            let cell = cells::read_cell(&mut self.resolver(), &reference)?;
+            if cell.is_pruned() {
+                return Err(CellError::PrunedCell.into());
+            }
+            self.push_value(Value::Scalar(Scalar::from(cell.payload().len() as u64)));
+            return Ok(());
+        }
         let top = self
             .current_call
             .stack
             .last()
             .ok_or(VMError::StackUnderflow)?;
         let len = match top {
-            Value::String(s) => s.len(),
             Value::Dict(d) => d.len(),
+            Value::Slice(s) => s.remaining_bytes(),
+            Value::Builder(b) => b.used_bytes(),
             _ => return Err(VMError::TypeHasNoLength),
         };
         self.push_value(Value::Scalar(Scalar::from(len as u64)));
@@ -2342,15 +2503,41 @@ impl VM {
         Ok(())
     }
 
+    /// Transitional adapter for the byte consumers not migrated in this step.
+    fn pop_string(&mut self) -> Result<String, VMError> {
+        match self.pop_value()? {
+            Value::String(string) => {
+                string.check_len()?;
+                Ok(string)
+            }
+            Value::Cell(reference) => {
+                let cell = cells::read_cell(&mut self.resolver(), &reference)?;
+                if cell.is_pruned() {
+                    return Err(CellError::PrunedCell.into());
+                }
+                if !cell.refs().is_empty() {
+                    return Err(CellError::InvalidFormat.into());
+                }
+                self.charge_alloc_bytes(cell.payload().len())?;
+                Ok(reference
+                    .witness
+                    .as_ref()
+                    .map(|value| value.as_ref().clone())
+                    .unwrap_or_else(|| String::from(cell.payload().to_vec())))
+            }
+            _ => Err(VMError::TypeNotString),
+        }
+    }
+
     fn pop_string_32(&mut self) -> Result<[u8; 32], VMError> {
-        let s = self.pop_value()?.to_string()?;
+        let s = self.pop_string()?;
         array32(&s.to_bytes()).ok_or(VMError::MalformedAddress)
     }
 
     /// Actor destinations accept a 32-byte hash or a canonical ActorID Cell
     /// envelope, including constructor code for deploy-on-first-delivery.
     fn pop_actor_id(&mut self) -> Result<ActorID, VMError> {
-        let bytes = self.pop_value()?.to_string()?.to_bytes_vec();
+        let bytes = self.pop_string()?.to_bytes_vec();
         if let Some(hash) = array32(&bytes) {
             return Ok(ActorID::Hash(hash));
         }
@@ -2417,7 +2604,7 @@ impl VM {
     /// `TypeNotScalar`; the confidential path lives in [`op_issuepriv`].
     fn op_issuepub(&mut self) -> Result<(), VMError> {
         let actor = self.require_actor()?.clone();
-        let tag = self.pop_value()?.to_string()?;
+        let tag = self.pop_string()?;
         let qty = match self.pop_value()? {
             Value::Scalar(i) => i,
             _ => return Err(VMError::TypeNotScalar),
@@ -2450,7 +2637,7 @@ impl VM {
         // One committed variable plus a 64-bit range gadget.
         self.current_call.charge_gas(r1cs_gas(65)?)?;
 
-        let tag = self.pop_value()?.to_string()?;
+        let tag = self.pop_string()?;
         let qty_var = self.pop_value()?.to_variable()?;
         // Register the Pedersen commitment with the CS. On the prover
         // the open assignment travels through; on the verifier only
@@ -2576,8 +2763,8 @@ impl VM {
     /// recompute and verify a cleartext token's flavor without
     /// running the corresponding `issuepub`.
     fn op_issuepubflv(&mut self) -> Result<(), VMError> {
-        let tag = self.pop_value()?.to_string()?;
-        let cid = self.pop_value()?.to_string()?;
+        let tag = self.pop_string()?;
+        let cid = self.pop_string()?;
         let bytes = array32(&cid.to_bytes()).ok_or(VMError::IndexOutOfRange)?;
         let flv = flavor_from_actor(&ActorID::Hash(bytes), &tag);
         self.push_value(Value::Scalar(flv));
@@ -2594,8 +2781,8 @@ impl VM {
     /// confidential token's flavor (the flv commitment is unblinded,
     /// so its point determines the scalar).
     fn op_issueprivflv(&mut self) -> Result<(), VMError> {
-        let tag = self.pop_value()?.to_string()?;
-        let pred = self.pop_value()?.to_string()?;
+        let tag = self.pop_string()?;
+        let pred = self.pop_string()?;
         let bytes = array32(&pred.to_bytes()).ok_or(VMError::IndexOutOfRange)?;
         let predicate = Predicate::opaque(curve25519_dalek::ristretto::CompressedRistretto(bytes));
         let flv = flavor_from_predicate(&predicate, &tag);
@@ -2641,7 +2828,7 @@ impl VM {
     /// witnesses may replace its typed values only after matching this identity.
     fn op_input(&mut self) -> Result<(), VMError> {
         self.require_external()?;
-        let encoded = self.pop_value()?.to_string()?;
+        let encoded = self.pop_string()?;
         let id = array32(&encoded.to_bytes()).ok_or(VMError::MalformedContractEncoding)?;
         let cell = cells::resolve_cell(&mut self.resolver(), id)?;
         let public = Contract::from_trusted_cell(&cell, &mut self.resolver())?;
@@ -2721,8 +2908,7 @@ impl VM {
             .to_scalar()?
             .to_u64()
             .ok_or(VMError::MalformedTaprootProof)?;
-        let root = array32(&self.pop_value()?.to_string()?.to_bytes())
-            .ok_or(VMError::MalformedTaprootProof)?;
+        let root = array32(&self.pop_string()?.to_bytes()).ok_or(VMError::MalformedTaprootProof)?;
         let internal_key = self.pop_value()?.to_point()?.to_compressed();
         let contract = self.pop_value()?.to_contract()?;
         self.current_call.charge_gas(GAS_POINT_DECOMPRESS)?;
@@ -2731,23 +2917,59 @@ impl VM {
             root,
             index,
         };
-        let bytes = contract.predicate.open_branch(
-            &proof,
-            &mut self.resolver(),
-            usize::try_from(gas).unwrap_or(usize::MAX),
-        )?;
-        let code_bytes = bytes.len();
-        let id = crate::script::script_cell(&bytes)?.id();
-        let code = if let Some(instructions) = self.script_witnesses.get(&id) {
-            if crate::string::compile_instructions(instructions) != bytes {
+        let root = contract
+            .predicate
+            .open_program(&proof, &mut self.resolver())?;
+        let id = root.id();
+        let program = Program::new(root.clone())?;
+        let code_bytes = program.len;
+        let instructions = if let Some(instructions) = self.script_witnesses.get(&id) {
+            if crate::script::instruction_cell(instructions)?.id() != id {
                 return Err(VMError::TaprootProofMismatch);
             }
-            Script::Transparent(instructions.clone())
+            Some(instructions.clone())
         } else {
-            Script::Opaque(bytes)
+            None
         };
         let child_anchor = self.split_anchor_for_call()?;
-        self.enter_contract_open_frame(contract, code, code_bytes, gas, args, child_anchor)?;
+        self.enter_contract_open_frame(
+            contract,
+            Script::Opaque(Vec::new()),
+            code_bytes,
+            gas,
+            args,
+            child_anchor,
+        )?;
+        self.current_call.code = None;
+        self.current_call.entry_program = Some(root);
+        self.current_call.program = Some(program);
+        self.current_call.instructions = instructions;
+        Ok(())
+    }
+
+    /// _cell_ **exec** is a tail transfer: only code cursors and Cell-local
+    /// labels change. Frame identity, escrow, stack and gas remain intact.
+    fn op_exec(&mut self) -> Result<(), VMError> {
+        let reference = self.pop_value()?.into_cell_ref()?;
+        let root = cells::read_cell(&mut self.resolver(), &reference)?;
+        let program = Program::new(root.as_ref().clone())?;
+        let id = root.id();
+        let instructions = self
+            .current_call
+            .private_scripts
+            .get(&id)
+            .or_else(|| self.script_witnesses.get(&id))
+            .cloned();
+        if let Some(instructions) = &instructions {
+            if crate::script::instruction_cell(instructions)?.id() != id {
+                return Err(VMError::TaprootProofMismatch);
+            }
+        }
+        self.current_call.program = Some(program);
+        self.current_call.instructions = instructions;
+        self.current_call.cursor = 0;
+        self.current_call.instruction_cursor = 0;
+        self.current_call.labels.clear();
         Ok(())
     }
 
@@ -2763,8 +2985,8 @@ impl VM {
         let gas = self.pop_gas_limit()?;
         // Debit the grant from the caller (see op_open).
         self.current_call.charge_gas(gas)?;
-        let sig_bytes = self.pop_value()?.to_string()?.to_bytes();
-        let prog_str = self.pop_value()?.to_string()?;
+        let sig_bytes = self.pop_string()?.to_bytes();
+        let prog_str = self.pop_string()?;
         let contract = self.pop_value()?.to_contract()?;
         if sig_bytes.len() != 64 {
             return Err(VMError::BadSignatureBytes);
@@ -2939,7 +3161,7 @@ impl VM {
         // re-entrant call into an actor that's mid-update lands here
         // too: its state is checked out, so `resolve_method` returns
         // `ActorEmpty` (ADR 0017 — the state is the re-entrancy lock).
-        let pre_frame: Result<(Vec<u8>, ActorID, u64, Arc<CellIndex>), VMError> = (|| {
+        let pre_frame: Result<(CallFrame, u64, Arc<CellIndex>), VMError> = (|| {
             if self.call_stack.len() >= MAX_CALL_DEPTH {
                 return Err(VMError::CallDepthExceeded);
             }
@@ -2957,10 +3179,18 @@ impl VM {
                 gas_used: &mut initial_gas,
                 gas_limit: gas,
             };
-            let script = registry.load_code_with_cells(&callee, &mut resolver)?;
-            Ok((script, caller, initial_gas, actor_cells))
+            let script = registry.load_program_with_cells(&callee, &mut resolver)?;
+            let frame = CallFrame::from_cell(
+                script,
+                CallKind::ActorCall {
+                    actor: callee.clone(),
+                    caller,
+                },
+                gas,
+            )?;
+            Ok((frame, initial_gas, actor_cells))
         })();
-        let (script, caller, initial_gas, actor_cells) = match pre_frame {
+        let (mut frame, initial_gas, actor_cells) = match pre_frame {
             Ok(v) => v,
             Err(error) => {
                 // Pre-frame failure (reentrancy, missing actor, etc.):
@@ -2990,15 +3220,7 @@ impl VM {
         // cursors so we can roll back if the child errors out.
         let callee_anchor = self.split_anchor_for_call()?;
 
-        let mut frame = CallFrame::from_bytecode(
-            script,
-            CallKind::ActorCall {
-                actor: callee,
-                caller,
-            },
-            gas,
-        )
-        .with_anchor(callee_anchor);
+        frame.anchor = Some(callee_anchor);
         frame.gas_used = initial_gas;
         frame.actor_cells = actor_cells;
         for v in args {
@@ -3090,7 +3312,7 @@ impl VM {
     fn op_setcode(&mut self, registry: Option<&mut dyn ActorRegistry>) -> Result<(), VMError> {
         let actor = ActorID::Hash(self.require_actor()?.to_hash());
         let registry = registry.ok_or(VMError::RegistryUnavailable)?;
-        let code_string = self.pop_value()?.to_string()?;
+        let code_string = self.pop_string()?;
         self.charge_alloc_bytes(code_string.len())?;
         let code = code_string.to_bytes();
         self.charge_alloc_bytes(code.len())?;
@@ -3371,7 +3593,7 @@ impl VM {
     /// witness is extracted directly.
     fn op_scalar(&mut self) -> Result<(), VMError> {
         self.require_external()?;
-        let s = self.pop_value()?.to_string()?;
+        let s = self.pop_string()?;
         let int = s.to_scalar()?;
         self.push_value(Value::Expression(Expression::constant(int)));
         Ok(())
@@ -3380,7 +3602,7 @@ impl VM {
     /// _s_ **commit** → _var_
     fn op_commit(&mut self) -> Result<(), VMError> {
         self.require_external()?;
-        let s = self.pop_value()?.to_string()?;
+        let s = self.pop_string()?;
         let commitment = s.to_commitment()?;
         let var = Variable { commitment };
         self.push_value(Value::Variable(var));
@@ -3551,8 +3773,8 @@ impl VM {
         let mut output_tokens: Vec<Token> = Vec::with_capacity(n);
         let mut cloak_outs: Vec<spacesuit::AllocatedValue> = Vec::with_capacity(n);
         for _ in 0..n {
-            let flv_str = self.pop_value()?.to_string()?;
-            let qty_str = self.pop_value()?.to_string()?;
+            let flv_str = self.pop_string()?;
+            let qty_str = self.pop_string()?;
             let flv_commit = flv_str.to_commitment()?;
             let qty_commit = qty_str.to_commitment()?;
             let token = Token::new(qty_commit, flv_commit);

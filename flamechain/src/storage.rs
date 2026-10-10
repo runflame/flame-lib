@@ -8,7 +8,10 @@ use cells::{
     CellReader, CellRef, CellSlice, Trie, read_cell,
 };
 
-use flamevm::{ActorID, ActorRegistry, Scalar, StoragePurchase, VMError, Value, empty_state};
+use flamevm::{
+    ActorID, ActorRegistry, Scalar, StoragePurchase, VMError, Value, code_cell, code_from_cell,
+    empty_state,
+};
 #[cfg(test)]
 use flamevm::{code_root, state_root};
 
@@ -210,11 +213,7 @@ fn collect_owned(
 impl LiveActor {
     fn retain_changes(&mut self) -> Result<(), CellError> {
         let code = match &self.code {
-            Some(code) => {
-                let mut builder = CellBuilder::new();
-                builder.store_snake(code)?;
-                CellRef::resident(builder.build())
-            }
+            Some(code) => CellRef::resident(code_cell(code)?),
             None => self.code_root.clone(),
         };
         let state = match &self.state {
@@ -767,16 +766,31 @@ impl ActorRegistry for ActorStore {
             return Err(VMError::ActorEmpty);
         }
         let cell = read_cell(cells, &live.code_root)?;
-        let mut slice = CellSlice::new(&cell);
-        let code = slice.load_snake(
+        let code = code_from_cell(
+            &cell,
             cells,
             usize::try_from(live.code_bytes).map_err(|_| VMError::StorageArithmeticOverflow)?,
         )?;
-        slice.finish()?;
         if code.len() as u64 != live.code_bytes {
             return Err(CellError::InvalidFormat.into());
         }
         Ok(code)
+    }
+
+    fn load_program_with_cells(
+        &self,
+        actor: &ActorID,
+        cells: &mut dyn CellReader,
+    ) -> Result<Cell, VMError> {
+        let live = self.require_live(actor.to_hash())?.live.as_ref().unwrap();
+        if self.checked_out.contains(&actor.to_hash()) {
+            return Err(VMError::ActorEmpty);
+        }
+        let cell = read_cell(cells, &live.code_root)?;
+        if cell.is_pruned() {
+            return Err(CellError::PrunedCell.into());
+        }
+        Ok(cell.as_ref().clone())
     }
 
     fn actor_cells(&self, actor: &ActorID) -> Result<Arc<CellIndex>, VMError> {
@@ -808,9 +822,7 @@ impl ActorRegistry for ActorStore {
         self.require_live(key)?;
         self.record_actor(key);
         let live = self.actors.get_mut(&key).unwrap().live.as_mut().unwrap();
-        let mut builder = CellBuilder::new();
-        builder.store_snake(&code)?;
-        live.code_root = CellRef::resident(builder.build()).to_unloaded();
+        live.code_root = CellRef::resident(code_cell(&code)?).to_unloaded();
         live.code_bytes = code.len() as u64;
         live.code = Some(code);
         live.retain_changes()?;
@@ -943,10 +955,8 @@ impl ActorRegistry for ActorStore {
             return Err(VMError::ActorAlreadyExists);
         }
         let state_bytes = Self::state_bytes(&state)?;
-        let mut builder = CellBuilder::new();
-        builder.store_snake(&code)?;
         let mut live = LiveActor {
-            code_root: CellRef::resident(builder.build()).to_unloaded(),
+            code_root: CellRef::resident(code_cell(&code)?).to_unloaded(),
             state_root: CellRef::resident(state.to_cell()?).to_unloaded(),
             code_bytes: code.len() as u64,
             code: Some(code),

@@ -95,11 +95,35 @@ impl Verifier {
         txbound_signature: Option<musig::Signature>,
         cells: &cells::CellIndex,
     ) -> Result<TxResult, VMError> {
+        let program = crate::script::script_cell(&bytecode)?;
+        Self::verify_cell_with_cells(
+            pc_gens,
+            program,
+            proof,
+            header,
+            gas_limit,
+            txbound_signature,
+            cells,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Executes the complete program Cell graph. Unlike flat bytecode, this
+    /// preserves the operands consumed by `pushcell` and the targets of `exec`.
+    pub fn verify_cell_with_cells(
+        pc_gens: &PedersenGens,
+        program: cells::Cell,
+        proof: &R1CSProof,
+        header: TxHeader,
+        gas_limit: u64,
+        txbound_signature: Option<musig::Signature>,
+        cells: &cells::CellIndex,
+    ) -> Result<TxResult, VMError> {
         let mut verifier = Verifier::new();
         // Verifier-side: stream the wire bytecode directly — decode one
         // instruction at a time, no `Vec<Instruction>`. See ADR 0015.
         let mut result =
-            VM::run_bytecode_with_cells(header, bytecode, gas_limit, &mut verifier, cells)?;
+            VM::run_program_with_cells(header, program, gas_limit, &mut verifier, cells)?;
         result.multiplications = result
             .multiplications
             .saturating_add(verifier.cs.metrics().multipliers);

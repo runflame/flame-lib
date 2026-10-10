@@ -10,380 +10,14 @@ fn s(bytes: &[u8]) -> String {
     String::from(bytes.to_vec())
 }
 
-#[test]
-fn string_literals_have_the_same_single_cell_limit_in_both_execution_paths() {
-    for transparent in [false, true] {
-        for len in [String::MAX_LEN, String::MAX_LEN + 1] {
-            let program = ScriptBuilder::new().push_str(String::from(vec![7; len]));
-            let mut vm = if transparent {
-                vm_with_script(program)
-            } else {
-                VM::new(
-                    dummy_header(),
-                    CallFrame::from_bytecode(
-                        program.to_bytecode(),
-                        CallKind::InternalRoot {
-                            actor: ActorID::Hash([0; 32]),
-                            caller: None,
-                        },
-                        1_000_000,
-                    ),
-                )
-            };
-            if len == String::MAX_LEN {
-                run_to_end(&mut vm).unwrap();
-                assert_str(&vm.current_call.stack[0], &vec![7; len]);
-            } else {
-                assert!(matches!(run_to_end(&mut vm), Err(VMError::StringTooLong)));
-                assert!(vm.current_call.stack.is_empty());
-            }
-        }
-    }
-    let bytes = ScriptBuilder::new()
-        .push_str(String::from(vec![7; String::MAX_LEN + 1]))
-        .to_bytecode();
-    assert!(matches!(
-        ScriptBuilder::parse(&bytes),
-        Err(VMError::StringTooLong)
-    ));
-}
-
-#[test]
-fn string_growth_and_transcript_reads_never_create_continuations() {
-    let full = || ScriptBuilder::new().push_str(String::from(vec![0; String::MAX_LEN]));
-    for program in [
-        full().push_str(s(&[1])).append(),
-        full().push_int(0u64).write_int(),
-        full().push_int(0u64).push_int(8u64).write_bits(),
-        full().push_int(1u64).write_zeros(),
-        full().push_int(u64::MAX).write_zeros(),
-        ScriptBuilder::new()
-            .push_str(s(b"test"))
-            .transcript()
-            .push_str(s(b"bytes"))
-            .push_int((String::MAX_LEN + 1) as u64)
-            .tread(),
-    ] {
-        let mut vm = vm_with_script(program);
-        assert!(matches!(run_to_end(&mut vm), Err(VMError::StringTooLong)));
-        assert!(vm.current_call.stack.iter().all(|value| {
-            !matches!(value, Value::String(string) if string.len() > String::MAX_LEN)
-        }));
-    }
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[]))
-            .push_int(String::MAX_LEN as u64)
-            .write_zeros(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_str(&vm.current_call.stack[0], &vec![0; String::MAX_LEN]);
-
-    assert!(matches!(
-        s(&[0]).append_zeros(usize::MAX),
-        Err(VMError::StringTooLong)
-    ));
-    assert!(matches!(
-        String::from(vec![0; String::MAX_LEN]).append_bytes(&[0]),
-        Err(VMError::StringTooLong)
-    ));
-}
-
-#[test]
-fn read_bits_n_zero_succeeds_and_yields_zero() {
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xaa, 0xbb]))
-            .push_int(0u64)
-            .read_bits()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_eq!(vm.current_call.stack.len(), 3);
-    assert_str(&vm.current_call.stack[0], &[0xaa, 0xbb]);
-    assert_int(&vm.current_call.stack[1], Scalar::ZERO);
-    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
-}
-
-#[test]
-fn read_bits_partial_byte_masks_high_bits() {
-    // Source byte: 0b1111_1111 = 0xff. Read 5 bits LSB-first → low 5 bits = 0b11111 = 31.
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xff, 0x00]))
-            .push_int(5u64)
-            .read_bits()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_str(&vm.current_call.stack[0], &[0x00]);
-    assert_int(&vm.current_call.stack[1], Scalar::from(31u64));
-    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
-}
-
-#[test]
-fn read_bits_too_short_preserves_string() {
-    // n=16 requires 2 bytes; only 1 available.
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xaa]))
-            .push_int(16u64)
-            .read_bits()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_eq!(vm.current_call.stack.len(), 2);
-    assert_str(&vm.current_call.stack[0], &[0xaa]);
-    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
-}
-
-#[test]
-fn read_bits_n_257_hard_fails() {
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0u8; 33]))
-            .push_int(257u64)
-            .read_bits()
-            .to_bytecode(),
-    );
-    assert!(matches!(
-        run_to_end(&mut vm).unwrap_err(),
-        VMError::IndexOutOfRange
-    ));
-}
-
-#[test]
-fn read_bits_near_order_count_hard_fails() {
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[]))
-            .push_int(-1i64)
-            .read_bits()
-            .to_bytecode(),
-    );
-    assert!(matches!(
-        run_to_end(&mut vm).unwrap_err(),
-        VMError::IndexOutOfRange
-    ));
-}
-
-/// Curve order ℓ itself is outside the canonical scalar interval [0, ℓ).
-const ELL_LE: [u8; 32] = [
-    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
-];
-
-#[test]
-fn read_bits_at_ell_soft_fails() {
-    // A scalar residue must be strictly less than ℓ.
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&ELL_LE))
-            .push_int(256u64)
-            .read_bits()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    // Soft-fail: original 32-byte string restored, marker = 0.
-    assert_eq!(vm.current_call.stack.len(), 2);
-    assert_str(&vm.current_call.stack[0], &ELL_LE);
-    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
-}
-
-#[test]
-fn read_bits_above_ell_soft_fails() {
-    // ℓ + 1: still non-canonical, must soft-fail.
-    let mut bytes = ELL_LE;
-    bytes[0] = bytes[0].wrapping_add(1);
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&bytes))
-            .push_int(256u64)
-            .read_bits()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_str(&vm.current_call.stack[0], &bytes);
-    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
-}
-
-#[test]
-fn read_bits_2pow255_soft_fails() {
-    // Reading all 256 bits must reject 2^255, which exceeds ℓ.
-    let mut bytes = [0u8; 32];
-    bytes[31] = 0x80;
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&bytes))
-            .push_int(256u64)
-            .read_bits()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_str(&vm.current_call.stack[0], &bytes);
-    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
-}
-
-#[test]
-fn read_bits_roundtrip_small_residues_at_various_n() {
-    let cases: &[(usize, u64)] = &[
-        (1, 1),
-        (8, 0xab),
-        (64, 0x0123_4567_89ab_cdef),
-        (252, 0xdead_beef_cafe_babe),
-        (253, 0xfeed_face_0123_4567),
-        (255, 0x5555_5555_5555_5555),
-        (256, 0x7fff_ffff_ffff_ffff),
-    ];
-    for (n, v) in cases.iter().copied() {
-        let value = Scalar::from(v);
-        let bytes = writebits_bytes(&value, n);
-        let mut vm = vm_with_script(
-            ScriptBuilder::new()
-                .push_str(s(&bytes))
-                .push_int(n as u64)
-                .read_bits()
-                .to_bytecode(),
-        );
-        run_to_end(&mut vm).unwrap_or_else(|e| panic!("n={} v={} err={:?}", n, v, e));
-        assert_int(&vm.current_call.stack[1], value);
-        assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
-        assert_str(&vm.current_call.stack[0], &[]);
-    }
-}
-
-#[test]
-fn read_bits_roundtrip_near_order_at_n_253_and_256() {
-    let value = Scalar::from(-12345i64);
-    let bytes = value.to_bytes();
-    for n in [253u64, 256] {
-        let mut vm = vm_with_script(
-            ScriptBuilder::new()
-                .push_str(s(&bytes))
-                .push_int(n)
-                .read_bits()
-                .to_bytecode(),
-        );
-        run_to_end(&mut vm).unwrap();
-        assert_int(&vm.current_call.stack[1], value);
-        assert_int(&vm.current_call.stack[2], Scalar::ONE);
-    }
-}
-
-#[test]
-fn read_int_one_roundtrip() {
-    let value = Scalar::from(1u64);
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&value.to_bytes()))
-            .read_int()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[1], value);
-    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
-}
-
-#[test]
-fn read_int_near_order_roundtrip() {
-    let value = Scalar::from(-12345i64);
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&value.to_bytes()))
-            .read_int()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[1], value);
-}
-
-#[test]
-fn read_int_zero_roundtrip() {
-    let value = Scalar::ZERO;
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&value.to_bytes()))
-            .read_int()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[1], value);
-}
-
-#[test]
-fn read_int_max_canonical_residue_roundtrip() {
-    // ℓ − 1 is the largest canonical residue.
-    let mut ell_minus_1 = ELL_LE;
-    ell_minus_1[0] = 0xec;
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&ell_minus_1))
-            .read_int()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    match &vm.current_call.stack[1] {
-        Value::Scalar(i) => assert_eq!(i.to_bytes(), ell_minus_1),
-        other => panic!("expected Scalar, got {}", value_kind(other)),
-    }
-    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
-}
-
-#[test]
-fn read_int_too_short_preserves_string() {
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xaa; 31]))
-            .read_int()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_eq!(vm.current_call.stack.len(), 2);
-    assert_str(&vm.current_call.stack[0], &[0xaa; 31]);
-    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
-}
-
-#[test]
-fn read_int_at_ell_soft_fails() {
-    let bytes = ELL_LE;
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&bytes))
-            .read_int()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_str(&vm.current_call.stack[0], &bytes);
-    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
-}
-
-#[test]
-fn read_str_success() {
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[1, 2, 3, 4, 5]))
-            .push_int(2u64)
-            .read_str()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_str(&vm.current_call.stack[0], &[3, 4, 5]);
-    assert_str(&vm.current_call.stack[1], &[1, 2]);
-    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
-}
-
-#[test]
-fn read_str_too_short_preserves() {
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[1]))
-            .push_int(5u64)
-            .read_str()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_str(&vm.current_call.stack[0], &[1]);
-    assert_int(&vm.current_call.stack[1], Scalar::from(0u64));
+fn builder_bytes(bytes: &[u8]) -> ScriptBuilder {
+    ScriptBuilder::new()
+        .push_str(s(bytes))
+        .slice()
+        .builder()
+        .append_bytes()
+        .roll_k(1)
+        .drop_()
 }
 
 #[test]
@@ -418,145 +52,6 @@ fn read_point_too_short() {
 }
 
 #[test]
-fn write_bits_full_byte() {
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xaa]))
-            .push_int(0xabu64)
-            .push_int(8u64)
-            .write_bits()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_str(&vm.current_call.stack[0], &[0xaa, 0xab]);
-}
-
-#[test]
-fn write_bits_non_aligned_hard_fails() {
-    // n=5 is not a multiple of 8 → hard-fail with BitCountOutOfRange.
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[]))
-            .push_int(0xffu64)
-            .push_int(5u64)
-            .write_bits()
-            .to_bytecode(),
-    );
-    assert!(matches!(
-        run_to_end(&mut vm).unwrap_err(),
-        VMError::BitCountOutOfRange
-    ));
-}
-
-#[test]
-fn write_bits_n_zero_is_noop() {
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xaa]))
-            .push_int(7u64)
-            .push_int(0u64)
-            .write_bits()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_str(&vm.current_call.stack[0], &[0xaa]);
-}
-
-#[test]
-fn write_bits_n_257_hard_fails() {
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[]))
-            .push_int(7u64)
-            .push_int(257u64)
-            .write_bits()
-            .to_bytecode(),
-    );
-    assert!(matches!(
-        run_to_end(&mut vm).unwrap_err(),
-        VMError::IndexOutOfRange
-    ));
-}
-
-#[test]
-fn write_then_read_bits_roundtrip_small_residues() {
-    let cases: &[(usize, u64)] = &[
-        (8, 0xab),
-        (64, 0x0123_4567_89ab_cdef),
-        (256, 0x7fff_ffff_ffff_ffff),
-    ];
-    for (n, v) in cases.iter().copied() {
-        // writebits requires n to be a multiple of 8.
-        let value = Scalar::from(v);
-        let mut vm = vm_with_script(
-            ScriptBuilder::new()
-                .push_str(s(&[]))
-                .push_int(v)
-                .push_int(n as u64)
-                .write_bits()
-                .push_int(n as u64)
-                .read_bits()
-                .to_bytecode(),
-        );
-        run_to_end(&mut vm).unwrap_or_else(|e| panic!("n={} v={} err={:?}", n, v, e));
-        assert_str(&vm.current_call.stack[0], &[]);
-        assert_int(&vm.current_call.stack[1], value);
-        assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
-    }
-}
-
-#[test]
-fn write_then_read_bits_roundtrip_near_order_n_256() {
-    let value = Scalar::from(-12345i64);
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[]))
-            .push_int(value)
-            .push_int(256u64)
-            .write_bits()
-            .push_int(256u64)
-            .read_bits()
-            .to_bytecode(),
-    );
-    run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[1], value);
-    assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
-}
-
-#[test]
-fn write_then_read_int_roundtrip_residue_extremes() {
-    let mut ell_minus_1 = ELL_LE;
-    ell_minus_1[0] = 0xec;
-    let values: Vec<Scalar> = vec![
-        Scalar::from(1u64),
-        Scalar::from(-12345i64),
-        Scalar::from_bytes(ell_minus_1).unwrap(),
-        Scalar::from(u128::MAX) + Scalar::ONE,
-        -(Scalar::from(u128::MAX) + Scalar::ONE),
-        Scalar::ZERO,
-        Scalar::from(0xdead_beef_cafe_babe_u64),
-    ];
-    for v in values {
-        let mut vm = vm_with_script(
-            ScriptBuilder::new()
-                .push_str(s(&[]))
-                .push_int(v)
-                .write_int()
-                .read_int()
-                .to_bytecode(),
-        );
-        run_to_end(&mut vm).unwrap_or_else(|e| panic!("value={:?} err={:?}", v, e));
-        match &vm.current_call.stack[1] {
-            Value::Scalar(i) => {
-                assert_eq!(i.to_bytes(), v.to_bytes(), "roundtrip differed for {:?}", v)
-            }
-            other => panic!("expected Scalar, got {}", value_kind(other)),
-        }
-        assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
-    }
-}
-
-#[test]
 fn write_zeros_appends_n_zero_bytes() {
     let mut vm = vm_with_script(
         ScriptBuilder::new()
@@ -571,12 +66,7 @@ fn write_zeros_appends_n_zero_bytes() {
 
 #[test]
 fn bit_not_inverts() {
-    let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0x00, 0xff, 0xa5]))
-            .bit_not()
-            .to_bytecode(),
-    );
+    let mut vm = vm_with_script(builder_bytes(&[0x00, 0xff, 0xa5]).bit_not().to_bytecode());
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[0xff, 0x00, 0x5a]);
 }
@@ -584,8 +74,7 @@ fn bit_not_inverts() {
 #[test]
 fn bit_or_basic() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xa0, 0x0f]))
+        builder_bytes(&[0xa0, 0x0f])
             .push_str(s(&[0x05, 0xf0]))
             .bit_or()
             .to_bytecode(),
@@ -597,8 +86,7 @@ fn bit_or_basic() {
 #[test]
 fn bit_and_basic() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xff, 0xf0]))
+        builder_bytes(&[0xff, 0xf0])
             .push_str(s(&[0xa5, 0xa5]))
             .bit_and()
             .to_bytecode(),
@@ -610,8 +98,7 @@ fn bit_and_basic() {
 #[test]
 fn bit_xor_basic() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xff, 0x00]))
+        builder_bytes(&[0xff, 0x00])
             .push_str(s(&[0xa5, 0xa5]))
             .bit_xor()
             .to_bytecode(),
@@ -623,8 +110,7 @@ fn bit_xor_basic() {
 #[test]
 fn bit_or_size_mismatch_errors() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xa0]))
+        builder_bytes(&[0xa0])
             .push_str(s(&[0x05, 0xf0]))
             .bit_or()
             .to_bytecode(),
@@ -638,78 +124,67 @@ fn bit_or_size_mismatch_errors() {
 #[test]
 fn shift_left_by_byte() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xa0, 0xb1, 0xc2, 0xd3]))
+        builder_bytes(&[0xa0, 0xb1, 0xc2, 0xd3])
             .push_int(8u64)
             .shift_left()
             .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[0xb1, 0xc2, 0xd3, 0x00]);
-    assert_str(&vm.current_call.stack[1], &[0xa0]);
 }
 
 #[test]
-fn shift_left_by_4_bits_left_pads_removed() {
+fn shift_left_by_4_bits_discards_removed() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xab]))
+        builder_bytes(&[0xab])
             .push_int(4u64)
             .shift_left()
             .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[0xb0]);
-    assert_str(&vm.current_call.stack[1], &[0x0a]);
 }
 
 #[test]
 fn shift_left_zero_is_noop() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xab, 0xcd]))
+        builder_bytes(&[0xab, 0xcd])
             .push_int(0u64)
             .shift_left()
             .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[0xab, 0xcd]);
-    assert_str(&vm.current_call.stack[1], &[]);
 }
 
 #[test]
 fn shift_right_by_byte() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xa0, 0xb1, 0xc2, 0xd3]))
+        builder_bytes(&[0xa0, 0xb1, 0xc2, 0xd3])
             .push_int(8u64)
             .shift_right()
             .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[0x00, 0xa0, 0xb1, 0xc2]);
-    assert_str(&vm.current_call.stack[1], &[0xd3]);
 }
 
 #[test]
-fn shift_right_by_4_bits_right_pads_removed() {
+fn shift_right_by_4_bits_discards_removed() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xab]))
+        builder_bytes(&[0xab])
             .push_int(4u64)
             .shift_right()
             .to_bytecode(),
     );
     run_to_end(&mut vm).unwrap();
     assert_str(&vm.current_call.stack[0], &[0x0a]);
-    assert_str(&vm.current_call.stack[1], &[0xb0]);
 }
 
 #[test]
 fn shift_too_large_errors() {
     let mut vm = vm_with_script(
-        ScriptBuilder::new()
-            .push_str(s(&[0xab]))
+        builder_bytes(&[0xab])
             .push_int(257u64) // > 256
             .shift_left()
             .to_bytecode(),

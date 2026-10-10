@@ -67,8 +67,9 @@ impl<'g> Prover<'g> {
     /// proof fails.
     ///
     /// Returns the full [`TxResult`]: `proof = Some(...)`,
-    /// `bytecode = program.to_bytecode()` (the verifier walks the
-    /// same bytes), `txid` / `txlog` / `total_fee` etc. populated.
+    /// `program` retains the complete native graph. `bytecode` is a legacy
+    /// compatibility view, not a standalone graph; use Cell-based verification.
+    /// `txid` / `txlog` / `total_fee` etc. are populated.
     pub fn prove(
         pc_gens: &'g PedersenGens,
         program: ScriptBuilder,

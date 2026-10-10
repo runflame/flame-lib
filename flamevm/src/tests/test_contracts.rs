@@ -198,7 +198,7 @@ fn taproot_program_larger_than_runtime_string_opens_through_cells() {
     let branch = branch.push_int(0u64).return_().to_bytecode();
     assert!(branch.len() > String::MAX_LEN);
 
-    // The program is a Snake-backed predicate leaf, never a runtime String
+    // The program is a Cell-backed predicate with explicit exec continuations, not a String
     // literal. Only its short root/index selector appears in the outer code.
     let tree = PredicateTree::scripts_only(vec![branch], TEST_BLINDING_KEY).unwrap();
     let proof = test_taproot_proof(&tree, 0).unwrap();

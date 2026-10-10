@@ -154,10 +154,12 @@ limit and contributes to the block's external-gas total. Direct send grants
 contribute instead to the block's internal-gas total. Nested sends are not
 counted again: they partition gas already granted to their ancestor message.
 
-**Script size limit:** counts canonical external-transaction script bytes, both
+**Script size limit:** currently counts the external root code Cell's payload, both
 per transaction and across a block. Dynamically loaded actor code is persistent
 state and its execution/allocation work is charged in gas; it is not counted a
-second time as external witness script.
+second time as external witness script. Additional code/literal Cells are bounded
+by total transport bytes and execution gas; graph-aware script-size policy remains
+an explicit follow-up in [the plan](plan.md).
 
 **Multiplications limit:** `TxMetrics.multiplications` is the exact number of
 Bulletproofs multiplication gates in the final constraint system, including
@@ -220,6 +222,9 @@ droppable, but non-copyable pure-computation values may be droppable too.
 | Type | Copyable | Droppable | Portable |
 | --- | --- | --- | --- |
 | Scalar, String, Point | yes | yes | yes |
+| Cell (raw serialized data) | yes | yes | yes |
+| Slice | yes | yes | no |
+| Builder | no | yes | no |
 | Dict | no | empty or sticky flag | sticky flag |
 | Token | no | no | yes |
 | ClearToken | no | quantity is zero | centered quantity is non-negative |
@@ -264,6 +269,7 @@ Implemented generic `Value` Cell encodings:
 | Point | 3 | compressed Ristretto:32 |
 | Token | 4 | qty commitment:32, flavor commitment:32 |
 | ClearToken | 6 | qty Scalar:32, flavor Scalar:32 |
+| Cell | 13 | one raw serialized Cell reference |
 
 Other Value tags are rejected. An expected concrete type does not repeat a tag.
 See [Data encoding](encoding.md) for the complete Cell layouts.
@@ -272,6 +278,8 @@ Stack-only types (non-portable and without an implemented `Value` encoding):
 
 | Type | Description |
 | --- | --- |
+| Slice | Owned shared Cell and independent byte/ref cursors; copyable and droppable. |
+| Builder | Mutable payload/ref buffers; non-copyable, droppable; finalized into a Cell. |
 | Contract | Linear contract handle. `Contract` has its own top-level encoding, but `Value::Contract` has no generic value tag. |
 | WideToken | Possibly-negative encrypted token tied to the current constraint system. |
 | Merlin | Mutable transcript state tied to the current execution. |
@@ -314,7 +322,8 @@ it does not make invalid points usable.
 The compact **instruction** grammar is separate from data encoding.
 `pushint` still chooses the smallest operand width, and label numbers retain
 their offset sub-varint encoding. These instruction bytes are carried inside
-snake-encoded script Cells.
+raw executable Cell payloads, without a length prefix. Each frame consumes
+bytes and literal references independently; `exec` changes the current Cell.
 
 Utreexo is outside this migration: its accumulator, paths, hashing, and legacy
 `merkle`/`readerwriter` codecs remain unchanged. Outer block transport merely
@@ -373,14 +382,17 @@ bytecode must be regenerated or explicitly migrated before using this format.
 
 Binary byte-aligned strings of 0..4095 bytes (`String::MAX_LEN`).
 
-The runtime String type and its opcodes remain temporarily; replacing String
-with a Cell value is a later change. Its canonical encoding is one payload-only
+The runtime String type and its opcodes remain temporarily alongside Cell
+handles. Literal loading and selected byte/ref reads and writes now use Cells, Slices and
+Builders. Replacing its other operations is deferred.
+Its canonical encoding is one payload-only
 Cell: raw bytes, no length prefix, no references, no snake continuation. Strings
 can hold bounded data, short programs, signatures, and hashes. Schema-defined
-program/blob fields can still use multi-Cell snakes independently of this
-runtime limit. Other types can be parsed from strings.
+blob fields may use multi-Cell Snakes independently of this runtime limit;
+programs instead use explicit `pushcell exec` continuation. Other types can be parsed from strings.
 
-Each string acts as a builder and a reader.
+New byte/ref reads use Slice and writes use Builder; String remains only for
+unmigrated operations and host-side witness compatibility.
 
 Literal parsing and VM growth reject results over the limit with
 `StringTooLong` before allocating them. Witness-bearing Strings obey the same
@@ -390,7 +402,7 @@ limit on their public bytes, before witness serialization.
 
 - `StringWitness::Point(Point)` — point-shaped witness; the inner [`Point`](#point) is `Opaque`, `Commitment(Open(value, blinding))` (used before `commit`, `scalar`, `expr`), or `Predicate(p)` (used before `signtx`, `signcall`, `contract`, `output`).
 - `StringWitness::Scalar(scalar)` — used before `scalar`.
-- `StringWitness::Script(instructions)` — bounded inline programs used before `run` / `switch` / `signcall`; predicate-branch overlays are supplied separately.
+- `StringWitness::Script(instructions)` — bounded compatibility source programs used before `signcall`; predicate-branch overlays are supplied separately.
 - `StringWitness::Contract(c)` — used before `input`, carrying open commitments on Token payloads.
 
 The verifier sees `String::Opaque(bytes)`. Atomic point/scalar downcasts preserve the same public bytes. A Contract witness emits only its 32-byte ContractID; ScriptBuilder collects its public Cell bodies and keeps private openings separately. `input` must resolve the authenticated public path before restoring private atomic witnesses. Predicate programs likewise use authenticated Cell paths; a private script overlay may only replace matching public bytecode.
@@ -507,12 +519,12 @@ An actor is **`(code, state)`**:
 
 Each actor is identified by a unique Actor ID derived from its constructor
 script. `Hash(h)` and `Constructor(bytes)` route to the same registry key when
-`h = code_root(bytes)`, so the identity commits to the initial code's snake
+`h = code_root(bytes)`, so the identity commits to the initial executable
 Cell. Their expected ActorID Cell layouts are distinct:
 
 ```text
 Hash(h)            = payload: 0x00 || h[32]; refs: none
-Constructor(code)  = payload: 0x01; refs: [snake(code)]
+Constructor(code)  = payload: 0x01; refs: [program Cell]
 ```
 
 The constructor form carries the code needed for deployment; the hash form is
@@ -637,7 +649,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 |     | **Stack**  | | | |
 | 0k | [push:k](#pushk-and-friends) | | ø → scalar | Push a small literal scalar 0–15 inline. |
 | 10–18 | [pushint8/16/64/128 \[s\], pushint](#pushk-and-friends) | | ø → scalar | Push a scalar with a canonical width-class payload. |
-| 19 | [pushstr](#pushstr) | | ø → str | Push a literal byte string with a length prefix. |
+| 19 | Reserved | | | Former pushstr; native execution rejects it. |
 | 1a | [pushpoint](#pushpoint) | | ø → point | Push a literal 32-byte Ristretto point. |
 | 1b | [pushtoken](#pushtoken) | | flv → token | Mint a zero-qty `ClearToken` of the given flavor (placeholder). |
 | 1c | [drop](#drop) | | x → ø | Discard a droppable value off the top of the stack. |
@@ -647,20 +659,22 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 2k | [dup:k](#dupk) | | x\_k … x\_0 → x\_k … x\_0 x\_k | One-byte `dup` with `k` ∈ 0..=15 baked into the opcode. |
 | 3k | [roll:k](#rollk) | | x\_k … x\_0 → x\_{k-1} … x\_0 x\_k | One-byte `roll` with `k` ∈ 0..=15 baked into the opcode. |
 |    |  **String**  | | | |
-| 40 | [readbits](#readbits) | | s n → s' x 1 \| s 0 | Pull `n` bits off the head of a string as a scalar (soft-fail if short). |
-| 41 | [readint](#readint) | | s → s' x 1 \| s 0 | Pull a canonical 32-byte scalar off the head of a string. |
-| 42 | [readstr](#readstr) | | s n → s' s'' 1 \| s 0 | Pull `n` bytes off the head of a string as a substring. |
+| 40 | [readuint](#readuint) | | s n → s' x 1 \| s 0 | Read 0..32 bytes from a Slice as a canonical LE Scalar. |
+| 41 | [readscalar](#readscalar) | | s → s' x 1 \| s 0 | Read a full canonical 32-byte LE Scalar from a Slice. |
+| 42 | [readbytes](#readbytes) | | s b n → s' b' 1 \| s b 0 | Copy N Slice bytes into a Builder; overflow hard-fails. |
 | 43 | [readpoint](#readpoint) | | s → s' p 1 \| s 0 | Pull a 32-byte Ristretto point off the head of a string. |
-| 44 | [writebits](#writebits) | | s x n → s' | Append the low `n` bits of `x` to a string. |
-| 45 | [writeint](#writeint) | | s x → s' | Append the canonical 32-byte form of `x` to a string. |
-| 46 | [append](#append) | | s s' → s'' | Concatenate two strings. |
+| 44 | [writeuint](#writeuint) | | b x n → b' | Write the low 0..32 bytes of a Scalar into a Builder. |
+| 45 | [writescalar](#writescalar) | | b x → b' | Write the full canonical 32-byte LE Scalar into a Builder. |
+| 46 | [appendbytes](#appendbytes) | | s b → s' b' | Append all unread bytes; preserve unread refs. |
 | 47 | [writezeros](#writezeros) | | s n → s' | Append `n` zero-bytes to a string. |
-| 48 | [bitnot](#bitnot) | | s → s' | Invert every bit of a string (length preserved). |
-| 49 | [bitor](#bitor) | | a b → c | Bitwise OR of two equal-length strings. |
-| 4a | [bitand](#bitand) | | a b → c | Bitwise AND of two equal-length strings. |
-| 4b | [bitxor](#bitxor) | | a b → c | Bitwise XOR of two equal-length strings. |
-| 4c | [shiftleft](#shiftleft) | | a n → b c | Shift a string left by `n` bits; `c` carries the displaced high bits. |
-| 4d | [shiftright](#shiftright) | | a n → b c | Shift a string right by `n` bits; `c` carries the displaced low bits. |
+| 48 | [bitnot](#bitnot) | | b → b' | Invert Builder payload bytes in place; preserve refs. |
+| 49 | [bitor](#bitor) | | b s → b' | OR Builder bytes with Cell/Slice payload bytes of equal length. |
+| 4a | [bitand](#bitand) | | b s → b' | AND Builder bytes with Cell/Slice payload bytes of equal length. |
+| 4b | [bitxor](#bitxor) | | b s → b' | XOR Builder bytes with Cell/Slice payload bytes of equal length. |
+| 4c | [shiftleft](#shiftleft) | | b n → b' | Shift Builder payload bits left in place, discarding displaced bits. |
+| 4d | [shiftright](#shiftright) | | b n → b' | Shift Builder payload bits right in place, discarding displaced bits. |
+| 4e | [appendrefs](#appendrefs) | | s b → s' b' | Append all unread refs without loading children; preserve unread bytes. |
+| 4f | [builder](#builder) | | ø → b | Create an empty Builder. |
 |    | **Math & logic**  | | | |
 | 50 | [abs](#abs) | | x → \|x\| s | Push the centered magnitude and derived sign (`s` ∈ {0,1}). |
 | 51 | [eq](#eq) | | a b → a b {0\|1} or constraint | Equality test — cleartext peek, or lifted Constraint in the CS. |
@@ -672,7 +686,7 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 57 | [not](#not) | | x → y | Logical NOT for scalars; structural negation for Constraints. |
 | 58 | [and](#and) | | a b → c | Logical AND for scalars; lifts to Constraint conjunction in CS. |
 | 59 | [or](#or) | | a b → c | Logical OR for scalars; lifts to Constraint disjunction in CS. |
-| 5a | [size](#size) | | x → x n | Push length of a String / entry count of a Dict (peek). |
+| 5a | [size](#size) | | x → x n | Cell payload bytes, Slice unread bytes, Builder used bytes, or Dict entries. |
 |    | **Constraints**  | | | |
 | 60 | [scalar](#scalar) | ext. | s → expr | Lift a 32-byte scalar string to a constant Expression. |
 | 61 | [commit](#commit) | ext. | s → var | Wrap a 32-byte Pedersen-commitment point as a CS Variable. |
@@ -693,11 +707,12 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | 80 | [transcript](#transcript) | | label → merlin | Open a new Merlin transcript seeded with `label`. |
 | 81 | [twrite](#twrite) | | m label s → m | Append a labeled byte string to a transcript. |
 | 82 | [tread](#tread) | | m label n → m s | Challenge `n` bytes from a transcript under `label`. |
-| 83 | [sha256](#sha256) | | s → x | 32-byte SHA-256 digest. |
-| 84 | [sha512](#sha512) | | s → x | 64-byte SHA-512 digest. |
-| 85 | [sha3](#sha3) | | s → x | 32-byte SHA3-256 (FIPS-202) digest. |
-| 86 | [keccak256](#keccak256) | | s → x | 32-byte Keccak-256 digest (Ethereum compatibility). |
-| 87 | [log](#log) | | s → ø | Emit a byte string as a data entry into the transaction log. |
+| 83 | [sha256](#sha256) | | s b → b' | Append a 32-byte SHA-256 payload digest into the provided Builder. |
+| 84 | [sha512](#sha512) | | s b → b' | Append a 64-byte SHA-512 payload digest into the provided Builder. |
+| 85 | [sha3](#sha3) | | s b → b' | Append a 32-byte SHA3-256 payload digest into the provided Builder. |
+| 86 | [keccak256](#keccak256) | | s b → b' | Append a 32-byte Keccak-256 payload digest into the provided Builder. |
+| 87 | [log](#log) | | s / cell → ø | Emit a String or payload-only Cell as a transaction-log data entry. |
+| 88 | [cellhash](#cellhash) | | c level b → b' | Append the cached Cell hash at an explicit level; no body read. |
 |    | **Tokens** | | | |
 | 90 | [amount](#amount) | | t → t qty flv | Peek the quantity and flavor of a token without consuming it. |
 | 91 | [issuepriv](#issuepriv) | pred.ext. | qty tag → T | Mint a confidential token under the current predicate's identity + `tag`. |
@@ -718,6 +733,10 @@ Each instruction is a one-byte **opcode** optionally followed by **immediate dat
 | a3 | [jumpif](#jumpif) | | x → ø | Pop a scalar; jump to a label iff non-zero (operand: label number). |
 | a4 | [return](#return) | | a\_{k-1} … a\_0 k → ø | Exit current call frame, returning `k` items to the parent. |
 | a5 | [type](#type) | | x → x code | Push the type code of the top value (peek). |
+| a6 | [pushcell](#pushcell) | | ø → cell | Consume the next reference from the current program Cell. |
+| a7 | [exec](#exec) | | cell → ø | Replace the current program Cell, preserving this frame. |
+| a8 | [slice](#slice) | | c → s | Resolve an ordinary Cell and create an owned Slice. |
+| a9 | [endcell](#endcell) | | b → c | Finalize a Builder, computing its Cell hashes. |
 |    | **Contracts & predicates** | | | |
 | c0 | [input](#input) | ext. | id → contract | Resolve a Utreexo-validated ContractID through the execution witness hierarchy. |
 | c1 | [contract](#contract) | | payload pred → contract | Lock one portable Value under the predicate. |
@@ -774,9 +793,9 @@ Canonical failure-shape vectors (stack order is bottom-to-top):
 
 | Opcode and absent/failing input | Output stack | Consumed on zero branch |
 | --- | --- | --- |
-| `readbits`: `String(aa), 16` | `String(aa), 0` | count |
-| `readint`: `String(aa×31)` | `String(aa×31), 0` | nothing else |
-| `readstr`: `String(01), 5` | `String(01), 0` | count |
+| `readuint`: `Slice(aa), 2` | `Slice(aa), 0` | count |
+| `readscalar`: `Slice(aa×31)` | `Slice(aa×31), 0` | nothing else |
+| `readbytes`: `Slice(01), Builder(), 5` | `Slice(01), Builder(), 0` | count |
 | `readpoint`: `String(00×31)` | `String(00×31), 0` | nothing else |
 | `replace`: `{ }, 5, 7` (no prior value) | `{5: 7}, 0` | key and new value enter the Dict |
 | `getopt`: `{ }, 5` | `{ }, 0` | key |
@@ -813,13 +832,42 @@ The decoder rejects values that fit a narrower class, including full-width
 values with a compact modular-negation form. Zero has only the immediate
 encoding; the negating compact forms do not admit a second encoding for it.
 
-### pushstr
+### pushcell
 
-ø → _string_
+ø → _cell_
 
-Reads a sub-varint length prefix + payload bytes; pushes them as a [String](#string).
-The bytecode length prefix is not part of the String's Cell encoding. A complete
-literal longer than 4095 bytes hard-fails `StringTooLong` before allocation.
+Consumes the next reference from the current program Cell and pushes a raw
+Cell handle. It does not load the referenced body. Missing refs hard-fail
+`InsufficientReferences`. Handles are copyable through `dup` and `getdup`,
+portable and droppable: encoded data is not authority to create bearer assets.
+Backing immutable allocations are shared, not copied. Neither the current
+program nor its consuming cursors are exposed on the stack.
+
+The byte and reference cursors are independent. Jump scans do not execute
+`pushcell`, and backward jumps do not rewind the reference cursor. Code that
+executes `pushcell` again consumes a further ref or fails; it cannot duplicate
+an already consumed reference by looping.
+
+### exec
+
+_cell_ → ø
+
+Resolves the supplied Cell through the current read context, checks its full
+commitment, and replaces this frame's program. Starts at byte/ref offset zero
+with an empty Cell-local label table. Abandons unread bytes and refs in the old
+program; those are serialized data, not live stack assets.
+
+The stack, caller/actor identity, external/internal permissions, anchor, gas
+budget, call depth and failure escrow are unchanged. `return` still returns
+from the original call. Missing/pruned targets and gas exhaustion use that
+call's ordinary failure rollback and argument recovery; root failures reject
+the transaction. Resident and unloaded targets pay the same read charge.
+
+Thus `pushcell exec` is explicit continuation. No program length prefix, Snake
+decoder, implicit child traversal or new call frame is involved. The builder
+packs straight-line programs at instruction boundaries and emits this pair.
+It rejects automatic splitting of labeled programs: labels cannot span Cells.
+The transaction commits its original program graph, not the last Cell executed.
 
 ### pushpoint
 
@@ -875,56 +923,100 @@ _x\_k … x\_0_ → _x\_{k-1} … x\_0 x\_k_
 
 Immediate-encoded `roll` with `k ∈ 0..=15` taken from the low nibble of the opcode byte (`0x3k`). One-byte equivalent of `pushint8 k; roll`. Same bounds rules as `roll`.
 
-## String instructions
+## Cell byte/reference instructions
 
-**Failure principle.** Insufficient source bytes and noncanonical scalar residues are **soft fails**. Invalid operation parameters (e.g. `n > 256`) and exceeding String's 4095-byte limit are **hard fails**. `writebits`, `writeint`, `append`, and `writezeros` check prospective growth before allocation and fail with `StringTooLong` if it would exceed the limit.
+A Slice owns shared immutable data and independent byte/reference cursors; a
+Builder owns mutable payload/reference buffers. Neither is portable. Cells and
+Slices are copyable with ordinary `dup`; Builders are not. All three are
+droppable plain serialization data, not authority to instantiate bearer assets.
 
-### readbits
+### builder
+
+ø → _b_
+
+Creates an empty Builder. Payload capacity is 4095 bytes and reference capacity
+is four. Ordinary writes never spill or implicitly descend into another Cell.
+
+### slice
+
+_c_ → _s_
+
+Resolves the Cell body in the current metered context and creates an owned Slice
+at byte/ref offsets zero. Missing bodies or explicit pruning hard-fail.
+
+### endcell
+
+_b_ → _c_
+
+Consumes the Builder and computes its ordinary Cell and all significant hashes.
+Finalization precharges a conservative bound for all sixteen possible hashes.
+
+### readuint
 
 _s n_ → _s' x 1_ | _s 0_
 
-Reads `n ≤ 256` bits **LSB-first within each byte** into bits `0..n-1` of a fresh
-`Scalar`, with all higher bits zero. The resulting unsigned residue must be
-strictly less than ℓ; no input bit is interpreted as a sign.
+Reads `0..=32` whole bytes as an unsigned little-endian canonical Scalar.
+Zero bytes produce zero. Short input or an integer at least the scalar order
+soft-fails without advancing either cursor. Invalid counts hard-fail.
+No masking of partial bytes and no modular reduction occur.
 
-Soft-fails on insufficient bytes or a residue ≥ ℓ (reachable only when
-`n ≥ 253`). A count outside `[0, 256]` hard-fails `IndexOutOfRange`.
-
-### readint
+### readscalar
 
 _s_ → _s' x 1_ | _s 0_
 
-Equivalent to `readbits(s, 256)`. Reads the canonical 32-byte little-endian `Scalar` residue. Soft-fail conditions match `readbits`.
+Equivalent to `32 readuint`: read the full canonical 32-byte LE Scalar.
 
-### readstr
+### readbytes
 
-_s n_ → _s' s'' 1_ | _s 0_
+_s b n_ → _s' b' 1_ | _s b 0_
 
-Reads `n` bytes into a new String, consuming them from `s`. Soft-fails if `s` has fewer than `n` bytes.
+Copies exactly N unread bytes into the Builder. Short input restores both
+operands and yields zero. Builder overflow hard-fails. Only the byte cursor
+advances; unread references remain accessible.
+
+### writeuint
+
+_b x n_ → _b'_
+
+Appends the first `0..=32` bytes of the Scalar's canonical LE representation.
+Selected low bytes are truncated, not fit-checked. Invalid counts or capacity
+overflow hard-fail; precharge copying before mutation.
+
+### writescalar
+
+_b x_ → _b'_
+
+Equivalent to `32 writeuint`: append the full canonical 32-byte LE Scalar.
+
+### appendbytes
+
+_s b_ → _s' b'_
+
+Appends all remaining Slice payload bytes, exhausts its byte cursor, and preserves
+its reference cursor. Capacity overflow hard-fails without partial mutation.
+
+### appendrefs
+
+_s b_ → _s' b'_
+
+Appends all remaining Slice references, exhausts its reference cursor, and
+preserves its byte cursor. Child bodies are not resolved. Check the complete
+reference capacity and every child's depth metadata before mutation.
+
+### Remaining byte/String instructions
+
+Their migration is undecided. They accept ordinary zero-ref Cells through a
+metered byte adapter as well as temporary String Values, and may return Strings.
+The host `push_str` helper now compiles a child Cell and `pushcell`; 0x19 is only
+a compatibility source marker for byte-only host APIs, never a native opcode.
+Private witnesses remain outside public Cell bytes. Load loop/branch constants
+once and duplicate them: program reference cursors do not rewind on jumps.
 
 ### readpoint
 
 _s_ → _s' p 1_ | _s 0_
 
 Reads 32 bytes as a [Point](#point). Soft-fail on insufficient bytes.
-
-### writebits
-
-_s x n_ → _s'_
-
-Appends the low `n` bits of `x`'s canonical 32-byte residue as bytes (LSB-first). `n` must be a multiple of 8 and `≤ 256`. A count outside `[0, 256]` hard-fails `IndexOutOfRange`; a non-byte-aligned count hard-fails `BitCountOutOfRange`.
-
-### writeint
-
-_s x_ → _s'_
-
-Equivalent to `writebits(s, x, 256)`. Appends the canonical 32-byte little-endian residue.
-
-### append
-
-_s s'_ → _s''_
-
-Concatenates: `s'' = s || s'`.
 
 ### writezeros
 
@@ -934,39 +1026,31 @@ Appends `n` zero-bytes.
 
 ### bitnot
 
-_s_ → _s'_
+_b_ → _b'_
 
-Inverts every bit of `s`. Output length matches input.
+Invert every Builder payload byte in place. Preserve payload length, capacity
+and child references; do not allocate a replacement buffer.
 
-### bitor
+### bitor / bitand / bitxor
 
-_a b_ → _c_
+_b s_ → _b'_
 
-Bitwise OR of two strings. Operands must have the same length — mismatch hard-fails `BitwiseSizeMismatch`.
+Combine the Builder payload in place with an equal-length Cell payload or
+Slice's unread bytes. A Cell body is resolved through the current metered
+context; a Slice does not move its cursors. The source operand is consumed.
+Builder sources are not accepted. Source refs must be zero (or already consumed
+on a Slice), preventing implicit loss of an unrelated reference stream.
+Mismatch hard-fails `BitwiseSizeMismatch`. Destination refs are preserved.
 
-### bitand
+### shiftleft / shiftright
 
-_a b_ → _c_
+_b n_ → _b'_
 
-Bitwise AND of two strings. Same length rule and failure mode as [`bitor`](#bitor).
-
-### bitxor
-
-_a b_ → _c_
-
-Bitwise XOR of two strings. Same length rule and failure mode as [`bitor`](#bitor).
-
-### shiftleft
-
-_a n_ → _b c_
-
-Shifts bits of `a` left by `n ≤ 256`. `b` has the same length as `a`; `c` carries the displaced bits as a zero-padded-left string of `ceil(n/8)` bytes. A count outside `[0, 256]` hard-fails `IndexOutOfRange`. Byte 0 is most significant.
-
-### shiftright
-
-_a n_ → _b c_
-
-Mirror of `shiftleft`; displaced low-end bits land in `c` zero-padded on the right.
+Shift the Builder's fixed-length payload as a big-endian bit string (byte zero
+is most significant), for `0..=256` bits. Discard displaced bits and fill the
+vacated positions with zero. A shift at least the payload bit length produces
+all zeroes. Payload length/capacity and references do not change. Invalid
+counts hard-fail `IndexOutOfRange`; charge linear byte work before mutation.
 
 ## Arithmetic & logic instructions
 
@@ -985,7 +1069,7 @@ _a b_ **eq** → _a b {0|1}_ (cleartext) | → _constraint_ (CS branch)
 
 Two stack diagrams depending on operand types and context:
 
-1. **Cleartext branch.** When neither operand is a CS type (`Variable` / `Expression`), or in internal context, peeks at the top two values and pushes `1` if equal or `0` otherwise. Operands stay on the stack. Equality is type-aware via `Value::try_eq`: `Scalar` / `String` / `Point` compare by value; **same-variant `Dict` and all linear types (`Token`, `ClearToken`, `Contract`, …) hard-fail `TypeNotComparable`** (linear values have no equality; Dicts would cost unbounded recursion).
+1. **Cleartext branch.** When neither operand is a CS type (`Variable` / `Expression`), or in internal context, peeks at the top two values and pushes `1` if equal or `0` otherwise. Operands stay on the stack. `Scalar` / `String` / `Point` compare by value. Any Cell/Slice/Builder pair compares by factual (highest-level) hash: Cells use the cached ID, Slices hash only their unread bytes and refs as an ordinary Cell, and Builders hash their current bytes and refs without finalizing or copying their payload buffers. Child bodies are not loaded for hashing, and private annotations are ignored. Explicit pruning changes factual identity; use `cellhash` at the intended level for semantic comparison. During migration a String can equal its zero-ref byte Cell. **Dict and all linear types (`Token`, `ClearToken`, `Contract`, …) hard-fail `TypeNotComparable`** when compared with the same type.
 2. **Lifted branch.** When at least one operand is `Expression` or `Variable` *and* the context is external, both operands are popped, lifted to `Expression` (Scalar → `Expression::Constant`), and the result is `Constraint::eq(a, b)`.
 
 ### neg
@@ -1113,11 +1197,10 @@ an Expression in internal context hard-fails `ExternalOnly`.
 
 _x_ → _x n_
 
-Peeks at the top value and pushes its length: byte count for `String`, entry count for `Dict`. Hard-fails `TypeHasNoLength` for other types. Available in both contexts (CS-system grouping is for byte adjacency).
-
-## Dict instructions
-
-[Dict](#dict) keys are always `Scalar`; values may be any [Value](#types). Insertion updates the Dict's sticky capability flags; portability is enforced only when the Dict crosses a storage or transfer boundary.
+Peek the Cell's own payload byte count, a Slice's unread byte count, a Builder's
+used byte count, or a Dict's entry count. References and descendant payloads are
+not counted. A Cell body must resolve and be non-pruned. String and other types
+hard-fail `TypeHasNoLength`; the inspected value stays on the stack.
 
 ### dict
 
@@ -1184,35 +1267,47 @@ _merlin label n_ → _merlin s_
 
 Challenges `n` bytes under `label`; pushes the result as a String.
 
-### sha256
+### sha256 / sha512 / sha3 / keccak256
 
-_s_ → _x_
+_s b_ → _b'_
 
-Returns a 32-byte SHA-256 digest.
+Hash the source payload bytes and append the digest to the provided Builder,
+preserving its existing payload prefix and refs. Source may be a Cell, Slice,
+or Builder. A Slice hashes only its unread bytes; a Builder hashes all its
+current payload bytes. The source is consumed. Source refs must be zero;
+ordinary Cell bodies must be available and unpruned. These are byte digests,
+not Cell commitments: no descriptors, refs, level hashes or depths are included.
 
-### sha512
+SHA-256, SHA3-256 (FIPS-202), and Keccak-256 produce 32 bytes; SHA-512 produces
+64 bytes. SHA3-256 and Keccak-256 are distinct. Capacity overflow hard-fails
+before digest allocation or destination mutation. Charge hashing work and
+digest storage before computing the result.
 
-_s_ → _x_
+### cellhash
 
-Returns a 64-byte SHA-512 digest.
+_c level b_ → _b'_
 
-### sha3
+Append the Cell's cached 32-byte SHA256 commitment at `level` (`0..=15`) to the
+provided Builder. No body is loaded, so unloaded and explicit pruned handles
+can supply their commitments. Levels above the Cell's highest significant level
+alias its highest hash. Invalid counts and insufficient destination capacity
+hard-fail. Lower hashes are claims until authenticated against an expected root.
 
-_s_ → _x_
-
-Returns a 32-byte SHA3-256 (FIPS-202) digest. Distinct from [`keccak256`](#keccak256).
-
-### keccak256
-
-_s_ → _x_
-
-Returns a 32-byte Keccak-256 digest (Ethereum compatibility). Distinct from [`sha3`](#sha3) (FIPS-202).
+For example, two partial trees may share their level-zero hashes while their
+factual IDs differ. Explicitly append the desired hashes into Builders and
+compare those Builders with `eq`; `eq` itself never chooses a lower level.
 
 ### log
 
 _s_ → ø
 
-Pops a String and emits `TxEntry::Data(bytes)` into the txlog. It is visible to the outer verifier and does not occupy persistent storage. Witness-bearing String variants serialize via `to_bytes` so prover and verifier emit identical bytes.
+Pops a String or a payload-only, non-pruned Cell and emits `TxEntry::Data(bytes)`
+into the txlog. It is visible to the outer verifier and does not occupy
+persistent storage. Witness-bearing Strings serialize via `to_bytes`; Cells
+resolve through the metered read context before their payload is copied.
+Refs are not silently ignored: a Cell containing refs fails `InvalidFormat`.
+This permits `pushcell log` to publish all 4095 payload bytes without putting a
+large String operand into the instruction stream.
 
 ## Token instructions
 
@@ -1234,7 +1329,7 @@ The current_predicate is the predicate stored on the enclosing `CallKind::Contra
 
 `Scalar` or `Point` operands hard-fail `TypeNotVariable` — lift to a `Variable` via [`commit`](#commit) first.
 
-**Non-fungible tokens.** Mix the contract's [`anchor`](#anchor) into `tag` (e.g. `anchor … keccak256` against domain bytes) to derive a fresh flavor per issuance — the result is a non-fungible Token, since no other issuance will share the flavor. Use [`issueprivflv`](#issueprivflv) on the consumer side to recompute the same flavor scalar for verification.
+**Non-fungible tokens.** Mix the contract's [`anchor`](#anchor) into `tag` (e.g. `anchor … builder keccak256 endcell` against domain bytes) to derive a fresh flavor per issuance — the result is a non-fungible Token, since no other issuance will share the flavor. Use [`issueprivflv`](#issueprivflv) on the consumer side to recompute the same flavor scalar for verification.
 
 ### issueprivflv
 
@@ -1320,14 +1415,13 @@ External execution appends the two opening equations to the transaction's random
 
 ## Control-flow instructions
 
-Control flow is structured-by-convention over a flat instruction stream:
+Control flow is structured-by-convention within the current program Cell:
 `label`/`jump`/`jumpif` carry a **label number**, not an offset, so bytecode
-is written without computing positions and the prover and a future streaming
-verifier resolve labels in their own cursor space (instruction index vs byte
-offset — see the design). The high-level builder (`build_if` / `build_while` /
+is written without computing positions. Prover and verifier use byte offsets;
+the prover additionally tracks a private-instruction overlay. The high-level builder (`build_if` / `build_while` /
 `build_loop` / `build_switch` / `build_break` / `build_continue`) emits these
 with a running label counter and forward-jump backpatching. Code only ever
-executes by becoming a CallFrame — there is no inline `run`; see
+enters through a CallFrame or replaces its code via `exec`; there is no inline `run`; see
 [`open`](#open) / [`signcall`](#signcall) / [`call`](#call).
 
 ### verify
@@ -1352,7 +1446,7 @@ Hard-fails: `FeeQtyNegative`, `FeeTooHigh` (per-arg or aggregate overflow), `Typ
 ø → ø — operand: label number (sub-varint)
 
 Marks a jump target. Each CallFrame keeps a `labels` array of positions
-(instruction index on the prover; byte offset on a streaming verifier), built
+(byte offset plus the prover's overlay index), built
 lazily as labels are reached. Labels must appear in strictly sequential order
 — 0, 1, 2, … — so the array is indexed directly by label number. On reaching
 `label N`:
@@ -1363,8 +1457,8 @@ lazily as labels are reached. Labels must appear in strictly sequential order
   hard-fails `LabelOutOfOrder`.
 - `N > labels.len()` → hard-fails `LabelOutOfOrder` (gap / out of order).
 
-Labels are frame-local: an opened/called sub-program numbers from 0 in its
-own frame.
+Labels are Cell-local within a frame: opened/called programs start from zero,
+and `exec` discards the old label table and starts a fresh scope.
 
 ### jump
 
@@ -1420,7 +1514,8 @@ Pushes the type code of the top value as `Scalar`, leaving the value on the stac
 | 3 | Point | 10 | Expression |
 | 4 | Token | 11 | Constraint |
 | 5 | WideToken | 12 | MultiscalarMul |
-| 6 | ClearToken | | |
+| 6 | ClearToken | 13 | Cell |
+| 14 | Slice | 15 | Builder |
 
 ### Contract, actor, and send instructions
 
@@ -1469,9 +1564,10 @@ _{results… k' 1 | contract args… k 0}_
 Pops the explicit argument count and portable arguments, gas grant, branch
 index (u64 Scalar), root ID (32-byte String), internal key (Point), and Contract.
 Checks the tweaked-key relation `P = X + h(X, root_id)·B`, resolves the
-program at that index through the predicate's Cell Trie, and reads its snake
-bytes. There are no sibling hashes, position bits, or caller-supplied public
-program bytes. Private program instructions must compile to the resolved bytes.
+program at that index through the predicate's Cell Trie, and enters its raw
+program Cell. There are no sibling hashes, position bits, or caller-supplied public
+program bytes. Private program instructions and operand refs must compile to
+the authenticated Cell ID. Child program Cells are loaded only when `exec` runs.
 `root_id` is the raw eight-byte-key Trie root; there is no intermediate
 count-envelope Cell. Lookup validates the visited path without relying on
 or scanning a total program count.
@@ -1508,7 +1604,7 @@ _args… k refund gas addr_ → ø
 Asynchronous message-send. Pops operands top-first:
 
 1. `addr` (String) — a bare 32-byte hash or a CellEnvelope for ActorID.
-   The constructor variant has a reference to its snake-encoded code.
+   The constructor variant has a reference to its native executable code.
 2. `gas` (`Scalar`) — gas allotment.
 3. `refund` (32-byte String) — bounce predicate point.
 4. `k` (`Scalar`) — args count.

@@ -96,6 +96,71 @@ impl Cell {
         &self,
         resolver: &mut R,
     ) -> Result<Vec<u8>, CellError> {
+        let records = self.resolved_graph(resolver)?;
+        let mut indexes = BTreeMap::new();
+        let mut bytes = Vec::new();
+        put_var(
+            u64::try_from(records.len()).map_err(|_| CellError::CellCountOverflow)?,
+            &mut bytes,
+        );
+        for (i, cell) in records.iter().enumerate() {
+            let descriptor = if cell.is_pruned() {
+                0x8000 | cell.level_mask()
+            } else {
+                cell.payload().len() as u16 | ((cell.refs().len() as u16) << 12)
+            };
+            bytes.extend_from_slice(&descriptor.to_le_bytes());
+            bytes.extend_from_slice(cell.payload());
+            for reference in cell.refs() {
+                let child = indexes
+                    .get(&reference.id())
+                    .copied()
+                    .ok_or(CellError::InvalidFormat)?;
+                put_var((i - child) as u64, &mut bytes);
+            }
+            indexes.insert(cell.id(), i);
+        }
+        Ok(bytes)
+    }
+
+    /// Restores resident refs for a complete supplied graph. Explicit pruning
+    /// records remain cuts; missing ordinary bodies are errors. For transport
+    /// boundaries, not implicit traversal during VM execution.
+    pub fn load_graph<R: CellReader + ?Sized>(&self, reader: &mut R) -> Result<Self, CellError> {
+        let mut resident = BTreeMap::<_, Arc<Cell>>::new();
+        for cell in self.resolved_graph(reader)? {
+            let ready = cell.refs().iter().all(|reference| {
+                reference
+                    .as_resident_arc()
+                    .is_some_and(|child| Arc::ptr_eq(child, &resident[&reference.id()]))
+            });
+            let full = if ready {
+                cell.clone()
+            } else {
+                Arc::new(Cell::new(
+                    cell.payload().to_vec(),
+                    cell.refs()
+                        .iter()
+                        .map(|reference| CellRef::resident(resident[&reference.id()].clone()))
+                        .collect(),
+                )?)
+            };
+            if full.commitment() != cell.commitment() {
+                return Err(CellError::InvalidFormat);
+            }
+            resident.insert(cell.id(), full);
+        }
+        Ok(resident
+            .remove(&self.id())
+            .expect("ordered graph contains root")
+            .as_ref()
+            .clone())
+    }
+
+    fn resolved_graph<R: CellReader + ?Sized>(
+        &self,
+        resolver: &mut R,
+    ) -> Result<Vec<Arc<Cell>>, CellError> {
         // Union resident frontiers before traversal: two references may carry
         // rich and detached views of the same child, in either reference order.
         let mut attached = BTreeMap::new();
@@ -126,37 +191,13 @@ impl Cell {
                 self.fallback.read(id, self.attached.get(&id).or(resident))
             }
         }
-        let records = ordered(
+        ordered(
             Arc::new(self.clone()),
             &mut EncodingCells {
                 attached,
                 fallback: resolver,
             },
-        )?;
-        let mut indexes = BTreeMap::new();
-        let mut bytes = Vec::new();
-        put_var(
-            u64::try_from(records.len()).map_err(|_| CellError::CellCountOverflow)?,
-            &mut bytes,
-        );
-        for (i, cell) in records.iter().enumerate() {
-            let descriptor = if cell.is_pruned() {
-                0x8000 | cell.level_mask()
-            } else {
-                cell.payload().len() as u16 | ((cell.refs().len() as u16) << 12)
-            };
-            bytes.extend_from_slice(&descriptor.to_le_bytes());
-            bytes.extend_from_slice(cell.payload());
-            for reference in cell.refs() {
-                let child = indexes
-                    .get(&reference.id())
-                    .copied()
-                    .ok_or(CellError::InvalidFormat)?;
-                put_var((i - child) as u64, &mut bytes);
-            }
-            indexes.insert(cell.id(), i);
-        }
-        Ok(bytes)
+        )
     }
 
     /// Decodes one bounded, canonical rooted DAG. Its root is the final record.
@@ -316,6 +357,31 @@ mod tests {
         let poor = rich.detached();
         let root = Cell::new(vec![3], vec![poor.into(), rich.into()]).unwrap();
         assert_eq!(decode(&root.encode().unwrap()).unwrap().id(), root.id());
+    }
+
+    #[test]
+    fn load_graph_reuses_resident_nodes_and_restores_detached_refs() {
+        let child = leaf(9);
+        let root = Cell::new(vec![1], vec![child.clone().into()]).unwrap();
+        let resident = root.load_graph(&mut ()).unwrap();
+        assert_eq!(resident.payload().as_ptr(), root.payload().as_ptr());
+        assert_eq!(
+            resident.refs()[0].as_resident().unwrap().payload().as_ptr(),
+            child.payload().as_ptr()
+        );
+        let mut bodies = crate::CellIndex::collect(Arc::new(root.clone())).unwrap();
+        let restored = root.detached().load_graph(&mut bodies).unwrap();
+        assert_eq!(restored.commitment(), root.commitment());
+        assert!(restored.refs()[0].as_resident().is_some());
+        assert!(matches!(
+            root.detached().load_graph(&mut ()),
+            Err(CellError::MissingCell(_))
+        ));
+        let cut = child.prune(1).unwrap();
+        let proof = Cell::new(vec![1], vec![cut.into()]).unwrap();
+        let restored = proof.load_graph(&mut ()).unwrap();
+        assert!(restored.refs()[0].as_resident().unwrap().is_pruned());
+        assert_eq!(restored.id(), proof.id());
     }
 
     #[test]

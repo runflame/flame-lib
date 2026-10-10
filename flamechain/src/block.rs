@@ -870,6 +870,7 @@ impl Blockchain {
             records.push(record);
             // Finish this external transaction's complete FIFO message closure
             // before advancing; every descendant sees only this execution Cell hierarchy.
+            let execution_cells = block_tx.tx.execution_cells()?;
             while let Some(message) = sends.pop_front() {
                 if message_count >= self.params.limits.max_messages {
                     return Err(ChainError::LimitExceeded);
@@ -883,7 +884,7 @@ impl Blockchain {
                 let staged = match message.execute_tx_with_cells(
                     &mut self.actors,
                     &context,
-                    Arc::clone(&block_tx.tx.witnesses),
+                    Arc::clone(&execution_cells),
                 ) {
                     Ok(result) => self
                         .actors

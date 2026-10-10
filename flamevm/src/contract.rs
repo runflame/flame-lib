@@ -48,7 +48,7 @@ impl fmt::Debug for Predicate {
 /// The sum tag distinguishes executable programs from random blinding data.
 #[derive(Clone, Debug)]
 pub enum PredicateLeaf {
-    Program(Vec<u8>),
+    Program(cells::Cell),
     Blinding([u8; 32]),
 }
 
@@ -56,7 +56,7 @@ impl CellEncode for PredicateLeaf {
     fn encode(&self, builder: &mut CellBuilder) -> Result<(), CellError> {
         match self {
             Self::Program(program) => {
-                builder.store_u8(0)?.store_snake(program)?;
+                builder.store_u8(0)?.store_ref(program.clone().into())?;
             }
             Self::Blinding(bytes) => {
                 builder.store_u8(1)?.store_bytes(bytes)?;
@@ -141,6 +141,20 @@ impl Predicate {
         cells: &mut R,
         max_program_bytes: usize,
     ) -> Result<Vec<u8>, VMError> {
+        let program = self.open_program(proof, cells)?;
+        if program.payload().len() > max_program_bytes {
+            return Err(CellError::LimitExceeded.into());
+        }
+        Ok(program.payload().to_vec())
+    }
+
+    /// Authenticates and returns the program Cell, preserving its operand
+    /// references. Execution consumes its Snake payload and refs directly.
+    pub fn open_program<R: CellReader + ?Sized>(
+        &self,
+        proof: &TaprootProof,
+        cells: &mut R,
+    ) -> Result<cells::Cell, VMError> {
         let internal = proof
             .internal_key
             .decompress()
@@ -155,9 +169,12 @@ impl Predicate {
         if slice.load_u8()? != 0 {
             return Err(VMError::TaprootProofMismatch);
         }
-        let program = slice.load_snake(cells, max_program_bytes)?;
+        let program = cells::read_cell(cells, &slice.load_ref()?)?;
         slice.finish()?;
-        Ok(program)
+        if program.is_pruned() {
+            return Err(CellError::PrunedCell.into());
+        }
+        Ok(program.as_ref().clone())
     }
 }
 
@@ -184,6 +201,19 @@ impl PredicateTree {
     pub fn new(
         internal_key: Option<CompressedRistretto>,
         programs: Vec<Vec<u8>>,
+        blinding_key: [u8; 32],
+    ) -> Result<Self, VMError> {
+        let programs = programs
+            .iter()
+            .map(|program| crate::script::script_cell(program))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_cells(internal_key, programs, blinding_key)
+    }
+
+    /// Builds predicates directly from complete executable Cell graphs.
+    pub fn from_cells(
+        internal_key: Option<CompressedRistretto>,
+        programs: Vec<cells::Cell>,
         blinding_key: [u8; 32],
     ) -> Result<Self, VMError> {
         if programs.is_empty() {
@@ -217,11 +247,11 @@ impl PredicateTree {
         programs: Vec<ScriptBuilder>,
         blinding_key: [u8; 32],
     ) -> Result<Self, VMError> {
-        let mut tree = Self::new(
-            internal_key,
-            programs.iter().map(ScriptBuilder::to_bytecode).collect(),
-            blinding_key,
-        )?;
+        let public_programs = programs
+            .iter()
+            .map(ScriptBuilder::to_cell)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut tree = Self::from_cells(internal_key, public_programs, blinding_key)?;
         tree.scripts = programs;
         Ok(tree)
     }
@@ -240,9 +270,9 @@ impl PredicateTree {
         &self.leaves
     }
 
-    pub fn programs(&self) -> impl Iterator<Item = &[u8]> {
+    pub fn programs(&self) -> impl Iterator<Item = &cells::Cell> {
         self.leaves.iter().filter_map(|leaf| match leaf {
-            PredicateLeaf::Program(program) => Some(program.as_slice()),
+            PredicateLeaf::Program(program) => Some(program),
             PredicateLeaf::Blinding(_) => None,
         })
     }
@@ -271,7 +301,8 @@ impl PredicateTree {
         })
     }
 
-    /// Records only Cells read to open this program, including snake overflow.
+    /// Records the selected path and resident program graph, including explicit
+    /// continuations. Unselected predicate branches remain unavailable.
     /// Unused program/blinding bodies remain unloaded in the returned witness bag.
     pub fn witness_for(&self, program_index: usize) -> Result<(TaprootProof, CellIndex), VMError> {
         let proof = self.taproot_proof_for(program_index)?;
@@ -279,7 +310,10 @@ impl PredicateTree {
             root: &self.root,
             recorded: CellIndex::new(),
         };
-        Predicate::opaque(self.point).open_branch(&proof, &mut recorder, u32::MAX as usize)?;
+        let program = Predicate::opaque(self.point).open_program(&proof, &mut recorder)?;
+        recorder
+            .recorded
+            .extend(&CellIndex::collect(Arc::new(program))?)?;
         Ok((proof, recorder.recorded))
     }
 }
@@ -306,12 +340,12 @@ impl CellReader for BranchRecorder<'_> {
     }
 }
 
-fn create_blinded_leaves(programs: &[Vec<u8>], blinding_key: &[u8; 32]) -> Vec<PredicateLeaf> {
+fn create_blinded_leaves(programs: &[cells::Cell], blinding_key: &[u8; 32]) -> Vec<PredicateLeaf> {
     let mut transcript = Transcript::new(b"flamevm.taproot.blinding");
     transcript.append_message(b"n", &(programs.len() as u64).to_le_bytes());
     transcript.append_message(b"key", blinding_key);
     for program in programs {
-        transcript.append_message(b"prog", program);
+        transcript.append_message(b"prog", &program.id());
     }
     let mut leaves = Vec::with_capacity(programs.len() * 2);
     for program in programs {
@@ -529,11 +563,12 @@ mod tests {
         );
         let predicate = Predicate::opaque(tree.point);
         let (proof, mut bag) = tree.witness_for(1).unwrap();
+        let program = predicate.open_program(&proof, &mut bag).unwrap();
         assert_eq!(
-            predicate.open_branch(&proof, &mut bag, 20_000).unwrap(),
+            crate::code_from_cell(&program, &mut bag, 20_000).unwrap(),
             programs[1]
         );
-        assert!(predicate.open_branch(&proof, &mut bag, 19_999).is_err());
+        assert!(crate::code_from_cell(&program, &mut bag, 19_999).is_err());
         assert!(predicate
             .open_branch(&proof, &mut CellIndex::new(), 20_000)
             .is_err());

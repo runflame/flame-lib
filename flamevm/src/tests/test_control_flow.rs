@@ -340,6 +340,7 @@ fn allocation_gas_trips_on_pushstr_append_and_tread() {
     let s = run_metered(
         ScriptBuilder::new()
             .push_str(String::from(vec![7u8; 60]))
+            .slice()
             .to_bytecode(),
         50,
     );
@@ -353,10 +354,11 @@ fn allocation_gas_trips_on_pushstr_append_and_tread() {
     let s = run_metered(
         ScriptBuilder::new()
             .push_str(String::from(vec![1u8; 40]))
-            .push_str(String::from(vec![2u8; 40]))
-            .append()
+            .slice()
+            .builder()
+            .append_bytes()
             .to_bytecode(),
-        100,
+        70,
     );
     assert!(
         matches!(s.unwrap_err(), VMError::OutOfGas),
@@ -545,12 +547,12 @@ fn type_pushes_scalar_code() {
 }
 
 #[test]
-fn type_pushes_string_code() {
+fn type_pushes_cell_code() {
     let mut script = pushstr_bytes(&[]); // empty string
     script.push(0xa5); // type
     let mut vm = vm_with_script(script);
     run_to_end(&mut vm).unwrap();
-    assert_int(&vm.current_call.stack[1], Scalar::from(1u64));
+    assert_int(&vm.current_call.stack[1], Scalar::from(13u64));
 }
 
 #[test]
