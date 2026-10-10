@@ -78,8 +78,6 @@ impl CellCommitment {
 pub enum CellRef {
     Resident(Arc<Cell>),
     Unloaded(Arc<CellCommitment>),
-    /// Lookup handle only: resolve it before storing it in a Cell.
-    Unresolved(CellID),
 }
 impl From<Cell> for CellRef {
     fn from(cell: Cell) -> Self {
@@ -95,25 +93,20 @@ impl CellRef {
     pub fn resident(cell: impl Into<Arc<Cell>>) -> Self {
         Self::Resident(cell.into())
     }
-    pub fn unresolved(id: CellID) -> Self {
-        Self::Unresolved(id)
-    }
     pub fn id(&self) -> CellID {
         match self {
             Self::Resident(cell) => cell.id(),
             Self::Unloaded(commitment) => commitment.id(),
-            Self::Unresolved(id) => *id,
         }
     }
-    pub fn commitment(&self) -> Result<&CellCommitment, CellError> {
+    pub fn commitment(&self) -> &CellCommitment {
         match self {
-            Self::Resident(cell) => Ok(cell.commitment()),
-            Self::Unloaded(commitment) => Ok(commitment),
-            Self::Unresolved(id) => Err(CellError::MissingCellMetadata(*id)),
+            Self::Resident(cell) => cell.commitment(),
+            Self::Unloaded(commitment) => commitment,
         }
     }
     pub fn validate_child(&self) -> Result<(), CellError> {
-        if self.commitment()?.depths.contains(&u16::MAX) {
+        if self.commitment().depths.contains(&u16::MAX) {
             return Err(CellError::DepthOverflow);
         }
         Ok(())
@@ -130,10 +123,10 @@ impl CellRef {
             _ => None,
         }
     }
-    pub fn to_unloaded(&self) -> Result<Self, CellError> {
+    pub fn to_unloaded(&self) -> Self {
         match self {
-            Self::Unloaded(_) => Ok(self.clone()),
-            _ => Ok(Self::Unloaded(Arc::new(self.commitment()?.clone()))),
+            Self::Unloaded(_) => self.clone(),
+            Self::Resident(_) => Self::Unloaded(Arc::new(self.commitment().clone())),
         }
     }
 }
@@ -184,14 +177,14 @@ impl Cell {
         let mut mask = 0;
         for reference in &refs {
             reference.validate_child()?;
-            mask |= reference.commitment()?.mask;
+            mask |= reference.commitment().mask;
         }
         let mut hashes = Vec::with_capacity(mask.count_ones() as usize + 1);
         let mut depths = Vec::with_capacity(hashes.capacity());
         for level in significant_levels(mask) {
             let mut depth = 0;
             for reference in &refs {
-                depth = depth.max(reference.commitment()?.depth(level)? + 1);
+                depth = depth.max(reference.commitment().depth(level)? + 1);
             }
             let preimage = ordinary_preimage(&payload, &refs, mask, level, hashes.last())?;
             hashes.push(Sha256::digest(preimage).into());
@@ -282,11 +275,7 @@ impl Cell {
             data: Arc::new(CellData {
                 pruned: self.is_pruned(),
                 payload: self.payload().into(),
-                refs: self
-                    .refs()
-                    .iter()
-                    .map(|r| r.to_unloaded().expect("validated Cell reference"))
-                    .collect(),
+                refs: self.refs().iter().map(|r| r.to_unloaded()).collect(),
                 commitment: self.commitment().clone(),
             }),
         }
@@ -323,11 +312,7 @@ impl Cell {
             + self
                 .refs()
                 .iter()
-                .map(|r| {
-                    r.commitment()
-                        .expect("validated Cell reference")
-                        .encoded_size()
-                })
+                .map(|r| r.commitment().encoded_size())
                 .sum::<usize>()
     }
     fn descriptor(&self) -> u16 {
@@ -344,10 +329,7 @@ impl Cell {
         bytes.extend_from_slice(&self.descriptor().to_le_bytes());
         bytes.extend_from_slice(self.payload());
         for reference in self.refs() {
-            reference
-                .commitment()
-                .expect("validated Cell reference")
-                .encode(&mut bytes);
+            reference.commitment().encode(&mut bytes);
         }
         bytes
     }
@@ -446,7 +428,7 @@ impl CellView {
         Ok(self.cell.refs().len())
     }
     /// Resolve by factual ID, validate all commitments, then inherit the cap.
-    pub fn reference<R: CellResolver + ?Sized>(
+    pub fn reference<R: CellReader + ?Sized>(
         &self,
         index: usize,
         resolver: &mut R,
@@ -457,7 +439,7 @@ impl CellView {
             .refs()
             .get(index)
             .ok_or(CellError::InsufficientReferences)?;
-        let cell = resolve_cell(resolver, reference)?;
+        let cell = read_cell(resolver, reference)?;
         Ok(Self {
             cell: cell.as_ref().clone(),
             level: self.level,
@@ -511,10 +493,10 @@ fn ordinary_preimage(
     bytes.extend_from_slice(&apply_mask(mask, level).to_le_bytes());
     bytes.extend_from_slice(previous.map_or(payload, |hash| hash.as_slice()));
     for reference in refs {
-        bytes.extend_from_slice(&reference.commitment()?.depth(level)?.to_le_bytes());
+        bytes.extend_from_slice(&reference.commitment().depth(level)?.to_le_bytes());
     }
     for reference in refs {
-        bytes.extend_from_slice(&reference.commitment()?.hash(level)?);
+        bytes.extend_from_slice(&reference.commitment().hash(level)?);
     }
     Ok(bytes)
 }
@@ -554,34 +536,63 @@ fn take<'a>(input: &mut &'a [u8], len: usize) -> Result<&'a [u8], CellError> {
     Ok(head)
 }
 
-/// Called for resident accesses too, so callers can meter logical accesses.
+/// ID-only lookup in the caller's permitted storage/witness scope.
 pub trait CellResolver {
-    fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError>;
+    fn resolve(&mut self, id: CellID) -> Result<Arc<Cell>, CellError>;
 }
-pub fn resolve_cell<R: CellResolver + ?Sized>(
-    resolver: &mut R,
-    reference: &CellRef,
+
+/// Common access path, including resident reads. Contexts meter and record here,
+/// not in the storage lookup, so cached bodies cannot bypass logical costs.
+pub trait CellReader {
+    fn read(&mut self, id: CellID, resident: Option<&Arc<Cell>>) -> Result<Arc<Cell>, CellError>;
+}
+
+impl<R: CellResolver + ?Sized> CellReader for R {
+    fn read(&mut self, id: CellID, resident: Option<&Arc<Cell>>) -> Result<Arc<Cell>, CellError> {
+        match resident {
+            Some(cell) => Ok(Arc::clone(cell)),
+            None => self.resolve(id),
+        }
+    }
+}
+
+fn read_checked<R: CellReader + ?Sized>(
+    reader: &mut R,
+    id: CellID,
+    resident: Option<&Arc<Cell>>,
 ) -> Result<Arc<Cell>, CellError> {
-    let cell = resolver.resolve(reference)?;
-    if cell.id() != reference.id() {
+    let cell = reader.read(id, resident)?;
+    if cell.id() != id {
         return Err(CellError::CellHashMismatch {
-            expected: reference.id(),
+            expected: id,
             actual: cell.id(),
         });
     }
-    if let Ok(expected) = reference.commitment()
-        && expected != cell.commitment()
-    {
+    Ok(cell)
+}
+
+/// Looks up a bare ID without inventing hash/depth metadata.
+pub fn resolve_cell<R: CellReader + ?Sized>(
+    reader: &mut R,
+    id: CellID,
+) -> Result<Arc<Cell>, CellError> {
+    read_checked(reader, id, None)
+}
+
+/// Reads a resident or unloaded reference and checks its full commitment.
+pub fn read_cell<R: CellReader + ?Sized>(
+    resolver: &mut R,
+    reference: &CellRef,
+) -> Result<Arc<Cell>, CellError> {
+    let cell = read_checked(resolver, reference.id(), reference.as_resident_arc())?;
+    if reference.commitment() != cell.commitment() {
         return Err(CellError::CellCommitmentMismatch(reference.id()));
     }
     Ok(cell)
 }
 impl CellResolver for () {
-    fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
-        reference
-            .as_resident_arc()
-            .cloned()
-            .ok_or_else(|| CellError::MissingCell(reference.id()))
+    fn resolve(&mut self, id: CellID) -> Result<Arc<Cell>, CellError> {
+        Err(CellError::MissingCell(id))
     }
 }
 
@@ -690,7 +701,7 @@ mod tests {
         let expected_preimage = [&[1, 0x10, 0, 0, 3, 0, 0][..], &reference.id()].concat();
         assert_eq!(root.hash_preimage(0).unwrap(), expected_preimage);
         assert_eq!(root.id(), <CellID>::from(Sha256::digest(expected_preimage)));
-        let detached = Cell::new(vec![3], vec![reference.to_unloaded().unwrap()]).unwrap();
+        let detached = Cell::new(vec![3], vec![reference.to_unloaded()]).unwrap();
         assert_eq!(detached.encode_record(), root.encode_record());
         assert_eq!(
             Cell::decode_record_exact(&root.encode_record())
@@ -698,10 +709,6 @@ mod tests {
                 .commitment(),
             root.commitment()
         );
-        assert!(matches!(
-            Cell::new(vec![], vec![CellRef::unresolved(root.id())]),
-            Err(CellError::MissingCellMetadata(_))
-        ));
     }
 
     #[test]
@@ -802,8 +809,8 @@ mod tests {
     #[test]
     fn resolver_checks_every_claimed_hash_and_depth_and_counts_resident_reads() {
         struct Fixed(Cell, usize);
-        impl CellResolver for Fixed {
-            fn resolve(&mut self, _: &CellRef) -> Result<Arc<Cell>, CellError> {
+        impl CellReader for Fixed {
+            fn read(&mut self, _: CellID, _: Option<&Arc<Cell>>) -> Result<Arc<Cell>, CellError> {
                 self.1 += 1;
                 Ok(Arc::new(self.0.clone()))
             }
@@ -812,17 +819,69 @@ mod tests {
         let forged = CellCommitment::new(1, vec![[0x99; 32], cell.id()], vec![0, 0]).unwrap();
         let reference = CellRef::Unloaded(Arc::new(forged));
         assert!(matches!(
-            resolve_cell(&mut Fixed(cell.clone(), 0), &reference),
+            read_cell(&mut Fixed(cell.clone(), 0), &reference),
             Err(CellError::CellCommitmentMismatch(_))
         ));
-        assert!(resolve_cell(&mut Fixed(cell.clone(), 0), &CellRef::unresolved(cell.id())).is_ok());
+        assert!(resolve_cell(&mut Fixed(cell.clone(), 0), cell.id()).is_ok());
         assert!(matches!(
-            resolve_cell(&mut Fixed(leaf(2), 0), &CellRef::unresolved(cell.id())),
+            resolve_cell(&mut Fixed(leaf(2), 0), cell.id()),
             Err(CellError::CellHashMismatch { .. })
         ));
         let mut counter = Fixed(cell.clone(), 0);
-        resolve_cell(&mut counter, &cell.into()).unwrap();
+        read_cell(&mut counter, &cell.into()).unwrap();
         assert_eq!(counter.1, 1);
+    }
+
+    #[test]
+    fn id_only_lookup_and_resident_fast_path_preserve_reference_metadata() {
+        struct Lookup {
+            body: Arc<Cell>,
+            calls: usize,
+        }
+        impl CellResolver for Lookup {
+            fn resolve(&mut self, id: CellID) -> Result<Arc<Cell>, CellError> {
+                self.calls += 1;
+                if id == self.body.id() {
+                    Ok(self.body.clone())
+                } else {
+                    Err(CellError::MissingCell(id))
+                }
+            }
+        }
+        let cell = Arc::new(parent(vec![leaf(1).prune(1).unwrap()]));
+        let resident = CellRef::resident(cell.clone());
+        let unloaded = resident.to_unloaded();
+        assert_eq!(unloaded.commitment(), resident.commitment());
+        assert_eq!(unloaded.to_unloaded().commitment(), cell.commitment());
+        let mut lookup = Lookup {
+            body: cell.clone(),
+            calls: 0,
+        };
+        assert_eq!(read_cell(&mut lookup, &resident).unwrap().id(), cell.id());
+        assert_eq!(lookup.calls, 0, "resident reads need no lookup table");
+        assert_eq!(read_cell(&mut lookup, &unloaded).unwrap().id(), cell.id());
+        assert_eq!(lookup.calls, 1);
+        assert_eq!(
+            resolve_cell(&mut lookup, cell.id()).unwrap().id(),
+            cell.id()
+        );
+        assert_eq!(lookup.calls, 2);
+        assert_eq!(
+            resolve_cell(&mut lookup, [9; 32]).unwrap_err(),
+            CellError::MissingCell([9; 32])
+        );
+
+        struct Wrong(Arc<Cell>);
+        impl CellResolver for Wrong {
+            fn resolve(&mut self, _: CellID) -> Result<Arc<Cell>, CellError> {
+                Ok(self.0.clone())
+            }
+        }
+        assert!(matches!(
+            resolve_cell(&mut Wrong(Arc::new(leaf(2))), cell.id()),
+            Err(CellError::CellHashMismatch { .. })
+        ));
+        println!("CellRef occupies {} bytes", std::mem::size_of::<CellRef>());
     }
 
     #[test]

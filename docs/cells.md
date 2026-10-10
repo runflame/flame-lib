@@ -98,6 +98,7 @@ The dependency direction is:
 cells
   Cell, CellID, CellRef, CellCommitment, CellView
   CellBuilder, CellSlice, CellEncode, CellDecode
+  CellResolver (ID lookup), CellReader (logical access)
   CellIndex
   Trie
 
@@ -133,7 +134,6 @@ pub type CellID = [u8; 32];
 pub enum CellRef {
     Resident(Arc<Cell>),
     Unloaded(Arc<CellCommitment>),
-    Unresolved(CellID),
 }
 
 pub struct Cell {
@@ -153,10 +153,11 @@ matching depths, including the highest factual pair. Detaching a child keeps
 this summary and does not change any ancestor hash. A reference to a pruned
 Cell can itself be resident or unloaded.
 
-`Unresolved(id)` is only a lookup handle. It has no depth or level metadata and
-cannot be stored in a Cell or Builder. Resolve it first, then store a resident
-reference or obtain `to_unloaded()`. Inventing depth zero for a bare ID would
-make parent identity depend on whether the child happened to be loaded.
+A bare CellID is a lookup key, not a CellRef. `resolve_cell(reader, id)` loads
+and verifies its body without inventing hash/depth metadata. Every CellRef
+already has a complete commitment; `commitment()` and `to_unloaded()` are
+infallible. Inventing depth zero for a bare ID would make parent identity
+depend on whether the child happened to be loaded.
 
 Cells are immutable and `Cell::clone()` shares `CellData`; it does not copy the
 payload or descendants. Resolving an unloaded reference returns an `Arc<Cell>`
@@ -171,10 +172,9 @@ The core immutable API is:
 ```rust
 impl CellRef {
     pub fn resident(cell: impl Into<Arc<Cell>>) -> Self;
-    pub fn unresolved(id: CellID) -> Self;
-    pub fn to_unloaded(&self) -> Result<Self, CellError>;
+    pub fn to_unloaded(&self) -> Self;
     pub fn id(&self) -> CellID;
-    pub fn commitment(&self) -> Result<&CellCommitment, CellError>;
+    pub fn commitment(&self) -> &CellCommitment;
     pub fn as_resident(&self) -> Option<&Cell>;
 }
 
@@ -197,7 +197,7 @@ impl Cell {
     pub fn encode_record(&self) -> Vec<u8>;
     pub fn decode_record_exact(bytes: &[u8]) -> Result<Self, CellError>;
     pub fn encode(&self) -> Result<Vec<u8>, CellError>;
-    pub fn encode_transport<R: CellResolver + ?Sized>(
+    pub fn encode_transport<R: CellReader + ?Sized>(
         &self, resolver: &mut R,
     ) -> Result<Vec<u8>, CellError>;
     pub fn decode_transport(
@@ -484,7 +484,7 @@ impl CellSlice<'_> {
     pub fn load_u32(&mut self) -> Result<u32, CellError>;
     pub fn load_u64(&mut self) -> Result<u64, CellError>;
     pub fn load_bytes(&mut self, len: usize) -> Result<&[u8], CellError>;
-    pub fn load_snake<R: CellResolver + ?Sized>(
+    pub fn load_snake<R: CellReader + ?Sized>(
         &mut self,
         cells: &mut R,
         limit: usize,
@@ -522,7 +522,7 @@ pub trait CellEncode {
 }
 
 pub trait CellDecode: Sized {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError>;
@@ -535,7 +535,7 @@ when following references. There is no runtime codec factory or type registry.
 
 All crate operations use one `CellError`. It distinguishes payload/reference
 capacity, insufficient input, trailing payload, trailing references, malformed
-type encoding, `MissingCell(CellID)`, `MissingCellMetadata(CellID)`,
+type encoding, `MissingCell(CellID)`,
 `CellCommitmentMismatch`, `DepthOverflow`, `InvalidLevel`, `PrunedCell`, and
 exhausted gas/resource budget. This
 lets a composite decoder propagate resolution failures without converting
@@ -760,7 +760,7 @@ Writing copies input directly into the final payloads and constructs only the
 overflow chain, iteratively from tail to head; it never stages a whole-string
 buffer. Reading checks the declared length against the caller's limit before
 allocation or resolution, then grows the result only from validated data.
-It follows continuation refs through `CellResolver`, checking each resolved
+It follows continuation refs through `CellReader`, checking each resolved
 body's commitment and exact payload/reference shape. Short nonterminals, extra
 continuation refs, incorrectly sized terminal payloads, explicit pruning
 records, missing bodies, depth overflows, and limit overruns fail. Each
@@ -838,7 +838,7 @@ uses this API: the Taproot commitment is directly to the raw eight-byte-key
 Trie root, not an intermediate count Cell. Membership lookup does not need to
 assert the total size or validate unvisited siblings.
 
-`get`, `insert`, and `remove` take a `CellResolver`. They resolve only the path
+`get`, `insert`, and `remove` take a `CellReader`. They resolve only the path
 being traversed. Mutations rebuild the affected path and swap the root only
 after the operation succeeds, so `MissingCell` and malformed-node errors leave
 the Trie unchanged. Resolver-backed `get_ref` and `get` return an owned
@@ -993,10 +993,10 @@ Cell in its place; that changes the factual root while retaining the selected
 lower commitments. Storage residency outside a submitted packet remains a
 separate concern.
 
-The protocol chooses the root and commitment level it expects. For the
-planned transaction layout, the signed body must include every execution
-witness that can influence its execution. The transaction envelope then
-references that body, the signature, and the R1CS proof. The decoder never
+The protocol chooses the root and commitment level it expects. The signed
+transaction body includes every execution witness through its program graph.
+The Tx root references that body and carries the signature and R1CS proof
+inline. The decoder never
 grants execution access to extra uncommitted records.
 
 ### Integration
@@ -1034,7 +1034,7 @@ impl CellIndex {
     pub fn iter(&self) -> impl Iterator<Item = (&CellID, &Arc<Cell>)>;
     pub fn to_cell(&self) -> Result<Cell, CellError>;
     pub fn id(&self) -> Result<CellID, CellError>;
-    pub fn from_cell<R: CellResolver + ?Sized>(
+    pub fn from_cell<R: CellReader + ?Sized>(
         root: &Cell, resolver: &mut R,
     ) -> Result<Self, CellError>;
 }
@@ -1105,13 +1105,16 @@ an ordinary application-defined envelope hierarchy.
 
 ### Transactions
 
-The script container holds script bytes and a direct reference to the
-execution witness snapshot root. The same highest root CellID is included
-in the ExternalTx payload and in `TxEntry::CellWitness`, making the exact
-availability set part of the signed TxID and proof transcript.
+Tx has one body reference, a fixed 64-byte signature field, and a U16-length
+inline R1CS proof. The body holds the header, a program reference, and a
+canonical mask-one pruned log reference containing the log's hash(0)/depth(0).
+TxID is the body's factual ID; WitnessID is the Tx root's factual ID.
 
-The outer typed transaction snapshot can carry script, signature, proof,
-and its embedded witness hierarchy together. Only the decoded execution
+The program contains bytecode and its supplied execution subcells. In the
+current bytecode API these subcells use an ordinary witness snapshot hierarchy
+referenced from the Snake container. No separate body witness field or
+`CellWitness` effect is needed: the program's factual hash commits availability.
+Only the decoded execution
 index is exposed to VM witness resolution. Its snapshot is frozen before
 proving and is shared unchanged with all calls and asynchronous descendants.
 
@@ -1119,15 +1122,30 @@ proving and is shared unchanged with all calls and asynchronous descendants.
 
 ### Allowed sources
 
-Every Cell access occurs through an execution-scoped resolver:
+Lookup providers have one ID-only operation. A separate read context covers
+both attached resident bodies and ID lookups:
 
 ```rust
 pub trait CellResolver {
-    fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError>;
+    fn resolve(&mut self, id: CellID) -> Result<Arc<Cell>, CellError>;
+}
+
+pub trait CellReader {
+    fn read(&mut self, id: CellID, resident: Option<&Arc<Cell>>)
+        -> Result<Arc<Cell>, CellError>;
 }
 ```
 
-The concrete VM resolver may use exactly these sources:
+Every CellResolver automatically implements unmetered CellReader: attached
+bodies are used directly, otherwise `resolve(id)` supplies them. `()` is an
+empty lookup provider and still supports resident reads. Metered and recording
+contexts implement CellReader instead, covering every logical access, even
+when no lookup is needed. `read_cell(reader, reference)` checks the returned
+ID and full expected commitment; `resolve_cell(reader, id)` checks the ID.
+Codecs, Trie, Snake, and CellView use this shared read path. Pure lookups do
+not determine gas prices or witness-recording policy.
+
+The concrete VM read context may use exactly these sources:
 
 1. a body already attached to the value in RAM;
 2. a body present in the current Contract or Actor's consensus-committed
@@ -1145,8 +1163,8 @@ in that order. `ActorStore` is currently RAM-backed. There is no disk backend
 or general-purpose resolver-composition adapter yet. The `CellResolver` trait
 allows a composite implementation to consult actor-scoped disk storage and
 then the transaction witness hierarchy. Such a fallback must continue only on a missing
-requested ID, not suppress integrity, resource-limit, or storage errors. It
-must charge logical access once, regardless of which source supplies the body,
+requested ID, not suppress integrity, resource-limit, or storage errors. The
+read context must charge logical access once, regardless of which source supplies the body,
 and disk lookup must enforce the same committed-residency scope as RAM lookup.
 
 ### Crossing ownership domains
@@ -1287,12 +1305,11 @@ branch; that implementation follows Cells through the current resolver.
 
 ### Committing availability
 
-Each external transaction carries one immutable execution `CellIndex`. Its
-`availability CellID` must be included in the transaction's canonical effect prefix and
-therefore in the `TxID` and every `signtx` signature. A concrete migration is a
-mandatory `TxEntry::CellWitness(availability CellID)` immediately after `TxEntry::Header` for
-external execution. The witness snapshot remains an ordinary Cell hierarchy
-referenced directly from the transaction's script container.
+Each external transaction's program carries one immutable execution `CellIndex`
+as subcells. The body's factual CellID includes the program's supplied graph,
+so availability is bound by TxID, every `signtx` signature, and the R1CS proof.
+No separate witness hash field or log entry is needed. The program's ordinary
+snapshot hierarchy preserves exactly which logical body lookups succeed.
 
 The current `BlockTx::witness_hash` is not enough: it is a block-level
 commitment assembled by the minter, while Cell availability must already be
@@ -1388,10 +1405,10 @@ block objects. The caller's context selects the root type and commitment
 level; `CellID` is the highest SHA-256 hash specified in [Identity](#identity),
 not a direct hash of an ordinary wire record.
 
-The ExternalTx envelope root identifies the submitted encoding, while `TxID`
-continues to identify the typed TxLog/effect graph. Under the Cell format that
-TxLog root is itself a CellID; it is not silently replaced by the ExternalTx
-root.
+The external Tx root identifies WitnessID. Its body root identifies TxID and
+commits the header, supplied program, and pruned log claim. EffectID is the
+computed log's level-zero hash, verified together with its depth. Internal
+execution IDs retain their factual effect-log root. See [encoding](encoding.md).
 
 Do not mechanically hash an enum's encoded view when the type already has a
 normalized identity. In particular,
@@ -1435,7 +1452,7 @@ because those sets are now committed by ordinary snapshot Cell roots.
 | VM codecs | `flamevm/src/encoding.rs` plus type-owned codecs: fixed scalars/points/tokens, tagged Values, single-Value Contracts, actors, messages, scripts |
 | Predicates | `flamevm/src/contract.rs`: program Trie, index selector, path-only witness collection and resolver-based branch opening |
 | Execution | `flamevm/src/vm.rs`: fixed Cell hierarchy before proving, scoped and metered resolution, public-path validation before restoring private witnesses |
-| Transactions | `flamevm/src/tx.rs`: direct witness-root reference, separate execution index, CellWitness effect, TxLog Trie and claimed TxID validation |
+| Transactions | `flamevm/tx.ctl`, `build.rs`, `src/tx.rs`: generated Tx/body codecs, inline authorization, pruned log, body TxID, factual WitnessID, and program-scoped execution index |
 | Actor storage | `flamechain/src/storage.rs`: content roots plus retained availability CellID, leases Trie, freeze instead of bulk destruction, explicit persistence only |
 | Scheduling and blocks | `flamechain/src/block.rs`: external then FIFO descendants with one witness index, Cell-backed block/record commitments and exact transport decoding |
 | Utreexo | `merkle` plus `flamechain/src/utreexo`: specialized accumulator and legacy forest/proof/path serialization retained; Cell migration deferred |

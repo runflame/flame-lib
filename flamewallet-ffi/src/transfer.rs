@@ -176,7 +176,7 @@ pub(crate) fn build(
             })
         })
         .collect::<Result<Vec<_>, FlameError>>()?;
-    let txid = unsigned.log().txid();
+    let txid = unsigned.txid();
 
     let proofs = specs.iter().map(|spec| spec.proof().clone()).collect();
     let signed = flamepayments::sign(unsigned, &keys).map_err(FlameError::transfer)?;

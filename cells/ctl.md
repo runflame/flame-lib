@@ -69,7 +69,7 @@ fn main() -> Result<(), CellError> {
     // This reads the tag and references, without opening either child.
     let decoded = Node::from_cell(&cell, &mut ())?;
     if let Node::Branch { left, .. } = decoded {
-        // () resolves resident children; use a CellResolver for unloaded ones.
+        // () reads resident children; an ID lookup provider handles unloaded ones.
         let leaf = left.load(&mut ())?;
         assert!(matches!(leaf, Node::Data { size: 3, .. }));
     }
@@ -81,6 +81,12 @@ Use `to_cell` and `from_cell` for a complete typed Cell. Inside another codec,
 `CellBuilder::store` and the generated `CellDecode::decode` append to or read
 from the current Cell. `from_cell` requires complete consumption of both
 payload and references; an inline `decode` leaves subsequent fields unread.
+
+Decoders take a `CellReader` access context. A plain `CellResolver` implements
+only `resolve(id)` and automatically works as an unmetered reader: resident
+bodies need no lookup. Metering and witness-recording contexts implement
+`CellReader` instead, so their hooks also run on resident reads. Reference
+reads verify the full hash/depth commitment; bare-ID lookups verify the ID.
 
 ## Examples, from bytes to graphs
 
@@ -175,7 +181,7 @@ cargo run -p cells --bin ctlc -- cells/examples/point.ctl > wire.rs
 ```
 
 ```rust
-use cells::{CellBuilder, CellDecode, CellEncode, CellError, CellResolver, CellSlice};
+use cells::{CellBuilder, CellDecode, CellEncode, CellError, CellReader, CellSlice};
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 
 mod wire;
@@ -206,7 +212,7 @@ impl CellEncode for Point {
 }
 
 impl CellDecode for Point {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         a: &mut CellSlice<'_>,
         b: &mut R,
     ) -> Result<Self, CellError> {

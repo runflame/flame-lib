@@ -607,20 +607,15 @@ fn phase21_txlog_ordering_in_txresult() {
     let delegate = StubDelegate::new();
     let result =
         VM::execute_external(dummy_header(), script, 1_000_000, delegate).expect("execute ok");
-    assert_eq!(
-        result.txlog.len(),
-        4,
-        "Header + CellWitness + 2 Data entries"
-    );
+    assert_eq!(result.txlog.len(), 3, "Header + 2 Data entries");
     assert!(matches!(result.txlog[0], TxEntry::Header(_)));
-    assert!(matches!(result.txlog[1], TxEntry::CellWitness(_)));
-    match &result.txlog[2] {
+    match &result.txlog[1] {
         TxEntry::Data(b) => assert_eq!(b, b"a"),
-        _ => panic!("txlog[2] must be Data(a)"),
+        _ => panic!("txlog[1] must be Data(a)"),
     }
-    match &result.txlog[3] {
+    match &result.txlog[2] {
         TxEntry::Data(b) => assert_eq!(b, b"b"),
-        _ => panic!("txlog[3] must be Data(b)"),
+        _ => panic!("txlog[2] must be Data(b)"),
     }
 }
 

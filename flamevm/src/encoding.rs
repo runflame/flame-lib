@@ -1,8 +1,7 @@
 //! Expected-type Cell codecs. Only the `Value` sum type carries a type tag.
 
 use cells::{
-    resolve_cell, Cell, CellBuilder, CellDecode, CellEncode, CellError, CellRef, CellResolver,
-    CellSlice,
+    read_cell, Cell, CellBuilder, CellDecode, CellEncode, CellError, CellReader, CellRef, CellSlice,
 };
 use curve25519_dalek::ristretto::CompressedRistretto;
 
@@ -19,12 +18,12 @@ pub(crate) fn blob_cell(bytes: &[u8]) -> Result<Cell, CellError> {
 }
 
 /// Resolves and exactly reads one dedicated byte-string Cell chain.
-pub(crate) fn read_blob<R: CellResolver + ?Sized>(
+pub(crate) fn read_blob<R: CellReader + ?Sized>(
     reference: &CellRef,
     resolver: &mut R,
     limit: usize,
 ) -> Result<Vec<u8>, CellError> {
-    let cell = resolve_cell(resolver, reference)?;
+    let cell = read_cell(resolver, reference)?;
     let mut slice = CellSlice::new(&cell);
     let bytes = slice.load_snake(resolver, limit)?;
     slice.finish()?;
@@ -39,7 +38,7 @@ impl CellEncode for Scalar {
 }
 
 impl CellDecode for Scalar {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         resolver: &mut R,
     ) -> Result<Self, CellError> {
@@ -57,7 +56,7 @@ impl CellEncode for Point {
 }
 
 impl CellDecode for Point {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         resolver: &mut R,
     ) -> Result<Self, CellError> {
@@ -74,7 +73,7 @@ impl CellEncode for Token {
 }
 
 impl CellDecode for Token {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         resolver: &mut R,
     ) -> Result<Self, CellError> {
@@ -94,7 +93,7 @@ impl CellEncode for ClearToken {
 }
 
 impl CellDecode for ClearToken {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         resolver: &mut R,
     ) -> Result<Self, CellError> {
@@ -127,7 +126,7 @@ impl CellEncode for String {
 }
 
 impl CellDecode for String {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         _resolver: &mut R,
     ) -> Result<Self, CellError> {
@@ -194,7 +193,7 @@ pub(crate) fn value_cell_at(value: &Value, depth: usize) -> Result<Cell, CellErr
 }
 
 impl CellDecode for Value {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         resolver: &mut R,
     ) -> Result<Self, CellError> {
@@ -241,7 +240,7 @@ impl Value {
     /// Decodes a Value from authenticated state, retaining lazy Dict branches.
     /// Call only after the owning Contract/Actor/state transition establishes
     /// the validity of its committed capability summaries and entry counts.
-    pub fn decode_trusted<R: CellResolver + ?Sized>(
+    pub fn decode_trusted<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         resolver: &mut R,
     ) -> Result<Self, CellError> {
@@ -249,7 +248,7 @@ impl Value {
     }
 
     /// Exactly decodes an authenticated Value Cell without eagerly loading Dicts.
-    pub fn from_trusted_cell<R: CellResolver + ?Sized>(
+    pub fn from_trusted_cell<R: CellReader + ?Sized>(
         cell: &Cell,
         resolver: &mut R,
     ) -> Result<Self, CellError> {
@@ -257,7 +256,7 @@ impl Value {
     }
 }
 
-pub(crate) fn value_from_cell_at<R: CellResolver + ?Sized>(
+pub(crate) fn value_from_cell_at<R: CellReader + ?Sized>(
     cell: &Cell,
     resolver: &mut R,
     depth: usize,
@@ -269,7 +268,7 @@ pub(crate) fn value_from_cell_at<R: CellResolver + ?Sized>(
     Ok(value)
 }
 
-fn decode_value_at<R: CellResolver + ?Sized>(
+fn decode_value_at<R: CellReader + ?Sized>(
     slice: &mut CellSlice<'_>,
     resolver: &mut R,
     depth: usize,
@@ -282,11 +281,11 @@ fn decode_value_at<R: CellResolver + ?Sized>(
         Ok(match slice.load_u8()? {
             0 => Value::Scalar(Scalar::decode(slice, resolver)?),
             1 => {
-                let cell = resolve_cell(resolver, &slice.load_ref()?)?;
+                let cell = read_cell(resolver, &slice.load_ref()?)?;
                 Value::String(String::from_cell(&cell, resolver)?)
             }
             2 => {
-                let cell = resolve_cell(resolver, &slice.load_ref()?)?;
+                let cell = read_cell(resolver, &slice.load_ref()?)?;
                 let mut child = CellSlice::new(&cell);
                 let dict = if trusted {
                     Dict::decode_trusted(&mut child, resolver)?
@@ -416,9 +415,7 @@ mod tests {
         ));
 
         for reference in [
-            CellRef::resident(Cell::new(vec![1], vec![]).unwrap())
-                .to_unloaded()
-                .unwrap(),
+            CellRef::resident(Cell::new(vec![1], vec![]).unwrap()).to_unloaded(),
             CellRef::resident(Cell::new(vec![], vec![]).unwrap()),
         ] {
             let cell = Cell::new(vec![0xaa], vec![reference]).unwrap();
@@ -445,7 +442,12 @@ mod tests {
         assert_eq!(cell.refs().len(), 1);
         let mut bag = CellIndex::collect(Arc::new(cell.clone())).unwrap();
         assert_eq!(
-            read_blob(&CellRef::unresolved(cell.id()), &mut bag, bytes.len()).unwrap(),
+            read_blob(
+                &CellRef::resident(cell.clone()).to_unloaded(),
+                &mut bag,
+                bytes.len()
+            )
+            .unwrap(),
             bytes
         );
     }

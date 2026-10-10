@@ -1,6 +1,6 @@
 //! Outbound messages and MessageID identity.
 
-use cells::{CellBuilder, CellDecode, CellEncode, CellError, CellRef, CellResolver, CellSlice};
+use cells::{CellBuilder, CellDecode, CellEncode, CellError, CellReader, CellRef, CellSlice};
 
 use crate::actor::ActorID;
 use crate::contract::Predicate;
@@ -150,7 +150,7 @@ impl CellEncode for Message {
 }
 
 impl CellDecode for Message {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         s: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError> {
@@ -163,7 +163,7 @@ impl CellDecode for Message {
         };
         let refund = Predicate::decode(s, cells)?;
         let gas = s.load_u64()?;
-        let root = cells::resolve_cell(cells, &s.load_ref()?)?;
+        let root = cells::read_cell(cells, &s.load_ref()?)?;
         let mut dict = Dict::from_cell(&root, cells)?;
         let mut payload = Vec::new();
         for i in 0..dict.len() {

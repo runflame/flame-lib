@@ -119,7 +119,7 @@ impl Verifier {
             }
         }
         // Bind the canonical TxID into the R1CS transcript so the
-        // proof commits to the full transaction (header + log), not
+        // proof commits to the body (header, supplied program, pruned log), not
         // just the constraint system shape. Must mirror the prover
         // step exactly — divergence silently invalidates every
         // proof.

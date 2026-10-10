@@ -2,9 +2,10 @@
 
 use bulletproofs::r1cs;
 use bulletproofs::r1cs::R1CSProof;
+#[cfg(test)]
+use cells::{read_cell, CellRef};
 use cells::{
-    resolve_cell, Cell, CellBuilder, CellDecode, CellEncode, CellError, CellID, CellIndex, CellRef,
-    CellResolver, CellSlice,
+    Cell, CellBuilder, CellDecode, CellEncode, CellError, CellID, CellIndex, CellReader, CellSlice,
 };
 use core::convert::TryFrom;
 use core::mem;
@@ -73,7 +74,7 @@ impl CellEncode for Anchor {
 }
 
 impl CellDecode for Anchor {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         r: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError> {
@@ -596,7 +597,7 @@ pub(crate) struct VM {
     current_call: CallFrame,
     call_stack: Vec<CallFrame>,
 
-    /// Effects emitted during execution; used to compute TxID.
+    /// Effects committed by the external body or the derived internal ID.
     pub(crate) txlog: Vec<TxEntry>,
 
     /// Running per-tx fee accumulator (overflow → `FeeTooHigh`).
@@ -632,16 +633,16 @@ impl ExecutionCells<'_> {
     }
 }
 
-impl CellResolver for ExecutionCells<'_> {
-    fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
+impl CellReader for ExecutionCells<'_> {
+    fn read(&mut self, id: CellID, resident: Option<&Arc<Cell>>) -> Result<Arc<Cell>, CellError> {
         self.charge(1)?;
-        let cell = match reference.as_resident_arc() {
+        let cell = match resident {
             Some(cell) => Arc::clone(cell),
             None => self
                 .actor
-                .get(&reference.id())
-                .or_else(|| self.external.get(&reference.id()))
-                .ok_or(CellError::MissingCell(reference.id()))?,
+                .get(&id)
+                .or_else(|| self.external.get(&id))
+                .ok_or(CellError::MissingCell(id))?,
         };
         self.charge((cell.record_size() as u64).saturating_add(cell.refs().len() as u64))?;
         Ok(cell)
@@ -660,7 +661,8 @@ impl VM {
 
     fn with_cells(mut self, cells: Arc<CellIndex>) -> Result<Self, CellError> {
         if matches!(self.current_call.kind, CallKind::ExternalRoot) {
-            self.txlog[1] = TxEntry::CellWitness(cells.id()?);
+            // Reject unencodable program data before executing private witnesses.
+            cells.to_cell()?;
         }
         self.cells = cells;
         Ok(self)
@@ -680,7 +682,7 @@ impl VM {
         frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
         let mut vm = Self::new(header, frame);
         while vm.step_external(&mut delegate)? {}
-        Ok(vm.into_result(script, None))
+        vm.into_result(script, None)
     }
 
     /// Runs an external-root program through the VM without finalizing
@@ -708,7 +710,7 @@ impl VM {
         vm.contract_witnesses = contract_witnesses;
         vm.script_witnesses = script_witnesses;
         while vm.step_external(delegate)? {}
-        Ok(vm.into_result(bytecode, None))
+        vm.into_result(bytecode, None)
     }
 
     /// Verifier entry: decodes external-root bytecode on demand using the
@@ -726,7 +728,7 @@ impl VM {
         frame.charge_gas(GAS_EXTERNAL_FINALIZE_BASE)?;
         let mut vm = Self::new(header, frame).with_cells(Arc::new(cells.clone()))?;
         while vm.step_external(delegate)? {}
-        Ok(vm.into_result(bytecode, None))
+        vm.into_result(bytecode, None)
     }
 
     /// Executes an internal transaction. On clean exit runs the tx-end
@@ -909,18 +911,13 @@ impl VM {
             }
         }
         registry.pop_checkpoint_commit();
-        Ok(vm.into_result(Vec::new(), None))
+        vm.into_result(Vec::new(), None)
     }
 
     fn new(header: TxHeader, initial_call: CallFrame) -> Self {
         // Header is the first txlog entry so TxID binds to version + locktime.
         let cells = Arc::new(CellIndex::new());
-        let mut txlog = vec![TxEntry::Header(header)];
-        if matches!(initial_call.kind, CallKind::ExternalRoot) {
-            txlog.push(TxEntry::CellWitness(
-                cells.id().expect("empty witness hierarchy"),
-            ));
-        }
+        let txlog = vec![TxEntry::Header(header)];
         // Seed last_anchor from the root frame's kind: ExternalRoot →
         // None (op_input must seed); InternalRoot → Some(Message.anchor)
         // (already unique from prior tx's op_send split).
@@ -973,12 +970,20 @@ impl VM {
         Ok(left)
     }
 
-    /// Drains the VM into a `TxResult`, computing TxID from the txlog.
-    fn into_result(mut self, bytecode: Vec<u8>, proof: Option<R1CSProof>) -> TxResult {
+    /// External IDs bind the body; derived internal IDs retain the effect root.
+    fn into_result(
+        mut self,
+        bytecode: Vec<u8>,
+        proof: Option<R1CSProof>,
+    ) -> Result<TxResult, VMError> {
         let txlog = mem::take(&mut self.txlog);
         let deferred_sigs = mem::take(&mut self.deferred_sigs);
-        let txid = TxID::from_log(&txlog);
-        TxResult {
+        let txid = if matches!(self.current_call.kind, CallKind::ExternalRoot) {
+            TxID(crate::tx::external_body(self.header, &bytecode, &self.cells, &txlog)?.id())
+        } else {
+            TxID::from_log(&txlog)
+        };
+        Ok(TxResult {
             txid,
             txlog,
             total_fee: self.total_fee.total(),
@@ -989,7 +994,7 @@ impl VM {
             cells: self.cells,
             proof,
             deferred_sigs,
-        }
+        })
     }
 
     /// Gate for external-only opcodes (CS-touching handlers).
@@ -2638,7 +2643,7 @@ impl VM {
         self.require_external()?;
         let encoded = self.pop_value()?.to_string()?;
         let id = array32(&encoded.to_bytes()).ok_or(VMError::MalformedContractEncoding)?;
-        let cell = resolve_cell(&mut self.resolver(), &CellRef::unresolved(id))?;
+        let cell = cells::resolve_cell(&mut self.resolver(), id)?;
         let public = Contract::from_trusted_cell(&cell, &mut self.resolver())?;
         self.charge_value_encoding(public.payload(), 3)?;
         if public.id() != id {
@@ -3736,9 +3741,13 @@ mod cell_execution_tests {
             source: CellIndex,
             used: CellIndex,
         }
-        impl CellResolver for Recording {
-            fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
-                let cell = self.source.resolve(reference)?;
+        impl CellReader for Recording {
+            fn read(
+                &mut self,
+                id: CellID,
+                resident: Option<&Arc<Cell>>,
+            ) -> Result<Arc<Cell>, CellError> {
+                let cell = self.source.read(id, resident)?;
                 self.used.insert(Arc::clone(&cell))?;
                 Ok(cell)
             }
@@ -3757,7 +3766,7 @@ mod cell_execution_tests {
             source: CellIndex::collect(Arc::new(contract.to_cell().unwrap())).unwrap(),
             used: CellIndex::new(),
         };
-        let root = resolve_cell(&mut recording, &CellRef::unresolved(id)).unwrap();
+        let root = cells::resolve_cell(&mut recording, id).unwrap();
         let loaded = Contract::from_trusted_cell(&root, &mut recording).unwrap();
         let mut dict = loaded.into_payload().to_dict().unwrap();
         dict.get_resolved(&Scalar::ONE, &mut recording)
@@ -3857,9 +3866,7 @@ mod cell_execution_tests {
         .unwrap();
         assert_eq!(result.txid, verified.txid);
         assert_eq!(result.gas_used, verified.gas_used);
-        assert!(
-            matches!(result.txlog[1], TxEntry::CellWitness(id) if id == result.cells.id().unwrap())
-        );
+        assert!(matches!(result.txlog[1], TxEntry::Input(_)));
         assert!(
             Verifier::verify(&pc, result.bytecode.clone(), proof, header, 1_000_000, None).is_err()
         );
@@ -3886,19 +3893,19 @@ mod cell_execution_tests {
         let empty = CellIndex::new();
         let mut costs = Vec::new();
         for (reference, actor, external) in [
-            (CellRef::Resident(cell.clone()), &empty, &empty),
+            (Some(CellRef::Resident(cell.clone())), &empty, &empty),
             (
-                CellRef::resident(cell.clone()).to_unloaded().unwrap(),
+                Some(CellRef::resident(cell.clone()).to_unloaded()),
                 &bag,
                 &empty,
             ),
             (
-                CellRef::resident(cell.clone()).to_unloaded().unwrap(),
+                Some(CellRef::resident(cell.clone()).to_unloaded()),
                 &empty,
                 &bag,
             ),
-            (CellRef::unresolved(cell.id()), &bag, &empty),
-            (CellRef::unresolved(cell.id()), &empty, &bag),
+            (None, &bag, &empty),
+            (None, &empty, &bag),
         ] {
             let mut gas = 0;
             let mut resolver = ExecutionCells {
@@ -3907,12 +3914,48 @@ mod cell_execution_tests {
                 gas_used: &mut gas,
                 gas_limit: 1000,
             };
-            assert_eq!(
-                resolve_cell(&mut resolver, &reference).unwrap().id(),
-                cell.id()
-            );
+            let read = match reference {
+                Some(reference) => read_cell(&mut resolver, &reference),
+                None => cells::resolve_cell(&mut resolver, cell.id()),
+            };
+            assert_eq!(read.unwrap().id(), cell.id());
             costs.push(gas);
         }
         assert_eq!(costs, vec![131; 5]);
+    }
+
+    #[test]
+    fn cell_read_misses_are_scoped_and_charge_attempts_before_lookup() {
+        let empty = CellIndex::new();
+        let id = [9; 32];
+        let mut gas = 0;
+        let mut reader = ExecutionCells {
+            external: &empty,
+            actor: &empty,
+            gas_used: &mut gas,
+            gas_limit: 1000,
+        };
+        assert_eq!(
+            cells::resolve_cell(&mut reader, id).unwrap_err(),
+            CellError::MissingCell(id)
+        );
+        assert_eq!(gas, 1);
+
+        let cell = Arc::new(Cell::new(vec![7], vec![]).unwrap());
+        for reference in [Some(CellRef::resident(cell.clone())), None] {
+            let mut gas = 0;
+            let mut reader = ExecutionCells {
+                external: &empty,
+                actor: &empty,
+                gas_used: &mut gas,
+                gas_limit: 0,
+            };
+            let result = match reference {
+                Some(r) => read_cell(&mut reader, &r),
+                None => cells::resolve_cell(&mut reader, cell.id()),
+            };
+            assert_eq!(result.unwrap_err(), CellError::ResourceExhausted);
+            assert_eq!(gas, 1);
+        }
     }
 }

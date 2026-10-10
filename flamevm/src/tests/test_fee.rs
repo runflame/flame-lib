@@ -22,11 +22,10 @@ fn phase19_op_fee_records_txlog_and_pushes_debt() {
         wide.0.assignment.as_deref().expect("prover assignment").f,
         FLAME_FLAVOR.to_dalek(),
     );
-    // Txlog: Header at 0, CellWitness at 1, Fee(100) at 2.
-    assert_eq!(vm.txlog.len(), 3);
+    // Txlog: Header at 0, Fee(100) at 1.
+    assert_eq!(vm.txlog.len(), 2);
     assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
-    assert!(matches!(vm.txlog[1], TxEntry::CellWitness(_)));
-    assert!(matches!(vm.txlog[2], TxEntry::Fee(100)));
+    assert!(matches!(vm.txlog[1], TxEntry::Fee(100)));
     // total_fee accumulator updated.
     assert_eq!(vm.total_fee.total(), 100);
 }
@@ -49,10 +48,10 @@ fn phase19_op_fee_accumulates_total() {
     let (vm, _prover) = run_external_steps(&pc_gens, program, 4);
     // 2 WideTokens stacked.
     assert_eq!(vm.current_call.stack.len(), 2);
-    // Txlog: Header + CellWitness + Fee(30) + Fee(70).
-    assert_eq!(vm.txlog.len(), 4);
-    assert!(matches!(vm.txlog[2], TxEntry::Fee(30)));
-    assert!(matches!(vm.txlog[3], TxEntry::Fee(70)));
+    // Txlog: Header + Fee(30) + Fee(70).
+    assert_eq!(vm.txlog.len(), 3);
+    assert!(matches!(vm.txlog[1], TxEntry::Fee(30)));
+    assert!(matches!(vm.txlog[2], TxEntry::Fee(70)));
     // Accumulator carries the sum.
     assert_eq!(vm.total_fee.total(), 100);
 }

@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use cells::{
-    Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellID, CellIndex, CellRef,
-    CellResolver, CellSlice, GasMeter, Trie, resolve_cell,
+    Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellID, CellIndex,
+    CellReader, CellRef, CellSlice, GasMeter, Trie, read_cell,
 };
 
 use flamevm::{
@@ -99,7 +99,7 @@ impl BlockTx {
         encode_envelope(self)
     }
 
-    fn decode_bounded<R: CellResolver + ?Sized>(
+    fn decode_bounded<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         cells: &mut R,
         version: u32,
@@ -109,7 +109,7 @@ impl BlockTx {
         if gas > limits.max_transaction_gas {
             return Err(CellError::InvalidFormat);
         }
-        let tx_cell = resolve_cell(cells, &slice.load_ref()?)?;
+        let tx_cell = read_cell(cells, &slice.load_ref()?)?;
         let tx = ExternalTx::from_cell_bounded(
             &tx_cell,
             cells,
@@ -126,7 +126,7 @@ impl BlockTx {
         {
             return Err(CellError::InvalidFormat);
         }
-        let proof_cell = resolve_cell(cells, &slice.load_ref()?)?;
+        let proof_cell = read_cell(cells, &slice.load_ref()?)?;
         let proofs = decode_sequence(
             &proof_cell,
             cells,
@@ -186,7 +186,7 @@ impl CellEncode for BlockTx {
 }
 
 impl CellDecode for BlockTx {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError> {
@@ -261,7 +261,7 @@ impl CellEncode for BlockHeader {
 }
 
 impl CellDecode for BlockHeader {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError> {
@@ -295,17 +295,17 @@ impl Block {
         encode_envelope(self)
     }
 
-    fn decode_bounded<R: CellResolver + ?Sized>(
+    fn decode_bounded<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         cells: &mut R,
         params: ChainParams,
     ) -> Result<Self, CellError> {
-        let header_cell = resolve_cell(cells, &slice.load_ref()?)?;
+        let header_cell = read_cell(cells, &slice.load_ref()?)?;
         let header = BlockHeader::from_cell(&header_cell, cells)?;
         if params.version != 1 || header.version != params.version {
             return Err(CellError::InvalidFormat);
         }
-        let txs = resolve_cell(cells, &slice.load_ref()?)?;
+        let txs = read_cell(cells, &slice.load_ref()?)?;
         let mut witness_bytes = 0usize;
         let transactions = decode_sequence(
             &txs,
@@ -364,7 +364,7 @@ impl CellEncode for Block {
 }
 
 impl CellDecode for Block {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError> {
@@ -402,7 +402,7 @@ fn proof_cell(proof: &Proof) -> Result<Cell, CellError> {
     Ok(builder.build())
 }
 
-fn decode_proof_cell<R: CellResolver + ?Sized>(
+fn decode_proof_cell<R: CellReader + ?Sized>(
     cell: &Cell,
     cells: &mut R,
 ) -> Result<Proof, CellError> {
@@ -420,7 +420,7 @@ fn decode_proof_cell<R: CellResolver + ?Sized>(
     })
 }
 
-fn decode_sequence<T, R: CellResolver + ?Sized>(
+fn decode_sequence<T, R: CellReader + ?Sized>(
     cell: &Cell,
     cells: &mut R,
     limit: usize,
@@ -444,7 +444,7 @@ fn decode_sequence<T, R: CellResolver + ?Sized>(
             if key != (index as u32).to_be_bytes() {
                 return Err(CellError::InvalidFormat);
             }
-            let cell = resolve_cell(cells, &reference)?;
+            let cell = read_cell(cells, &reference)?;
             decode(&cell, cells)
         })
         .collect()
@@ -492,10 +492,10 @@ impl<'a> TypedDecode<'a> {
     }
 }
 
-impl CellResolver for TypedDecode<'_> {
-    fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
+impl CellReader for TypedDecode<'_> {
+    fn read(&mut self, id: CellID, resident: Option<&Arc<Cell>>) -> Result<Arc<Cell>, CellError> {
         self.budget.charge(1)?;
-        let cell = self.envelope.resolve(reference)?;
+        let cell = self.envelope.read(id, resident)?;
         self.budget
             .charge(cell.record_size() as u64 + cell.refs().len() as u64)?;
         Ok(cell)
@@ -848,7 +848,7 @@ impl Blockchain {
             {
                 return Err(ChainError::LimitExceeded);
             }
-            let txid = log.txid();
+            let txid = block_tx.tx.txid;
 
             let record = ExecutionRecord {
                 kind: ExecutionKind::External,
@@ -908,7 +908,7 @@ impl Blockchain {
                 };
                 self.actors.pop_checkpoint_rollback();
                 let (kind, log, executed_actor_state, error) = staged?;
-                let txid = log.txid();
+                let txid = TxID::from_log(log.entries());
 
                 let record = ExecutionRecord { kind, txid };
                 observe(record, &log, error.as_deref())?;
@@ -1482,7 +1482,8 @@ mod tests {
         let rejected = chain.connect_with_observer(&block, |record, log, error| {
             seen += 1;
             assert_eq!(record.kind, ExecutionKind::External);
-            assert_eq!(record.txid, log.txid());
+            assert_eq!(record.txid, block.transactions[0].tx.txid);
+            assert_eq!(log.effect_id(), block.transactions[0].tx.effect_id());
             assert!(error.is_none());
             Err(ChainError::InvalidEffectLog)
         });
@@ -1703,7 +1704,13 @@ mod tests {
         assert_ne!(tx.witness_hash().unwrap(), original);
         tx.proofs.clear();
         let witness = Arc::new(Cell::new(vec![42], vec![]).unwrap());
-        Arc::make_mut(&mut tx.tx.witnesses).insert(witness).unwrap();
+        Arc::make_mut(&mut tx.tx.witnesses)
+            .insert(witness.clone())
+            .unwrap();
+        assert!(matches!(tx.witness_hash(), Err(CellError::InvalidFormat)));
+        let mut cells = CellIndex::new();
+        cells.insert(witness).unwrap();
+        tx.tx = external_tx(ScriptBuilder::new().with_cells(cells).nop(), 0).tx;
         assert_ne!(tx.witness_hash().unwrap(), original);
     }
 

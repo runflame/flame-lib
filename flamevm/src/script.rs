@@ -6,7 +6,7 @@ use std::{
 };
 
 use cells::{
-    CellBuilder, CellDecode, CellEncode, CellError, CellID, CellIndex, CellResolver, CellSlice,
+    CellBuilder, CellDecode, CellEncode, CellError, CellID, CellIndex, CellReader, CellSlice,
 };
 
 use crate::contract::{Contract, ContractID, PredicateTree};
@@ -936,7 +936,7 @@ impl CellEncode for Script {
 }
 
 impl CellDecode for Script {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError> {

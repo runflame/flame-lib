@@ -1027,30 +1027,29 @@ pub(crate) fn assert_nm_txlog(result: &TxResult, inputs: &[NMInputSpec], outputs
     // bugs (wrong count) before walking entry-by-entry.
     assert_eq!(
         result.txlog.len(),
-        2 + inputs.len() + outputs.len(),
-        "txlog length must be Header + CellWitness + N inputs + M outputs"
+        1 + inputs.len() + outputs.len(),
+        "txlog length must be Header + N inputs + M outputs"
     );
     // Header at index 0.
     assert!(matches!(result.txlog[0], TxEntry::Header(_)));
-    assert!(matches!(result.txlog[1], TxEntry::CellWitness(_)));
-    // Inputs at [2..2+N], in spec order. The contract_id check is
+    // Inputs at [1..1+N], in spec order. The contract_id check is
     // load-bearing — it pins down predicate + anchor + payload
     // bytes all at once.
     for (i, inp) in inputs.iter().enumerate() {
         let expected_id = build_input_contract(inp).0.id();
-        match &result.txlog[2 + i] {
+        match &result.txlog[1 + i] {
             TxEntry::Input(id) => {
                 assert_eq!(
                     *id,
                     expected_id,
                     "txlog[{}] input contract_id mismatch",
-                    2 + i
+                    1 + i
                 )
             }
-            _ => panic!("txlog[{}] must be Input", 2 + i),
+            _ => panic!("txlog[{}] must be Input", 1 + i),
         }
     }
-    // Outputs at [2+N .. 2+N+M], in spec order. We verify:
+    // Outputs at [1+N .. 1+N+M], in spec order. We verify:
     //
     //   - predicate point             (catches pairing inversion)
     //   - Token qty/flv commitment points
@@ -1079,7 +1078,7 @@ pub(crate) fn assert_nm_txlog(result: &TxResult, inputs: &[NMInputSpec], outputs
     for (j, out) in outputs.iter().enumerate() {
         let expected_pred = output_predicate_point(out.predicate_tag);
         let (q_open, f_open) = open_commitments_for_output(out);
-        let idx = 2 + inputs.len() + j;
+        let idx = 1 + inputs.len() + j;
         match &result.txlog[idx] {
             TxEntry::Output(c) => {
                 assert_eq!(

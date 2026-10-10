@@ -85,8 +85,8 @@ impl<'g> Prover<'g> {
             .multiplications
             .saturating_add(prover.cs.metrics().multipliers);
         // Bind the canonical TxID into the R1CS transcript so the
-        // proof commits to the full transaction effects (header +
-        // log), not just the constraint system shape. Verifier
+        // proof commits to the body (header, supplied program, pruned log),
+        // not just the constraint system shape. Verifier
         // mirrors this exact step before `cs.verify`.
         prover
             .cs

@@ -504,13 +504,14 @@ fn facade_build_sign_verify_roundtrip() {
 
     let tx = unsigned.sign(sig);
     assert_eq!(tx.witnesses().id(), witness_id);
-    let bytes = tx.to_envelope().unwrap().encode();
+    let bytes = tx.to_bytes().unwrap();
     let tx =
         crate::ExternalTx::from_bytes_bounded(&bytes, 1, tx.script.len(), tx.proof_bytes().len())
             .unwrap();
     assert_eq!(tx.witnesses().id(), witness_id);
     let txlog = tx.verify(limits).expect("verify ok");
-    assert_eq!(txlog.txid(), si.txid, "verified txlog matches the built tx");
+    assert_eq!(tx.txid, si.txid, "verified body matches the built tx");
+    assert_eq!(txlog.effect_id(), tx.effect_id());
 }
 
 /// Two-key multi-sig: build a tx that consumes TWO contracts via

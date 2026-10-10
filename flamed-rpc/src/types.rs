@@ -257,12 +257,6 @@ pub enum TxEntry {
         /// Transaction lock time.
         locktime: u32,
     },
-    /// The committed execution witness.
-    CellWitness {
-        /// Hash of the witness body set.
-        #[serde(with = "crate::codec::hex32")]
-        hash: [u8; 32],
-    },
     /// Bytes published by the execution.
     Data {
         /// All bytes, encoded as base64.

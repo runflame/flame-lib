@@ -2,7 +2,7 @@
 
 use bulletproofs::PedersenGens;
 use cells::{
-    CellBuilder, CellDecode, CellEncode, CellError, CellID, CellIndex, CellRef, CellResolver,
+    CellBuilder, CellDecode, CellEncode, CellError, CellID, CellIndex, CellReader, CellRef,
     CellSlice, Trie,
 };
 use core::{any::Any, fmt};
@@ -135,7 +135,7 @@ impl Predicate {
     /// Authenticates a branch selector and loads its code through this execution's
     /// resolver. There are no separate sibling hashes or caller-supplied code.
     /// Missing path/continuation Cells are hard errors, never alternate branches.
-    pub fn open_branch<R: CellResolver + ?Sized>(
+    pub fn open_branch<R: CellReader + ?Sized>(
         &self,
         proof: &TaprootProof,
         cells: &mut R,
@@ -149,12 +149,8 @@ impl Predicate {
         if (internal + RISTRETTO_BASEPOINT_TABLE * &tweak).compress() != self.point {
             return Err(VMError::TaprootProofMismatch);
         }
-        let leaf = Trie::lookup(
-            &CellRef::unresolved(proof.root),
-            &proof.index.to_be_bytes(),
-            cells,
-        )?
-        .ok_or(VMError::TaprootProofMismatch)?;
+        let leaf = Trie::lookup_id(proof.root, &proof.index.to_be_bytes(), cells)?
+            .ok_or(VMError::TaprootProofMismatch)?;
         let mut slice = CellSlice::new(&leaf);
         if slice.load_u8()? != 0 {
             return Err(VMError::TaprootProofMismatch);
@@ -173,7 +169,7 @@ impl CellEncode for Predicate {
 }
 
 impl CellDecode for Predicate {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError> {
@@ -293,17 +289,18 @@ struct BranchRecorder<'a> {
     recorded: CellIndex,
 }
 
-impl CellResolver for BranchRecorder<'_> {
-    fn resolve(&mut self, reference: &CellRef) -> Result<Arc<cells::Cell>, CellError> {
-        let source = if reference.id() == self.root.id() {
-            self.root
+impl CellReader for BranchRecorder<'_> {
+    fn read(
+        &mut self,
+        id: CellID,
+        resident: Option<&Arc<cells::Cell>>,
+    ) -> Result<Arc<cells::Cell>, CellError> {
+        let resident = if id == self.root.id() {
+            self.root.as_resident_arc()
         } else {
-            reference
+            resident
         };
-        let cell = source
-            .as_resident_arc()
-            .cloned()
-            .ok_or(CellError::MissingCell(source.id()))?;
+        let cell = ().read(id, resident)?;
         self.recorded.insert(Arc::clone(&cell))?;
         Ok(cell)
     }
@@ -356,7 +353,7 @@ impl CellEncode for TaprootProof {
 }
 
 impl CellDecode for TaprootProof {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError> {
@@ -405,7 +402,7 @@ impl Contract {
     /// bind this body to an accepted input commitment (including chain membership
     /// validation). Unlike ordinary `CellDecode`, hidden branches remain unloaded;
     /// accessed nodes and values still undergo their normal decoding checks.
-    pub fn from_trusted_cell<R: CellResolver + ?Sized>(
+    pub fn from_trusted_cell<R: CellReader + ?Sized>(
         cell: &cells::Cell,
         resolver: &mut R,
     ) -> Result<Self, CellError> {
@@ -440,7 +437,7 @@ impl CellEncode for Contract {
 }
 
 impl CellDecode for Contract {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError> {

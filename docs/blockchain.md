@@ -146,8 +146,10 @@ ordered proof Trie whose leaves contain snake-wrapped legacy Utreexo Proof
 bytes. Scalar fields use little-endian encoding; ordered Trie indices use
 fixed-width big-endian keys.
 
-Each ExternalTx directly references a separate, explicitly committed witness
-snapshot Cell hierarchy. Its restored execution Cell index is immutable. The
+Each ExternalTx body references its program, whose subcells carry the supplied
+execution witness hierarchy. Body TxID commits the program and canonical pruned
+log; Tx WitnessID additionally commits the inline signature and R1CS proof.
+Its restored execution Cell index is immutable. The
 outer block transport graph is not an execution witness pool. Bounded decoders
 check script length before loading its snake, enforce counts/depths and exact
 typed payload/reference consumption, and reject malformed signatures/proofs.

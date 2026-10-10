@@ -61,7 +61,12 @@ fn every_shape_verifies_with_its_inputs_and_outputs() {
             spec.label,
             metrics.multiplications
         );
-        assert_eq!(log.txid(), shape.txid, "{} signs its own txid", spec.label);
+        assert_eq!(
+            shape.tx.txid, shape.txid,
+            "{} signs its own txid",
+            spec.label
+        );
+        assert_eq!(log.effect_id(), shape.tx.effect_id());
         assert_eq!(shape.transfer.inputs.len(), spec.inputs);
         assert_eq!(shape.transfer.outputs.len(), spec.outputs);
     }
@@ -113,7 +118,8 @@ fn every_shapes_send_rebuilds_verifies_and_opens_its_notes() {
             shape.bytes.len(),
             "{label}: same length every time"
         );
-        assert_ne!(log.txid(), shape.txid, "{label}: a fresh r, a fresh send");
+        assert_ne!(sent.tx.txid, shape.txid, "{label}: a fresh r, a fresh send");
+        assert_eq!(log.effect_id(), sent.tx.effect_id());
         for payment in &shape.transfer.outputs {
             let (_, received) = fixtures::open(&log, &payment.path.owner());
             assert_eq!(received.opening.qty, payment.output.qty);

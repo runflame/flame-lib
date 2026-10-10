@@ -1,7 +1,7 @@
 //! Routing addresses encoded as an expected Cell sum type.
 
 use crate::{ActorID, Dict, Predicate};
-use cells::{CellBuilder, CellDecode, CellEncode, CellError, CellRef, CellResolver, CellSlice};
+use cells::{CellBuilder, CellDecode, CellEncode, CellError, CellReader, CellRef, CellSlice};
 
 #[derive(Debug)]
 pub enum Address {
@@ -37,7 +37,7 @@ impl CellEncode for Address {
 }
 
 impl CellDecode for Address {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError> {
@@ -46,7 +46,7 @@ impl CellDecode for Address {
             Self::TAG_MESSAGE_TARGET => {
                 let dst = ActorID::decode(slice, cells)?;
                 let gas = slice.load_u64()?;
-                let cell = cells::resolve_cell(cells, &slice.load_ref()?)?;
+                let cell = cells::read_cell(cells, &slice.load_ref()?)?;
                 let args = Dict::from_cell(&cell, cells)?;
                 Ok(Self::MessageTarget { dst, args, gas })
             }

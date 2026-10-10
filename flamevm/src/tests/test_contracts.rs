@@ -662,10 +662,9 @@ fn input_pushes_contract_seeds_anchor_and_emits_txlog() {
     assert_eq!(vm.current_call.stack.len(), 1);
     assert!(matches!(&vm.current_call.stack[0], Value::Contract(c) if c.id() == expected_id));
     assert_eq!(vm.last_anchor.unwrap().0, expected_id);
-    assert_eq!(vm.txlog.len(), 3);
+    assert_eq!(vm.txlog.len(), 2);
     assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
-    assert!(matches!(vm.txlog[1], TxEntry::CellWitness(_)));
-    assert!(matches!(vm.txlog[2], TxEntry::Input(id) if id == expected_id));
+    assert!(matches!(vm.txlog[1], TxEntry::Input(id) if id == expected_id));
 }
 
 #[test]
@@ -728,9 +727,9 @@ fn input_then_output_anchor_chain() {
     vm.push_value(Value::Point(Point::from_bytes([0xbb; 32])));
     vm.op_output().unwrap();
     assert!(vm.current_call.stack.is_empty());
-    assert_eq!(vm.txlog.len(), 4);
-    assert!(matches!(vm.txlog[2], TxEntry::Input(_)));
-    assert!(matches!(&vm.txlog[3], TxEntry::Output(c) if c.anchor == expected.split().0));
+    assert_eq!(vm.txlog.len(), 3);
+    assert!(matches!(vm.txlog[1], TxEntry::Input(_)));
+    assert!(matches!(&vm.txlog[2], TxEntry::Output(c) if c.anchor == expected.split().0));
     assert_eq!(vm.last_anchor.unwrap(), expected.split().1);
 }
 
@@ -746,8 +745,8 @@ fn input_via_step_external_dispatch() {
     vm.push_value(Value::String(String::from(expected.to_vec())));
     assert!(vm.step_external(&mut StubDelegate::new()).unwrap());
     assert!(matches!(&vm.current_call.stack[0], Value::Contract(c) if c.id() == expected));
-    assert_eq!(vm.txlog.len(), 3);
-    assert!(matches!(vm.txlog[2], TxEntry::Input(id) if id == expected));
+    assert_eq!(vm.txlog.len(), 2);
+    assert!(matches!(vm.txlog[1], TxEntry::Input(id) if id == expected));
 }
 
 #[test]
@@ -766,10 +765,9 @@ fn external_tx_one_input_one_output_via_signtx() {
         .output();
     let vm = run_external_workflow(program);
     assert!(vm.current_call.stack.is_empty());
-    assert_eq!(vm.txlog.len(), 4);
-    assert!(matches!(vm.txlog[1], TxEntry::CellWitness(_)));
-    assert!(matches!(vm.txlog[2], TxEntry::Input(id) if id == input_id));
-    let TxEntry::Output(output) = &vm.txlog[3] else {
+    assert_eq!(vm.txlog.len(), 3);
+    assert!(matches!(vm.txlog[1], TxEntry::Input(id) if id == input_id));
+    let TxEntry::Output(output) = &vm.txlog[2] else {
         panic!("expected output")
     };
     assert_int(output.payload(), Scalar::from(42u64));
@@ -831,10 +829,10 @@ fn external_tx_two_inputs_two_outputs_via_open() {
         .output();
     let vm = run_external_workflow(p);
     assert!(vm.current_call.stack.is_empty());
-    assert_eq!(vm.txlog.len(), 6);
-    assert!(matches!(vm.txlog[2], TxEntry::Input(id) if id == id1));
-    assert!(matches!(vm.txlog[3], TxEntry::Input(id) if id == id2));
-    let (TxEntry::Output(out1), TxEntry::Output(out2)) = (&vm.txlog[4], &vm.txlog[5]) else {
+    assert_eq!(vm.txlog.len(), 5);
+    assert!(matches!(vm.txlog[1], TxEntry::Input(id) if id == id1));
+    assert!(matches!(vm.txlog[2], TxEntry::Input(id) if id == id2));
+    let (TxEntry::Output(out1), TxEntry::Output(out2)) = (&vm.txlog[3], &vm.txlog[4]) else {
         panic!("expected outputs")
     };
     assert_int(out1.payload(), Scalar::from(9u64));

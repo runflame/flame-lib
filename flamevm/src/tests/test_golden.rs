@@ -60,7 +60,7 @@ fn golden_consensus_hashes() {
         assert_eq!(hex(TxID::from_log(&entries).as_bytes()), expected);
         let log = crate::TxLog::from(entries);
         let decoded: crate::TxLog = decode_envelope(&log.to_envelope().unwrap().encode()).unwrap();
-        assert_eq!(decoded.txid(), log.txid());
+        assert_eq!(decoded.effect_id(), log.effect_id());
     }
     assert_eq!(
         hex(&state_root(&Value::Scalar(Scalar::from(42u64)))),
@@ -157,7 +157,6 @@ fn golden_txlog_wire_encoding() {
     for (entry, tag, data) in [
         (TxEntry::Input([0x11; 32]), 2, [0x11; 32]),
         (TxEntry::Receive([0x22; 32]), 3, [0x22; 32]),
-        (TxEntry::CellWitness([0x33; 32]), 15, [0x33; 32]),
         (
             TxEntry::ActorDestroy {
                 actor: ActorID::Hash([7; 32]),

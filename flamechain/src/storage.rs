@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use cells::{
-    Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellID, CellIndex, CellRef,
-    CellResolver, CellSlice, Trie, resolve_cell,
+    Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellID, CellIndex,
+    CellReader, CellRef, CellSlice, Trie, read_cell,
 };
 
 use flamevm::{ActorID, ActorRegistry, Scalar, StoragePurchase, VMError, Value, empty_state};
@@ -143,7 +143,7 @@ impl CellEncode for Lease {
 }
 
 impl CellDecode for Lease {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         _cells: &mut R,
     ) -> Result<Self, CellError> {
@@ -632,7 +632,7 @@ impl ActorStore {
                         .get(&graph.root)
                         .ok_or(CellError::MissingCell(graph.root))?,
                 )
-                .to_unloaded()?,
+                .to_unloaded(),
             )?;
             trie.insert(id, entry.build(), &mut ())?;
         }
@@ -660,7 +660,7 @@ impl ActorStore {
         let key = actor.to_hash();
         self.require_live(key)?;
         let state_bytes = Self::state_bytes(&state)?;
-        let root = CellRef::resident(state.to_cell()?).to_unloaded()?;
+        let root = CellRef::resident(state.to_cell()?).to_unloaded();
         self.record_actor(key);
         let live = self.actors.get_mut(&key).unwrap().live.as_mut().unwrap();
         live.state = Some(state);
@@ -706,14 +706,14 @@ impl ActorRegistry for ActorStore {
     fn load_state_with_cells(
         &mut self,
         id: &ActorID,
-        cells: &mut dyn CellResolver,
+        cells: &mut dyn CellReader,
     ) -> Result<Value, VMError> {
         let key = id.to_hash();
         let live = self.require_live(key)?.live.as_ref().unwrap();
         if self.checked_out.contains(&key) {
             return Err(VMError::ActorEmpty);
         }
-        let cell = resolve_cell(cells, &live.state_root)?;
+        let cell = read_cell(cells, &live.state_root)?;
         // Canonical storage reads never inherit private witnesses or loaded
         // Dict branches from an in-memory cache left by an earlier transaction.
         let state = Value::from_trusted_cell(&cell, cells)?;
@@ -740,7 +740,7 @@ impl ActorRegistry for ActorStore {
             return Err(VMError::SaveWithoutLoad);
         }
         let state_bytes = Self::state_bytes(&state)?;
-        let root = CellRef::resident(state.to_cell()?).to_unloaded()?;
+        let root = CellRef::resident(state.to_cell()?).to_unloaded();
         self.record_actor(key);
         let live = self.actors.get_mut(&key).unwrap().live.as_mut().unwrap();
         live.state = Some(state);
@@ -760,13 +760,13 @@ impl ActorRegistry for ActorStore {
     fn load_code_with_cells(
         &self,
         actor: &ActorID,
-        cells: &mut dyn CellResolver,
+        cells: &mut dyn CellReader,
     ) -> Result<Vec<u8>, VMError> {
         let live = self.require_live(actor.to_hash())?.live.as_ref().unwrap();
         if self.checked_out.contains(&actor.to_hash()) {
             return Err(VMError::ActorEmpty);
         }
-        let cell = resolve_cell(cells, &live.code_root)?;
+        let cell = read_cell(cells, &live.code_root)?;
         let mut slice = CellSlice::new(&cell);
         let code = slice.load_snake(
             cells,
@@ -810,7 +810,7 @@ impl ActorRegistry for ActorStore {
         let live = self.actors.get_mut(&key).unwrap().live.as_mut().unwrap();
         let mut builder = CellBuilder::new();
         builder.store_snake(&code)?;
-        live.code_root = CellRef::resident(builder.build()).to_unloaded()?;
+        live.code_root = CellRef::resident(builder.build()).to_unloaded();
         live.code_bytes = code.len() as u64;
         live.code = Some(code);
         live.retain_changes()?;
@@ -946,8 +946,8 @@ impl ActorRegistry for ActorStore {
         let mut builder = CellBuilder::new();
         builder.store_snake(&code)?;
         let mut live = LiveActor {
-            code_root: CellRef::resident(builder.build()).to_unloaded()?,
-            state_root: CellRef::resident(state.to_cell()?).to_unloaded()?,
+            code_root: CellRef::resident(builder.build()).to_unloaded(),
+            state_root: CellRef::resident(state.to_cell()?).to_unloaded(),
             code_bytes: code.len() as u64,
             code: Some(code),
             state: Some(state),
@@ -1003,7 +1003,7 @@ mod tests {
     fn exhausted_snapshot_levels_return_an_actor_commitment_error() {
         let dict = Dict::from_values(vec![Value::Scalar(Scalar::from(7u64))]);
         let root = dict.to_cell().unwrap();
-        let trie = resolve_cell(&mut (), &root.refs()[0]).unwrap();
+        let trie = read_cell(&mut (), &root.refs()[0]).unwrap();
         let root = Cell::new(
             root.payload().to_vec(),
             vec![trie.prune(15).unwrap().into()],

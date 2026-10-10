@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 
 use cells::{
-    Cell, CellBuilder, CellDecode, CellEncode, CellError, CellRef, CellResolver, CellSlice, Trie,
+    Cell, CellBuilder, CellDecode, CellEncode, CellError, CellReader, CellRef, CellSlice, Trie,
 };
 
 use crate::errors::VMError;
@@ -87,9 +87,13 @@ impl Dict {
     /// no work. Every cached key must already have a resident authenticated path.
     pub(crate) fn encoding_path_gas(&self) -> Result<u64, CellError> {
         struct Meter(u64);
-        impl CellResolver for Meter {
-            fn resolve(&mut self, reference: &CellRef) -> Result<std::sync::Arc<Cell>, CellError> {
-                let cell = ().resolve(reference)?;
+        impl CellReader for Meter {
+            fn read(
+                &mut self,
+                id: cells::CellID,
+                resident: Option<&std::sync::Arc<Cell>>,
+            ) -> Result<std::sync::Arc<Cell>, CellError> {
+                let cell = ().read(id, resident)?;
                 // One traversal plus rebuilding/hashing the same path.
                 let cost = 2 * (1 + cell.record_size() as u64 + cell.refs().len() as u64);
                 self.0 = self.0.checked_add(cost).ok_or(CellError::LimitExceeded)?;
@@ -166,7 +170,7 @@ impl Dict {
     }
 
     /// Loads and validates one value without copying its VM ownership.
-    pub fn get_resolved<R: CellResolver + ?Sized>(
+    pub fn get_resolved<R: CellReader + ?Sized>(
         &mut self,
         key: &Scalar,
         resolver: &mut R,
@@ -197,7 +201,7 @@ impl Dict {
 
     /// Inserts atomically; a traversal/decoding error returns the supplied value.
     #[allow(clippy::result_large_err)]
-    pub fn insert_resolved<R: CellResolver + ?Sized>(
+    pub fn insert_resolved<R: CellReader + ?Sized>(
         &mut self,
         key: Scalar,
         value: Value,
@@ -232,7 +236,7 @@ impl Dict {
     /// Strict insertion. An occupied key returns `Ok(Err(value))`; a loading
     /// failure returns `Err((error, value))`. Neither changes sticky flags.
     #[allow(clippy::result_large_err)]
-    pub fn insert_strict_resolved<R: CellResolver + ?Sized>(
+    pub fn insert_strict_resolved<R: CellReader + ?Sized>(
         &mut self,
         key: Scalar,
         value: Value,
@@ -246,7 +250,7 @@ impl Dict {
     }
 
     /// Removes an owned value only after decoding and path rebuilding succeed.
-    pub fn remove_resolved<R: CellResolver + ?Sized>(
+    pub fn remove_resolved<R: CellReader + ?Sized>(
         &mut self,
         key: &Scalar,
         resolver: &mut R,
@@ -265,7 +269,7 @@ impl Dict {
         Ok(self.values.remove(key))
     }
 
-    pub fn first_key_resolved<R: CellResolver + ?Sized>(
+    pub fn first_key_resolved<R: CellReader + ?Sized>(
         &self,
         resolver: &mut R,
     ) -> Result<Option<Scalar>, CellError> {
@@ -275,7 +279,7 @@ impl Dict {
             .transpose()
     }
 
-    pub fn last_key_resolved<R: CellResolver + ?Sized>(
+    pub fn last_key_resolved<R: CellReader + ?Sized>(
         &self,
         resolver: &mut R,
     ) -> Result<Option<Scalar>, CellError> {
@@ -285,7 +289,7 @@ impl Dict {
             .transpose()
     }
 
-    pub fn next_key_after_resolved<R: CellResolver + ?Sized>(
+    pub fn next_key_after_resolved<R: CellReader + ?Sized>(
         &self,
         key: &Scalar,
         resolver: &mut R,
@@ -298,14 +302,14 @@ impl Dict {
 
     /// Validates an entire import, including its leaf count and scalar paths.
     /// Decoded values are installed only after all leaves pass validation.
-    pub fn hydrate_all<R: CellResolver + ?Sized>(
+    pub fn hydrate_all<R: CellReader + ?Sized>(
         &mut self,
         resolver: &mut R,
     ) -> Result<(), CellError> {
         self.hydrate_at(resolver, 1)
     }
 
-    fn hydrate_at<R: CellResolver + ?Sized>(
+    fn hydrate_at<R: CellReader + ?Sized>(
         &mut self,
         resolver: &mut R,
         depth: usize,
@@ -316,7 +320,7 @@ impl Dict {
         for (path, reference) in entries {
             let key = scalar_from_path(path)?;
             if !self.values.contains_key(&key) {
-                let cell = cells::resolve_cell(resolver, &reference)?;
+                let cell = cells::read_cell(resolver, &reference)?;
                 let value = crate::encoding::value_from_cell_at(&cell, resolver, depth, false)?;
                 self.check_claimed_flags(&value)?;
                 trie.insert_ref(&key_path(&key), CellRef::resident(cell), resolver)?;
@@ -330,7 +334,7 @@ impl Dict {
 
     /// Reads an envelope already authenticated by an owning state transition.
     /// Unlike ordinary [`CellDecode`], this does not resolve hidden branches.
-    pub fn decode_trusted<R: CellResolver + ?Sized>(
+    pub fn decode_trusted<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         _resolver: &mut R,
     ) -> Result<Self, CellError> {
@@ -356,7 +360,7 @@ impl Dict {
     }
 
     /// Opens a previously validated dictionary envelope without hydration.
-    pub fn from_trusted_cell<R: CellResolver + ?Sized>(
+    pub fn from_trusted_cell<R: CellReader + ?Sized>(
         cell: &Cell,
         resolver: &mut R,
     ) -> Result<Self, CellError> {
@@ -460,7 +464,7 @@ impl Dict {
         Ok(())
     }
 
-    pub(crate) fn decode_at<R: CellResolver + ?Sized>(
+    pub(crate) fn decode_at<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         resolver: &mut R,
         depth: usize,
@@ -477,7 +481,7 @@ impl Dict {
 }
 
 impl CellDecode for Dict {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         resolver: &mut R,
     ) -> Result<Self, CellError> {
@@ -538,9 +542,13 @@ mod tests {
             cells: CellIndex,
             gas: u64,
         }
-        impl CellResolver for Meter {
-            fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
-                let cell = self.cells.resolve(reference)?;
+        impl CellReader for Meter {
+            fn read(
+                &mut self,
+                id: cells::CellID,
+                resident: Option<&Arc<Cell>>,
+            ) -> Result<Arc<Cell>, CellError> {
+                let cell = self.cells.read(id, resident)?;
                 self.gas += 1 + cell.record_size() as u64 + cell.refs().len() as u64;
                 Ok(cell)
             }
@@ -837,7 +845,7 @@ mod tests {
         let mut bag = CellIndex::collect(Arc::new(full.clone())).unwrap();
         let root = full.refs()[0].as_resident().unwrap();
         let mut refs = root.refs().to_vec();
-        refs[1] = refs[1].to_unloaded().unwrap();
+        refs[1] = refs[1].to_unloaded();
         let partial_root = Cell::new(root.payload().to_vec(), refs).unwrap();
         let partial = Cell::new(
             full.payload().to_vec(),

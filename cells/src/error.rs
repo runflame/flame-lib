@@ -39,9 +39,6 @@ pub enum CellError {
     #[error("pruned Cell has no accessible application data")]
     PrunedCell,
 
-    #[error("Cell reference {0:?} needs hash/depth metadata before encoding")]
-    MissingCellMetadata(CellID),
-
     #[error("resolved Cell commitment mismatch for {0:?}")]
     CellCommitmentMismatch(CellID),
 

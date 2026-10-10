@@ -37,6 +37,9 @@ nightly = ["curve25519-dalek/alloc", "bulletproofs/nightly"]
 [dev-dependencies]
 criterion = "0.2"
 
+[build-dependencies]
+cells = { path = "../cells" }
+
 [[bench]]
 name = "gas"
 harness = false

@@ -4,8 +4,8 @@ use std::{
 };
 
 use crate::{
-    Cell, CellBuilder, CellCommitment, CellError, CellID, CellRef, CellResolver, CellSlice,
-    GasMeter, MAX_CELL_LEVEL, Trie, resolve_cell,
+    Cell, CellBuilder, CellCommitment, CellError, CellID, CellReader, CellRef, CellResolver,
+    CellSlice, GasMeter, MAX_CELL_LEVEL, Trie, read_cell,
 };
 
 /// An exact in-memory availability index. Network transport belongs to a Cell root.
@@ -91,7 +91,7 @@ impl CellIndex {
         Ok(self.to_cell()?.id())
     }
 
-    pub fn from_cell<R: CellResolver + ?Sized>(
+    pub fn from_cell<R: CellReader + ?Sized>(
         cell: &Cell,
         resolver: &mut R,
     ) -> Result<Self, CellError> {
@@ -129,12 +129,8 @@ impl CellIndex {
 }
 
 impl CellResolver for CellIndex {
-    fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
-        reference
-            .as_resident_arc()
-            .cloned()
-            .or_else(|| self.get(&reference.id()))
-            .ok_or(CellError::MissingCell(reference.id()))
+    fn resolve(&mut self, id: CellID) -> Result<Arc<Cell>, CellError> {
+        self.get(&id).ok_or(CellError::MissingCell(id))
     }
 }
 
@@ -142,7 +138,7 @@ fn cut(reference: &CellRef, cap: u8) -> Result<Cell, CellError> {
     if cap >= MAX_CELL_LEVEL {
         return Err(CellError::InvalidLevel);
     }
-    let c = reference.commitment()?;
+    let c = reference.commitment();
     if c.level() > cap {
         return Err(CellError::InvalidLevel);
     }
@@ -169,7 +165,7 @@ fn prove(
         if *next < cell.refs().len() {
             let r = &cell.refs()[*next];
             if let Some(body) = index.get(&r.id()) {
-                if r.commitment()? != body.commitment() {
+                if r.commitment() != body.commitment() {
                     return Err(CellError::CellCommitmentMismatch(r.id()));
                 }
                 if let Some(proof) = done.get(&r.id()) {
@@ -214,7 +210,7 @@ fn project(cell: &Cell, cap: u8) -> Result<Cell, CellError> {
     }
     let mut refs = Vec::new();
     for r in cell.refs() {
-        let c = r.commitment()?;
+        let c = r.commitment();
         let mask = c.mask() & ((1u16 << cap) - 1);
         let levels = (0..=cap)
             .filter(|&l| l == 0 || mask & (1 << (l - 1)) != 0)
@@ -290,7 +286,7 @@ impl CellEnvelope {
         let wire = Cell::decode_transport(bytes, max_bytes, gas)?;
         let mut s = CellSlice::new(&wire);
         let cap = s.load_u8()?;
-        let proof = resolve_cell(&mut (), &s.load_ref()?)?;
+        let proof = read_cell(&mut (), &s.load_ref()?)?;
         s.finish()?;
         if cap > proof.level() {
             return Err(CellError::InvalidLevel);
@@ -311,7 +307,7 @@ impl CellEnvelope {
             )?;
             cells.insert(Arc::new(project(&cell, cap)?))?;
             for r in cell.refs() {
-                pending.push(resolve_cell(&mut (), r)?);
+                pending.push(read_cell(&mut (), r)?);
             }
         }
         let root = wire.refs()[0]
@@ -327,8 +323,8 @@ impl CellEnvelope {
 }
 
 impl CellResolver for CellEnvelope {
-    fn resolve(&mut self, reference: &CellRef) -> Result<Arc<Cell>, CellError> {
-        self.cells.resolve(reference)
+    fn resolve(&mut self, id: CellID) -> Result<Arc<Cell>, CellError> {
+        self.cells.resolve(id)
     }
 }
 
@@ -358,10 +354,10 @@ mod tests {
             restored.get(&root.id()).unwrap().commitment(),
             root.commitment()
         );
-        assert!(resolve_cell(&mut restored, &root.refs()[0]).is_ok());
+        assert!(read_cell(&mut restored, &root.refs()[0]).is_ok());
         let missing = restored.get(&root.id()).unwrap().refs()[1].clone();
         assert!(
-            matches!(resolve_cell(&mut restored,&missing), Err(CellError::MissingCell(id)) if id == b.id())
+            matches!(read_cell(&mut restored,&missing), Err(CellError::MissingCell(id)) if id == b.id())
         );
     }
 

@@ -90,7 +90,7 @@ fn imports(mut output: String, decls: &[Decl]) -> String {
         ("::cells::CellEncode", "CellEncode", "CellsEncode", 2),
         ("::cells::CellError", "CellError", "CellsError", 2),
         ("::cells::CellRef", "CellRef", "CellsRef", 2),
-        ("::cells::CellResolver", "CellResolver", "CellsResolver", 2),
+        ("::cells::CellReader", "CellReader", "CellsReader", 2),
         ("::cells::CellSlice", "CellSlice", "CellsSlice", 2),
         ("::core::primitive::usize", "usize", "Usize", 1),
     ] {
@@ -346,11 +346,13 @@ impl Compiler<'_> {
 
     // Alias declarations become transparent Rust newtypes, preserving codecs
     // such as V128 that would be lost by a plain Rust `type Count = u64`.
-    fn integer_wrappers(&self, ty: &Ty) -> Option<usize> {
+    fn integer_wrappers(&self, ty: &Ty) -> Option<(usize, Integer)> {
         match &ty.kind {
-            Type::Integer(_) => Some(0),
+            Type::Integer(integer) => Some((0, *integer)),
             Type::Named(name) => match &self.declarations[name.name.as_str()].kind {
-                Kind::Alias(inner) => self.integer_wrappers(inner).map(|n| n + 1),
+                Kind::Alias(inner) => self
+                    .integer_wrappers(inner)
+                    .map(|(n, integer)| (n + 1, integer)),
                 _ => None,
             },
             _ => None,
@@ -539,7 +541,7 @@ impl Compiler<'_> {
         } else {
             "_"
         };
-        writeln!(out, "impl ::cells::CellDecode for {name} {{\nfn decode<{}: ::cells::CellResolver + ?::core::marker::Sized>({}: &mut ::cells::CellSlice<'_>, {resolver}: &mut {}) -> ::core::result::Result<Self, ::cells::CellError> {{\n{}.try_load(|{cursor}| {{", self.resolver_type, self.slice, self.resolver_type, self.slice).unwrap();
+        writeln!(out, "impl ::cells::CellDecode for {name} {{\nfn decode<{}: ::cells::CellReader + ?::core::marker::Sized>({}: &mut ::cells::CellSlice<'_>, {resolver}: &mut {}) -> ::core::result::Result<Self, ::cells::CellError> {{\n{}.try_load(|{cursor}| {{", self.resolver_type, self.slice, self.resolver_type, self.slice).unwrap();
         match &decl.kind {
             Kind::Struct(fields) => self.decode_fields(fields, "Self", out),
             Kind::Alias(ty) => writeln!(
@@ -639,7 +641,7 @@ impl Compiler<'_> {
             Length::Fixed(n) => format!("{n}usize"),
             Length::Field(name) => {
                 let (local, ty, encode) = &bindings[&name.name];
-                let wrappers = self.integer_wrappers(ty).expect("validated count");
+                let (wrappers, integer) = self.integer_wrappers(ty).expect("validated count");
                 let mut value = if *encode && wrappers == 0 {
                     format!("*{local}")
                 } else {
@@ -648,9 +650,13 @@ impl Compiler<'_> {
                 for _ in 0..wrappers {
                     value.push_str(".0");
                 }
-                format!(
-                    "::core::primitive::usize::try_from({value}).map_err(|_| ::cells::CellError::LimitExceeded)?"
-                )
+                if matches!(integer, Integer::U8 | Integer::U16) {
+                    format!("::core::primitive::usize::from({value})")
+                } else {
+                    format!(
+                        "::core::primitive::usize::try_from({value}).map_err(|_| ::cells::CellError::LimitExceeded)?"
+                    )
+                }
             }
         }
     }
@@ -845,6 +851,20 @@ mod tests {
         assert!(output.contains("remaining_bytes() / 32"));
         assert!(output.contains("CellEncode::encode"));
         assert!(compile("type Point=[U8;32]; struct TooBig { points:[Point;128] }").is_err());
+    }
+
+    #[test]
+    fn small_array_counts_use_infallible_conversions_including_aliases() {
+        for count in ["U8", "U16"] {
+            let output = compile(&format!(
+                "type Count={count}; struct A {{ n:Count, data:[U8;n] }}"
+            ))
+            .unwrap();
+            assert!(output.contains("usize::from("));
+            assert!(!output.contains("usize::try_from("));
+        }
+        let output = compile("struct A { n:U64, data:[U8;n] }").unwrap();
+        assert!(output.contains("usize::try_from("));
     }
 
     #[test]

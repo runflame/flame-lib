@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{Cell, CellError, CellRef, CellResolver, MAX_CELL_REFS, resolve_cell};
+use crate::{Cell, CellError, CellReader, CellRef, MAX_CELL_REFS, read_cell};
 
 pub trait GasMeter {
     fn charge(&mut self, amount: u64) -> Result<(), CellError>;
@@ -54,7 +54,7 @@ fn take<'a>(input: &mut &'a [u8], n: usize) -> Result<&'a [u8], CellError> {
 }
 
 // One canonical ordered postorder, independent of Arc identity and cache residency.
-pub(crate) fn ordered<R: CellResolver + ?Sized>(
+pub(crate) fn ordered<R: CellReader + ?Sized>(
     root: Arc<Cell>,
     resolver: &mut R,
 ) -> Result<Vec<Arc<Cell>>, CellError> {
@@ -66,7 +66,7 @@ pub(crate) fn ordered<R: CellResolver + ?Sized>(
         if *next < cell.refs().len() {
             let reference = &cell.refs()[*next];
             *next += 1;
-            let child = resolve_cell(resolver, reference)?;
+            let child = read_cell(resolver, reference)?;
             if completed.contains(&child.id()) {
                 continue;
             }
@@ -92,7 +92,7 @@ impl Cell {
 
     /// Packs the complete physical DAG, with children first and this Cell last.
     /// Unloaded references must resolve; explicit pruning records are terminal data.
-    pub fn encode_transport<R: CellResolver + ?Sized>(
+    pub fn encode_transport<R: CellReader + ?Sized>(
         &self,
         resolver: &mut R,
     ) -> Result<Vec<u8>, CellError> {
@@ -117,12 +117,13 @@ impl Cell {
             attached: BTreeMap<crate::CellID, Arc<Cell>>,
             fallback: &'a mut R,
         }
-        impl<R: CellResolver + ?Sized> CellResolver for EncodingCells<'_, R> {
-            fn resolve(&mut self, r: &CellRef) -> Result<Arc<Cell>, CellError> {
-                match self.attached.get(&r.id()) {
-                    Some(cell) => self.fallback.resolve(&CellRef::resident(cell.clone())),
-                    None => self.fallback.resolve(r),
-                }
+        impl<R: CellReader + ?Sized> CellReader for EncodingCells<'_, R> {
+            fn read(
+                &mut self,
+                id: crate::CellID,
+                resident: Option<&Arc<Cell>>,
+            ) -> Result<Arc<Cell>, CellError> {
+                self.fallback.read(id, self.attached.get(&id).or(resident))
             }
         }
         let records = ordered(
@@ -333,7 +334,7 @@ mod tests {
             assert!(decode(&bytes).is_err(), "{bytes:?}");
         }
         let c = leaf(1);
-        let root = Cell::new(vec![], vec![CellRef::resident(c).to_unloaded().unwrap()]).unwrap();
+        let root = Cell::new(vec![], vec![CellRef::resident(c).to_unloaded()]).unwrap();
         assert!(matches!(
             root.encode_transport(&mut ()),
             Err(CellError::MissingCell(_))
@@ -375,10 +376,7 @@ mod tests {
         assert_eq!(bytes[0], 2);
         let restored = decode(&bytes).unwrap();
         assert_eq!(restored.commitment(), root.commitment());
-        assert_eq!(
-            restored.refs()[0].commitment().unwrap(),
-            pruned.commitment()
-        );
+        assert_eq!(restored.refs()[0].commitment(), pruned.commitment());
         assert_eq!(restored.encode().unwrap(), bytes);
     }
 

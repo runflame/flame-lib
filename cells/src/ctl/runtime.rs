@@ -1,7 +1,7 @@
 use std::{fmt, marker::PhantomData};
 
 use crate::{
-    CellBuilder, CellDecode, CellEncode, CellError, CellRef, CellResolver, CellSlice, resolve_cell,
+    CellBuilder, CellDecode, CellEncode, CellError, CellReader, CellRef, CellSlice, read_cell,
 };
 
 /// A lazy CTL `^T` reference. The type describes the expected child encoding;
@@ -34,11 +34,11 @@ impl<T> Ref<T> {
         Ok(Self::from_reference(value.to_cell()?.into()))
     }
 
-    pub fn load<R: CellResolver + ?Sized>(&self, cells: &mut R) -> Result<T, CellError>
+    pub fn load<R: CellReader + ?Sized>(&self, cells: &mut R) -> Result<T, CellError>
     where
         T: CellDecode,
     {
-        let cell = resolve_cell(cells, &self.reference)?;
+        let cell = read_cell(cells, &self.reference)?;
         T::from_cell(&cell, cells)
     }
 }
@@ -63,7 +63,7 @@ impl<T> CellEncode for Ref<T> {
 }
 
 impl<T> CellDecode for Ref<T> {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         _cells: &mut R,
     ) -> Result<Self, CellError> {
@@ -79,16 +79,24 @@ mod tests {
 
     struct NeverResolve;
 
-    impl CellResolver for NeverResolve {
-        fn resolve(&mut self, _: &CellRef) -> Result<Arc<Cell>, CellError> {
+    impl CellReader for NeverResolve {
+        fn read(
+            &mut self,
+            _: crate::CellID,
+            _: Option<&Arc<Cell>>,
+        ) -> Result<Arc<Cell>, CellError> {
             panic!("decoding a reference must not resolve its body")
         }
     }
 
     struct Fixed(Cell, usize);
 
-    impl CellResolver for Fixed {
-        fn resolve(&mut self, _: &CellRef) -> Result<Arc<Cell>, CellError> {
+    impl CellReader for Fixed {
+        fn read(
+            &mut self,
+            _: crate::CellID,
+            _: Option<&Arc<Cell>>,
+        ) -> Result<Arc<Cell>, CellError> {
             self.1 += 1;
             Ok(Arc::new(self.0.clone()))
         }
@@ -99,7 +107,7 @@ mod tests {
         struct NoTraits;
 
         let child = CellRef::resident(42u8.to_cell().unwrap());
-        let reference = Ref::<NoTraits>::from_reference(child.to_unloaded().unwrap());
+        let reference = Ref::<NoTraits>::from_reference(child.to_unloaded());
         let encoded = reference.clone().to_cell().unwrap();
         assert!(encoded.payload().is_empty());
         assert_eq!(encoded.refs().len(), 1);

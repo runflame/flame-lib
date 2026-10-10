@@ -1,4 +1,4 @@
-use crate::{Cell, CellError, CellRef, CellResolver, MAX_CELL_PAYLOAD, resolve_cell};
+use crate::{Cell, CellError, CellReader, CellRef, MAX_CELL_PAYLOAD, read_cell};
 
 /// A consuming payload/reference cursor over one [`Cell`].
 #[derive(Clone, Debug)]
@@ -93,7 +93,7 @@ impl<'a> CellSlice<'a> {
     /// dedicated continuation Cells must have canonical lengths and ref counts.
     /// The cursor stays on the parent, preserving subsequent fields and refs.
     /// On error the cursor is unchanged, but resolver charges are not refunded.
-    pub fn load_snake<R: CellResolver + ?Sized>(
+    pub fn load_snake<R: CellReader + ?Sized>(
         &mut self,
         cells: &mut R,
         limit: usize,
@@ -117,7 +117,7 @@ impl<'a> CellSlice<'a> {
 
             let mut reference = slice.load_ref()?;
             loop {
-                let cell = resolve_cell(cells, &reference)?;
+                let cell = read_cell(cells, &reference)?;
                 if cell.is_pruned() {
                     return Err(CellError::PrunedCell);
                 }

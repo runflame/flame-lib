@@ -517,18 +517,17 @@ fn confidential_1_to_1_with_fee() {
     assert_eq!(prover_result.total_fee, 3);
 
     // Txlog layout: Header, Input, Fee(3), Output.
-    assert_eq!(prover_result.txlog.len(), 5);
+    assert_eq!(prover_result.txlog.len(), 4);
     assert!(matches!(prover_result.txlog[0], TxEntry::Header(_)));
-    assert!(matches!(prover_result.txlog[1], TxEntry::CellWitness(_)));
-    match &prover_result.txlog[2] {
+    match &prover_result.txlog[1] {
         TxEntry::Input(id) => assert_eq!(*id, expected_input_id),
-        _ => panic!("txlog[2] must be Input"),
+        _ => panic!("txlog[1] must be Input"),
+    }
+    match &prover_result.txlog[2] {
+        TxEntry::Fee(q) => assert_eq!(*q, 3),
+        _ => panic!("txlog[2] must be Fee(3)"),
     }
     match &prover_result.txlog[3] {
-        TxEntry::Fee(q) => assert_eq!(*q, 3),
-        _ => panic!("txlog[3] must be Fee(3)"),
-    }
-    match &prover_result.txlog[4] {
         TxEntry::Output(c) => {
             assert_eq!(c.predicate.to_point(), out_pred);
             let token = match c.payload() {
@@ -538,7 +537,7 @@ fn confidential_1_to_1_with_fee() {
             assert_eq!(token.qty.to_point(), q_out.to_point());
             assert_eq!(token.flv.to_point(), f_out.to_point());
         }
-        _ => panic!("txlog[4] must be Output"),
+        _ => panic!("txlog[3] must be Output"),
     }
 
     // Verifier round-trip.

@@ -18,33 +18,52 @@ snapshots are ordinary cap-plus-proof-root Cells, with no root-ID prefix.
 
 ## Transactions and execution witnesses
 
-An ExternalTx root has this layout:
+The authoritative [CTL schema](../flamevm/tx.ctl) generates the wire codecs at
+build time. The layout is:
 
-| Payload | Ordered child references |
-| --- | --- |
-| version:u32 LE, locktime:u32 LE, witness root CellID:32 bytes | script container, signature, R1CS proof, **unloaded TxLog** |
+| Cell | Payload | Ordered child references |
+| --- | --- | --- |
+| Tx | signature:64 bytes, r1cs_length:u16 LE, r1cs_proof:r1cs_length bytes | TxBody |
+| TxBody | version:u32 LE, locktime:u32 LE | program, pruned TxLog |
+| pruned TxLog | retained hash(0):32 bytes, depth(0):u16 LE | none |
 
-The script container stores the script in length-prefixed snake encoding.
-Its next unused reference points directly to the witness snapshot Cell root.
-A long script uses the first reference for its continuation; the witness-root
-reference follows it. The signature Cell has either zero
-bytes (no TxID-bound authorization) or 64 bytes, and no references. The proof
-is a dedicated snake. UnsignedTx omits the signature and proof references,
-leaving script-container and unloaded-TxLog references. The effect-root
-reference retains its actual mask, hashes, and depths, including the factual
-TxID; it is not a bare ID or an explicit pruning record. Verification rebuilds
-the effect graph and compares the complete commitment summary as well as TxID.
+The program contains bytecode and the necessary execution subcells. The current
+bytecode API stores bytes as a length-prefixed Snake, followed by a reference
+to its ordinary execution-witness snapshot hierarchy. There is no separate
+witness field or witness hash in Tx or TxBody. Native Cell-operand opcodes and
+instruction-stream continuation are separate work in the plan.
+
+An all-zero 64-byte signature means absent authorization; it is decoded as
+`None`, never verified as a signature. Any other field must parse as a Schnorr
+signature. The verifier rejects absence when `signtx` is used and presence
+when no `signtx` authorization was recorded. Explicit `signcall` signatures
+remain in the program.
+
+The R1CS proof is inline, not a Snake or child Cell. Its length must fit both
+U16 and the remaining 4095-byte payload: at most 4029 bytes. The pinned proof
+decoder accepts at most 2497 bytes, so current proofs fit. Caller proof-size
+limits are checked before copying proof bytes.
+
+The log child must be a resident, explicit mask-one pruning record. Its full
+record is 36 bytes: `01 80`, then its retained hash and LE depth. It is not
+decoded as a TxLog. Verification computes the effects and reconstructs this
+canonical pruning record from `hash(0)` and `depth(0)`, comparing the complete
+commitment. A computed log containing pruned outputs may have higher hash
+levels; those do not replace this specified level-zero comparison.
+
+`UnsignedTx::to_cell()` encodes TxBody. `ExternalTx::to_bytes()` transports the
+complete Tx root directly, without an additional CellEnvelope wrapper.
 
 Transport and execution have separate scopes:
 
-- The **transport DAG** reconstructs the typed snapshot, script, signature,
+- The **transport DAG** reconstructs the body, program, signature,
   proof, and witness hierarchy. Its bodies are not implicitly VM witnesses.
 - The **execution index** is the immutable set available to the external VM and
   every synchronous call and asynchronous descendant it initiates. It contains
   Contract bodies, predicate paths, and optional actor/Dict bodies.
 
-External execution emits `Header`, then `CellWitness(witness_root.id())`.
-That entry participates in TxID and therefore the signature and R1CS transcript.
+External execution emits `Header` followed by effects. There is no `CellWitness`
+entry: the factual program graph is already committed by the body ID.
 Removing even an unused execution body changes the signed statement. The index
 is fixed before proving; it never includes its own transaction envelope,
 avoiding a circular commitment. Private commitment openings and prover-only
@@ -76,7 +95,7 @@ let unsigned = ScriptBuilder::new()
 
 // When signtx is used, sign unsigned.signing_instructions() instead.
 let tx = unsigned.without_signature()?;
-let bytes = tx.to_envelope()?.encode();
+let bytes = tx.to_bytes()?;
 let decoded = ExternalTx::from_bytes_bounded(
     &bytes, 1, max_script_bytes, max_proof_bytes,
 )?;
@@ -93,8 +112,13 @@ before proving; it is not trimmed according to later execution outcomes.
 
 ### Transaction identity
 
-The claimed TxID is the **TxLog root CellID**, not the ExternalTx root ID.
-Verification re-executes and checks the claimed effect root. Bounded transport
+`TxID = TxBody.id()`, `WitnessID = Tx.id()`, and
+`EffectID = computed_TxLog.hash(0)`. Signature and R1CS transcripts bind TxID.
+Changing top-level signature/proof changes WitnessID, not TxID; changing the
+program or supplied execution data changes TxID even when effects are equal.
+The log must not contain the body ID, which would create a circular commitment.
+Internal execution IDs retain the factual computed-log root, bound to Receive.
+Verification re-executes and checks the claimed log hash and depth. Bounded transport
 decoders reject trailing bytes and unused outer bodies; unused bodies inside
 the committed execution index are allowed.
 
@@ -121,7 +145,6 @@ separate TxEntry Cell. The sum tag is one byte:
 | 12 | StoragePurchase | actor ID:32, bytes:u64, expiry:u64, fee:Scalar | — |
 | 13 | ActorDestroy | actor ID:32 | — |
 | 14 | ActorDeploy | actor ID:32 | constructor code snake |
-| 15 | CellWitness | execution availability CellID:32 | — |
 
 Integers in payloads are little-endian unless explicitly stated otherwise.
 
@@ -134,7 +157,7 @@ Integers in payloads are little-endian unless explicitly stated otherwise.
 | Token | qty commitment:32, flavor commitment:32 | — |
 | ClearToken | qty Scalar:32, flavor Scalar:32 | — |
 | String | raw bytes, 0..4095; no length prefix | — |
-| Script / proof / arbitrary blob field | snake: u32 LE total length followed by bytes | next continuation when needed |
+| Script / arbitrary blob field | snake: u32 LE total length followed by bytes | next continuation when needed |
 | Dict | count:u64 LE, flags:u8 | Trie root unless empty |
 
 Only `Value` adds a tag: Scalar=0, String=1, Dict=2, Point=3,
@@ -150,6 +173,7 @@ The limit also applies to witness-bearing Strings' public bytes. Literal
 parsing and VM string growth reject lengths above 4095 with `StringTooLong`,
 before allocating the result. Programs, proofs, and other schema-defined blob
 fields remain snakes and may span many Cells; they are not runtime Strings.
+The external Tx's R1CS proof is the explicitly inline exception above.
 
 Dict has a single implementation over `cells::Trie`, including small and
 sequential dictionaries. Keys are always present in the trie path: reverse

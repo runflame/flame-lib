@@ -44,12 +44,12 @@ pub use value::Value;
 pub use verifier::Verifier;
 
 pub use tx::{
-    ExternalTx, InternalTx, Limits, SigningInstructions, TxEntry, TxHeader, TxID, TxLog, TxMetrics,
-    UnsignedTx,
+    EffectID, ExternalTx, InternalTx, Limits, SigningInstructions, TxEntry, TxHeader, TxID, TxLog,
+    TxMetrics, UnsignedTx,
 };
 pub use vm::{Anchor, BlockContext};
 
 pub use cells::{
-    Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError, CellID, CellIndex, CellRef,
-    CellResolver, CellSlice, Trie,
+    read_cell, resolve_cell, Cell, CellBuilder, CellDecode, CellEncode, CellEnvelope, CellError,
+    CellID, CellIndex, CellReader, CellRef, CellResolver, CellSlice, Trie,
 };

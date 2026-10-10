@@ -363,12 +363,11 @@ fn issuepriv_emits_token_with_predicate_bound_flavor() {
     assert_int(&vm.current_call.stack[1], Scalar::from(1u64));
     assert_int(&vm.current_call.stack[2], Scalar::from(1u64));
 
-    // External log: Header + CellWitness + IssuePriv.
-    assert_eq!(vm.txlog.len(), 3);
+    // External log: Header + IssuePriv.
+    assert_eq!(vm.txlog.len(), 2);
     assert!(matches!(vm.txlog[0], TxEntry::Header(_)));
-    assert!(matches!(vm.txlog[1], TxEntry::CellWitness(_)));
     let expected_flv_pt = Commitment::unblinded(expected_flv).to_point();
-    match &vm.txlog[2] {
+    match &vm.txlog[1] {
         TxEntry::IssuePriv(q, f) => {
             assert_eq!(*q, qty_commit.to_point());
             assert_eq!(*f, expected_flv_pt);

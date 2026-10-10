@@ -150,7 +150,7 @@ impl CellEncode for Point {
 }
 
 impl CellDecode for Point {
-    fn decode<R: cells::CellResolver + ?Sized>(a: &mut CellSlice<'_>, b: &mut R) -> Result<Self, CellError> {
+    fn decode<R: cells::CellReader + ?Sized>(a: &mut CellSlice<'_>, b: &mut R) -> Result<Self, CellError> {
         a.try_load(|a| types::Point::decode(a, b)?.try_into())
     }
 }
@@ -173,7 +173,7 @@ impl CellEncode for Key {
 }
 
 impl CellDecode for Key {
-    fn decode<R: cells::CellResolver + ?Sized>(a: &mut CellSlice<'_>, b: &mut R) -> Result<Self, CellError> {
+    fn decode<R: cells::CellReader + ?Sized>(a: &mut CellSlice<'_>, b: &mut R) -> Result<Self, CellError> {
         a.try_load(|a| types::Key::decode(a, b)?.try_into())
     }
 }
@@ -204,7 +204,7 @@ impl CellEncode for Points {
 }
 
 impl CellDecode for Points {
-    fn decode<R: cells::CellResolver + ?Sized>(a: &mut CellSlice<'_>, b: &mut R) -> Result<Self, CellError> {
+    fn decode<R: cells::CellReader + ?Sized>(a: &mut CellSlice<'_>, b: &mut R) -> Result<Self, CellError> {
         a.try_load(|a| types::Points::decode(a, b)?.try_into())
     }
 }

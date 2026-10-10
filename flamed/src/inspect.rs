@@ -7,8 +7,8 @@ use flamed_rpc::{
     InstructionView, PredicatePoint, TxEntry as RpcTxEntry, TxValue, ValueCell,
 };
 use flamevm::{
-    ActorID, Anchor, Cell, CellDecode, CellEncode, CellEnvelope, CellError, CellRef, CellResolver,
-    CellSlice, Contract, Instruction, Predicate, Scalar, Trie, TxEntry, Value,
+    read_cell, resolve_cell, ActorID, Anchor, Cell, CellDecode, CellEncode, CellEnvelope,
+    CellError, CellRef, CellSlice, Contract, Instruction, Predicate, Scalar, Trie, TxEntry, Value,
 };
 
 /// Decodes an archived contract's public payload.
@@ -19,7 +19,7 @@ pub fn contract(id: ContractId, mut result: ContractResult) -> Result<ContractRe
     if envelope.root() != id.0 {
         return Err(CellError::InvalidFormat);
     }
-    let root = envelope.resolve(&CellRef::unresolved(envelope.root()))?;
+    let root = resolve_cell(&mut envelope, id.0)?;
     let (contract, decoded) = match Contract::from_cell(&root, &mut envelope) {
         Ok(contract) => {
             let decoded = render_value(contract.payload());
@@ -46,11 +46,10 @@ pub fn actor(mut result: ActorResult) -> ActorResult {
     let decoded = result.state.as_ref().map(|bytes| {
         let mut gas = (bytes.0.len() as u64).saturating_mul(1024);
         let mut envelope = CellEnvelope::decode(&bytes.0, bytes.0.len(), &mut gas)?;
-        let reference = CellRef::unresolved(envelope.root());
-        match envelope
-            .resolve(&reference)
-            .and_then(|cell| Value::from_cell(&cell, &mut envelope))
-        {
+        let id = envelope.root();
+        let root = resolve_cell(&mut envelope, id)?;
+        let reference = CellRef::resident(root.clone());
+        match Value::from_cell(&root, &mut envelope) {
             Ok(value) => render_value(&value),
             Err(CellError::MissingCell(_)) => available_cells(&reference, &mut envelope),
             Err(error) => Err(error),
@@ -127,7 +126,7 @@ pub fn effects(bytes: &[u8]) -> Result<Vec<RpcTxEntry>, CellError> {
             if key != (i as u64).to_be_bytes() {
                 return Err(CellError::InvalidFormat);
             }
-            let cell = envelope.resolve(&reference)?;
+            let cell = read_cell(&mut envelope, &reference)?;
             effect_from_cell(&cell, &mut envelope)
         })
         .collect()
@@ -153,7 +152,7 @@ fn effect_from_cell(cell: &Cell, envelope: &mut CellEnvelope) -> Result<RpcTxEnt
             }
         }
         TxEntry::TAG_OUTPUT => {
-            let contract = envelope.resolve(&slice.load_ref()?)?;
+            let contract = read_cell(envelope, &slice.load_ref()?)?;
             let contract = Contract::from_trusted_cell(&contract, envelope)?;
             let payload = CellRef::resident(contract.payload().to_cell()?);
             RpcTxEntry::Output {
@@ -164,7 +163,7 @@ fn effect_from_cell(cell: &Cell, envelope: &mut CellEnvelope) -> Result<RpcTxEnt
             }
         }
         TxEntry::TAG_SEND => {
-            let message = envelope.resolve(&slice.load_ref()?)?;
+            let message = read_cell(envelope, &slice.load_ref()?)?;
             message_effect(&message, envelope)?
         }
         _ => return Err(CellError::InvalidFormat),
@@ -191,7 +190,7 @@ fn message_effect(cell: &Cell, envelope: &mut CellEnvelope) -> Result<RpcTxEntry
     );
 
     let gas_limit = slice.load_u64()?.to_string();
-    let payload = envelope.resolve(&slice.load_ref()?)?;
+    let payload = read_cell(envelope, &slice.load_ref()?)?;
     slice.finish()?;
 
     // Message arguments use a dictionary with consecutive keys starting at zero.
@@ -219,9 +218,7 @@ fn message_effect(cell: &Cell, envelope: &mut CellEnvelope) -> Result<RpcTxEntry
             if key != expected {
                 return Err(CellError::InvalidFormat);
             }
-            match envelope
-                .resolve(&reference)
-                .and_then(|cell| Value::from_cell(&cell, envelope))
+            match read_cell(envelope, &reference).and_then(|cell| Value::from_cell(&cell, envelope))
             {
                 Ok(value) => render_value(&value),
                 Err(CellError::MissingCell(_)) => available_cells(&reference, envelope),
@@ -271,7 +268,6 @@ fn render_effect(entry: &TxEntry) -> Result<RpcTxEntry, CellError> {
             version: h.version,
             locktime: h.locktime,
         },
-        TxEntry::CellWitness(hash) => RpcTxEntry::CellWitness { hash: *hash },
         TxEntry::Data(bytes) => RpcTxEntry::Data {
             bytes: bytes.clone(),
         },
@@ -383,7 +379,7 @@ fn available_cells(reference: &CellRef, envelope: &mut CellEnvelope) -> Result<T
         if !seen.insert(reference.id()) {
             continue;
         }
-        match envelope.resolve(&reference) {
+        match read_cell(envelope, &reference) {
             Ok(cell) => {
                 pending.extend(cell.refs().iter().cloned());
                 cells.push(ValueCell {
@@ -427,9 +423,7 @@ mod tests {
         assert_eq!(trie.refs().len(), 2);
         let mut builder = CellBuilder::new();
         builder.store_bytes(trie.payload()).unwrap();
-        builder
-            .store_ref(trie.refs()[0].to_unloaded().unwrap())
-            .unwrap();
+        builder.store_ref(trie.refs()[0].to_unloaded()).unwrap();
         builder.store_ref(trie.refs()[1].clone()).unwrap();
         let partial_trie = builder.build();
         let mut builder = CellBuilder::new();
@@ -509,9 +503,8 @@ mod tests {
 
     #[test]
     fn absent_state_root_stays_a_hash_reference() {
-        let state_ref = CellRef::resident(Value::Scalar(Scalar::ONE).to_cell().unwrap())
-            .to_unloaded()
-            .unwrap();
+        let state_ref =
+            CellRef::resident(Value::Scalar(Scalar::ONE).to_cell().unwrap()).to_unloaded();
         let state = state_ref.id();
         let mut builder = CellBuilder::new();
         builder
@@ -611,7 +604,6 @@ mod tests {
                 version: 1,
                 locktime: u32::MAX,
             }),
-            TxEntry::CellWitness([0x22; 32]),
             TxEntry::Input([0x33; 32]),
             TxEntry::Receive([0x44; 32]),
             TxEntry::Output(
@@ -656,17 +648,17 @@ mod tests {
         let decoded = effects(&bytes).unwrap();
         assert_eq!(decoded, expected);
         let json = serde_json::to_value(&decoded).unwrap();
-        assert_eq!(json[4]["data"]["anchor"], "55".repeat(32));
+        assert_eq!(json[3]["data"]["anchor"], "55".repeat(32));
         assert_eq!(
-            json[4]["data"]["payload"]["entries"][0]["value"]["bytes"],
+            json[3]["data"]["payload"]["entries"][0]["value"]["bytes"],
             "q6ur".repeat(85) + "q6s="
         );
-        assert_eq!(json[5]["data"]["code"], "7+/v".repeat(85) + "7+8=");
-        assert_eq!(json[6]["data"]["state"], json[4]["data"]["payload"]);
+        assert_eq!(json[4]["data"]["code"], "7+/v".repeat(85) + "7+8=");
+        assert_eq!(json[5]["data"]["state"], json[3]["data"]["payload"]);
         assert_eq!(
-            json[7]["data"],
+            json[6]["data"],
             json!({
-                "message": json[7]["data"]["message"],
+                "message": json[6]["data"]["message"],
                 "target": {
                     "kind": "constructor",
                     "actor": hex::encode(target.to_hash()),

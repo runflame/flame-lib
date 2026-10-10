@@ -6,9 +6,7 @@ mod note;
 mod roundtrip;
 
 use flamekd::ReceivingAddress;
-use flamevm::{
-    CellEncode, Contract, ContractID, ExternalTx, Limits, TxEntry, TxHeader, TxLog, FLAME_FLAVOR,
-};
+use flamevm::{Contract, ContractID, ExternalTx, Limits, TxEntry, TxHeader, TxLog, FLAME_FLAVOR};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
@@ -85,7 +83,7 @@ pub(crate) fn receive(
 /// Encode, decode and verify — the verifier's view of a built transaction,
 /// and the bytes that actually travel.
 pub(crate) fn publish(tx: &ExternalTx) -> (Vec<u8>, TxLog) {
-    let bytes = tx.to_envelope().expect("envelope").encode();
+    let bytes = tx.to_bytes().expect("transaction bytes");
     let decoded =
         ExternalTx::from_bytes_bounded(&bytes, 1, tx.script.len(), tx.proof_bytes().len())
             .expect("decode");
@@ -94,7 +92,7 @@ pub(crate) fn publish(tx: &ExternalTx) -> (Vec<u8>, TxLog) {
 }
 
 /// The contracts a log created, in order. Entries are counted by variant:
-/// every external log begins `Header, CellWitness(CellID)`, so the length of
+/// every external log begins with `Header`, so the length of
 /// `entries()` says nothing on its own.
 pub(crate) fn outputs(log: &TxLog) -> Vec<Contract> {
     log.entries()

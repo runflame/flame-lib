@@ -149,7 +149,7 @@ impl Mempool {
         {
             return Err(MempoolError::InvalidEnvelope);
         }
-        let txid = log.txid();
+        let txid = block_tx.tx.txid;
         if self.txids.contains(txid.as_bytes()) {
             return Err(MempoolError::Duplicate);
         }

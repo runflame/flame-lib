@@ -26,8 +26,8 @@ use flamepayments::{
     InputSpec, Opening, OutputSpec, SpendAccount, ViewingKey,
 };
 use flamevm::{
-    Anchor, CellEncode, CellError, ClearToken, Contract, ContractID, ExternalTx, Limits, Scalar,
-    TxHeader, TxID, TxLog, TxMetrics, UnsignedTx, Value, FLAME_FLAVOR,
+    Anchor, CellError, ClearToken, Contract, ContractID, ExternalTx, Limits, Scalar, TxHeader,
+    TxID, TxLog, TxMetrics, UnsignedTx, Value, FLAME_FLAVOR,
 };
 use merlin::Transcript;
 use musig::{Multisignature, MusigError, Signature, VerificationKey};
@@ -317,7 +317,7 @@ pub fn signature(
         .map(|(key, contract)| (VerificationKey::from_compressed(*key), *contract))
         .collect();
     let signature = Signature::sign_multi(keys, items, &mut transcript)?;
-    Ok((signature, unsigned.log().txid()))
+    Ok((signature, unsigned.txid()))
 }
 
 /// A copy of `tx`, retaining its full effect-root commitment.
@@ -494,7 +494,7 @@ impl Wallet {
                 build_transfer(&[input], &outputs, FEE, header(), limits(), &mut self.rng)
                     .expect("build a funding transaction");
             let tx = sign(unsigned, &[key]).expect("sign a funding transaction");
-            let bytes = tx.to_envelope().expect("envelope").encode();
+            let bytes = tx.to_bytes().expect("transaction bytes");
             let log = decode(&bytes, DecodeMethod::Envelope)
                 .expect("decode a funding transaction")
                 .verify(limits())
@@ -614,7 +614,7 @@ fn encode(tx: ExternalTx, inputs: usize) -> (ExternalTx, Vec<u8>, DecodeMethod) 
         }
     }
     let tx = block_tx.tx;
-    let bytes = tx.to_envelope().expect("envelope").encode();
+    let bytes = tx.to_bytes().expect("transaction bytes");
     (tx, bytes, DecodeMethod::Envelope)
 }
 

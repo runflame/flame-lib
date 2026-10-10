@@ -149,11 +149,6 @@ mod tests {
     fn reference_validation_is_atomic_and_checks_every_level() {
         let mut builder = CellBuilder::new();
         builder.store_u8(7).unwrap();
-        let id = [9; 32];
-        assert!(matches!(
-            builder.store_ref(CellRef::unresolved(id)),
-            Err(CellError::MissingCellMetadata(missing)) if missing == id
-        ));
         let reference = CellRef::Unloaded(Arc::new(
             CellCommitment::new(1, vec![[1; 32], [2; 32]], vec![u16::MAX, 0]).unwrap(),
         ));

@@ -1,4 +1,4 @@
-use crate::{Cell, CellBuilder, CellEnvelope, CellError, CellIndex, CellResolver, CellSlice};
+use crate::{Cell, CellBuilder, CellEnvelope, CellError, CellIndex, CellReader, CellSlice};
 
 /// Canonically writes one expected type into a Cell builder.
 pub trait CellEncode {
@@ -19,12 +19,12 @@ pub trait CellEncode {
 
 /// Canonically reads one expected type from a Cell slice.
 pub trait CellDecode: Sized {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError>;
 
-    fn from_cell<R: CellResolver + ?Sized>(cell: &Cell, cells: &mut R) -> Result<Self, CellError> {
+    fn from_cell<R: CellReader + ?Sized>(cell: &Cell, cells: &mut R) -> Result<Self, CellError> {
         let mut slice = CellSlice::new(cell);
         let value = Self::decode(&mut slice, cells)?;
         slice.finish()?;
@@ -42,7 +42,7 @@ macro_rules! integer_codec {
         }
 
         impl CellDecode for $type {
-            fn decode<R: CellResolver + ?Sized>(
+            fn decode<R: CellReader + ?Sized>(
                 slice: &mut CellSlice<'_>,
                 _cells: &mut R,
             ) -> Result<Self, CellError> {
@@ -65,7 +65,7 @@ impl<const N: usize> CellEncode for [u8; N] {
 }
 
 impl<const N: usize> CellDecode for [u8; N] {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         slice: &mut CellSlice<'_>,
         _cells: &mut R,
     ) -> Result<Self, CellError> {
@@ -156,7 +156,7 @@ mod tests {
         }
 
         impl CellDecode for Example {
-            fn decode<R: CellResolver + ?Sized>(
+            fn decode<R: CellReader + ?Sized>(
                 slice: &mut CellSlice<'_>,
                 cells: &mut R,
             ) -> Result<Self, CellError> {

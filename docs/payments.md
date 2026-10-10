@@ -82,7 +82,7 @@ quantity, the flavor, and a memo, encrypted under that key, and is logged
 directly after the output:
 
 ```text
-Header · CellWitness · Input(id)… · Fee(fee)
+Header · Input(id)… · Fee(fee)
 Output(Contract { enc(S_a), anchor, Token { C_qty, C_flv } })   Data(0x01 ++ enc(R_0) ++ tag_0 ++ ct_0)
 Output(Contract { enc(S_b), anchor, Token { C_qty, C_flv } })   Data(0x01 ++ enc(R_1) ++ tag_1 ++ ct_1)
 ```

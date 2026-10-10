@@ -491,14 +491,13 @@ fn failed_call_rolls_back_every_state_lane() {
     // Send would have made this length 4.
     assert_eq!(
         result.txlog.len(),
-        3,
-        "txlog must be [Header, CellWitness, Input] after rollback (got len={}, entries={:?})",
+        2,
+        "txlog must be [Header, Input] after rollback (got len={}, entries={:?})",
         result.txlog.len(),
         result.txlog,
     );
     assert!(matches!(result.txlog[0], TxEntry::Header(_)));
-    assert!(matches!(result.txlog[1], TxEntry::CellWitness(_)));
-    assert!(matches!(result.txlog[2], TxEntry::Input(_)));
+    assert!(matches!(result.txlog[1], TxEntry::Input(_)));
 
     // ── deferred_sigs assertion: signtx's TxBound was rolled back ──
     assert!(

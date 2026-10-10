@@ -32,8 +32,9 @@ expressions, constraints, and MSMs may not.
 The VM emits an ordered log of state effects. Inputs, outputs, issuance,
 retirement, fees, sends, actor saves, storage purchases, actor destruction, and
 explicit data are effects. Calls, branches, signatures, constraints, and batch
-verification are execution machinery and do not appear in the log. TxID commits
-to the ordered effects.
+verification are execution machinery and do not appear in the log. External
+TxID commits the body: header, supplied program graph, and a pruned commitment
+to the ordered effects. Internal IDs retain their computed effect root.
 
 Every `open`, `signcall`, and actor `call` runs in an isolated frame with its own
 stack, control flow, and gas budget. Successful calls return only explicitly
@@ -91,7 +92,7 @@ External transactions produce the following effects:
 5. Issuance and retirement — creation and removal of tokens to/from circulation.
 6. Data entry — for data logging that does not occupy permanent storage.
 
-Transaction ID (”TxID”) is the CellID of the ordered TxLog Trie envelope. External logs begin with `Header`, then `CellWitness(availability CellID)` committing the exact initiating execution index. Transaction signatures and ZK proofs bind to TxID and therefore to the effects **and witness availability**.
+External TxID is the factual CellID of TxBody: header, program, and a mask-one pruned TxLog reference. Program subcells carry all supplied execution witnesses. The VM recomputes the log and checks its level-zero hash and depth. The Tx root carries the 64-byte signature and U16-length inline R1CS proof; its factual ID is WitnessID. Transaction signatures and ZK proofs bind TxID, covering the code, data availability, and declared effects. An all-zero signature field denotes absent authorization. See [encoding](encoding.md#transactions-and-execution-witnesses).
 
 ## Internal transactions
 
@@ -125,9 +126,9 @@ Witness bodies from another external transaction are never added to that bag.
 
 Calls themselves are intra-transaction control flow, not effects. Anything a callee does that the outer world cares about appears through one of the effects above.
 
-Canonical internal log shapes are enforced by the state machine. Success is `Header, Receive, [ActorDeploy], effects...`, where deployment is permitted only immediately after `Receive` and any `ActorDestroy` entries form a suffix. Failed delivery is exactly `Header, Receive, Output(refund)`. Lease expiry freezes bodies without emitting retirement/destruction effects. External logs start with `Header, CellWitness(availability CellID)` and cannot contain internal-only actor effects.
+Canonical internal log shapes are enforced by the state machine. Success is `Header, Receive, [ActorDeploy], effects...`, where deployment is permitted only immediately after `Receive` and any `ActorDestroy` entries form a suffix. Failed delivery is exactly `Header, Receive, Output(refund)`. Lease expiry freezes bodies without emitting retirement/destruction effects. External logs start with `Header` and cannot contain internal-only actor effects.
 
-**TxLog transport.** Effects are **re-derived by re-executing** the bytecode under the proof/signature binding; a supplied log does not authorize effects. `TxEntry` and `TxLog` implement `CellEncode` and `CellDecode` for archival and light-client transport. The log envelope holds a u64-LE count and a Trie of consecutive u64 big-endian indices, whose leaves reference tagged TxEntry Cells. Existing tags 0–14 are retained and tag 15 is `CellWitness`. Blob fields use snakes; typed fields use their expected Cell layouts. See [Data encoding](encoding.md#txlog).
+**TxLog transport.** Effects are **re-derived by re-executing** the bytecode under the proof/signature binding; a supplied log does not authorize effects. External TxBody carries only its canonical 36-byte pruning record. `TxEntry` and `TxLog` implement `CellEncode` and `CellDecode` for archival and light-client transport. The log envelope holds a u64-LE count and a Trie of consecutive u64 big-endian indices, whose leaves reference tagged TxEntry Cells (tags 0–14). Blob fields use snakes; typed fields use their expected Cell layouts. `TxLog::effect_id()` returns its level-zero hash, not the external TxID. See [Data encoding](encoding.md#txlog).
 
 Internal transactions do not pay transaction-prioritization fees. Actors may
 nevertheless burn Flame for storage through `addstorage`. Internal transactions
@@ -376,7 +377,7 @@ The runtime String type and its opcodes remain temporarily; replacing String
 with a Cell value is a later change. Its canonical encoding is one payload-only
 Cell: raw bytes, no length prefix, no references, no snake continuation. Strings
 can hold bounded data, short programs, signatures, and hashes. Schema-defined
-program/proof/blob fields can still use multi-Cell snakes independently of this
+program/blob fields can still use multi-Cell snakes independently of this
 runtime limit. Other types can be parsed from strings.
 
 Each string acts as a builder and a reader.
@@ -1576,7 +1577,7 @@ interaction's status and effects is ordinary actor logic rather than a
 concurrency guarantee the VM can infer. Nested call depth is capped at
 `MAX_CALL_DEPTH` (64).
 
-**Emits no txlog entry.** Calls are intra-tx control flow; the structural effects produced inside the callee (`Output`, `Send`, `ActorSave`, `SetCode`, `StoragePurchase`, `Issue`, `Retire`, `Fee`, `Data`, and actor destruction) are what the state machine reads. The `(External TxID, Internal TxID)` of a tx is a merkle root over effects only — see the effect model above.
+**Emits no txlog entry.** Calls are intra-tx control flow; the structural effects produced inside the callee (`Output`, `Send`, `ActorSave`, `SetCode`, `StoragePurchase`, `Issue`, `Retire`, `Fee`, `Data`, and actor destruction) are what the state machine reads. External TxID commits the body and its pruned effect claim; internal TxID commits the computed effects — see the effect model above.
 
 Creates an isolated `CallKind::ActorCall { actor, caller }` frame (the frame's starting anchor lives in `CallFrame.anchor` — todo #4) with the popped gas allotment. The frame has the callee's actor identity — `op_load`/`op_save`/`op_call`/`op_send` operate on the callee.
 

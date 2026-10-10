@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    Cell, CellBuilder, CellCommitment, CellError, CellIndex, CellRef, CellResolver, CellSlice,
+    Cell, CellBuilder, CellCommitment, CellError, CellIndex, CellReader, CellRef, CellSlice,
     GasMeter, MAX_CELL_PAYLOAD, MAX_CELL_REFS,
 };
 
@@ -203,8 +203,12 @@ fn noncanonical_roots_and_continuations_are_rejected_atomically() {
 #[test]
 fn length_and_resolution_failures_preserve_the_cursor() {
     struct Budget(usize);
-    impl CellResolver for Budget {
-        fn resolve(&mut self, _: &CellRef) -> Result<Arc<Cell>, CellError> {
+    impl CellReader for Budget {
+        fn read(
+            &mut self,
+            _: crate::CellID,
+            _: Option<&Arc<Cell>>,
+        ) -> Result<Arc<Cell>, CellError> {
             self.0 += 1;
             Err(CellError::ResourceExhausted)
         }
@@ -231,8 +235,12 @@ fn length_and_resolution_failures_preserve_the_cursor() {
     assert_eq!(slice.remaining_refs(), 1);
 
     struct Wrong(Arc<Cell>);
-    impl CellResolver for Wrong {
-        fn resolve(&mut self, _: &CellRef) -> Result<Arc<Cell>, CellError> {
+    impl CellReader for Wrong {
+        fn read(
+            &mut self,
+            _: crate::CellID,
+            _: Option<&Arc<Cell>>,
+        ) -> Result<Arc<Cell>, CellError> {
             Ok(self.0.clone())
         }
     }

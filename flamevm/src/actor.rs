@@ -1,7 +1,7 @@
 //! Actor data model: identity, state, lifecycle counters, registry.
 
 use cells::{
-    CellBuilder, CellDecode, CellEncode, CellError, CellIndex, CellRef, CellResolver, CellSlice,
+    CellBuilder, CellDecode, CellEncode, CellError, CellIndex, CellReader, CellRef, CellSlice,
 };
 use std::sync::Arc;
 
@@ -86,7 +86,7 @@ impl CellEncode for ActorID {
 }
 
 impl CellDecode for ActorID {
-    fn decode<R: CellResolver + ?Sized>(
+    fn decode<R: CellReader + ?Sized>(
         r: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError> {
@@ -183,7 +183,7 @@ pub trait ActorRegistry {
     fn load_code_with_cells(
         &self,
         id: &ActorID,
-        _cells: &mut dyn CellResolver,
+        _cells: &mut dyn CellReader,
     ) -> Result<Vec<u8>, VMError> {
         self.load_code(id)
     }
@@ -191,7 +191,7 @@ pub trait ActorRegistry {
     fn load_state_with_cells(
         &mut self,
         id: &ActorID,
-        _cells: &mut dyn CellResolver,
+        _cells: &mut dyn CellReader,
     ) -> Result<Value, VMError> {
         self.load_state(id)
     }
