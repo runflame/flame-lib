@@ -84,7 +84,7 @@ pub enum Error {
 }
 
 /// Extended spending key `(s, v, t)`, with HRP `spend` or `testspend`.
-#[derive(Clone, PartialEq, Eq, ZeroizeOnDrop)]
+#[derive(Clone, Debug, PartialEq, Eq, ZeroizeOnDrop)]
 pub struct SpendKey {
     s: Scalar,
     v: Scalar,
