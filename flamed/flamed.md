@@ -7,9 +7,10 @@ archives every block it accepts, and answers wallets over JSON-RPC 2.0.
 It is not a peer. It has no network but its RPC port, no reorganization, no
 consensus, and no way of learning about a block someone else made. A devnet
 build mints on a timer because one node with a timer is the smallest thing
-that produces blocks at all; a build without the `devnet` feature mints
-nothing and holds no allocation, which makes it an honest node that can open
-and serve a chain and can create neither blocks nor funds.
+that produces blocks at all, and issues flames for the burns its core
+indexer reports ([Minting](#minting)); a build without the `devnet` feature
+mints nothing and holds no allocation, which makes it an honest node that
+can open and serve a chain and can create neither blocks nor funds.
 
 ## What the node keeps that the chain forgets
 
@@ -73,8 +74,9 @@ network agree.
 **`flamed.toml`** is one node's local policy: where its data lives, where to
 listen, how often to mint an iblock (`block_interval_secs`, 5 by default) and
 a mock core block (`core_block_interval_secs`, 15 by default), the fee it
-will not go below, and where the mock core indexer keeps its table
-(`indexer_dir`, `<data_dir>/indexer` by default). None of it is consensus —
+will not go below, where the mock core indexer keeps its table
+(`indexer_dir`, `<data_dir>/indexer` by default), and optionally a mint
+playground to follow as the core chain instead (`playground_url`). None of it is consensus —
 the header's time is only required not to go backwards, and a fee floor is
 an opinion about what is worth relaying.
 
@@ -209,10 +211,11 @@ pending, and after a restart, because the mempool is not durable and neither
 are its times.
 
 **The core indexer** is the `CoreIndexer` trait in `src/indexer.rs`: `tip`
-names the core block the next header commits. The minter calls it once per
-iblock; replay never does, because everything a block needs is in it.
+names the core block the next header commits, and `blocks` lists the burns
+of each core block in a range. The minter asks both once per iblock; replay
+never does, because everything a block needs is in it.
 
-`MockIndexer` is the only implementation, and it has no Bitcoin behind it.
+`MockIndexer` has no Bitcoin behind it and no burns on it.
 Its chain grows only when `mine` is called: a devnet build runs a second
 timer for that, every `core_block_interval_secs`, independent of the minter,
 so about three 5 s iblocks share each 15 s core block. Core block `h` is
@@ -223,8 +226,42 @@ block on the minter's first ask. A torn last line is dropped; any other bad
 line, or a hash that is not its height's, stops the node from starting. If
 the table is lost, the archive still replays; the core chain starts over.
 
-A connector to a real Bitcoin node replaces it through `Node::open_with`,
-and the node stays the same.
+`PlaygroundIndexer` follows a [mint playground](../demos/mint-playground)
+instead, when `flamed.toml` sets `playground_url`: the playground's blocks
+are the core blocks, `core_block_hash(h)` again, and its eligible burns are
+theirs. No mock core chain is mined then.
+
+A connector to a real Bitcoin node replaces either through
+`Node::open_with`, and the node stays the same.
+
+## Minting
+
+Flames enter the chain one way besides the devnet genesis: a block that
+moves its core anchor from height `p` to `h` carries a **mint proof**, the
+burns of core blocks `p + 1` to `h`, and issues each core block's
+allotment to them. A block that stays on its parent's core block proves
+nothing and issues nothing. That is the anchor rule `flamechain` enforces:
+no block reaches a new core block without proving it.
+
+- **Allotment.** 50 FLM per core block, halved every 210,000 core blocks,
+  as Bitcoin's subsidy is: 21 million in all.
+- **Split.** By burned sats: each share floored, then the leftover sparks one
+  each to the largest remainders, the earlier burn first on a tie. A core
+  block nobody burned in issues nothing, and the allotment is lost.
+- **Outputs.** One cleartext Flame output per reward predicate, summed over
+  every core block the proof covers, in a single `mint` execution that runs
+  before the block's transactions. It appears in `history`, `scan` and
+  `unspent` like any other transaction, with `execution.kind` `mint`.
+- **Catching up.** One block proves at most `max_core_blocks` core blocks
+  (1,024) and `max_burns` burns (100,000), whole core blocks only; a node
+  far behind its core chain closes the gap a block at a time.
+
+A burn names a predicate and an amount, exactly what a Bitcoin mint proof
+output in `btc-integration` carries as `flame_reward_address` and its burned
+value. The chain checks the proof's shape and pays it; that the burns are
+really on the core chain is the node's to check against its indexer, as
+the core block hash is. A devnet node builds the proof from its own
+indexer, so there is nothing to check yet.
 
 **`locktime`** is documented as Bitcoin's: below `500_000_000` a height,
 otherwise Unix seconds before which the transaction is invalid, and `0`
@@ -238,7 +275,7 @@ delay the transaction; it is the sender's claim, covered by the TxID.
 ```console
 $ cargo run -p flamed --features devnet -- genesis \
       --chainparams flamed/configs/chainparams.toml --out ./genesis.json
-genesis 9eaac245514fc1735be9a6b0a4b47be55c4b57e326825553c8a3518760b6b0f3 with 1 allocation(s) -> ./genesis.json
+genesis a7291837c9a24b3932c1259994e59b7208bc9a50d1bbfd5acb8de43fe3a9424a with 1 allocation(s) -> ./genesis.json
 
 $ cargo run -p flamed --features devnet -- run --config flamed/configs/flamed.toml
 flamed: height 0 with 1 unspent contract(s), 0 block(s) archived
@@ -246,11 +283,11 @@ flamed: serving JSON-RPC on http://127.0.0.1:8545
 flamed: mining a mock core block every 15s
 flamed: minting every 5s
 core block 1 447bf649df413cac10b1ed24934496eebbbf623c911f968a60c0e81b1fba5ea0
-block 1 f183312ff09e2d10e728137707ca27781c22ebe15444d701a1b1db48c22b962c txs=0 dropped=0
-block 2 7f462631eb9a96ead2ee6bf24a7e2c64f3a9b800fbeb006cf2d70f61b430f2e0 txs=0 dropped=0
-block 3 452eed43c1b1aee04fde318be5b17046d24176efb194e4f58068357fca9a2a4a txs=0 dropped=0
+block 1 f183312ff09e2d10e728137707ca27781c22ebe15444d701a1b1db48c22b962c core=1 burns=0 txs=0 dropped=0
+block 2 7f462631eb9a96ead2ee6bf24a7e2c64f3a9b800fbeb006cf2d70f61b430f2e0 core=1 burns=0 txs=0 dropped=0
+block 3 452eed43c1b1aee04fde318be5b17046d24176efb194e4f58068357fca9a2a4a core=1 burns=0 txs=0 dropped=0
 core block 2 425bf3a649d848b33b0e05123253bdea186f701b927f240de4e728130b0c2576
-block 4 2b530890399d1c74b1b09e5856c2aa53091155a31ae52ebf66c53badae13dd20 txs=0 dropped=0
+block 4 2b530890399d1c74b1b09e5856c2aa53091155a31ae52ebf66c53badae13dd20 core=2 burns=0 txs=0 dropped=0
 ```
 
 Block hashes differ from run to run, because each header carries the time

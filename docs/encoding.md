@@ -204,14 +204,16 @@ carries its root directly. Other typed CellEnvelope snapshots use
 ## Blocks and Utreexo
 
 ```ctl
-struct Block { header: ^BlockHeader, transactions: ^Cell }
+struct Block { header: ^BlockHeader, transactions: ^Cell, mint: ^Cell }
 struct BlockTx { gas: U64, tx: ^Tx, proofs: ^Cell }
 struct BlockHeader {
-    version: U32, height: U64, core_block: Hash, time: U64, parent: Hash,
-    witnesses: Hash, effects: Hash, contracts: Hash, actors: Hash,
-    available_storage_units: U64,
+    version: U32, height: U64, core_block: Hash, core_height: U64, time: U64,
+    parent: Hash, witnesses: Hash, mint: Hash, effects: Hash, contracts: Hash,
+    actors: Hash, available_storage_units: U64,
 }
-enum ExecutionKind: U8 { External = 0, Internal = 1, Failed = 2 }
+struct Burn { reward_predicate: Point, sats: U64 }
+// mint: a sequence of core blocks, each a sequence of Burn.
+enum ExecutionKind: U8 { External = 0, Internal = 1, Failed = 2, Mint = 3 }
 struct ExecutionRecord { kind: ExecutionKind, txid: Hash }
 struct SequenceHeader { count: U32 }
 // Optional Trie ref; consecutive U32 BE keys, expected-type leaves.
@@ -221,8 +223,23 @@ BlockHash is the BlockHeader CellID.
 `time` is the minter's clock in Unix seconds when it built the block, not the
 core block's time; it may not be less than the parent's. Several consecutive
 blocks (iblocks) may name the same `core_block`.
-Witness root is the transaction sequence's factual ID; effects root is the
-execution-record sequence's factual ID. Block transport uses CellEnvelope.
+A block either stays on its parent's `core_block` and `core_height`, with an
+empty mint proof, or moves to a later height and a different hash, with one
+entry per core block it moves over: entry `i` lists the burns of core block
+`parent.core_height + 1 + i`. Each burn has a nonzero `sats` and a valid
+point. Every core block issues `allotment(h)` sparks: 50 FLM halved every
+210,000 core blocks, split among its burns by `sats`, each share floored and
+the leftover sparks given one each to the largest remainders (earlier burn
+first on ties). A core block without burns issues nothing. The block runs one
+`Mint` execution before its transactions, unless nothing is issued: a log of
+a version-1, locktime-0 header and one cleartext Flame output per reward
+predicate, in order of first appearance, summed over the proof. Output `i`'s
+anchor is the Merlin transcript `flame.mint` with `core_height` (the
+header's) and `index` (`i`) as U64s, challenged as 32 `anchor` bytes.
+Whether the burns are the ones the core chain holds is checked by the node
+against its core indexer, as `core_block` is.
+Witness root is the transaction sequence's factual ID; mint root is the mint
+proof's; effects root is the execution-record sequence's factual ID. Block transport uses CellEnvelope.
 
 Utreexo proofs keep their existing `merkle / readerwriter` byte encoding,
 stored as raw payloads in dedicated zero-ref Cells inside BlockTx, with no

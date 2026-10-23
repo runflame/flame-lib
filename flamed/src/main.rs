@@ -118,12 +118,21 @@ fn first_address(chainparams: &std::path::Path) -> Result<String, Box<dyn std::e
 async fn run(config: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let cfg = NodeConfig::load(&config)?;
     let genesis = GenesisFile::load(&cfg.genesis_path())?;
-    let indexer = flamed::MockIndexer::open(&cfg.indexer_dir())?;
-    let node: SharedNode = Arc::new(Mutex::new(Node::open_with(
-        &genesis,
-        &cfg,
-        Box::new(indexer.clone()),
-    )?));
+    // A playground is the core chain when there is one; otherwise this
+    // node mines a mock one, with nothing burned on it.
+    // Only a devnet build mines the mock chain itself.
+    #[cfg_attr(not(feature = "devnet"), allow(unused_variables))]
+    let (core, mock): (Box<dyn flamed::CoreIndexer>, _) = match &cfg.playground_url {
+        Some(url) => {
+            let network = genesis.chain.network.into();
+            (Box::new(flamed::PlaygroundIndexer::new(url, network)?), None)
+        }
+        None => {
+            let indexer = flamed::MockIndexer::open(&cfg.indexer_dir())?;
+            (Box::new(indexer.clone()), Some(indexer))
+        }
+    };
+    let node: SharedNode = Arc::new(Mutex::new(Node::open_with(&genesis, &cfg, core)?));
     {
         let opened = node.lock().expect("a freshly built node is not poisoned");
         println!(
@@ -148,12 +157,20 @@ async fn run(config: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "devnet")]
     let minter = {
-        let core = flamed::minter::CoreMiner::new(indexer, cfg.core_block_interval());
-        println!(
-            "flamed: mining a mock core block every {}s",
-            cfg.core_block_interval_secs
-        );
-        tokio::spawn(core.run(shutdown.clone()));
+        match (mock, &cfg.playground_url) {
+            (Some(indexer), _) => {
+                let core = flamed::minter::CoreMiner::new(indexer, cfg.core_block_interval());
+                println!(
+                    "flamed: mining a mock core block every {}s",
+                    cfg.core_block_interval_secs
+                );
+                tokio::spawn(core.run(shutdown.clone()));
+            }
+            (None, url) => println!(
+                "flamed: following the mint playground at {}",
+                url.as_deref().unwrap_or_default()
+            ),
+        }
         let minter = flamed::minter::Minter::new(Arc::clone(&node), cfg.block_interval());
         println!("flamed: minting every {}s", cfg.block_interval_secs);
         tokio::spawn(minter.run(shutdown.clone()))

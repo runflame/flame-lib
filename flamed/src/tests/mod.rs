@@ -10,6 +10,7 @@ mod block;
 mod contract;
 mod history;
 mod node;
+mod playground;
 mod rpc;
 mod times;
 mod transactions;
@@ -38,7 +39,7 @@ pub(crate) const SEED_A: [u8; 64] = [0xa1; 64];
 /// The account the tests call B.
 pub(crate) const SEED_B: [u8; 64] = [0xb2; 64];
 
-/// 1000 Flame, all of the supply this devnet ever has.
+/// 1000 Flame, the whole genesis allocation.
 pub(crate) const GENESIS_SPARKS: u64 = 1_000 * SPARKS_PER_FLAME;
 /// One Flame, in sparks.
 pub(crate) const FLAME: u64 = SPARKS_PER_FLAME;
@@ -119,6 +120,7 @@ pub(crate) fn devnet<K: AccountKey>(dir: &Path, a: &Account<K>) -> (GenesisFile,
         core_block_interval_secs: 15,
         minimum_fee: 0,
         indexer_dir: None,
+        playground_url: None,
     };
     (genesis, cfg)
 }

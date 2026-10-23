@@ -7,8 +7,10 @@ pub mod storage;
 pub mod utreexo;
 
 pub use block::{
-    AppliedBlock, Block, BlockHeader, BlockLimits, BlockTx, Blockchain, ChainError, ChainParams,
-    ContractLeaf, ExecutionKind, ExecutionRecord, ReorgOutcome, StateCommitment,
+    AppliedBlock, Block, BlockHeader, BlockLimits, BlockTx, Blockchain, Burn, ChainError,
+    ChainParams, ContractLeaf, ExecutionKind, ExecutionRecord, HALVING_INTERVAL,
+    INITIAL_ALLOTMENT_SPARKS, MintProof, ReorgOutcome, StateCommitment, allotment_sparks,
+    split_allotment,
 };
 pub use mempool::{Mempool, MempoolEntry, MempoolError, MempoolPolicy, RebaseReport};
 pub use storage::{ActorInfo, Lease, SPARKS_PER_FLAME, StorageError, StorageParams, StoredActor};

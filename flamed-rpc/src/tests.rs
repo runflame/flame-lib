@@ -232,9 +232,11 @@ fn a_block_preserves_execution_categories_links_and_exact_fees() {
                 version: 1,
                 height: 1,
                 core_block_hash: [0x99; 32],
+                core_height: 7,
                 time: 1_760_000_000,
                 parent: BlockId([0x22; 32]),
                 witness_root: [0xaa; 32],
+                mint_root: [0xbb; 32],
                 effects_root: [0x33; 32],
                 state: StateCommitment {
                     contracts: [0x55; 32],
@@ -270,7 +272,8 @@ fn a_block_preserves_execution_categories_links_and_exact_fees() {
                 "id": "11".repeat(32),
                 "header": {
                     "version": 1, "height": 1, "core_block_hash": "99".repeat(32),
-                    "time": 1_760_000_000, "parent": "22".repeat(32), "witness_root": "aa".repeat(32),
+                    "core_height": 7, "time": 1_760_000_000, "parent": "22".repeat(32),
+                    "witness_root": "aa".repeat(32), "mint_root": "bb".repeat(32),
                     "effects_root": "33".repeat(32),
                     "state": {
                         "contracts": "55".repeat(32), "actors": "44".repeat(32),
@@ -301,6 +304,7 @@ fn execution_data_is_nested_and_requires_each_variants_fields() {
 
     let cases = [
         (ExecutionData::External, json!({"kind": "external"}), vec![]),
+        (ExecutionData::Mint, json!({"kind": "mint"}), vec![]),
         (
             ExecutionData::Internal {
                 parent: TxId([0x77; 32]),

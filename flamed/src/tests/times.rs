@@ -7,7 +7,12 @@ use flamekd::util::{CHANGE, RECEIVING};
 use tempfile::TempDir;
 
 use super::*;
-use crate::indexer::{core_block_hash, unix_now, CoreBlock, CoreError, CoreIndexer, MockIndexer};
+use flamechain::{Burn, INITIAL_ALLOTMENT_SPARKS};
+use flamevm::{Scalar, Value};
+
+use crate::indexer::{
+    core_block_hash, unix_now, CoreBlock, CoreBurns, CoreError, CoreIndexer, MockIndexer,
+};
 
 /// A signing time well past `LOCKTIME_TIMESTAMP_THRESHOLD`.
 const SIGNED_AT: u32 = 1_800_000_000;
@@ -117,37 +122,76 @@ fn a_transaction_carries_its_signing_time_and_admission_time() {
     assert_eq!(node.scan(&[allocation], 0)[0].time, None);
 }
 
-/// An indexer standing in for a real one: its tip never moves.
-struct FixedIndexer;
+/// An indexer standing in for a real one: its tip never moves, and core
+/// blocks 2 and 7 hold burns paying `payee`.
+struct FixedIndexer {
+    payee: [u8; 32],
+}
 
 impl CoreIndexer for FixedIndexer {
     fn tip(&mut self) -> Result<CoreBlock, CoreError> {
-        Ok(CoreBlock {
-            height: 7,
-            hash: core_block_hash(7),
-            time: 1_000,
-        })
+        Ok(fixed_core_block(7))
+    }
+
+    fn blocks(&mut self, from: u64, to: u64) -> Result<Vec<CoreBurns>, CoreError> {
+        Ok((from..=to.min(7))
+            .map(|height| CoreBurns {
+                block: fixed_core_block(height),
+                burns: match height {
+                    2 | 7 => vec![Burn {
+                        reward_predicate: self.payee,
+                        sats: 1_000,
+                    }],
+                    _ => Vec::new(),
+                },
+            })
+            .collect())
+    }
+}
+
+fn fixed_core_block(height: u64) -> CoreBlock {
+    CoreBlock {
+        height,
+        hash: core_block_hash(height),
+        time: 1_000,
     }
 }
 
 #[test]
-fn any_indexer_drops_in() {
+fn any_indexer_drops_in_and_its_burns_mint() {
     let dir = TempDir::new().unwrap();
-    let (genesis, cfg) = devnet(dir.path(), &account(&SEED_A));
+    let a = account(&SEED_A);
+    let (genesis, cfg) = devnet(dir.path(), &a);
+    let payee = a.predicate_at(RECEIVING, 1).unwrap().to_point().to_bytes();
     let since = unix_now();
-    let mut node = Node::open_with(&genesis, &cfg, Box::new(FixedIndexer)).unwrap();
+    let mut node = Node::open_with(&genesis, &cfg, Box::new(FixedIndexer { payee })).unwrap();
     node.mint_block().unwrap();
     node.mint_block().unwrap();
     for height in 1..=2 {
         let summary = node.block_summary(height).unwrap();
         assert_eq!(summary.header.core_block_hash, core_block_hash(7));
+        assert_eq!(summary.header.core_height, 7);
         // The minter's clock, not the core block's.
         assert!(summary.header.time >= since);
     }
 
+    // The first block moved over core blocks 1..=7 and paid both burns'
+    // allotments in one output; the second stayed on 7 and paid nothing.
+    let hits = node.scan(&[payee], 0);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].height, 1);
+    let contract = contract_of(&node, &hits[0].id.0);
+    let Value::ClearToken(token) = contract.payload() else {
+        panic!("a mint output holds cleartext flames");
+    };
+    assert_eq!(token.qty(), Scalar::from(2 * INITIAL_ALLOTMENT_SPARKS));
+    let minted = node.transaction(hits[0].txid, false).unwrap();
+    assert_eq!(minted.summary.execution, flamed_rpc::ExecutionData::Mint);
+
     drop(node);
-    let node = Node::open_with(&genesis, &cfg, Box::new(FixedIndexer)).unwrap();
+    let node = Node::open_with(&genesis, &cfg, Box::new(FixedIndexer { payee })).unwrap();
     assert_eq!(node.tip().height, 2);
+    assert_eq!(node.scan(&[payee], 0).len(), 1);
 }
 
 #[test]

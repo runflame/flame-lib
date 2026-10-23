@@ -6,6 +6,12 @@ use serde::{Deserialize, Serialize};
 
 pub const FEE_PER_BLOCK: i64 = 1_000;
 pub const BLOCK_REWARD_SPARKS: i64 = 5_000_000_000;
+/// Block 1 begins at 2027-01-11T00:00:00Z, the calendar the UI shows.
+pub const CALENDAR_START: i64 = 1_799_625_600;
+/// Seconds per simulated block: 144 blocks a day.
+pub const BLOCK_SECONDS: i64 = 600;
+/// Most blocks one `/api/core/blocks` request returns.
+pub const MAX_CORE_BLOCKS: i64 = 1_024;
 pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -164,6 +170,28 @@ pub struct Snapshot {
     pub block_reward_sparks: i64,
     pub services: Vec<Service>,
     pub minters: Vec<MinterSummary>,
+}
+
+/// The last committed block, as a Flame node's core indexer sees it.
+#[derive(Debug, Serialize)]
+pub struct CoreTip {
+    pub height: i64,
+    pub time: i64,
+}
+
+/// One committed block and the burns eligible for its reward, in contribution order.
+#[derive(Debug, Serialize)]
+pub struct CoreBlock {
+    pub height: i64,
+    pub time: i64,
+    pub burns: Vec<CoreBurn>,
+}
+
+/// One contribution's eligible burn in a block. The chain pays its share to `address`.
+#[derive(Debug, Serialize)]
+pub struct CoreBurn {
+    pub address: String,
+    pub sats: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -973,6 +1001,81 @@ impl Database {
     }
 }
 
+impl Database {
+    pub fn core_tip(&self) -> Result<CoreTip, Error> {
+        let height = self.connection.query_row(
+            "SELECT COALESCE(MAX(height), 0) FROM blocks",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(CoreTip {
+            height,
+            time: block_time(height),
+        })
+    }
+
+    /// Committed blocks `from..=to`, at most [`MAX_CORE_BLOCKS`], each with the burns `tick`
+    /// counted as eligible: every Independent/Service burn, and a delegated burn only while its
+    /// provider had an active Service contribution in that block. Fees and inactive
+    /// delegations are spending, not weight.
+    pub fn core_blocks(&self, from: i64, to: i64) -> Result<Vec<CoreBlock>, Error> {
+        if from < 1 || to < from {
+            return Err(Error::Invalid(
+                "Expected 1 <= from <= to block heights.".into(),
+            ));
+        }
+        let to = to.min(from.saturating_add(MAX_CORE_BLOCKS - 1));
+        let mut blocks: Vec<CoreBlock> = self
+            .connection
+            .prepare("SELECT height FROM blocks WHERE height BETWEEN ?1 AND ?2 ORDER BY height")?
+            .query_map(params![from, to], |row| row.get(0))?
+            .map(|height| {
+                height.map(|height| CoreBlock {
+                    height,
+                    time: block_time(height),
+                    burns: Vec::new(),
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let mut statement = self.connection.prepare(
+            "SELECT a.height, account.address, a.burned_sats
+             FROM accruals a
+             JOIN contributions c ON c.id = a.contribution_id
+             JOIN accounts account ON account.id = c.user_id
+             WHERE a.height BETWEEN ?1 AND ?2 AND a.burned_sats > 0
+               AND (c.service_user_id IS NULL OR EXISTS (
+                   SELECT 1 FROM accruals s JOIN contributions sc ON sc.id = s.contribution_id
+                   WHERE s.height = a.height AND sc.mode = 'service'
+                     AND sc.user_id = c.service_user_id))
+             ORDER BY a.height, a.contribution_id",
+        )?;
+        let burns = statement.query_map(params![from, to], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                CoreBurn {
+                    address: row.get(1)?,
+                    sats: row.get(2)?,
+                },
+            ))
+        })?;
+        for burn in burns {
+            let (height, burn) = burn?;
+            // Accruals exist only for committed blocks, which are contiguous from 1.
+            let block = usize::try_from(height - from)
+                .ok()
+                .and_then(|index| blocks.get_mut(index))
+                .filter(|block| block.height == height)
+                .ok_or_else(|| Error::Invalid(format!("Block {height} is not contiguous.")))?;
+            block.burns.push(burn);
+        }
+        Ok(blocks)
+    }
+}
+
+fn block_time(height: i64) -> i64 {
+    CALENDAR_START + (height.max(1) - 1) * BLOCK_SECONDS
+}
+
 fn canonical_address(address: &str) -> Result<String, Error> {
     ReceivingAddress::from_bech32(address, Network::Testnet)
         .map(|address| address.to_bech32(Network::Testnet))
@@ -1307,6 +1410,48 @@ mod tests {
         value.duration = 144;
         value.budget_sats = 144 * 20;
         value
+    }
+
+    #[test]
+    fn core_blocks_list_only_eligible_burns_in_contribution_order() {
+        let mut db = database();
+        let mut late = service_request(1, 1);
+        late.delay_blocks = 1;
+        let service = db.submit(late).unwrap();
+        db.submit(delegated_request(2, 2, service.user_id)).unwrap();
+        db.submit(request(3, 3, 200)).unwrap();
+        assert_eq!(db.core_tip().unwrap().height, 0);
+        db.tick().unwrap();
+        db.tick().unwrap();
+
+        let tip = db.core_tip().unwrap();
+        assert_eq!((tip.height, tip.time), (2, CALENDAR_START + BLOCK_SECONDS));
+        let blocks = db.core_blocks(1, 100).unwrap();
+        let addresses = |block: &CoreBlock| -> Vec<String> {
+            block.burns.iter().map(|burn| burn.address.clone()).collect()
+        };
+        assert_eq!(blocks.len(), 2);
+        // Block 1: the service has not started, so its delegate is no weight.
+        assert_eq!(addresses(&blocks[0]), vec![address(3)]);
+        assert_eq!(
+            addresses(&blocks[1]),
+            vec![address(1), address(2), address(3)]
+        );
+        let burned: i64 = db
+            .connection
+            .query_row(
+                "SELECT SUM(burned_sats) FROM accruals WHERE height = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            blocks[1].burns.iter().map(|burn| burn.sats).sum::<i64>(),
+            burned
+        );
+        assert!(db.core_blocks(3, 9).unwrap().is_empty());
+        assert!(matches!(db.core_blocks(0, 1), Err(Error::Invalid(_))));
+        assert!(matches!(db.core_blocks(2, 1), Err(Error::Invalid(_))));
     }
 
     #[test]

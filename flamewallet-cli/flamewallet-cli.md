@@ -152,3 +152,14 @@ the genesis wallet pays a fresh wallet, which pays part of it back, and
 each side's newest item, pending and then confirmed, is `from` or `to`
 the other's tracking address. `KEEP=1` and `PORT` (default 18547) as
 above.
+
+```sh
+e2e/devnet-playground.sh
+```
+
+The same throwaway node, following a mint playground as its core chain: a
+fresh wallet burns in the playground as its only minter, the node pays it
+50 FLM for each playground block it moves over, and the wallet spends one.
+Checks the minted balance against the playground blocks paid. `KEEP=1` and
+`PORT` (default 18548) as above; `PLAYGROUND_PORT` (default 18549) is the
+playground's.

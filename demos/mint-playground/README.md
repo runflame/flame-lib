@@ -107,8 +107,19 @@ A pending public request is saved locally before submission, keeping its ID and 
 | `POST /api/minter` | JSON `{address, name?, service_commission_bps?}`; registers/loads the canonical profile or independently saves supplied name/rate fields. A rate change reprices all past delegated rewards atomically. Omitted fields remain unchanged. |
 | `POST /api/contributions` | JSON `{address, budget_sats, duration, delay_blocks, request_id, mode?, service_user_id?}`. Mode is `independent` (default), `service`, or `delegating`; Delegating requires `service_user_id`. A new Service contribution initializes an absent identity rate to 200 basis points but never overwrites a saved rate. Returns `{id, user_id, start_block}`. |
 | `GET /api/rewards` | Address-sorted accumulated rewards: `[{"address":"t1…i1…","reward_sparks":"5000000000"}]`. |
+| `GET /api/core/tip` | The last committed block as a Flame node's core chain sees it: `{height, time}`, `height` 0 before the first block. `time` is the simulated calendar's: block 1 at 2027-01-11T00:00:00Z plus 600 s per block. |
+| `GET /api/core/blocks?from=A&to=B` | Committed blocks `A..=B` (at most 1,024, `A >= 1`), each `{height, time, burns: [{address, sats}]}` with the burns eligible for that block's reward in contribution-ID order: Independent and Service burns, and delegated burns only while the provider's Service is active. Fees and inactive delegations are excluded. |
 
 Service offers contain `{user_id, name, commission_bps, active}`. Contribution responses expose the owner's net `reward_sparks`, outgoing `commission_sparks` and identity-derived rate, alongside owner/provider names and IDs; accrual storage retains gross rewards. Minter summaries contain lifetime own burn/fees, total account rewards including incoming commissions and contribution count; their displayed mode follows the latest contribution, while service percentages come from current identity settings.
+
+### Connecting a Flame node
+
+A devnet `flamed` can follow the playground as its core chain: set `playground_url = "http://127.0.0.1:3000"` in its `flamed.toml`. Each Flame block that moves to a later playground block carries those blocks' eligible burns as its mint proof and issues their 50 FLM allotments as real, spendable outputs locked to the minters' receiving addresses, using the same proportional split and tie-break as this ledger. See [flamed's Minting section](../../flamed/flamed.md#minting). Differences from this ledger:
+
+- **Delegation.** The chain pays a delegated burn's whole share to the delegator's address; commission is not part of the chain.
+- **Halving.** The chain halves the allotment every 210,000 core blocks, which is 58 hours at one block per second; this ledger keeps paying 50 FLM.
+- **Reset.** Resetting the playground under a running node puts the core chain behind the Flame anchor, and minting stops with an error. Reset both together.
+- **Network.** The node reads the playground's testnet addresses with the network in its `genesis.json`, which must be testnet.
 
 The reward export represents **currently attributed lifetime rewards**, not a spendable balance or an instruction to pay them again. Balances may decrease after a retrospective commission change, even for finished contributions; they are not an append-only entitlement. Creating actual Flame UTXOs is deliberately out of scope. A real payout integration needs finalization rules in addition to an atomic issuance/checkpoint ledger or immutable export snapshot: already-issued assets cannot simply be reassigned by changing this demo's rate. It can use stored receiving addresses directly and must not require private keys.
 

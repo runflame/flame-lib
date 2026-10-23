@@ -384,6 +384,9 @@ pub enum ExecutionData {
         /// VM error text. This text is not a consensus field.
         error: String,
     },
+    /// Flames issued for the burns of the core blocks the block moved its
+    /// anchor over. Effects are the reward outputs.
+    Mint,
 }
 
 /// Summary of a confirmed execution.
@@ -735,6 +738,9 @@ pub struct BlockHeader {
     /// Opaque authenticated Bitcoin/core-block identity supplied by the caller.
     #[serde(with = "crate::codec::hex32")]
     pub core_block_hash: [u8; 32],
+    /// That core block's height. A block that moves it issues the flames
+    /// its mint proof burned for.
+    pub core_height: u64,
     /// The minter's clock when it built the block, in Unix seconds; several
     /// blocks may share one core block.
     pub time: u64,
@@ -743,6 +749,9 @@ pub struct BlockHeader {
     /// Committed witness root, as hex.
     #[serde(with = "crate::codec::hex32")]
     pub witness_root: [u8; 32],
+    /// Committed mint proof root, as hex.
+    #[serde(with = "crate::codec::hex32")]
+    pub mint_root: [u8; 32],
     /// Committed effects root, as hex.
     #[serde(with = "crate::codec::hex32")]
     pub effects_root: [u8; 32],

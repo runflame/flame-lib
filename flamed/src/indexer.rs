@@ -1,15 +1,19 @@
 //! The core chain, as this node sees it: through an indexer.
 //!
-//! Every Flame header commits a `core_block_hash`: the core chain's tip when
-//! the block was minted. Flame blocks are iblocks and come faster than core
-//! blocks, so consecutive headers often name the same one. A header carries
-//! its own time, so the node asks the indexer only for the tip.
+//! Every Flame header commits a `core_block_hash` and its height: the core
+//! block the block was minted on. Flame blocks are iblocks and come faster
+//! than core blocks, so consecutive headers often name the same one. A block
+//! that moves to a later core block carries the burns of every core block it
+//! moves over, which is what issues flames; the indexer is where the minter
+//! reads them. A header carries its own time, so nothing asks for times.
 //!
-//! `MockIndexer` is the only implementation. There is no Bitcoin behind it:
-//! its chain grows only when something calls [`MockIndexer::mine`], which on
-//! a devnet is a timer of its own. It keeps its table in its own directory,
-//! apart from `blocks.bin`, so a connector to a real Bitcoin node can
-//! replace it without the node changing.
+//! `MockIndexer` has no Bitcoin behind it and no burns in it: its chain
+//! grows only when something calls [`MockIndexer::mine`], which on a devnet
+//! is a timer of its own. It keeps its table in its own directory, apart
+//! from `blocks.bin`, so a connector to a real Bitcoin node can replace it
+//! without the node changing. [`crate::playground::PlaygroundIndexer`]
+//! follows a mint playground instead, whose simulated Bitcoin blocks and
+//! burns become the core chain.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -17,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use flamechain::Burn;
 use sha2::{Digest, Sha256};
 
 /// One core block, as an indexer reports it.
@@ -30,10 +35,23 @@ pub struct CoreBlock {
     pub time: u64,
 }
 
+/// One core block with the burns it records, in the order it holds them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoreBurns {
+    /// The block.
+    pub block: CoreBlock,
+    /// Its burns, each paying its share to a predicate.
+    pub burns: Vec<Burn>,
+}
+
 /// What the node needs from a core-chain indexer.
 pub trait CoreIndexer: Send {
     /// The core chain's tip, which the next Flame block anchors to.
     fn tip(&mut self) -> Result<CoreBlock, CoreError>;
+
+    /// Core blocks `from..=to` with their burns, in height order. Fewer only
+    /// when the chain ends first.
+    fn blocks(&mut self, from: u64, to: u64) -> Result<Vec<CoreBurns>, CoreError>;
 }
 
 /// This devnet's stand-in for the hash of core block `height`.
@@ -157,6 +175,22 @@ impl CoreIndexer for MockIndexer {
             None => self.mine(),
         }
     }
+
+    /// Nobody burns on the mock chain, so its blocks issue nothing.
+    fn blocks(&mut self, from: u64, to: u64) -> Result<Vec<CoreBurns>, CoreError> {
+        let table = self.lock()?;
+        let first = from.max(1);
+        Ok(table
+            .blocks
+            .iter()
+            .skip((first - 1) as usize)
+            .take_while(|block| block.height <= to)
+            .map(|&block| CoreBurns {
+                block,
+                burns: Vec::new(),
+            })
+            .collect())
+    }
 }
 
 fn parse_line(line: &str) -> Option<([u8; 32], u64)> {
@@ -180,6 +214,18 @@ pub enum CoreError {
     /// A thread panicked while extending the mock's chain.
     #[error("the core indexer is poisoned: an earlier operation panicked")]
     Poisoned,
+    /// The core chain disagrees with itself or with the Flame anchor, for
+    /// example a playground that was reset under a running node.
+    #[error("the core chain is inconsistent: {0}")]
+    Inconsistent(String),
+    /// A playground that could not be asked, or answered nonsense.
+    #[error("playground at {url}: {reason}")]
+    Playground {
+        /// Where it was asked.
+        url: String,
+        /// What went wrong.
+        reason: String,
+    },
     /// The filesystem.
     #[error(transparent)]
     Io(#[from] io::Error),

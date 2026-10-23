@@ -10,3 +10,8 @@ core_block_interval_secs = 15
 minimum_fee = 0
 # Where the mock core indexer keeps the core blocks it has mined. Default: <data_dir>/indexer.
 # indexer_dir = "./data/indexer"
+# Devnet only: follow a mint playground as the core chain instead of mining a
+# mock one. Its blocks are the core blocks, and blocks that move to a later
+# one issue flames for its minters' burns. block_interval_secs still sets the
+# iblock pace; core_block_interval_secs is then unused.
+# playground_url = "http://127.0.0.1:3000"

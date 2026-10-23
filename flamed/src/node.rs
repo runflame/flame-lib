@@ -19,6 +19,8 @@ use flamechain::{
     utreexo_hasher, Block, BlockHash, BlockTx, Blockchain, ChainError, ChainParams, ContractLeaf,
     ExecutionKind, Mempool, MempoolError, MempoolPolicy, RebaseReport,
 };
+#[cfg(any(test, feature = "devnet"))]
+use flamechain::MintProof;
 use flamed_rpc::{
     ActorCode, ActorId, ActorQueryResult, ActorResult, ActorStateEnvelope, BlockHeader, BlockId,
     BlockResult, BlockSummary, BlockTxEnvelope, BlocksResult, ContractEnvelope, ContractId,
@@ -894,7 +896,7 @@ impl Node {
         //    touched yet and the next tick tries again. The time is this
         //    node's clock, held at the tip's if the clock has gone back.
         let height = self.chain.height().saturating_add(1);
-        let core = self.indexer.tip()?.hash;
+        let anchor = self.next_anchor()?;
         let time = unix_now().max(self.chain.header().time);
 
         // 1. Write every candidate down before draining the pool. `BlockTx`
@@ -912,7 +914,7 @@ impl Node {
         // The pool is already drained, so an error here would take every
         // candidate with it — and the minter treats a failed build as
         // recoverable and keeps ticking. Put them all back first.
-        let (block, taken, mut dropped) = match self.build_next(core, time, height, &candidates) {
+        let (block, taken, mut dropped) = match self.build_next(&anchor, time, height, &candidates) {
             Ok(built) => built,
             Err(error) => {
                 let restored = self.readmit(&candidates);
@@ -953,12 +955,70 @@ impl Node {
         self.settle_received();
 
         dropped += rebase.dropped;
+        let burns: usize = block.mint.core_blocks.iter().map(Vec::len).sum();
         println!(
-            "block {height} {} txs={} dropped={dropped}",
+            "block {height} {} core={} burns={burns} txs={} dropped={dropped}",
             hex::encode(hash.as_bytes()),
+            block.header.core_height,
             block.transactions.len()
         );
         Ok(hash)
+    }
+
+    /// The core block the next block is minted on, and the mint proof that
+    /// gets it there: every core block since the tip's anchor, up to the
+    /// indexer's tip, as many as one block may prove. A core chain that has
+    /// not moved keeps the tip's anchor and proves nothing.
+    #[cfg(any(test, feature = "devnet"))]
+    fn next_anchor(&mut self) -> Result<Anchor, NodeError> {
+        let header = self.chain.header();
+        let (current, current_hash) = (header.core_height, header.core_block_hash);
+        let tip = self.indexer.tip()?;
+        if tip.height < current {
+            return Err(CoreError::Inconsistent(format!(
+                "its tip is core block {} but the chain is anchored at {current}",
+                tip.height
+            ))
+            .into());
+        }
+        if tip.height == current {
+            return Ok(Anchor {
+                core_height: current,
+                core_hash: current_hash,
+                mint: MintProof::default(),
+            });
+        }
+
+        let limits = self.params.limits;
+        let from = current + 1;
+        let to = tip.height.min(current.saturating_add(limits.max_core_blocks as u64));
+        let mut mint = MintProof::default();
+        let mut last = None;
+        let mut burns = 0usize;
+        for (expected, core) in (from..=to).zip(self.indexer.blocks(from, to)?) {
+            if core.block.height != expected {
+                return Err(CoreError::Inconsistent(format!(
+                    "asked for core block {expected}, got {}",
+                    core.block.height
+                ))
+                .into());
+            }
+            // Whole core blocks only, while their burns fit in one block.
+            burns += core.burns.len();
+            if burns > limits.max_burns && last.is_some() {
+                break;
+            }
+            last = Some(core.block);
+            mint.core_blocks.push(core.burns);
+        }
+        let last = last.ok_or_else(|| {
+            CoreError::Inconsistent(format!("core block {from} is below its tip but missing"))
+        })?;
+        Ok(Anchor {
+            core_height: last.height,
+            core_hash: last.hash,
+            mint,
+        })
     }
 
     /// Hands each confirmed transaction its admission time, and forgets the
@@ -983,15 +1043,24 @@ impl Node {
     #[cfg(any(test, feature = "devnet"))]
     fn build_next(
         &mut self,
-        core: [u8; 32],
+        anchor: &Anchor,
         time: u64,
         height: u64,
         candidates: &[(TxID, Vec<u8>)],
     ) -> Result<(Block, usize, usize), NodeError> {
+        let build = |chain: &mut Blockchain, transactions| {
+            chain.build_block_on_core(
+                anchor.core_height,
+                anchor.core_hash,
+                time,
+                anchor.mint.clone(),
+                transactions,
+            )
+        };
         let mut take = candidates.len();
         loop {
             let transactions = self.decode_batch(&candidates[..take])?;
-            match self.chain.build_block_at(core, time, transactions) {
+            match build(&mut self.chain, transactions) {
                 Ok(block) => return Ok((block, take, 0)),
                 // Too much for one block: halve and try again. The rest are
                 // put back by the caller. Both shapes have to be caught —
@@ -1004,7 +1073,7 @@ impl Node {
                 // Anything else is one bad transaction somewhere in the
                 // batch, and one bad transaction must never halt minting.
                 Err(error) => {
-                    let block = self.chain.build_block_at(core, time, Vec::new())?;
+                    let block = build(&mut self.chain, Vec::new())?;
                     // Said only once the empty block is a fact.
                     for (txid, _) in &candidates[..take] {
                         eprintln!(
@@ -1051,6 +1120,15 @@ impl Node {
     }
 }
 
+/// Where the next block is minted: a core block, and the proof of every
+/// core block between it and the tip's.
+#[cfg(any(test, feature = "devnet"))]
+struct Anchor {
+    core_height: u64,
+    core_hash: [u8; 32],
+    mint: MintProof,
+}
+
 /// The predicate payments to a receiving or tracking address are locked
 /// by: `Predicate::opaque(S)`, the rule `flamepayments` builds outputs with.
 fn address_predicate(text: &str, network: Network) -> Result<[u8; 32], NodeError> {
@@ -1072,7 +1150,7 @@ fn address_predicate(text: &str, network: Network) -> Result<[u8; 32], NodeError
 }
 
 /// [`address_predicate`] for one network, with `flamekd`'s own error.
-fn predicate_of(text: &str, network: Network) -> Result<[u8; 32], flamekd::Error> {
+pub(crate) fn predicate_of(text: &str, network: Network) -> Result<[u8; 32], flamekd::Error> {
     // A receiving address is a tracking address with an encryption key
     // appended, so length alone says which one was meant, and the error
     // names the right one.
@@ -1245,6 +1323,7 @@ fn connect_block(
 
         let execution = match (record.kind, received, error) {
             (ExecutionKind::External, None, None) => ExecutionData::External,
+            (ExecutionKind::Mint, None, None) => ExecutionData::Mint,
             (ExecutionKind::Internal, Some((parent, actor)), None) => {
                 ExecutionData::Internal { parent, actor }
             }
@@ -1316,7 +1395,7 @@ fn connect_block(
     let internal = applied
         .records
         .iter()
-        .filter(|r| r.kind != ExecutionKind::External)
+        .filter(|r| matches!(r.kind, ExecutionKind::Internal | ExecutionKind::InternalFailed))
         .count() as u32;
     let failed = applied
         .records
@@ -1377,9 +1456,11 @@ fn block_summary(
             version: header.version,
             height: header.height,
             core_block_hash: header.core_block_hash,
+            core_height: header.core_height,
             time: header.time,
             parent: BlockId(header.parent.into_bytes()),
             witness_root: header.witness_root,
+            mint_root: header.mint_root,
             effects_root: header.effects_root,
             state: StateCommitment {
                 contracts: header.state.contracts.0,

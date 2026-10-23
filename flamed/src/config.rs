@@ -100,6 +100,8 @@ params!(LimitsConfig, LimitsSection, BlockLimits, {
     max_messages: usize,
     max_proofs_per_transaction: usize,
     max_proof_depth: usize,
+    max_core_blocks: usize,
+    max_burns: usize,
 });
 
 /// Which network's address encoding an allocation is written in.
@@ -286,6 +288,11 @@ pub struct NodeConfig {
     /// purpose: it stands in for a separate service.
     #[serde(default)]
     pub indexer_dir: Option<PathBuf>,
+    /// Devnet only: a mint playground, `http://host:port`, to follow as the
+    /// core chain instead of mining a mock one. Its blocks are the core
+    /// blocks, and its minters' burns are what blocks issue flames for.
+    #[serde(default)]
+    pub playground_url: Option<String>,
 }
 
 fn default_block_interval_secs() -> u64 {

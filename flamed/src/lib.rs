@@ -25,12 +25,14 @@ mod inspect;
 #[cfg(any(test, feature = "devnet"))]
 pub mod minter;
 pub mod node;
+pub mod playground;
 pub mod rpc;
 pub mod store;
 pub mod utxos;
 
 pub use config::{ChainParamsFile, GenesisFile, NodeConfig};
-pub use indexer::{CoreBlock, CoreError, CoreIndexer, MockIndexer};
+pub use indexer::{CoreBlock, CoreBurns, CoreError, CoreIndexer, MockIndexer};
+pub use playground::PlaygroundIndexer;
 pub use node::{Node, NodeError, ProofStatus, SharedNode, TipInfo, TxStatus};
 pub use rpc::{serve, FlamedRpc};
 pub use store::BlockStore;

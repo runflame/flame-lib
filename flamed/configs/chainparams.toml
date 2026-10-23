@@ -19,7 +19,7 @@ network = "testnet"
 # max_script_bytes, max_transaction_gas, max_gas_credit, max_external_gas,
 # max_internal_gas, max_multiplications_per_transaction,
 # max_multiplications, max_messages, max_proofs_per_transaction,
-# max_proof_depth — every field is optional and falls back to the upstream
+# max_proof_depth, max_core_blocks, max_burns — every field is optional and falls back to the upstream
 # BlockLimits::default().
 
 # 1000 Flame, the whole supply of this devnet, under the first receiving

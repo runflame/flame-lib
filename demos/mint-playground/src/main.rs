@@ -20,6 +20,8 @@ enum Command {
     Submit(db::ContributionRequest, Reply<db::Submitted>),
     Minter(db::MinterRequest, Reply<db::Minter>),
     Rewards(Reply<Vec<db::RewardBalance>>),
+    CoreTip(Reply<db::CoreTip>),
+    CoreBlocks(i64, i64, Reply<Vec<db::CoreBlock>>),
     Tick(Reply<()>),
     Stop(oneshot::Sender<()>),
 }
@@ -55,6 +57,12 @@ impl Store {
                         }
                         Command::Rewards(reply) => {
                             let _ = reply.send(database.rewards());
+                        }
+                        Command::CoreTip(reply) => {
+                            let _ = reply.send(database.core_tip());
+                        }
+                        Command::CoreBlocks(from, to, reply) => {
+                            let _ = reply.send(database.core_blocks(from, to));
                         }
                         Command::Tick(reply) => {
                             let _ = reply.send(database.tick());
@@ -141,6 +149,32 @@ async fn snapshot(
 
 async fn rewards(State(store): State<Store>) -> Result<Json<Vec<db::RewardBalance>>, ApiError> {
     store.request(Command::Rewards).await.map(Json)
+}
+
+async fn core_tip(State(store): State<Store>) -> Result<Json<db::CoreTip>, ApiError> {
+    store.request(Command::CoreTip).await.map(Json)
+}
+
+#[derive(serde::Deserialize)]
+struct CoreBlocksQuery {
+    from: i64,
+    to: i64,
+}
+
+async fn core_blocks(
+    State(store): State<Store>,
+    query: Result<Query<CoreBlocksQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<Vec<db::CoreBlock>>, ApiError> {
+    let Query(query) = query.map_err(|error| {
+        ApiError(
+            error.status(),
+            "Expected integer from and to block heights.".into(),
+        )
+    })?;
+    store
+        .request(|reply| Command::CoreBlocks(query.from, query.to, reply))
+        .await
+        .map(Json)
 }
 
 async fn submit(
@@ -271,6 +305,8 @@ fn router(store: Store) -> Router {
         )
         .route("/api/state", get(snapshot))
         .route("/api/rewards", get(rewards))
+        .route("/api/core/tip", get(core_tip))
+        .route("/api/core/blocks", get(core_blocks))
         .route("/api/contributions", post(submit))
         .route("/api/minter", post(minter))
         .layer(DefaultBodyLimit::max(2048))

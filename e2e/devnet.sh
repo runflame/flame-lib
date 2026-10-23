@@ -6,7 +6,10 @@
 #
 # Builds with -j1 by default; set CARGO_BUILD_JOBS to change that. Set
 # KEEP=1 to keep the scratch directory and print its path. A script sets
-# `port` before sourcing; PORT overrides it.
+# `port` before sourcing; PORT overrides it. It may also define
+# `before_node`, run once the scratch directory exists, which can append
+# lines to the node's flamed.toml through `node_toml` and register
+# processes to stop on exit in `extra_pids`.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,9 +23,14 @@ wallet="$root/target/debug/flamewallet"
 
 dir="$(mktemp -d)"
 node_pid=""
+node_toml=""
+extra_pids=()
 cleanup() {
     local status=$?
     [[ -n "$node_pid" ]] && kill "$node_pid" 2>/dev/null && wait "$node_pid" 2>/dev/null || true
+    for pid in "${extra_pids[@]}"; do
+        kill "$pid" 2>/dev/null && wait "$pid" 2>/dev/null || true
+    done
     if [[ $status != 0 && -f "$dir/node.log" ]]; then
         echo "--- last lines of the node's log" >&2
         tail -n 40 "$dir/node.log" >&2
@@ -30,6 +38,7 @@ cleanup() {
     if [[ "${KEEP:-}" == 1 ]]; then echo "kept $dir"; else rm -rf "$dir"; fi
 }
 trap cleanup EXIT
+if declare -F before_node >/dev/null; then before_node; fi
 
 "$flamed" genesis --chainparams "$root/flamed/configs/chainparams.toml" --out "$dir/genesis.json"
 cat >"$dir/flamed.toml" <<TOML
@@ -38,6 +47,7 @@ genesis = "$dir/genesis.json"
 rpc_bind = "127.0.0.1:$port"
 block_interval_secs = 2
 minimum_fee = 0
+$node_toml
 TOML
 "$flamed" run --config "$dir/flamed.toml" >"$dir/node.log" 2>&1 &
 node_pid=$!

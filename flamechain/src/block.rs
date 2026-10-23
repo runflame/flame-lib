@@ -11,15 +11,17 @@ use cells::{
 #[cfg(test)]
 use flamevm::ActorAddress;
 use flamevm::{
-    ActorID, ActorRegistry, BlockContext, Contract, ContractID, ExternalTx, Limits, Message,
-    TxEntry, TxHeader, TxID, TxLog, VMError,
+    ActorID, ActorRegistry, Anchor, BlockContext, ClearToken, Contract, ContractID, ExternalTx,
+    FLAME_FLAVOR, Limits, Message, Point, Predicate, Scalar, TxEntry, TxHeader, TxID, TxLog,
+    VMError, Value,
 };
 use merkle::{Hash, MerkleItem};
 use merlin::Transcript;
 
 use crate::BlockHash;
 use crate::storage::{
-    ActorInfo, ActorStore, RegistryUndo, StorageError, StorageParams, StoredActor,
+    ActorInfo, ActorStore, RegistryUndo, SPARKS_PER_FLAME, StorageError, StorageParams,
+    StoredActor,
 };
 use crate::utreexo::{self, Catchup, Forest, Proof, UtreexoError};
 
@@ -40,6 +42,10 @@ pub struct BlockLimits {
     pub max_messages: usize,
     pub max_proofs_per_transaction: usize,
     pub max_proof_depth: usize,
+    /// Core blocks one block's mint proof may cover.
+    pub max_core_blocks: usize,
+    /// Burns one block's mint proof may list, over all its core blocks.
+    pub max_burns: usize,
 }
 
 impl Default for BlockLimits {
@@ -58,6 +64,8 @@ impl Default for BlockLimits {
             max_messages: 100_000,
             max_proofs_per_transaction: 100_000,
             max_proof_depth: 63,
+            max_core_blocks: 1_024,
+            max_burns: 100_000,
         }
     }
 }
@@ -212,11 +220,16 @@ pub struct BlockHeader {
     /// Opaque authenticated Bitcoin/core-block identity supplied by the caller.
     /// Consecutive blocks may share one core block.
     pub core_block_hash: [u8; 32],
+    /// The height of that core block. A block that moves it carries the
+    /// mint proof for every core block it moves over.
+    pub core_height: u64,
     /// The minter's clock when it built the block, in Unix seconds. It is
     /// not the core block's time and may not go backwards.
     pub time: u64,
     pub parent: BlockHash,
     pub witness_root: CellID,
+    /// The mint proof's Cell ID.
+    pub mint_root: CellID,
     pub effects_root: CellID,
     pub state: StateCommitment,
 }
@@ -234,12 +247,12 @@ impl BlockHeader {
         if expected_version != 1 {
             return Err(CellError::InvalidFormat);
         }
-        let mut envelope = decode_envelope(bytes, 250)?;
+        let mut envelope = decode_envelope(bytes, 320)?;
         let root = envelope
             .cells()
             .get(&envelope.root())
             .expect("validated envelope root");
-        let header = Self::from_cell(&root, &mut TypedDecode::new(&mut envelope, 250)?)?;
+        let header = Self::from_cell(&root, &mut TypedDecode::new(&mut envelope, 320)?)?;
         if header.version != expected_version {
             return Err(CellError::InvalidFormat);
         }
@@ -256,9 +269,11 @@ impl CellEncode for BlockHeader {
             .store_u32(self.version)?
             .store_u64(self.height)?
             .store_bytes(&self.core_block_hash)?
+            .store_u64(self.core_height)?
             .store_u64(self.time)?
             .store_bytes(self.parent.as_bytes())?
             .store_bytes(&self.witness_root)?
+            .store_bytes(&self.mint_root)?
             .store_bytes(&self.effects_root)?
             .store_bytes(&self.state.contracts.0)?
             .store_bytes(&self.state.actors)?
@@ -276,9 +291,11 @@ impl CellDecode for BlockHeader {
             version: slice.load_u32()?,
             height: slice.load_u64()?,
             core_block_hash: <[u8; 32]>::decode(slice, cells)?,
+            core_height: slice.load_u64()?,
             time: slice.load_u64()?,
             parent: BlockHash::new(<[u8; 32]>::decode(slice, cells)?),
             witness_root: <[u8; 32]>::decode(slice, cells)?,
+            mint_root: <[u8; 32]>::decode(slice, cells)?,
             effects_root: <[u8; 32]>::decode(slice, cells)?,
             state: StateCommitment {
                 contracts: Hash(<[u8; 32]>::decode(slice, cells)?),
@@ -289,14 +306,134 @@ impl CellDecode for BlockHeader {
     }
 }
 
+/// Flames issued for each core block before the first halving: 50 FLM.
+pub const INITIAL_ALLOTMENT_SPARKS: u64 = 50 * SPARKS_PER_FLAME;
+
+/// Core blocks between halvings of the allotment, as in Bitcoin.
+pub const HALVING_INTERVAL: u64 = 210_000;
+
+/// The flames core block `core_height` issues: 50 FLM, halved every
+/// [`HALVING_INTERVAL`] core blocks, nothing after 64 halvings. Heights
+/// count from the genesis anchor at 0, so the first core block is 1.
+pub fn allotment_sparks(core_height: u64) -> u64 {
+    let halvings = core_height.saturating_sub(1) / HALVING_INTERVAL;
+    if halvings >= 64 {
+        0
+    } else {
+        INITIAL_ALLOTMENT_SPARKS >> halvings
+    }
+}
+
+/// Splits `allotment` among `burns` in proportion to their sats: each share
+/// is floored, then the leftover sparks go one each to the largest
+/// remainders, the earlier burn first on a tie. With no burns there are no
+/// shares, and the allotment is lost.
+pub fn split_allotment(allotment: u64, burns: &[Burn]) -> Vec<u64> {
+    let total: u128 = burns.iter().map(|burn| u128::from(burn.sats)).sum();
+    if total == 0 {
+        return vec![0; burns.len()];
+    }
+    let (mut shares, remainders): (Vec<u64>, Vec<u128>) = burns
+        .iter()
+        .map(|burn| {
+            let exact = u128::from(burn.sats) * u128::from(allotment);
+            // A share is at most the allotment, so it fits.
+            ((exact / total) as u64, exact % total)
+        })
+        .unzip();
+    // Less than one spark per burn is left over.
+    let leftover = allotment - shares.iter().sum::<u64>();
+    let mut order: Vec<usize> = (0..burns.len()).collect();
+    order.sort_by(|&a, &b| remainders[b].cmp(&remainders[a]).then(a.cmp(&b)));
+    for &index in order.iter().take(leftover as usize) {
+        shares[index] += 1;
+    }
+    shares
+}
+
+/// One burn a core block records: its weight in that block's allotment, and
+/// the predicate its share is paid to. On Bitcoin this is a mint proof
+/// output: the burned amount and its `flame_reward_address`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Burn {
+    /// The compressed point of the opaque predicate the share is locked by.
+    pub reward_predicate: [u8; 32],
+    /// Burned satoshis. Never zero.
+    pub sats: u64,
+}
+
+impl CellEncode for Burn {
+    fn encode(&self, builder: &mut CellBuilder) -> Result<(), CellError> {
+        builder
+            .store_bytes(&self.reward_predicate)?
+            .store_u64(self.sats)?;
+        Ok(())
+    }
+}
+
+impl CellDecode for Burn {
+    fn decode<R: CellReader + ?Sized>(
+        slice: &mut CellSlice<'_>,
+        cells: &mut R,
+    ) -> Result<Self, CellError> {
+        Ok(Self {
+            reward_predicate: <[u8; 32]>::decode(slice, cells)?,
+            sats: slice.load_u64()?,
+        })
+    }
+}
+
+/// What ties a block to the core chain: the burns of every core block it
+/// moves its anchor over. A block that stays on its parent's core block
+/// carries an empty one; a block that moves from core height `p` to `h`
+/// carries exactly `h - p` entries, and issues each one's allotment.
+///
+/// The chain checks the proof's shape and pays it out. Whether these burns
+/// are the ones the core chain holds is checked against a core indexer by
+/// the caller, as the core block hash is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MintProof {
+    /// Entry `i` is the burns of core block `parent.core_height + 1 + i`.
+    pub core_blocks: Vec<Vec<Burn>>,
+}
+
+impl MintProof {
+    pub fn to_cell(&self) -> Result<Cell, CellError> {
+        sequence_cell_with(&self.core_blocks, |burns| sequence_cell(burns))
+    }
+
+    fn decode_bounded<R: CellReader + ?Sized>(
+        cell: &Cell,
+        cells: &mut R,
+        limits: BlockLimits,
+    ) -> Result<Self, CellError> {
+        let mut burn_count = 0usize;
+        let core_blocks = decode_sequence(cell, cells, limits.max_core_blocks, |cell, cells| {
+            decode_sequence(cell, cells, limits.max_burns, |cell, cells| {
+                burn_count += 1;
+                if burn_count > limits.max_burns {
+                    return Err(CellError::LimitExceeded);
+                }
+                Burn::from_cell(cell, cells)
+            })
+        })?;
+        Ok(Self { core_blocks })
+    }
+}
+
 pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<BlockTx>,
+    pub mint: MintProof,
 }
 
 impl Block {
     pub fn witness_root(&self) -> Result<CellID, CellError> {
         Ok(sequence_cell(&self.transactions)?.id())
+    }
+
+    pub fn mint_root(&self) -> Result<CellID, CellError> {
+        Ok(self.mint.to_cell()?.id())
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, CellError> {
@@ -332,9 +469,12 @@ impl Block {
                 Ok(tx)
             },
         )?;
+        let mint = read_cell(cells, &slice.load_ref()?)?;
+        let mint = MintProof::decode_bounded(&mint, cells, params.limits)?;
         Ok(Self {
             header,
             transactions,
+            mint,
         })
     }
 
@@ -366,7 +506,8 @@ impl CellEncode for Block {
     fn encode(&self, builder: &mut CellBuilder) -> Result<(), CellError> {
         builder
             .store_ref(CellRef::resident(self.header.to_cell()?))?
-            .store_ref(CellRef::resident(sequence_cell(&self.transactions)?))?;
+            .store_ref(CellRef::resident(sequence_cell(&self.transactions)?))?
+            .store_ref(CellRef::resident(self.mint.to_cell()?))?;
         Ok(())
     }
 }
@@ -522,6 +663,9 @@ pub enum ExecutionKind {
     External,
     Internal,
     InternalFailed,
+    /// The flames a block's mint proof issues; it comes before the
+    /// block's transactions.
+    Mint,
 }
 
 impl ExecutionKind {
@@ -530,6 +674,7 @@ impl ExecutionKind {
             Self::External => 0,
             Self::Internal => 1,
             Self::InternalFailed => 2,
+            Self::Mint => 3,
         }
     }
 }
@@ -636,9 +781,11 @@ impl Blockchain {
             version: params.version,
             height: 0,
             core_block_hash: [0; 32],
+            core_height: 0,
             time: 0,
             parent: BlockHash::new([0; 32]),
             witness_root: empty_sequence_id(),
+            mint_root: empty_sequence_id(),
             effects_root: empty_sequence_id(),
             state: StateCommitment {
                 contracts: contract_root,
@@ -740,12 +887,40 @@ impl Blockchain {
         self.build_block_at(core_block_hash, self.header.time, transactions)
     }
 
-    /// Builds a candidate by running the same transition as validation, then
-    /// rolling it back.
+    /// [`Self::build_block_on_core`] with no burns: on the parent's core
+    /// block if `core_block_hash` is the parent's, otherwise on the next
+    /// core block, which then issues nothing.
     pub fn build_block_at(
         &mut self,
         core_block_hash: [u8; 32],
         time: u64,
+        transactions: Vec<BlockTx>,
+    ) -> Result<Block, ChainError> {
+        let (core_height, mint) = if core_block_hash == self.header.core_block_hash {
+            (self.header.core_height, MintProof::default())
+        } else {
+            let next = self
+                .header
+                .core_height
+                .checked_add(1)
+                .ok_or(ChainError::LimitExceeded)?;
+            let mint = MintProof {
+                core_blocks: vec![Vec::new()],
+            };
+            (next, mint)
+        };
+        self.build_block_on_core(core_height, core_block_hash, time, mint, transactions)
+    }
+
+    /// Builds a candidate anchored to core block `core_height`, issuing what
+    /// `mint` proves, by running the same transition as validation, then
+    /// rolling it back.
+    pub fn build_block_on_core(
+        &mut self,
+        core_height: u64,
+        core_block_hash: [u8; 32],
+        time: u64,
+        mint: MintProof,
         transactions: Vec<BlockTx>,
     ) -> Result<Block, ChainError> {
         let height = self
@@ -758,15 +933,19 @@ impl Blockchain {
                 version: self.params.version,
                 height,
                 core_block_hash,
+                core_height,
                 time,
                 parent: self.tip(),
                 witness_root: empty_sequence_id(),
+                mint_root: empty_sequence_id(),
                 effects_root: empty_sequence_id(),
                 state: self.header.state,
             },
             transactions,
+            mint,
         };
         block.header.witness_root = block.witness_root()?;
+        block.header.mint_root = block.mint_root()?;
         self.check_header(&block)?;
 
         self.actors.push_outer_checkpoint();
@@ -853,6 +1032,26 @@ impl Blockchain {
         let mut internal_gas = 0u64;
         let mut multiplications = 0usize;
         let mut message_count = 0usize;
+
+        if let Some(log) = self.mint_log(block)? {
+            let record = ExecutionRecord {
+                kind: ExecutionKind::Mint,
+                txid: TxID::from_log(log.entries()),
+            };
+            observe(record, &log, None)?;
+            self.apply_log_with_cells(
+                &mut work,
+                &hasher,
+                ExecutionKind::Mint,
+                log,
+                &[],
+                &mut sends,
+                &mut seen_outputs,
+                block.header.height,
+                &mut (),
+            )?;
+            records.push(record);
+        }
 
         for block_tx in &block.transactions {
             let (log, metrics) = block_tx.tx.verify_with_metrics(block_tx.limits)?;
@@ -988,6 +1187,50 @@ impl Blockchain {
             state,
             effects_root,
         })
+    }
+
+    /// The outputs `block`'s mint proof issues, one per reward predicate in
+    /// the order each first appears, summed over every core block the proof
+    /// covers. None when nothing is issued: no core block moved, or none of
+    /// them had a burn.
+    fn mint_log(&self, block: &Block) -> Result<Option<TxLog>, ChainError> {
+        let mut paid: Vec<([u8; 32], u64)> = Vec::new();
+        let mut positions = BTreeMap::new();
+        for (offset, burns) in block.mint.core_blocks.iter().enumerate() {
+            let core_height = self
+                .header
+                .core_height
+                .checked_add(1 + offset as u64)
+                .ok_or(ChainError::LimitExceeded)?;
+            let shares = split_allotment(allotment_sparks(core_height), burns);
+            for (burn, share) in burns.iter().zip(shares) {
+                if share == 0 {
+                    continue;
+                }
+                let position = *positions.entry(burn.reward_predicate).or_insert_with(|| {
+                    paid.push((burn.reward_predicate, 0));
+                    paid.len() - 1
+                });
+                paid[position].1 = paid[position]
+                    .1
+                    .checked_add(share)
+                    .ok_or(ChainError::LimitExceeded)?;
+            }
+        }
+        if paid.is_empty() {
+            return Ok(None);
+        }
+        let mut entries = vec![TxEntry::Header(TxHeader {
+            version: 1,
+            locktime: 0,
+        })];
+        for (index, (predicate, sparks)) in paid.into_iter().enumerate() {
+            let predicate = Predicate::opaque(Point::from_bytes(predicate).to_compressed());
+            let anchor = Anchor(mint_anchor(block.header.core_height, index as u64));
+            let payload = Value::ClearToken(ClearToken::new(Scalar::from(sparks), FLAME_FLAVOR));
+            entries.push(TxEntry::Output(Contract::new(predicate, anchor, payload)?));
+        }
+        Ok(Some(TxLog::from(entries)))
     }
 
     fn bounce_log(message: Message) -> Result<TxLog, ChainError> {
@@ -1198,6 +1441,16 @@ impl Blockchain {
                     }
                 }
             }
+            ExecutionKind::Mint => {
+                if header.version != 1
+                    || header.locktime != 0
+                    || entries[1..]
+                        .iter()
+                        .any(|entry| !matches!(entry, TxEntry::Output(_)))
+                {
+                    return Err(ChainError::InvalidEffectLog);
+                }
+            }
             ExecutionKind::InternalFailed => {
                 if header.version != 1
                     || header.locktime != 0
@@ -1225,6 +1478,7 @@ impl Blockchain {
         {
             return Err(ChainError::InvalidHeader);
         }
+        self.check_mint(block)?;
         if block.transactions.len() > self.params.limits.max_transactions {
             return Err(ChainError::LimitExceeded);
         }
@@ -1260,6 +1514,43 @@ impl Blockchain {
         // network admission, not bypass it by skipping Cell decoding.
         Block::from_bytes_bounded(&block.to_bytes()?, self.params)?;
         if block.witness_root()? != block.header.witness_root {
+            return Err(ChainError::InvalidHeader);
+        }
+        Ok(())
+    }
+
+    /// The anchor rule: a block either stays on its parent's core block and
+    /// proves nothing, or moves to a later, different one and proves every
+    /// core block it moves over. Every burn weighs something and pays a
+    /// valid point.
+    fn check_mint(&self, block: &Block) -> Result<(), ChainError> {
+        let parent = &self.header;
+        let core_blocks = &block.mint.core_blocks;
+        let moved = block
+            .header
+            .core_height
+            .checked_sub(parent.core_height)
+            .ok_or(ChainError::InvalidMintProof)?;
+        let same_core = block.header.core_block_hash == parent.core_block_hash;
+        if (moved == 0) != same_core || core_blocks.len() as u64 != moved {
+            return Err(ChainError::InvalidMintProof);
+        }
+        let burns = core_blocks.iter().map(Vec::len).sum::<usize>();
+        if core_blocks.len() > self.params.limits.max_core_blocks
+            || burns > self.params.limits.max_burns
+        {
+            return Err(ChainError::LimitExceeded);
+        }
+        if core_blocks.iter().flatten().any(|burn| {
+            burn.sats == 0
+                || Point::from_bytes(burn.reward_predicate)
+                    .to_compressed()
+                    .decompress()
+                    .is_none()
+        }) {
+            return Err(ChainError::InvalidMintProof);
+        }
+        if block.mint_root()? != block.header.mint_root {
             return Err(ChainError::InvalidHeader);
         }
         Ok(())
@@ -1341,6 +1632,18 @@ impl Blockchain {
     }
 }
 
+/// The anchor of a block's `index`th mint output. A block that issues has
+/// moved to a core height no earlier block was on, so no two mint outputs
+/// share one.
+fn mint_anchor(core_height: u64, index: u64) -> [u8; 32] {
+    let mut transcript = Transcript::new(b"flame.mint");
+    transcript.append_u64(b"core_height", core_height);
+    transcript.append_u64(b"index", index);
+    let mut anchor = [0; 32];
+    transcript.challenge_bytes(b"anchor", &mut anchor);
+    anchor
+}
+
 /// Utreexo leaf for a contract id. Public so callers outside the crate can
 /// verify and refresh their own membership proofs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1368,6 +1671,8 @@ pub enum ChainError {
     DuplicateContract,
     #[error("invalid transaction effect log")]
     InvalidEffectLog,
+    #[error("the mint proof does not match the block's core anchor")]
+    InvalidMintProof,
     #[error("block commitment mismatch")]
     CommitmentMismatch,
     #[error("requested block is not the active tip")]
@@ -1567,6 +1872,151 @@ mod tests {
         assert_eq!(plain.state_commitment(), chain.state_commitment());
     }
 
+    fn burn(reward_predicate: [u8; 32], sats: u64) -> Burn {
+        Burn {
+            reward_predicate,
+            sats,
+        }
+    }
+
+    /// The Ristretto basepoint, compressed: a valid point that is not the
+    /// unspendable key.
+    fn basepoint() -> [u8; 32] {
+        let bytes = hex::decode("e2f2ae0a6abc4e71a884a961c500515f58e30b6aa582dd8db6a65945e08d2d76")
+            .unwrap();
+        bytes.try_into().unwrap()
+    }
+
+    fn minted(log: &TxLog) -> Vec<([u8; 32], u64)> {
+        log.entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                TxEntry::Output(contract) => {
+                    let Value::ClearToken(token) = contract.payload() else {
+                        panic!("mint outputs hold cleartext flames");
+                    };
+                    assert_eq!(token.flv(), FLAME_FLAVOR);
+                    let sparks = u64::from_le_bytes(token.qty().to_bytes()[..8].try_into().unwrap());
+                    Some((contract.predicate.to_point().to_bytes(), sparks))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn allotment_halves_like_bitcoin_and_runs_out() {
+        assert_eq!(allotment_sparks(1), 50 * SPARKS_PER_FLAME);
+        assert_eq!(allotment_sparks(HALVING_INTERVAL), 50 * SPARKS_PER_FLAME);
+        assert_eq!(allotment_sparks(HALVING_INTERVAL + 1), 25 * SPARKS_PER_FLAME);
+        assert_eq!(allotment_sparks(64 * HALVING_INTERVAL + 1), 0);
+        let total: u128 = (0..64u64)
+            .map(|era| u128::from(allotment_sparks(era * HALVING_INTERVAL + 1)) * 210_000)
+            .sum();
+        assert!(total <= 21_000_000 * u128::from(SPARKS_PER_FLAME));
+    }
+
+    #[test]
+    fn split_floors_then_hands_leftovers_to_largest_remainders() {
+        let a = burn([1; 32], 1);
+        let b = burn([2; 32], 1);
+        let c = burn([3; 32], 1);
+        // 10 / 3: three each, and the one left goes to the earliest tie.
+        assert_eq!(split_allotment(10, &[a, b, c]), vec![4, 3, 3]);
+        // 10 * 2/3 = 6.67 and 10 * 1/3 = 3.33: the larger remainder wins.
+        assert_eq!(split_allotment(10, &[b, burn([1; 32], 2)]), vec![3, 7]);
+        assert_eq!(split_allotment(10, &[]), Vec::<u64>::new());
+        let shares = split_allotment(INITIAL_ALLOTMENT_SPARKS, &[a, burn([2; 32], 6), c]);
+        assert_eq!(shares.iter().sum::<u64>(), INITIAL_ALLOTMENT_SPARKS);
+    }
+
+    #[test]
+    fn a_block_that_moves_its_core_anchor_issues_what_its_proof_burns() {
+        let mut chain = Blockchain::new(ChainParams::default()).unwrap();
+        let alice = basepoint();
+        let bob = Predicate::unspendable_key().to_bytes();
+        let mint = MintProof {
+            core_blocks: vec![
+                vec![burn(alice, 3_000), burn(bob, 1_000)],
+                // Nobody burned: this core block's allotment is lost.
+                vec![],
+                vec![burn(alice, 1)],
+            ],
+        };
+        let block = chain
+            .build_block_on_core(3, [0x33; 32], 10, mint, Vec::new())
+            .unwrap();
+        let mut logs = Vec::new();
+        let applied = chain
+            .connect_with_observer(&block, |record, log, _| {
+                assert_eq!(record.kind, ExecutionKind::Mint);
+                logs.push(minted(log));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(applied.records.len(), 1);
+        let fifty = INITIAL_ALLOTMENT_SPARKS;
+        assert_eq!(logs, vec![vec![(alice, fifty * 3 / 4 + fifty), (bob, fifty / 4)]]);
+        assert_eq!(chain.header().core_height, 3);
+
+        // On the same core block nothing more is issued.
+        let same = chain.build_block_at([0x33; 32], 11, Vec::new()).unwrap();
+        assert!(same.mint.core_blocks.is_empty());
+        assert!(chain.connect(&same).unwrap().records.is_empty());
+    }
+
+    #[test]
+    fn the_core_anchor_and_the_mint_proof_must_agree() {
+        let mut chain = Blockchain::new(ChainParams::default()).unwrap();
+        let first = chain.build_block([0x11; 32], Vec::new()).unwrap();
+        assert_eq!(first.header.core_height, 1);
+        chain.connect(&first).unwrap();
+
+        let proof = |n: usize| MintProof {
+            core_blocks: vec![Vec::new(); n],
+        };
+        let reject = |chain: &mut Blockchain, height, hash, mint| {
+            matches!(
+                chain.build_block_on_core(height, hash, 0, mint, Vec::new()),
+                Err(ChainError::InvalidMintProof)
+            )
+        };
+        // Staying put proves nothing; moving proves every block moved over.
+        assert!(reject(&mut chain, 1, [0x11; 32], proof(1)));
+        assert!(reject(&mut chain, 3, [0x22; 32], proof(1)));
+        assert!(reject(&mut chain, 2, [0x22; 32], proof(0)));
+        // A new hash is a new core block, and the old one has a height.
+        assert!(reject(&mut chain, 1, [0x22; 32], proof(0)));
+        assert!(reject(&mut chain, 2, [0x11; 32], proof(1)));
+        assert!(reject(&mut chain, 0, [0x00; 32], proof(0)));
+        // Every burn weighs something and pays a point.
+        let zero = MintProof {
+            core_blocks: vec![vec![burn(basepoint(), 0)]],
+        };
+        assert!(reject(&mut chain, 2, [0x22; 32], zero));
+        let not_a_point = MintProof {
+            core_blocks: vec![vec![burn([0xff; 32], 1)]],
+        };
+        assert!(reject(&mut chain, 2, [0x22; 32], not_a_point));
+
+        // A built block whose proof is swapped no longer matches its header.
+        let mut swapped = chain
+            .build_block_on_core(2, [0x22; 32], 0, proof(1), Vec::new())
+            .unwrap();
+        swapped.mint = MintProof {
+            core_blocks: vec![vec![burn(basepoint(), 1)]],
+        };
+        assert!(matches!(chain.connect(&swapped), Err(ChainError::InvalidHeader)));
+
+        let mut params = ChainParams::default();
+        params.limits.max_core_blocks = 2;
+        let mut small = Blockchain::new(params).unwrap();
+        assert!(matches!(
+            small.build_block_on_core(3, [0x33; 32], 0, proof(3), Vec::new()),
+            Err(ChainError::LimitExceeded)
+        ));
+    }
+
     #[test]
     fn blocks_share_a_core_block_and_their_time_never_goes_back() {
         let mut chain = Blockchain::new(ChainParams::default()).unwrap();
@@ -1595,7 +2045,7 @@ mod tests {
         let block = chain.build_block([0x11; 32], Vec::new()).unwrap();
         let bytes = block.to_bytes().unwrap();
         let header_cell = block.header.to_cell().unwrap();
-        assert_eq!(header_cell.payload().len(), 220);
+        assert_eq!(header_cell.payload().len(), 260);
         assert!(header_cell.refs().is_empty());
         assert_eq!(
             &header_cell.payload()[..12],

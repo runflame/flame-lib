@@ -33,3 +33,5 @@ jobs:
       run: e2e/devnet-tokens.sh
     - name: Counterparties
       run: e2e/devnet-counterparty.sh
+    - name: Minting from the playground
+      run: e2e/devnet-playground.sh
