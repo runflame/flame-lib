@@ -1,5 +1,5 @@
-//! Times: a block's from the core indexer, a transaction's from its
-//! signer and from this node's mempool.
+//! Times: a block's from its header, a transaction's from its signer and
+//! from this node's mempool; and the core chain the blocks anchor to.
 
 use std::fs;
 
@@ -13,7 +13,7 @@ use crate::indexer::{core_block_hash, unix_now, CoreBlock, CoreError, CoreIndexe
 const SIGNED_AT: u32 = 1_800_000_000;
 
 #[test]
-fn block_times_come_from_the_indexer_and_survive_a_restart() {
+fn block_times_are_in_the_header_and_survive_a_restart() {
     let dir = TempDir::new().unwrap();
     let (genesis, cfg) = devnet(dir.path(), &account(&SEED_A));
     let since = unix_now();
@@ -21,42 +21,42 @@ fn block_times_come_from_the_indexer_and_survive_a_restart() {
     node.mint_block().unwrap();
     node.mint_block().unwrap();
 
-    // Genesis anchors to no core block.
+    // Genesis was minted by no one.
     assert_eq!(node.block_time(0), None);
     let times: Vec<u64> = (1..=2).map(|h| node.block_time(h).unwrap()).collect();
     for time in &times {
         assert!((since..=unix_now()).contains(time));
     }
-    assert_eq!(
-        node.block_summary(1).unwrap().header.core_block_hash,
-        core_block_hash(1)
-    );
+    assert!(times[0] <= times[1]);
+    assert_eq!(node.block_summary(1).unwrap().header.time, times[0]);
 
-    // The indexer is what remembers them, in its own directory.
-    let indexer = MockIndexer::open(&cfg.indexer_dir()).unwrap();
-    assert_eq!(indexer.len(), 2);
-    for (height, time) in (1..=2).zip(&times) {
-        assert_eq!(
-            indexer.time_of(&core_block_hash(height)).unwrap(),
-            Some(*time)
-        );
-    }
-    drop(indexer);
-
-    drop(node);
-    let node = Node::open(&genesis, &cfg).unwrap();
-    assert_eq!(node.block_time(1), Some(times[0]));
-    assert_eq!(node.block_time(2), Some(times[1]));
-
-    // An indexer that lost its table costs the times, not the chain.
+    // Losing the core indexer's table costs nothing already minted.
     drop(node);
     fs::remove_dir_all(cfg.indexer_dir()).unwrap();
-    let mut node = Node::open(&genesis, &cfg).unwrap();
+    let node = Node::open(&genesis, &cfg).unwrap();
     assert_eq!(node.tip().height, 2);
-    assert_eq!(node.block_time(1), None);
-    assert_eq!(node.block_time(2), None);
+    assert_eq!(node.block_time(1), Some(times[0]));
+    assert_eq!(node.block_time(2), Some(times[1]));
+}
+
+#[test]
+fn iblocks_share_a_core_block_until_the_core_chain_grows() {
+    let dir = TempDir::new().unwrap();
+    let (genesis, cfg) = devnet(dir.path(), &account(&SEED_A));
+    let indexer = MockIndexer::open(&cfg.indexer_dir()).unwrap();
+    let mut node = Node::open_with(&genesis, &cfg, Box::new(indexer.clone())).unwrap();
+    let core = |node: &Node, height| node.block_summary(height).unwrap().header.core_block_hash;
+
+    // The first ask mines the first core block; later iblocks reuse it.
     node.mint_block().unwrap();
-    assert!(node.block_time(3).unwrap() >= since);
+    node.mint_block().unwrap();
+    assert_eq!(core(&node, 1), core_block_hash(1));
+    assert_eq!(core(&node, 2), core_block_hash(1));
+    assert_eq!(indexer.len(), 1);
+
+    assert_eq!(indexer.mine().unwrap().height, 2);
+    node.mint_block().unwrap();
+    assert_eq!(core(&node, 3), core_block_hash(2));
 }
 
 #[test]
@@ -117,21 +117,16 @@ fn a_transaction_carries_its_signing_time_and_admission_time() {
     assert_eq!(node.scan(&[allocation], 0)[0].time, None);
 }
 
-/// An indexer with a clock of its own, standing in for the real one.
+/// An indexer standing in for a real one: its tip never moves.
 struct FixedIndexer;
 
 impl CoreIndexer for FixedIndexer {
-    fn anchor(&mut self, flame_height: u64) -> Result<CoreBlock, CoreError> {
+    fn tip(&mut self) -> Result<CoreBlock, CoreError> {
         Ok(CoreBlock {
-            hash: core_block_hash(flame_height),
-            time: 1_000 + flame_height,
+            height: 7,
+            hash: core_block_hash(7),
+            time: 1_000,
         })
-    }
-
-    fn time_of(&self, hash: &[u8; 32]) -> Result<Option<u64>, CoreError> {
-        Ok((1..=16)
-            .find(|height| core_block_hash(*height) == *hash)
-            .map(|height| 1_000 + height))
     }
 }
 
@@ -139,30 +134,38 @@ impl CoreIndexer for FixedIndexer {
 fn any_indexer_drops_in() {
     let dir = TempDir::new().unwrap();
     let (genesis, cfg) = devnet(dir.path(), &account(&SEED_A));
+    let since = unix_now();
     let mut node = Node::open_with(&genesis, &cfg, Box::new(FixedIndexer)).unwrap();
     node.mint_block().unwrap();
     node.mint_block().unwrap();
-    assert_eq!(node.block_time(1), Some(1_001));
-    assert_eq!(node.block_time(2), Some(1_002));
+    for height in 1..=2 {
+        let summary = node.block_summary(height).unwrap();
+        assert_eq!(summary.header.core_block_hash, core_block_hash(7));
+        // The minter's clock, not the core block's.
+        assert!(summary.header.time >= since);
+    }
 
     drop(node);
     let node = Node::open_with(&genesis, &cfg, Box::new(FixedIndexer)).unwrap();
-    assert_eq!(node.block_time(2), Some(1_002));
+    assert_eq!(node.tip().height, 2);
 }
 
 #[test]
-fn the_mock_indexer_keeps_the_first_time_it_gave() {
+fn the_mock_indexer_mines_in_order_and_remembers() {
     let dir = TempDir::new().unwrap();
     let mut indexer = MockIndexer::open(dir.path()).unwrap();
-    let first = indexer.anchor(7).unwrap();
-    assert_eq!(first.hash, core_block_hash(7));
-    assert_eq!(indexer.anchor(7).unwrap(), first);
-    assert_eq!(indexer.len(), 1);
+    let first = indexer.tip().unwrap();
+    assert_eq!(first.height, 1);
+    assert_eq!(first.hash, core_block_hash(1));
+    assert_eq!(indexer.tip().unwrap(), first);
+    let second = indexer.mine().unwrap();
+    assert_eq!(second.height, 2);
+    assert!(second.time >= first.time);
     drop(indexer);
 
     let mut indexer = MockIndexer::open(dir.path()).unwrap();
-    assert_eq!(indexer.anchor(7).unwrap(), first);
-    assert_eq!(indexer.time_of(&core_block_hash(8)).unwrap(), None);
+    assert_eq!(indexer.len(), 2);
+    assert_eq!(indexer.tip().unwrap(), second);
 }
 
 #[test]
@@ -172,19 +175,22 @@ fn the_mock_indexer_drops_a_torn_line_and_refuses_a_corrupt_one() {
     let line = format!("{} 1700000000\n", hex::encode(core_block_hash(1)));
     fs::write(&path, format!("{line}{}", &line[..20])).unwrap();
 
-    let mut indexer = MockIndexer::open(dir.path()).unwrap();
-    assert_eq!(indexer.len(), 1);
-    indexer.anchor(2).unwrap();
-    drop(indexer);
     let indexer = MockIndexer::open(dir.path()).unwrap();
+    assert_eq!(indexer.len(), 1);
+    indexer.mine().unwrap();
+    drop(indexer);
+    let mut indexer = MockIndexer::open(dir.path()).unwrap();
     assert_eq!(indexer.len(), 2);
-    assert_eq!(
-        indexer.time_of(&core_block_hash(1)).unwrap(),
-        Some(1_700_000_000)
-    );
+    assert_eq!(indexer.tip().unwrap().hash, core_block_hash(2));
     drop(indexer);
 
     fs::write(&path, format!("{line}not a line\n")).unwrap();
+    assert!(matches!(
+        MockIndexer::open(dir.path()),
+        Err(CoreError::Corrupt { line: 2, .. })
+    ));
+    // A well-formed line at the wrong height is no better.
+    fs::write(&path, format!("{line}{line}")).unwrap();
     assert!(matches!(
         MockIndexer::open(dir.path()),
         Err(CoreError::Corrupt { line: 2, .. })

@@ -210,7 +210,11 @@ pub struct BlockHeader {
     pub version: u32,
     pub height: u64,
     /// Opaque authenticated Bitcoin/core-block identity supplied by the caller.
+    /// Consecutive blocks may share one core block.
     pub core_block_hash: [u8; 32],
+    /// The minter's clock when it built the block, in Unix seconds. It is
+    /// not the core block's time and may not go backwards.
+    pub time: u64,
     pub parent: BlockHash,
     pub witness_root: CellID,
     pub effects_root: CellID,
@@ -252,6 +256,7 @@ impl CellEncode for BlockHeader {
             .store_u32(self.version)?
             .store_u64(self.height)?
             .store_bytes(&self.core_block_hash)?
+            .store_u64(self.time)?
             .store_bytes(self.parent.as_bytes())?
             .store_bytes(&self.witness_root)?
             .store_bytes(&self.effects_root)?
@@ -271,6 +276,7 @@ impl CellDecode for BlockHeader {
             version: slice.load_u32()?,
             height: slice.load_u64()?,
             core_block_hash: <[u8; 32]>::decode(slice, cells)?,
+            time: slice.load_u64()?,
             parent: BlockHash::new(<[u8; 32]>::decode(slice, cells)?),
             witness_root: <[u8; 32]>::decode(slice, cells)?,
             effects_root: <[u8; 32]>::decode(slice, cells)?,
@@ -630,6 +636,7 @@ impl Blockchain {
             version: params.version,
             height: 0,
             core_block_hash: [0; 32],
+            time: 0,
             parent: BlockHash::new([0; 32]),
             witness_root: empty_sequence_id(),
             effects_root: empty_sequence_id(),
@@ -724,11 +731,21 @@ impl Blockchain {
         &self.contracts
     }
 
-    /// Builds a candidate by running the same transition as validation, then
-    /// rolling it back.
+    /// [`Self::build_block_at`] the tip's time.
     pub fn build_block(
         &mut self,
         core_block_hash: [u8; 32],
+        transactions: Vec<BlockTx>,
+    ) -> Result<Block, ChainError> {
+        self.build_block_at(core_block_hash, self.header.time, transactions)
+    }
+
+    /// Builds a candidate by running the same transition as validation, then
+    /// rolling it back.
+    pub fn build_block_at(
+        &mut self,
+        core_block_hash: [u8; 32],
+        time: u64,
         transactions: Vec<BlockTx>,
     ) -> Result<Block, ChainError> {
         let height = self
@@ -741,6 +758,7 @@ impl Blockchain {
                 version: self.params.version,
                 height,
                 core_block_hash,
+                time,
                 parent: self.tip(),
                 witness_root: empty_sequence_id(),
                 effects_root: empty_sequence_id(),
@@ -1203,6 +1221,7 @@ impl Blockchain {
         if block.header.version != self.params.version
             || block.header.height != expected_height
             || block.header.parent != self.tip()
+            || block.header.time < self.header.time
         {
             return Err(ChainError::InvalidHeader);
         }
@@ -1549,12 +1568,34 @@ mod tests {
     }
 
     #[test]
+    fn blocks_share_a_core_block_and_their_time_never_goes_back() {
+        let mut chain = Blockchain::new(ChainParams::default()).unwrap();
+        let first = chain.build_block_at([0x21; 32], 1_000, Vec::new()).unwrap();
+        chain.connect(&first).unwrap();
+        let same_core = chain.build_block_at([0x21; 32], 1_000, Vec::new()).unwrap();
+        assert_eq!(same_core.header.time, 1_000);
+        chain.connect(&same_core).unwrap();
+
+        assert!(matches!(
+            chain.build_block_at([0x21; 32], 999, Vec::new()),
+            Err(ChainError::InvalidHeader)
+        ));
+        let mut earlier = chain.build_block_at([0x22; 32], 1_005, Vec::new()).unwrap();
+        earlier.header.time = 999;
+        assert!(matches!(
+            chain.connect(&earlier),
+            Err(ChainError::InvalidHeader)
+        ));
+        assert_eq!(chain.build_block([0x22; 32], Vec::new()).unwrap().header.time, 1_000);
+    }
+
+    #[test]
     fn canonical_block_vector_and_bounded_decoders() {
         let mut chain = Blockchain::new(ChainParams::default()).unwrap();
         let block = chain.build_block([0x11; 32], Vec::new()).unwrap();
         let bytes = block.to_bytes().unwrap();
         let header_cell = block.header.to_cell().unwrap();
-        assert_eq!(header_cell.payload().len(), 212);
+        assert_eq!(header_cell.payload().len(), 220);
         assert!(header_cell.refs().is_empty());
         assert_eq!(
             &header_cell.payload()[..12],

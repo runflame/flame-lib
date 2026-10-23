@@ -270,10 +270,14 @@ pub struct NodeConfig {
     pub genesis: Option<PathBuf>,
     /// Where the JSON-RPC server listens.
     pub rpc_bind: SocketAddr,
-    /// Devnet only: how often the minter mints. Zero is refused rather
-    /// than read as "never" or as "as fast as this node can".
+    /// Devnet only: how often the minter mints an iblock. Zero is refused
+    /// rather than read as "never" or as "as fast as this node can".
     #[serde(default = "default_block_interval_secs")]
     pub block_interval_secs: u64,
+    /// Devnet only: how often the mock core indexer mines a core block.
+    /// Zero is refused, as for `block_interval_secs`.
+    #[serde(default = "default_core_block_interval_secs")]
+    pub core_block_interval_secs: u64,
     /// The fee this node's mempool will not go below.
     #[serde(default)]
     pub minimum_fee: u64,
@@ -285,6 +289,10 @@ pub struct NodeConfig {
 }
 
 fn default_block_interval_secs() -> u64 {
+    5
+}
+
+fn default_core_block_interval_secs() -> u64 {
     15
 }
 
@@ -292,7 +300,7 @@ impl NodeConfig {
     /// Reads one from disk.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let config: NodeConfig = toml::from_str(&read(path)?)?;
-        if config.block_interval_secs == 0 {
+        if config.block_interval_secs == 0 || config.core_block_interval_secs == 0 {
             return Err(ConfigError::BlockInterval);
         }
         Ok(config)
@@ -301,6 +309,11 @@ impl NodeConfig {
     /// How often this node mints.
     pub fn block_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.block_interval_secs)
+    }
+
+    /// How often the mock core indexer mines.
+    pub fn core_block_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.core_block_interval_secs)
     }
 
     /// Where this node reads its genesis from.
@@ -348,6 +361,8 @@ pub enum ConfigError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     /// A block interval of zero, which is not a way to say anything.
-    #[error("block_interval_secs must be at least 1; omit it for the default")]
+    #[error(
+        "block_interval_secs and core_block_interval_secs must be at least 1; omit them for the defaults"
+    )]
     BlockInterval,
 }

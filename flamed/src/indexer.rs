@@ -1,27 +1,20 @@
 //! The core chain, as this node sees it: through an indexer.
 //!
-//! Every Flame header commits a `core_block_hash`, and the Bitcoin block it
-//! names carries the time a Flame block is shown with. A Flame header has
-//! no time of its own, so the node asks an indexer for both: which core
-//! block to anchor the next block to, and later, what time a core block it
-//! anchored to had.
-//!
-//! The node keeps those times only in memory, in its block index. The
-//! indexer is what remembers them, so a node that restarts and replays its
-//! archive asks the indexer again for every block and ends up with the same
-//! times it had.
+//! Every Flame header commits a `core_block_hash`: the core chain's tip when
+//! the block was minted. Flame blocks are iblocks and come faster than core
+//! blocks, so consecutive headers often name the same one. A header carries
+//! its own time, so the node asks the indexer only for the tip.
 //!
 //! `MockIndexer` is the only implementation. There is no Bitcoin behind it:
-//! the hash it anchors to is `core_block_hash(height)`, as before, and the
-//! time is this machine's clock when it first saw that height. It keeps its
-//! own table in its own directory, apart from `blocks.bin`, so an
-//! implementation backed by a real Bitcoin indexer can replace it without
-//! the node changing.
+//! its chain grows only when something calls [`MockIndexer::mine`], which on
+//! a devnet is a timer of its own. It keeps its table in its own directory,
+//! apart from `blocks.bin`, so a connector to a real Bitcoin node can
+//! replace it without the node changing.
 
-use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -29,6 +22,8 @@ use sha2::{Digest, Sha256};
 /// One core block, as an indexer reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CoreBlock {
+    /// Its height in the core chain; the first block the mock mines is 1.
+    pub height: u64,
     /// The hash a Flame header commits as `core_block_hash`.
     pub hash: [u8; 32],
     /// Its time, in Unix seconds.
@@ -37,19 +32,11 @@ pub struct CoreBlock {
 
 /// What the node needs from a core-chain indexer.
 pub trait CoreIndexer: Send {
-    /// The core block to anchor the Flame block at `flame_height` to.
-    fn anchor(&mut self, flame_height: u64) -> Result<CoreBlock, CoreError>;
-
-    /// The time of a core block, or `None` if this indexer does not know
-    /// it.
-    fn time_of(&self, hash: &[u8; 32]) -> Result<Option<u64>, CoreError>;
+    /// The core chain's tip, which the next Flame block anchors to.
+    fn tip(&mut self) -> Result<CoreBlock, CoreError>;
 }
 
-/// This devnet's stand-in for a core-chain identity.
-///
-/// `check_header` does not constrain `core_block_hash`, so a devnet needs
-/// some rule; height is the only thing a second node could independently
-/// agree on.
+/// This devnet's stand-in for the hash of core block `height`.
 pub fn core_block_hash(height: u64) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"flame.devnet.core");
@@ -65,16 +52,24 @@ pub fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// An indexer with no Bitcoin behind it.
+/// A core chain with no Bitcoin behind it.
 ///
-/// Its table lives in `core-times.txt`, one line per core block: the hash
-/// in hex, a space, the Unix time, a newline. Each line is written and
-/// synced before `anchor` returns it, so a time the node has used is one
-/// this indexer can give back after a restart.
-#[derive(Debug)]
+/// Its table lives in `core-times.txt`, one line per core block from height
+/// 1: the hash in hex, a space, the Unix time, a newline. Each line is
+/// written and synced before `mine` returns it, so a block the node has
+/// anchored to is one this indexer still has after a restart.
+///
+/// Clones share one chain: the node holds one to read the tip, and the
+/// devnet's core miner another to extend it.
+#[derive(Clone, Debug)]
 pub struct MockIndexer {
+    table: Arc<Mutex<Table>>,
+}
+
+#[derive(Debug)]
+struct Table {
     file: File,
-    times: BTreeMap<[u8; 32], u64>,
+    blocks: Vec<CoreBlock>,
 }
 
 impl MockIndexer {
@@ -84,8 +79,8 @@ impl MockIndexer {
     /// Opens the table in `dir`, creating both if this is a fresh start.
     ///
     /// A trailing line with no newline means the process died mid-append.
-    /// The block it was for was never archived, because `anchor` had not
-    /// returned yet, so the line is dropped.
+    /// No block was anchored to it, because `mine` had not returned yet, so
+    /// the line is dropped.
     pub fn open(dir: &Path) -> Result<Self, CoreError> {
         fs::create_dir_all(dir)?;
         let path = dir.join(Self::FILE);
@@ -96,51 +91,71 @@ impl MockIndexer {
         };
         let complete = text.rfind('\n').map_or(0, |end| end + 1);
 
-        let mut times = BTreeMap::new();
+        let mut blocks = Vec::new();
         for (index, line) in text[..complete].lines().enumerate() {
-            let (hash, time) = parse_line(line).ok_or_else(|| CoreError::Corrupt {
-                path: path.clone(),
-                line: index + 1,
-            })?;
-            times.insert(hash, time);
+            let height = index as u64 + 1;
+            let block = parse_line(line)
+                .filter(|(hash, _)| *hash == core_block_hash(height))
+                .map(|(hash, time)| CoreBlock { height, hash, time })
+                .ok_or_else(|| CoreError::Corrupt {
+                    path: path.clone(),
+                    line: index + 1,
+                })?;
+            blocks.push(block);
         }
 
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         if complete < text.len() {
             file.set_len(complete as u64)?;
         }
-        Ok(Self { file, times })
+        Ok(Self {
+            table: Arc::new(Mutex::new(Table { file, blocks })),
+        })
     }
 
-    /// How many core blocks this indexer knows.
+    /// How many core blocks this chain has.
     pub fn len(&self) -> usize {
-        self.times.len()
+        self.lock().map_or(0, |table| table.blocks.len())
     }
 
-    /// Whether it knows any.
+    /// Whether it has any.
     pub fn is_empty(&self) -> bool {
-        self.times.is_empty()
+        self.len() == 0
+    }
+
+    /// Extends the chain by one block, timed by this machine's clock but
+    /// never before its parent.
+    pub fn mine(&self) -> Result<CoreBlock, CoreError> {
+        let mut table = self.lock()?;
+        let (height, parent_time) = table
+            .blocks
+            .last()
+            .map_or((1, 0), |tip| (tip.height + 1, tip.time));
+        let block = CoreBlock {
+            height,
+            hash: core_block_hash(height),
+            time: unix_now().max(parent_time),
+        };
+        writeln!(table.file, "{} {}", hex::encode(block.hash), block.time)?;
+        table.file.sync_data()?;
+        table.blocks.push(block);
+        Ok(block)
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Table>, CoreError> {
+        self.table.lock().map_err(|_| CoreError::Poisoned)
     }
 }
 
 impl CoreIndexer for MockIndexer {
-    /// Anchors to `core_block_hash(flame_height)`. A height asked for twice
-    /// — a mint that failed and was retried — gets the time it got the
-    /// first time.
-    fn anchor(&mut self, flame_height: u64) -> Result<CoreBlock, CoreError> {
-        let hash = core_block_hash(flame_height);
-        if let Some(&time) = self.times.get(&hash) {
-            return Ok(CoreBlock { hash, time });
+    /// The last block mined. A chain with none mines its first, so a fresh
+    /// devnet can mint before its core miner has ticked.
+    fn tip(&mut self) -> Result<CoreBlock, CoreError> {
+        let tip = self.lock()?.blocks.last().copied();
+        match tip {
+            Some(tip) => Ok(tip),
+            None => self.mine(),
         }
-        let time = unix_now();
-        writeln!(self.file, "{} {time}", hex::encode(hash))?;
-        self.file.sync_data()?;
-        self.times.insert(hash, time);
-        Ok(CoreBlock { hash, time })
-    }
-
-    fn time_of(&self, hash: &[u8; 32]) -> Result<Option<u64>, CoreError> {
-        Ok(self.times.get(hash).copied())
     }
 }
 
@@ -153,14 +168,18 @@ fn parse_line(line: &str) -> Option<([u8; 32], u64)> {
 /// An indexer could not answer.
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
-    /// A line of the mock's table that does not parse.
-    #[error("{path} line {line} is not `<hex hash> <unix time>`")]
+    /// A line of the mock's table that does not parse, or names the wrong
+    /// hash for its height.
+    #[error("{path} line {line} is not `<hex hash of its height> <unix time>`")]
     Corrupt {
         /// The table.
         path: PathBuf,
         /// Which line, from 1.
         line: usize,
     },
+    /// A thread panicked while extending the mock's chain.
+    #[error("the core indexer is poisoned: an earlier operation panicked")]
+    Poisoned,
     /// The filesystem.
     #[error(transparent)]
     Io(#[from] io::Error),

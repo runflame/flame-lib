@@ -1,13 +1,16 @@
-//! The devnet block producer.
+//! The devnet block producers.
 //!
 //! Flame's block producers are minters. There is no consensus here and no
-//! competition for the next block: one node, one timer, one block per tick.
+//! competition for the next block: one node, one timer, one iblock per tick.
+//! A second, slower timer stands in for Bitcoin and mines the mock core
+//! chain the iblocks anchor to.
 
 use std::time::Duration;
 
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
+use crate::indexer::MockIndexer;
 use crate::node::{NodeError, SharedNode};
 
 /// Mints one block per interval until told to stop.
@@ -76,6 +79,45 @@ impl Minter {
                 // Every remaining case means this process can no longer be
                 // trusted to extend its own archive.
                 Err(fatal) => return Err(fatal),
+            }
+        }
+    }
+}
+
+/// Mines one mock core block per interval until told to stop.
+pub struct CoreMiner {
+    indexer: MockIndexer,
+    interval: Duration,
+}
+
+impl CoreMiner {
+    /// A miner extending the chain `indexer` shares with the node.
+    pub fn new(indexer: MockIndexer, interval: Duration) -> Self {
+        Self { indexer, interval }
+    }
+
+    /// Runs until `shutdown` is cancelled. A core block that could not be
+    /// mined is only logged: the minter keeps anchoring to the old tip.
+    pub async fn run(self, shutdown: CancellationToken) {
+        let mut ticker = tokio::time::interval(self.interval);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // The first tick fires at once: a node that starts mines a core
+        // block, as Bitcoin will have moved on while it was down.
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = ticker.tick() => {}
+            }
+            // Mining syncs a file, which is not work for a runtime thread.
+            let indexer = self.indexer.clone();
+            match tokio::task::spawn_blocking(move || indexer.mine()).await {
+                Ok(Ok(block)) => println!(
+                    "core block {} {}",
+                    block.height,
+                    hex::encode(block.hash)
+                ),
+                Ok(Err(error)) => eprintln!("core mining failed: {error}"),
+                Err(error) => eprintln!("the core miner panicked: {error}"),
             }
         }
     }

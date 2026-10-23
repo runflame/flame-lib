@@ -725,7 +725,7 @@ pub struct StateCommitment {
     pub available_storage_units: u64,
 }
 
-/// The complete block header. Block headers contain no timestamp.
+/// The complete block header.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockHeader {
     /// Consensus protocol version.
@@ -735,6 +735,9 @@ pub struct BlockHeader {
     /// Opaque authenticated Bitcoin/core-block identity supplied by the caller.
     #[serde(with = "crate::codec::hex32")]
     pub core_block_hash: [u8; 32],
+    /// The minter's clock when it built the block, in Unix seconds; several
+    /// blocks may share one core block.
+    pub time: u64,
     /// Previous block identifier, as committed in the header.
     pub parent: BlockId,
     /// Committed witness root, as hex.
@@ -754,9 +757,7 @@ pub struct BlockSummary {
     pub id: BlockId,
     /// Complete consensus header.
     pub header: BlockHeader,
-    /// The time of the core block the header anchors to, in Unix seconds,
-    /// as the node's core indexer reports it. Absent for genesis and for a
-    /// core block the indexer does not know.
+    /// The header's `time`, in Unix seconds. Absent for genesis.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<u64>,
     /// External transaction count.

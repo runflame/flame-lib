@@ -207,7 +207,7 @@ carries its root directly. Other typed CellEnvelope snapshots use
 struct Block { header: ^BlockHeader, transactions: ^Cell }
 struct BlockTx { gas: U64, tx: ^Tx, proofs: ^Cell }
 struct BlockHeader {
-    version: U32, height: U64, core_block: Hash, parent: Hash,
+    version: U32, height: U64, core_block: Hash, time: U64, parent: Hash,
     witnesses: Hash, effects: Hash, contracts: Hash, actors: Hash,
     available_storage_units: U64,
 }
@@ -218,6 +218,9 @@ struct SequenceHeader { count: U32 }
 ```
 
 BlockHash is the BlockHeader CellID.
+`time` is the minter's clock in Unix seconds when it built the block, not the
+core block's time; it may not be less than the parent's. Several consecutive
+blocks (iblocks) may name the same `core_block`.
 Witness root is the transaction sequence's factual ID; effects root is the
 execution-record sequence's factual ID. Block transport uses CellEnvelope.
 

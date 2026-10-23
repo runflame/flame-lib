@@ -35,7 +35,7 @@ are not in it:
 
 All three live in memory and are rebuilt by replaying `blocks.bin`. The only
 durable state this node has is that file and `genesis.json`. Block times are
-not its own: they belong to the core indexer, which keeps them in its own
+in the block headers; the mock core indexer keeps its own chain in its own
 directory ([Times](#times)).
 
 ## The three files
@@ -71,10 +71,12 @@ not the limits. Comparing whole `chainparams.toml` files is what makes a
 network agree.
 
 **`flamed.toml`** is one node's local policy: where its data lives, where to
-listen, how often to mint, the fee it will not go below, and where the mock
-core indexer keeps its table (`indexer_dir`, `<data_dir>/indexer` by
-default). None of it is consensus — the block header carries no timestamp,
-and a fee floor is an opinion about what is worth relaying.
+listen, how often to mint an iblock (`block_interval_secs`, 5 by default) and
+a mock core block (`core_block_interval_secs`, 15 by default), the fee it
+will not go below, and where the mock core indexer keeps its table
+(`indexer_dir`, `<data_dir>/indexer` by default). None of it is consensus —
+the header's time is only required not to go backwards, and a fee floor is
+an opinion about what is worth relaying.
 
 `blocks.bin` sits beside them in the data directory: one record per block, a
 `u64` little-endian length then the block's canonical bytes. A torn trailing
@@ -187,42 +189,42 @@ the length of the history.
 
 ## Times
 
-A Flame header has no time field, and none is planned: a block's time is the
-time of the Bitcoin block its `core_block_hash` names. A transaction has
-three times, each vouched for by someone different.
+Flame blocks are iblocks: they come faster than core (Bitcoin) blocks, and
+consecutive ones often anchor to the same `core_block_hash`. So a block's
+time cannot be its core block's; each header carries its own `time`, the
+minter's clock when it built the block, which consensus only requires not to
+go backwards. A transaction has three times, each vouched for by someone
+different.
 
 | Field | Where | Who vouches for it |
 |---|---|---|
-| `time` | `BlockSummary`, and `ScanEntry` and `UnspentEntry` for the creating block | the core indexer |
-| `block_time` | `TransactionResult` | the core indexer, through the block |
+| `time` | `BlockSummary` (and `header.time`), and `ScanEntry` and `UnspentEntry` for the creating block | the minter, in the header |
+| `block_time` | `TransactionResult` | the minter, through the block |
 | `locktime` | `TransactionSummary`, `PendingTransaction` | the sender: signed, never checked |
 | `received_at` | `PendingTransaction`, `TransactionResult`, and `UnspentEntry` while pending | this node's clock |
 
-All are Unix seconds. `time` and `block_time` are absent for genesis and for a
-block the indexer does not know. `received_at` is absent on a confirmed
-transaction this node never held pending, and after a restart, because the
-mempool is not durable and neither are its times.
+All are Unix seconds. `time` and `block_time` are absent for genesis.
+`received_at` is absent on a confirmed transaction this node never held
+pending, and after a restart, because the mempool is not durable and neither
+are its times.
 
-**The core indexer** is the `CoreIndexer` trait in `src/indexer.rs`: `anchor`
-names the core block to commit in the next header and its time, and
-`time_of` gives back the time of a core block already anchored to. The
-minter calls `anchor`; `Node::open` calls `time_of` for every archived block
-while replaying, which is how a restarted node gets back the times it had.
-The node holds the times only in its block index.
+**The core indexer** is the `CoreIndexer` trait in `src/indexer.rs`: `tip`
+names the core block the next header commits. The minter calls it once per
+iblock; replay never does, because everything a block needs is in it.
 
 `MockIndexer` is the only implementation, and it has no Bitcoin behind it.
-It anchors height `h` to `core_block_hash(h)`, the same devnet rule as
-before, so existing archives replay unchanged. The time is this machine's
-clock when the indexer first saw that height. Each one is appended to
-`<indexer_dir>/core-times.txt` (`<hex hash> <unix seconds>` per line) and
-synced before `anchor` returns, so any time a block was shown with can be
-given back. A torn last line is dropped; any other bad line stops the node
-from starting. If the table is lost, the node still opens and serves every
-block, without times, and prints how many it could not time.
+Its chain grows only when `mine` is called: a devnet build runs a second
+timer for that, every `core_block_interval_secs`, independent of the minter,
+so about three 5 s iblocks share each 15 s core block. Core block `h` is
+`core_block_hash(h)` with this machine's clock as its time; each is appended
+to `<indexer_dir>/core-times.txt` (`<hex hash> <unix seconds>` per line, from
+height 1) and synced before `mine` returns. A fresh chain mines its first
+block on the minter's first ask. A torn last line is dropped; any other bad
+line, or a hash that is not its height's, stops the node from starting. If
+the table is lost, the archive still replays; the core chain starts over.
 
-A real indexer replaces it through `Node::open_with` and the node stays the
-same. Several Flame blocks then anchor to one Bitcoin block and share its
-time, which the hash-keyed lookup already allows.
+A connector to a real Bitcoin node replaces it through `Node::open_with`,
+and the node stays the same.
 
 **`locktime`** is documented as Bitcoin's: below `500_000_000` a height,
 otherwise Unix seconds before which the transaction is invalid, and `0`
@@ -236,16 +238,23 @@ delay the transaction; it is the sender's claim, covered by the TxID.
 ```console
 $ cargo run -p flamed --features devnet -- genesis \
       --chainparams flamed/configs/chainparams.toml --out ./genesis.json
-genesis fc159f2a12e80c2fb711a0075cb7836df207b715d7726407ce2f6a9bdaf5dd25 with 1 allocation(s) -> ./genesis.json
+genesis 9eaac245514fc1735be9a6b0a4b47be55c4b57e326825553c8a3518760b6b0f3 with 1 allocation(s) -> ./genesis.json
 
 $ cargo run -p flamed --features devnet -- run --config flamed/configs/flamed.toml
 flamed: height 0 with 1 unspent contract(s), 0 block(s) archived
 flamed: serving JSON-RPC on http://127.0.0.1:8545
-flamed: minting every 15s
-block 1 04e8da3d74ea0c67ee5469029f9d296a296721eb94e3429d5836654cee736ccc txs=0 dropped=0
+flamed: mining a mock core block every 15s
+flamed: minting every 5s
+core block 1 447bf649df413cac10b1ed24934496eebbbf623c911f968a60c0e81b1fba5ea0
+block 1 f183312ff09e2d10e728137707ca27781c22ebe15444d701a1b1db48c22b962c txs=0 dropped=0
+block 2 7f462631eb9a96ead2ee6bf24a7e2c64f3a9b800fbeb006cf2d70f61b430f2e0 txs=0 dropped=0
+block 3 452eed43c1b1aee04fde318be5b17046d24176efb194e4f58068357fca9a2a4a txs=0 dropped=0
+core block 2 425bf3a649d848b33b0e05123253bdea186f701b927f240de4e728130b0c2576
+block 4 2b530890399d1c74b1b09e5856c2aa53091155a31ae52ebf66c53badae13dd20 txs=0 dropped=0
 ```
 
-Running `genesis` twice on the same network definition gives identical
+Block hashes differ from run to run, because each header carries the time
+it was minted. Running `genesis` twice on the same network definition gives identical
 bytes, which is the property that lets two operators check they are on the
 same network by comparing files.
 
@@ -253,7 +262,7 @@ same network by comparing files.
 $ curl -s -X POST -H 'content-type: application/json' \
     --data '{"jsonrpc":"2.0","id":1,"method":"tip","params":[]}' \
     http://127.0.0.1:8545
-{"jsonrpc":"2.0","id":1,"result":{"hash":"fc159f2a…","height":0,"contract_root":"8669b06a…"}}
+{"jsonrpc":"2.0","id":1,"result":{"hash":"9eaac245…","height":0,"contract_root":"8669b06a…"}}
 
 $ curl -s -X POST -H 'content-type: application/json' \
     --data '{"jsonrpc":"2.0","id":2,"method":"proof","params":["e870be9e…"]}' \

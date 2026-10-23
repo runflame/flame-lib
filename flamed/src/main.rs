@@ -118,7 +118,12 @@ fn first_address(chainparams: &std::path::Path) -> Result<String, Box<dyn std::e
 async fn run(config: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let cfg = NodeConfig::load(&config)?;
     let genesis = GenesisFile::load(&cfg.genesis_path())?;
-    let node: SharedNode = Arc::new(Mutex::new(Node::open(&genesis, &cfg)?));
+    let indexer = flamed::MockIndexer::open(&cfg.indexer_dir())?;
+    let node: SharedNode = Arc::new(Mutex::new(Node::open_with(
+        &genesis,
+        &cfg,
+        Box::new(indexer.clone()),
+    )?));
     {
         let opened = node.lock().expect("a freshly built node is not poisoned");
         println!(
@@ -143,6 +148,12 @@ async fn run(config: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "devnet")]
     let minter = {
+        let core = flamed::minter::CoreMiner::new(indexer, cfg.core_block_interval());
+        println!(
+            "flamed: mining a mock core block every {}s",
+            cfg.core_block_interval_secs
+        );
+        tokio::spawn(core.run(shutdown.clone()));
         let minter = flamed::minter::Minter::new(Arc::clone(&node), cfg.block_interval());
         println!("flamed: minting every {}s", cfg.block_interval_secs);
         tokio::spawn(minter.run(shutdown.clone()))

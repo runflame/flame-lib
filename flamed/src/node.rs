@@ -7,9 +7,8 @@
 //! `OutputIndex` for the history. All three are rebuilt by replaying
 //! `blocks.bin`, which is the only durable state there is.
 //!
-//! Times come from outside. A block's time is its core block's, which the
-//! core indexer reports and remembers; a transaction's admission time is
-//! this node's clock, kept in memory only.
+//! A block's time is in its header, put there by the minter's clock; a
+//! transaction's admission time is this node's clock, kept in memory only.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -149,8 +148,9 @@ impl Node {
         Self::open_with(genesis, cfg, Box::new(indexer))
     }
 
-    /// Opens a node: rebuilds the genesis, replays the archive with each
-    /// block's time from `indexer`, and starts with an empty mempool.
+    /// Opens a node: rebuilds the genesis, replays the archive, and starts
+    /// with an empty mempool. `indexer` names the core tip each minted block
+    /// anchors to.
     pub fn open_with(
         genesis: &GenesisFile,
         cfg: &NodeConfig,
@@ -177,7 +177,7 @@ impl Node {
         let mut outputs = OutputIndex::new();
         let mut txindex = TxIndex::new();
 
-        txindex.insert_block(block_summary(chain.header(), None, 0, 0, 0, 0));
+        txindex.insert_block(block_summary(chain.header(), 0, 0, 0, 0));
 
         for ((id, contract), record) in allocations.iter().zip(&genesis.contracts) {
             utxos.insert_transient(*id);
@@ -198,15 +198,11 @@ impl Node {
         }
 
         let mut store = BlockStore::open(&cfg.blocks_path())?;
-        let mut untimed = 0usize;
         // An archived block was validated when it was appended, so one that
         // will not decode or connect now means the archive is wrong, not
-        // that this block is skippable. A block the indexer has no time for
-        // is still the same block; it is shown without one.
+        // that this block is skippable.
         for block in store.replay(params)? {
             let height = block.header.height;
-            let time = indexer.time_of(&block.header.core_block_hash)?;
-            untimed += usize::from(time.is_none());
             connect_block(
                 &mut chain,
                 &mut utxos,
@@ -214,16 +210,11 @@ impl Node {
                 &mut outputs,
                 None,
                 &block,
-                time,
             )
             .map_err(|source| NodeError::Replay {
                 height,
                 source: Box::new(source),
             })?;
-        }
-
-        if untimed != 0 {
-            eprintln!("flamed: the core indexer has no time for {untimed} archived block(s)");
         }
 
         let mempool = Mempool::new(&chain, mempool_policy(params, cfg.minimum_fee));
@@ -859,7 +850,7 @@ impl Node {
         Ok((entries, false))
     }
 
-    /// The time of the block at `height`, if the indexer knew it.
+    /// The time in the header of the block at `height`; none for genesis.
     pub fn block_time(&self, height: u64) -> Option<u64> {
         self.txindex.block(height).and_then(|block| block.time)
     }
@@ -900,10 +891,11 @@ impl Node {
     #[cfg(any(test, feature = "devnet"))]
     pub fn mint_block(&mut self) -> Result<BlockHash, NodeError> {
         // 0. Ask the indexer first: if it cannot answer, nothing has been
-        //    touched yet and the next tick tries again.
+        //    touched yet and the next tick tries again. The time is this
+        //    node's clock, held at the tip's if the clock has gone back.
         let height = self.chain.height().saturating_add(1);
-        let anchor = self.indexer.anchor(height)?;
-        let core = anchor.hash;
+        let core = self.indexer.tip()?.hash;
+        let time = unix_now().max(self.chain.header().time);
 
         // 1. Write every candidate down before draining the pool. `BlockTx`
         //    is not `Clone` and `build_block` consumes what it is given, so
@@ -920,7 +912,7 @@ impl Node {
         // The pool is already drained, so an error here would take every
         // candidate with it — and the minter treats a failed build as
         // recoverable and keeps ticking. Put them all back first.
-        let (block, taken, mut dropped) = match self.build_next(core, height, &candidates) {
+        let (block, taken, mut dropped) = match self.build_next(core, time, height, &candidates) {
             Ok(built) => built,
             Err(error) => {
                 let restored = self.readmit(&candidates);
@@ -953,7 +945,6 @@ impl Node {
             &mut self.outputs,
             Some(&mut self.mempool),
             &block,
-            Some(anchor.time),
         )
         .map_err(|source| NodeError::Archive {
             height,
@@ -993,13 +984,14 @@ impl Node {
     fn build_next(
         &mut self,
         core: [u8; 32],
+        time: u64,
         height: u64,
         candidates: &[(TxID, Vec<u8>)],
     ) -> Result<(Block, usize, usize), NodeError> {
         let mut take = candidates.len();
         loop {
             let transactions = self.decode_batch(&candidates[..take])?;
-            match self.chain.build_block(core, transactions) {
+            match self.chain.build_block_at(core, time, transactions) {
                 Ok(block) => return Ok((block, take, 0)),
                 // Too much for one block: halve and try again. The rest are
                 // put back by the caller. Both shapes have to be caught —
@@ -1012,7 +1004,7 @@ impl Node {
                 // Anything else is one bad transaction somewhere in the
                 // batch, and one bad transaction must never halt minting.
                 Err(error) => {
-                    let block = self.chain.build_block(core, Vec::new())?;
+                    let block = self.chain.build_block_at(core, time, Vec::new())?;
                     // Said only once the empty block is a fact.
                     for (txid, _) in &candidates[..take] {
                         eprintln!(
@@ -1174,7 +1166,7 @@ fn build_chain(
 ///
 /// One function for minting and for replay, so an archived chain and a live
 /// one cannot drift apart. `mempool` is `None` during replay, where no pool
-/// exists yet. `time` is the core block's, as the indexer reported it.
+/// exists yet.
 fn connect_block(
     chain: &mut Blockchain,
     utxos: &mut UtxoSet,
@@ -1182,7 +1174,6 @@ fn connect_block(
     outputs: &mut OutputIndex,
     mempool: Option<&mut Mempool>,
     block: &Block,
-    time: Option<u64>,
 ) -> Result<(BlockHash, RebaseReport), NodeError> {
     // 1. `connect` reports only `ExecutionRecord { kind, txid }`, so the
     //    effects are read through an observer during block validation.
@@ -1335,7 +1326,6 @@ fn connect_block(
 
     txindex.insert_block(block_summary(
         &block.header,
-        time,
         block.transactions.len() as u32,
         internal,
         failed,
@@ -1376,7 +1366,6 @@ enum UtxoEffect {
 
 fn block_summary(
     header: &flamechain::BlockHeader,
-    time: Option<u64>,
     transactions: u32,
     internal: u32,
     failed: u32,
@@ -1388,6 +1377,7 @@ fn block_summary(
             version: header.version,
             height: header.height,
             core_block_hash: header.core_block_hash,
+            time: header.time,
             parent: BlockId(header.parent.into_bytes()),
             witness_root: header.witness_root,
             effects_root: header.effects_root,
@@ -1397,7 +1387,8 @@ fn block_summary(
                 available_storage_units: header.state.available_storage_units,
             },
         },
-        time,
+        // Genesis was minted by no one.
+        time: (header.height != 0).then_some(header.time),
         transactions,
         internal,
         failed,
