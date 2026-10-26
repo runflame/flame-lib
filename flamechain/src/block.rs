@@ -360,6 +360,34 @@ pub struct Burn {
     pub reward_predicate: [u8; 32],
     /// Burned satoshis. Never zero.
     pub sats: u64,
+    /// The service this burn delegated its minting to, if any, and what
+    /// the service takes of the share.
+    pub delegation: Option<Delegation>,
+}
+
+/// The terms a delegated burn carries: the service's predicate and its
+/// commission in basis points, fixed for this burn. The share is split
+/// as [`Delegation::commission`] says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Delegation {
+    /// The compressed point of the opaque predicate the commission is
+    /// locked by.
+    pub provider_predicate: [u8; 32],
+    /// At most [`MAX_COMMISSION_BPS`].
+    pub commission_bps: u16,
+}
+
+/// A commission of 10,000 basis points gives the service the whole share.
+pub const MAX_COMMISSION_BPS: u16 = 10_000;
+
+impl Delegation {
+    /// The service's part of `share`: `floor(share × bps / 10,000)`. The
+    /// delegator keeps the rest, so no spark is made or lost.
+    pub fn commission(&self, share: u64) -> u64 {
+        // At most `share`, since the rate is at most 10,000.
+        (u128::from(share) * u128::from(self.commission_bps) / u128::from(MAX_COMMISSION_BPS))
+            as u64
+    }
 }
 
 impl CellEncode for Burn {
@@ -367,6 +395,17 @@ impl CellEncode for Burn {
         builder
             .store_bytes(&self.reward_predicate)?
             .store_u64(self.sats)?;
+        match &self.delegation {
+            None => {
+                builder.store_u8(0)?;
+            }
+            Some(delegation) => {
+                builder
+                    .store_u8(1)?
+                    .store_bytes(&delegation.provider_predicate)?
+                    .store_u16(delegation.commission_bps)?;
+            }
+        }
         Ok(())
     }
 }
@@ -376,9 +415,20 @@ impl CellDecode for Burn {
         slice: &mut CellSlice<'_>,
         cells: &mut R,
     ) -> Result<Self, CellError> {
+        let reward_predicate = <[u8; 32]>::decode(slice, cells)?;
+        let sats = slice.load_u64()?;
+        let delegation = match slice.load_u8()? {
+            0 => None,
+            1 => Some(Delegation {
+                provider_predicate: <[u8; 32]>::decode(slice, cells)?,
+                commission_bps: slice.load_u16()?,
+            }),
+            _ => return Err(CellError::InvalidFormat),
+        };
         Ok(Self {
-            reward_predicate: <[u8; 32]>::decode(slice, cells)?,
-            sats: slice.load_u64()?,
+            reward_predicate,
+            sats,
+            delegation,
         })
     }
 }
@@ -1191,7 +1241,8 @@ impl Blockchain {
 
     /// The outputs `block`'s mint proof issues, one per reward predicate in
     /// the order each first appears, summed over every core block the proof
-    /// covers. None when nothing is issued: no core block moved, or none of
+    /// covers. A delegated burn's share pays its delegator what the
+    /// commission leaves, then its service the commission. None when nothing is issued: no core block moved, or none of
     /// them had a burn.
     fn mint_log(&self, block: &Block) -> Result<Option<TxLog>, ChainError> {
         let mut paid: Vec<([u8; 32], u64)> = Vec::new();
@@ -1204,17 +1255,27 @@ impl Blockchain {
                 .ok_or(ChainError::LimitExceeded)?;
             let shares = split_allotment(allotment_sparks(core_height), burns);
             for (burn, share) in burns.iter().zip(shares) {
-                if share == 0 {
-                    continue;
+                let commission = burn
+                    .delegation
+                    .map_or(0, |delegation| delegation.commission(share));
+                let mut pay = |predicate: [u8; 32], sparks: u64| -> Result<(), ChainError> {
+                    if sparks == 0 {
+                        return Ok(());
+                    }
+                    let position = *positions.entry(predicate).or_insert_with(|| {
+                        paid.push((predicate, 0));
+                        paid.len() - 1
+                    });
+                    paid[position].1 = paid[position]
+                        .1
+                        .checked_add(sparks)
+                        .ok_or(ChainError::LimitExceeded)?;
+                    Ok(())
+                };
+                pay(burn.reward_predicate, share - commission)?;
+                if let Some(delegation) = burn.delegation {
+                    pay(delegation.provider_predicate, commission)?;
                 }
-                let position = *positions.entry(burn.reward_predicate).or_insert_with(|| {
-                    paid.push((burn.reward_predicate, 0));
-                    paid.len() - 1
-                });
-                paid[position].1 = paid[position]
-                    .1
-                    .checked_add(share)
-                    .ok_or(ChainError::LimitExceeded)?;
             }
         }
         if paid.is_empty() {
@@ -1522,7 +1583,8 @@ impl Blockchain {
     /// The anchor rule: a block either stays on its parent's core block and
     /// proves nothing, or moves to a later, different one and proves every
     /// core block it moves over. Every burn weighs something and pays a
-    /// valid point.
+    /// valid point, and a delegated one names a valid service point and a
+    /// commission of at most 100%.
     fn check_mint(&self, block: &Block) -> Result<(), ChainError> {
         let parent = &self.header;
         let core_blocks = &block.mint.core_blocks;
@@ -1541,12 +1603,19 @@ impl Blockchain {
         {
             return Err(ChainError::LimitExceeded);
         }
+        let invalid_point = |point: [u8; 32]| {
+            Point::from_bytes(point)
+                .to_compressed()
+                .decompress()
+                .is_none()
+        };
         if core_blocks.iter().flatten().any(|burn| {
             burn.sats == 0
-                || Point::from_bytes(burn.reward_predicate)
-                    .to_compressed()
-                    .decompress()
-                    .is_none()
+                || invalid_point(burn.reward_predicate)
+                || burn.delegation.is_some_and(|delegation| {
+                    delegation.commission_bps > MAX_COMMISSION_BPS
+                        || invalid_point(delegation.provider_predicate)
+                })
         }) {
             return Err(ChainError::InvalidMintProof);
         }
@@ -1876,6 +1945,22 @@ mod tests {
         Burn {
             reward_predicate,
             sats,
+            delegation: None,
+        }
+    }
+
+    fn delegated(
+        reward_predicate: [u8; 32],
+        sats: u64,
+        provider_predicate: [u8; 32],
+        commission_bps: u16,
+    ) -> Burn {
+        Burn {
+            delegation: Some(Delegation {
+                provider_predicate,
+                commission_bps,
+            }),
+            ..burn(reward_predicate, sats)
         }
     }
 
@@ -1963,6 +2048,97 @@ mod tests {
         let same = chain.build_block_at([0x33; 32], 11, Vec::new()).unwrap();
         assert!(same.mint.core_blocks.is_empty());
         assert!(chain.connect(&same).unwrap().records.is_empty());
+    }
+
+    #[test]
+    fn a_delegated_burn_pays_its_service_the_commission_and_its_owner_the_rest() {
+        let mut chain = Blockchain::new(ChainParams::default()).unwrap();
+        let owner = basepoint();
+        let service = Predicate::unspendable_key().to_bytes();
+        let fifty = INITIAL_ALLOTMENT_SPARKS;
+        let mint = MintProof {
+            core_blocks: vec![
+                // The service mints too; 2% of the delegator's half is its.
+                vec![burn(service, 1), delegated(owner, 1, service, 200)],
+                // Three basis points of a whole allotment.
+                vec![delegated(owner, 1, service, 3)],
+                // Nothing for the service, then everything.
+                vec![delegated(owner, 1, service, 0)],
+                vec![delegated(owner, 1, service, MAX_COMMISSION_BPS)],
+            ],
+        };
+        let block = chain
+            .build_block_on_core(4, [0x44; 32], 10, mint, Vec::new())
+            .unwrap();
+        let mut logs = Vec::new();
+        chain
+            .connect_with_observer(&block, |_, log, _| {
+                logs.push(minted(log));
+                Ok(())
+            })
+            .unwrap();
+        let half = fifty / 2;
+        let odd = fifty * 3 / 10_000;
+        let owner_total = (half - half / 50) + (fifty - odd) + fifty;
+        let service_total = half + half / 50 + odd + fifty;
+        assert_eq!(
+            logs,
+            vec![vec![(service, service_total), (owner, owner_total)]]
+        );
+        assert_eq!(owner_total + service_total, 4 * fifty);
+
+        // The terms survive the block's encoding.
+        let bytes = block.to_bytes().unwrap();
+        let decoded = Block::from_bytes_bounded(&bytes, ChainParams::default()).unwrap();
+        assert_eq!(decoded.mint, block.mint);
+
+        // A commission that does not divide is floored, in the owner's favour.
+        let terms = Delegation {
+            provider_predicate: service,
+            commission_bps: 3,
+        };
+        assert_eq!(terms.commission(9_999), 2);
+        assert_eq!(terms.commission(0), 0);
+    }
+
+    #[test]
+    fn a_delegation_needs_a_service_point_and_at_most_the_whole_share() {
+        let mut chain = Blockchain::new(ChainParams::default()).unwrap();
+        let reject = |chain: &mut Blockchain, burn| {
+            matches!(
+                chain.build_block_on_core(
+                    1,
+                    [0x11; 32],
+                    0,
+                    MintProof {
+                        core_blocks: vec![vec![burn]],
+                    },
+                    Vec::new()
+                ),
+                Err(ChainError::InvalidMintProof)
+            )
+        };
+        let service = Predicate::unspendable_key().to_bytes();
+        assert!(reject(
+            &mut chain,
+            delegated(basepoint(), 1, service, MAX_COMMISSION_BPS + 1)
+        ));
+        assert!(reject(
+            &mut chain,
+            delegated(basepoint(), 1, [0xff; 32], 200)
+        ));
+        assert!(!reject(&mut chain, delegated(basepoint(), 1, service, 200)));
+
+        // An unknown delegation tag is not a burn.
+        let mut builder = CellBuilder::new();
+        burn(basepoint(), 1).encode(&mut builder).unwrap();
+        let mut payload = builder.build().payload().to_vec();
+        *payload.last_mut().unwrap() = 2;
+        let cell = Cell::new(payload, vec![]).unwrap();
+        assert_eq!(
+            Burn::from_cell(&cell, &mut ()).unwrap_err(),
+            CellError::InvalidFormat
+        );
     }
 
     #[test]

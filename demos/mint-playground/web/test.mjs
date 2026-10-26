@@ -619,7 +619,7 @@ test('a pending delegation forecast immediately reprices at the provider’s cur
   assert.deepEqual(JSON.parse(page.requests.filter(request => request.url === '/api/contributions').at(-1).options.body), original);
 });
 
-test('commission saves preserve unsaved edits, isolate failures, and refresh repriced balances immediately', async () => {
+test('commission saves preserve unsaved edits, isolate failures, and refresh state immediately', async () => {
   let finishSave;
   const page = await openPage('/mint', new Map(), undefined, undefined, { profile: body => Object.hasOwn(body, 'service_commission_bps') ? new Promise(resolve => { finishSave = resolve; }) : profileResponse('Minter 1', 1, 200) });
   await page.event('mode-service', 'change');
@@ -650,7 +650,7 @@ test('commission saves preserve unsaved edits, isolate failures, and refresh rep
   finishSave(profileResponse('Minter 1', 1, 5000));
   await retrying;
   assert.deepEqual(JSON.parse(profileRequests(page).at(-1).options.body), { address: 'tf1demo-address', service_commission_bps: 5000 });
-  assert.equal(stateRequests(page).length, before + 1, 'successful saves fetch repriced state without waiting for the periodic poll');
+  assert.equal(stateRequests(page).length, before + 1, 'successful saves fetch the new rate without waiting for the periodic poll');
   assert.equal(page.elements.get('minter-name').value, 'An unsaved name', 'saving a rate must not save or discard a separate name edit');
   assert.equal(page.elements.get('commission').value, '50');
   assert.equal(page.elements.get('submit').disabled, false);
@@ -1401,11 +1401,11 @@ test('service and delegating personal totals conserve net rewards without claimi
   }
   assert.equal(provider.elements.get('total-reward').textContent, '3,750\u00a0FLM');
   assert.equal(provider.elements.get('total-rate').textContent, '53\u00a0sat/FLM');
-  assert.deepEqual(rowValues(provider), ['0', '1,250', '0', '0'], 'finished linked rows reflect the identity’s retroactive commission');
+  assert.deepEqual(rowValues(provider), ['0', '1,250', '0', '0'], 'linked rows show the commission the server accrued');
   assert.equal(delegate.elements.get('total-reward').textContent, '1,250\u00a0FLM');
   assert.equal(delegate.elements.get('total-rate').textContent, '160\u00a0sat/FLM');
   assert.deepEqual(rowValues(delegate), ['200,000', '1,250', '0', '160']);
-  assert.equal(dashboard.elements.get('total-reward').textContent, '5,000\u00a0FLM', 'repricing historical allocations does not create or destroy global rewards');
+  assert.equal(dashboard.elements.get('total-reward').textContent, '5,000\u00a0FLM', 'commission splits do not create or destroy global rewards');
 });
 
 test('dashboard minter totals sort by raw numeric values, preserve modes and colors, and do not mutate the snapshot', async () => {

@@ -211,7 +211,11 @@ struct BlockHeader {
     parent: Hash, witnesses: Hash, mint: Hash, effects: Hash, contracts: Hash,
     actors: Hash, available_storage_units: U64,
 }
-struct Burn { reward_predicate: Point, sats: U64 }
+struct Burn { reward_predicate: Point, sats: U64, delegation: BurnDelegation }
+enum BurnDelegation: U8 {
+    None = 0,
+    Service { provider_predicate: Point, commission_bps: U16 } = 1,
+}
 // mint: a sequence of core blocks, each a sequence of Burn.
 enum ExecutionKind: U8 { External = 0, Internal = 1, Failed = 2, Mint = 3 }
 struct ExecutionRecord { kind: ExecutionKind, txid: Hash }
@@ -230,10 +234,14 @@ entry per core block it moves over: entry `i` lists the burns of core block
 point. Every core block issues `allotment(h)` sparks: 50 FLM halved every
 210,000 core blocks, split among its burns by `sats`, each share floored and
 the leftover sparks given one each to the largest remainders (earlier burn
-first on ties). A core block without burns issues nothing. The block runs one
+first on ties). A delegated burn's `commission_bps` is at most 10,000 and its
+`provider_predicate` a valid point; its share pays
+`floor(share × commission_bps / 10,000)` to the provider and the rest to its
+`reward_predicate`. A core block without burns issues nothing. The block runs one
 `Mint` execution before its transactions, unless nothing is issued: a log of
 a version-1, locktime-0 header and one cleartext Flame output per reward
-predicate, in order of first appearance, summed over the proof. Output `i`'s
+predicate, in order of first appearance (a delegated burn's own predicate
+before its provider's, zero amounts skipped), summed over the proof. Output `i`'s
 anchor is the Merlin transcript `flame.mint` with `core_height` (the
 header's) and `index` (`i`) as U64s, challenged as 32 `anchor` bytes.
 Whether the burns are the ones the core chain holds is checked by the node

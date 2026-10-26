@@ -86,7 +86,59 @@ fn the_playground_s_burns_mint_on_its_blocks() {
         (&a, INITIAL_ALLOTMENT_SPARKS / 4 * 3),
         (&b, INITIAL_ALLOTMENT_SPARKS / 4),
     ] {
-        let predicate = account.predicate_at(RECEIVING, 0).unwrap().to_point().to_bytes();
+        let predicate = account
+            .predicate_at(RECEIVING, 0)
+            .unwrap()
+            .to_point()
+            .to_bytes();
+        let hits = node.scan(&[predicate], 1);
+        assert_eq!(hits.len(), 1);
+        let contract = contract_of(&node, &hits[0].id.0);
+        let Value::ClearToken(token) = contract.payload() else {
+            panic!("a mint output holds cleartext flames");
+        };
+        assert_eq!(token.qty(), Scalar::from(sparks));
+    }
+}
+
+#[test]
+fn a_delegated_burn_pays_its_service_the_commission_of_its_block() {
+    let dir = TempDir::new().unwrap();
+    let a = account(&SEED_A);
+    let b = account(&SEED_B);
+    let (genesis, cfg) = devnet(dir.path(), &a);
+    let service = a
+        .address_at(RECEIVING, 0)
+        .unwrap()
+        .to_bech32(Network::Testnet);
+    let delegator = b
+        .address_at(RECEIVING, 0)
+        .unwrap()
+        .to_bech32(Network::Testnet);
+    let (url, server) = playground(vec![
+        ("/api/core/tip".into(), json!({"height": 1, "time": 0})),
+        (
+            "/api/core/blocks?from=1&to=1".into(),
+            json!([{"height": 1, "time": 0, "burns": [
+                {"address": service, "sats": 1},
+                {"address": delegator, "sats": 1,
+                 "service": {"address": service, "commission_bps": 200}},
+            ]}]),
+        ),
+    ]);
+    let indexer = PlaygroundIndexer::new(&url, Network::Testnet).unwrap();
+    let mut node = Node::open_with(&genesis, &cfg, Box::new(indexer)).unwrap();
+    node.mint_block().unwrap();
+    server.join().unwrap();
+
+    // Each burned half the block; the service takes 2% of the delegator's.
+    let half = INITIAL_ALLOTMENT_SPARKS / 2;
+    for (account, sparks) in [(&a, half + half / 50), (&b, half - half / 50)] {
+        let predicate = account
+            .predicate_at(RECEIVING, 0)
+            .unwrap()
+            .to_point()
+            .to_bytes();
         let hits = node.scan(&[predicate], 1);
         assert_eq!(hits.len(), 1);
         let contract = contract_of(&node, &hits[0].id.0);
@@ -102,7 +154,10 @@ fn a_playground_on_another_network_or_behind_the_chain_is_an_error() {
     let dir = TempDir::new().unwrap();
     let a = account(&SEED_A);
     let (genesis, cfg) = devnet(dir.path(), &a);
-    let mainnet = a.address_at(RECEIVING, 0).unwrap().to_bech32(Network::Mainnet);
+    let mainnet = a
+        .address_at(RECEIVING, 0)
+        .unwrap()
+        .to_bech32(Network::Mainnet);
     let (url, server) = playground(vec![
         ("/api/core/tip".into(), json!({"height": 1, "time": 0})),
         (

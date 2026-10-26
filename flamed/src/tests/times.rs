@@ -141,6 +141,7 @@ impl CoreIndexer for FixedIndexer {
                     2 | 7 => vec![Burn {
                         reward_predicate: self.payee,
                         sats: 1_000,
+                        delegation: None,
                     }],
                     _ => Vec::new(),
                 },

@@ -229,7 +229,8 @@ the table is lost, the archive still replays; the core chain starts over.
 `PlaygroundIndexer` follows a [mint playground](../demos/mint-playground)
 instead, when `flamed.toml` sets `playground_url`: the playground's blocks
 are the core blocks, `core_block_hash(h)` again, and its eligible burns are
-theirs. No mock core chain is mined then.
+theirs, a delegated one with its service and that block's commission. No
+mock core chain is mined then.
 
 A connector to a real Bitcoin node replaces either through
 `Node::open_with`, and the node stays the same.
@@ -248,6 +249,11 @@ no block reaches a new core block without proving it.
 - **Split.** By burned sats: each share floored, then the leftover sparks one
   each to the largest remainders, the earlier burn first on a tie. A core
   block nobody burned in issues nothing, and the allotment is lost.
+- **Delegation.** A burn may name a service's predicate and a commission
+  in basis points, the terms in force when it burned. Its share is split:
+  the service gets `floor(share × bps / 10,000)` and the burn's own
+  predicate the rest. The terms are part of the burn, so they cannot change
+  after it is minted.
 - **Outputs.** One cleartext Flame output per reward predicate, summed over
   every core block the proof covers, in a single `mint` execution that runs
   before the block's transactions. It appears in `history`, `scan` and
@@ -258,9 +264,10 @@ no block reaches a new core block without proving it.
 
 A burn names a predicate and an amount, exactly what a Bitcoin mint proof
 output in `btc-integration` carries as `flame_reward_address` and its burned
-value. The chain checks the proof's shape and pays it; that the burns are
-really on the core chain is the node's to check against its indexer, as
-the core block hash is. A devnet node builds the proof from its own
+value. Bitcoin mint proofs do not carry delegation terms yet; only the
+playground's burns do. The chain checks the proof's shape and pays it;
+that the burns are really on the core chain is the node's to check against
+its indexer, as the core block hash is. A devnet node builds the proof from its own
 indexer, so there is nothing to check yet.
 
 **`locktime`** is documented as Bitcoin's: below `500_000_000` a height,

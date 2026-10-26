@@ -133,7 +133,7 @@ fn reset_prints_a_usable_backup_and_clears_the_ledger_from_any_working_directory
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         for table in ["accounts", "contributions", "blocks", "accruals"] {
             let count: i64 = connection
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {

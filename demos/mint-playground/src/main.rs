@@ -552,7 +552,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn identity_commission_api_registers_offers_reprices_history_and_ignores_old_retry_quotes(
+    async fn identity_commission_api_registers_offers_prices_later_blocks_and_ignores_old_retry_quotes(
     ) {
         let (store, thread) = Store::open(PathBuf::from(":memory:")).unwrap();
         let app = router(store.clone());
@@ -619,15 +619,13 @@ mod tests {
             .oneshot(Request::get("/api/state").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        let repriced = json(response).await;
-        assert_eq!(repriced["contributions"][0]["commission_bps"], 1000);
-        assert_eq!(repriced["contributions"][0]["reward_sparks"], "2250000000");
-        assert_eq!(
-            repriced["contributions"][0]["commission_sparks"],
-            "250000000"
-        );
-        assert_eq!(repriced["minters"][0]["reward_sparks"], "2750000000");
-        assert_eq!(repriced["totals"]["reward_sparks"], "5000000000");
+        // The new rate is shown, but the committed block keeps the 3.33% it was minted at.
+        let saved = json(response).await;
+        assert_eq!(saved["contributions"][0]["commission_bps"], 1000);
+        assert_eq!(saved["contributions"][0]["reward_sparks"], "2416750000");
+        assert_eq!(saved["contributions"][0]["commission_sparks"], "83250000");
+        assert_eq!(saved["minters"][0]["reward_sparks"], "2583250000");
+        assert_eq!(saved["totals"]["reward_sparks"], "5000000000");
         service["commission_bps"] = 333.into();
         assert_eq!(
             json(app.clone().oneshot(post_request(&service)).await.unwrap()).await,
@@ -661,7 +659,28 @@ mod tests {
             .oneshot(Request::get("/api/state").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(json(after_null_retry).await, repriced);
+        assert_eq!(json(after_null_retry).await, saved);
+        store
+            .request(Command::Tick)
+            .await
+            .unwrap_or_else(|e| panic!("{}", e.1));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/core/blocks?from=1&to=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let blocks = json(response).await;
+        for (block, rate) in [(0, 333), (1, 1000)] {
+            let burns = &blocks[block]["burns"];
+            assert!(burns[0].get("service").is_none());
+            assert_eq!(burns[1]["address"], owner.as_str());
+            assert_eq!(burns[1]["service"]["address"], address);
+            assert_eq!(burns[1]["service"]["commission_bps"], rate);
+        }
         delegated["request_id"] = "obsolete-new-contribution-0001".into();
         let rejected = app.clone().oneshot(post_request(&delegated)).await.unwrap();
         assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);

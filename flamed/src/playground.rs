@@ -4,7 +4,10 @@
 //! weigh in each block's allotment. `PlaygroundIndexer` reads both over
 //! its HTTP API, so the node mints on the playground's blocks and every
 //! block that moves to a later one issues what the playground's minters
-//! burned for — the same split the playground's own ledger shows.
+//! burned for — the same split the playground's own ledger shows. A
+//! delegated burn carries its service's address and the commission in
+//! force in its block, so the chain pays the service its commission and
+//! the delegator the rest, as the ledger does.
 //!
 //! The playground has no block hashes, so a core block's hash is this
 //! devnet's [`core_block_hash`] of its height, as on the mock chain. A
@@ -15,7 +18,7 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use flamechain::Burn;
+use flamechain::{Burn, Delegation};
 use flamekd::Network;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -53,6 +56,16 @@ struct Block {
 struct PlaygroundBurn {
     address: String,
     sats: u64,
+    /// Present on a delegated burn: the service it minted through, at the
+    /// commission in force in that block.
+    #[serde(default)]
+    service: Option<PlaygroundService>,
+}
+
+#[derive(Deserialize)]
+struct PlaygroundService {
+    address: String,
+    commission_bps: u16,
 }
 
 impl PlaygroundIndexer {
@@ -161,16 +174,26 @@ impl CoreIndexer for PlaygroundIndexer {
                         // The playground checked every address when it took
                         // the contribution; one that does not read here is a
                         // playground on another network.
-                        let reward_predicate = predicate_of(&burn.address, self.network)
-                            .map_err(|_| {
+                        let predicate = |address: &str| {
+                            predicate_of(address, self.network).map_err(|_| {
                                 self.error(format!(
-                                    "{} is not a receiving address on this network",
-                                    burn.address
+                                    "{address} is not a receiving address on this network"
                                 ))
-                            })?;
+                            })
+                        };
+                        let delegation = burn
+                            .service
+                            .map(|service| {
+                                Ok::<_, CoreError>(Delegation {
+                                    provider_predicate: predicate(&service.address)?,
+                                    commission_bps: service.commission_bps,
+                                })
+                            })
+                            .transpose()?;
                         Ok(Burn {
-                            reward_predicate,
+                            reward_predicate: predicate(&burn.address)?,
                             sats: burn.sats,
+                            delegation,
                         })
                     })
                     .collect::<Result<_, CoreError>>()?;

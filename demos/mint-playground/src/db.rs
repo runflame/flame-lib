@@ -187,11 +187,21 @@ pub struct CoreBlock {
     pub burns: Vec<CoreBurn>,
 }
 
-/// One contribution's eligible burn in a block. The chain pays its share to `address`.
+/// One contribution's eligible burn in a block. The chain pays its share to `address`, less
+/// the commission a delegated burn's `service` takes.
 #[derive(Debug, Serialize)]
 pub struct CoreBurn {
     pub address: String,
     pub sats: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<CoreService>,
+}
+
+/// A delegated burn's terms: its provider's address and the commission in force in that block.
+#[derive(Debug, Serialize)]
+pub struct CoreService {
+    pub address: String,
+    pub commission_bps: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -503,6 +513,33 @@ impl Database {
             transaction.commit()?;
             connection.pragma_update(None, "foreign_keys", true)?;
         }
+        if schema_version < 4 {
+            // Each accrual keeps the commission in force in its block. Version 3 had
+            // repriced every accrual to the provider's current rate, so that rate is
+            // the one its stored commission was computed with.
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+            let has_rate: bool = transaction.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('accruals') WHERE name = 'commission_bps'",
+                [],
+                |row| row.get(0),
+            )?;
+            if !has_rate {
+                transaction.execute_batch(
+                    "ALTER TABLE accruals ADD COLUMN commission_bps INTEGER NOT NULL DEFAULT 0
+                         CHECK(typeof(commission_bps) = 'integer' AND commission_bps BETWEEN 0 AND 10000);",
+                )?;
+            }
+            transaction.execute_batch(
+                "UPDATE accruals SET commission_bps = (
+                     SELECT COALESCE(u.service_commission_bps, 0)
+                     FROM contributions c JOIN accounts u ON u.id = c.service_user_id
+                     WHERE c.id = accruals.contribution_id)
+                 WHERE contribution_id IN (SELECT id FROM contributions WHERE service_user_id IS NOT NULL);",
+            )?;
+            transaction.pragma_update(None, "user_version", 4)?;
+            transaction.commit()?;
+        }
         connection.execute_batch(
             "CREATE INDEX IF NOT EXISTS contributions_by_user ON contributions(user_id);",
         )?;
@@ -552,12 +589,12 @@ impl Database {
                 [&address],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
+            // The rate applies from the next block on; past accruals keep theirs.
             if previous != Some(rate) {
                 transaction.execute(
                     "UPDATE accounts SET service_commission_bps = ?1 WHERE id = ?2",
                     params![rate, user_id],
                 )?;
-                reprice_commissions(&transaction, Some(user_id))?;
             }
         }
         let minter = transaction.query_row(
@@ -824,15 +861,19 @@ impl Database {
             params![height, amount(total_burn)?, amount(total_fees)?, reward],
         )?;
         for item in active {
-            let commission = if item.service_user_id.is_some() {
-                (i128::from(item.reward) * i128::from(item.commission_bps) / 10_000) as i64
+            // The provider's rate in this block is the delegation's term for it, fixed
+            // once committed, as the chain fixes it once minted.
+            let rate = if item.service_user_id.is_some() {
+                item.commission_bps
             } else {
                 0
             };
+            let commission = (i128::from(item.reward) * i128::from(rate) / 10_000) as i64;
             transaction.execute(
-                "INSERT INTO accruals(height, contribution_id, burned_sats, fees_sats, reward_sparks, commission_sparks)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![height, item.id, item.burn, item.fee, item.reward, commission],
+                "INSERT INTO accruals(height, contribution_id, burned_sats, fees_sats, reward_sparks,
+                     commission_sparks, commission_bps)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![height, item.id, item.burn, item.fee, item.reward, commission, rate],
             )?;
             // SQLite may promote an overflowing addition to REAL; the account CHECK rejects it.
             transaction.execute(
@@ -1016,8 +1057,8 @@ impl Database {
 
     /// Committed blocks `from..=to`, at most [`MAX_CORE_BLOCKS`], each with the burns `tick`
     /// counted as eligible: every Independent/Service burn, and a delegated burn only while its
-    /// provider had an active Service contribution in that block. Fees and inactive
-    /// delegations are spending, not weight.
+    /// provider had an active Service contribution in that block, with that provider and the
+    /// commission it took in that block. Fees and inactive delegations are spending, not weight.
     pub fn core_blocks(&self, from: i64, to: i64) -> Result<Vec<CoreBlock>, Error> {
         if from < 1 || to < from {
             return Err(Error::Invalid(
@@ -1038,10 +1079,11 @@ impl Database {
             })
             .collect::<Result<_, _>>()?;
         let mut statement = self.connection.prepare(
-            "SELECT a.height, account.address, a.burned_sats
+            "SELECT a.height, account.address, a.burned_sats, service.address, a.commission_bps
              FROM accruals a
              JOIN contributions c ON c.id = a.contribution_id
              JOIN accounts account ON account.id = c.user_id
+             LEFT JOIN accounts service ON service.id = c.service_user_id
              WHERE a.height BETWEEN ?1 AND ?2 AND a.burned_sats > 0
                AND (c.service_user_id IS NULL OR EXISTS (
                    SELECT 1 FROM accruals s JOIN contributions sc ON sc.id = s.contribution_id
@@ -1055,6 +1097,15 @@ impl Database {
                 CoreBurn {
                     address: row.get(1)?,
                     sats: row.get(2)?,
+                    service: row
+                        .get::<_, Option<String>>(3)?
+                        .map(|address| -> rusqlite::Result<_> {
+                            Ok(CoreService {
+                                address,
+                                commission_bps: row.get(4)?,
+                            })
+                        })
+                        .transpose()?,
                 },
             ))
         })?;
@@ -1089,6 +1140,8 @@ fn legacy_commission<'de, D: serde::Deserializer<'de>>(
     Option::<i64>::deserialize(deserializer).map(|value| Some(value.unwrap_or(0)))
 }
 
+/// Version 3's migration: reprices every delegated accrual to its provider's current rate.
+/// Since version 4 a rate applies only to later blocks, so nothing else calls this.
 fn reprice_commissions(connection: &Connection, service_user_id: Option<i64>) -> Result<(), Error> {
     let mut deltas = std::collections::BTreeMap::<i64, i128>::new();
     let mut statement = connection.prepare(
@@ -1428,7 +1481,11 @@ mod tests {
         assert_eq!((tip.height, tip.time), (2, CALENDAR_START + BLOCK_SECONDS));
         let blocks = db.core_blocks(1, 100).unwrap();
         let addresses = |block: &CoreBlock| -> Vec<String> {
-            block.burns.iter().map(|burn| burn.address.clone()).collect()
+            block
+                .burns
+                .iter()
+                .map(|burn| burn.address.clone())
+                .collect()
         };
         assert_eq!(blocks.len(), 2);
         // Block 1: the service has not started, so its delegate is no weight.
@@ -1649,112 +1706,122 @@ mod tests {
         assert!(matches!(db.submit(chain), Err(Error::Invalid(_))));
     }
 
+    fn accrual_terms(db: &Database, contribution_id: i64) -> Vec<(i64, i64, i64)> {
+        db.connection
+            .prepare(
+                "SELECT reward_sparks, commission_sparks, commission_bps FROM accruals
+                 WHERE contribution_id = ?1 ORDER BY height",
+            )
+            .unwrap()
+            .query_map([contribution_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
     #[test]
-    fn identity_rate_reprices_finished_active_and_future_delegations_without_changing_issuance() {
+    fn identity_rate_applies_from_the_next_block_and_never_reprices_history() {
         let mut db = database();
         let first = set_commission(&mut db, 1, 200).unwrap();
         assert_eq!(first.service_commission_bps, Some(200));
         assert!(!db.snapshot(false).unwrap().services[0].active);
-        set_commission(&mut db, 2, 1_000).unwrap();
         let service = db.submit(service_request(1, 1)).unwrap();
-        let other = db.submit(service_request(2, 2)).unwrap();
-        let finished = db.submit(delegated_request(3, 3, service.user_id)).unwrap();
-        let mut active = delegated_request(4, 4, service.user_id);
-        active.duration = 288;
-        active.budget_sats = 5_760;
-        let active = db.submit(active).unwrap();
-        let mut future = delegated_request(3, 5, service.user_id);
-        future.delay_blocks = 200;
+        let delegated = db.submit(delegated_request(2, 2, service.user_id)).unwrap();
+        let mut future = delegated_request(3, 3, service.user_id);
+        future.delay_blocks = 2;
         let future = db.submit(future).unwrap();
-        db.submit(delegated_request(5, 6, other.user_id)).unwrap();
-        for _ in 0..145 {
-            db.tick().unwrap();
-        }
+        db.tick().unwrap();
+        db.tick().unwrap();
+
+        let rewards = db.rewards().unwrap();
         let totals = serde_json::to_value(db.snapshot(true).unwrap().totals).unwrap();
         set_commission(&mut db, 1, 5_000).unwrap();
-        let state = db.snapshot(false).unwrap();
+        // Saving changes no balance and no committed accrual.
+        assert_eq!(
+            serde_json::to_value(db.rewards().unwrap()).unwrap(),
+            serde_json::to_value(&rewards).unwrap()
+        );
+        let state = db.snapshot(true).unwrap();
         assert_eq!(serde_json::to_value(&state.totals).unwrap(), totals);
-        for id in [service.id, finished.id, active.id, future.id] {
-            assert_eq!(
-                state
-                    .contributions
-                    .iter()
-                    .find(|c| c.id == id)
-                    .unwrap()
-                    .commission_bps,
-                5_000
-            );
+        // Contributions show the rate their next blocks will pay.
+        for id in [delegated.id, future.id] {
+            let contribution = state.contributions.iter().find(|c| c.id == id).unwrap();
+            assert_eq!(contribution.commission_bps, 5_000);
         }
-        assert_eq!(state.minters[0].reward_sparks, "288000000000");
-        assert_eq!(state.minters[1].reward_sparks, "158400000000");
-        assert_eq!(state.minters[2].reward_sparks, "72000000000");
-        assert_eq!(state.minters[3].reward_sparks, "72000000000");
-        assert_eq!(state.minters[4].reward_sparks, "129600000000");
-        assert_eq!(
-            state
-                .minters
-                .iter()
-                .map(|m| m.reward_sparks.parse::<i64>().unwrap())
-                .sum::<i64>(),
-            144 * BLOCK_REWARD_SPARKS
-        );
-        assert!(state
-            .chart_contributions
-            .unwrap()
-            .iter()
-            .filter(|c| c.minter_id == service.user_id)
-            .all(|c| c.commission_bps == 5_000));
-        let loaded = db.minter(minter_request(1, None)).unwrap();
-        assert_eq!(loaded.service_commission_bps, Some(5_000));
-        assert_eq!(
-            db.minter(minter_request(1, Some("Renamed")))
-                .unwrap()
-                .service_commission_bps,
-            Some(5_000)
-        );
-        set_commission(&mut db, 1, 0).unwrap();
-        let zero = db.snapshot(true).unwrap();
-        assert_eq!(zero.minters[0].reward_sparks, "144000000000");
-        assert_eq!(zero.minters[2].reward_sparks, "144000000000");
-        set_commission(&mut db, 1, 10_000).unwrap();
-        let full = db.snapshot(true).unwrap();
-        assert_eq!(full.minters[0].reward_sparks, "432000000000");
-        assert_eq!(full.minters[2].reward_sparks, "0");
-        assert_eq!(full.minters[3].reward_sparks, "0");
-        assert_eq!(serde_json::to_value(&full.totals).unwrap(), totals);
-        db.submit(service_request(1, 7)).unwrap();
+
         db.tick().unwrap();
-        let latest = db.snapshot(true).unwrap();
-        assert_eq!(latest.services[0].commission_bps, 10_000);
-        assert_eq!(latest.minters[0].reward_sparks, "437000000000");
+        let terms = accrual_terms(&db, delegated.id);
+        assert_eq!(
+            terms.iter().map(|t| t.2).collect::<Vec<_>>(),
+            vec![200, 200, 5_000]
+        );
+        for (gross, commission, rate) in &terms {
+            assert_eq!(*commission, gross * rate / 10_000);
+        }
+        // The delayed delegation started after the save, so it never paid 2%.
+        assert_eq!(
+            accrual_terms(&db, future.id)
+                .iter()
+                .map(|t| t.2)
+                .collect::<Vec<_>>(),
+            vec![5_000]
+        );
+        let blocks = db.core_blocks(1, 3).unwrap();
+        let rates: Vec<Vec<i64>> = blocks
+            .iter()
+            .map(|block| {
+                block
+                    .burns
+                    .iter()
+                    .filter_map(|burn| burn.service.as_ref())
+                    .map(|service| {
+                        assert_eq!(service.address, address(1));
+                        service.commission_bps
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(rates, vec![vec![200], vec![200], vec![5_000, 5_000]]);
+        assert_eq!(
+            db.rewards()
+                .unwrap()
+                .iter()
+                .map(|r| r.reward_sparks.parse::<i64>().unwrap())
+                .sum::<i64>(),
+            3 * BLOCK_REWARD_SPARKS
+        );
+
+        // Whole-share and zero commissions apply the same way.
+        set_commission(&mut db, 1, 10_000).unwrap();
+        db.tick().unwrap();
+        set_commission(&mut db, 1, 0).unwrap();
+        db.tick().unwrap();
+        let terms = accrual_terms(&db, delegated.id);
+        assert_eq!(terms[3].1, terms[3].0);
+        assert_eq!((terms[4].1, terms[4].2), (0, 0));
+        let loaded = db.minter(minter_request(1, Some("Renamed"))).unwrap();
+        assert_eq!(loaded.service_commission_bps, Some(0));
     }
 
     #[test]
-    fn repricing_rounds_each_accrual_separately_and_self_delegation_has_no_balance_delta() {
+    fn commission_rounds_each_accrual_and_self_delegation_keeps_its_gross_share() {
         let mut db = database();
+        set_commission(&mut db, 1, 333).unwrap();
         let service = db.submit(service_request(1, 1)).unwrap();
         let delegated = db.submit(delegated_request(2, 2, service.user_id)).unwrap();
         db.submit(request(3, 3, 100)).unwrap();
         for _ in 0..10 {
             db.tick().unwrap();
         }
-        let gross = db
-            .connection
-            .prepare("SELECT reward_sparks FROM accruals WHERE contribution_id=?1 ORDER BY height")
-            .unwrap()
-            .query_map([delegated.id], |row| row.get::<_, i64>(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        let expected: i64 = gross
+        let terms = accrual_terms(&db, delegated.id);
+        let gross: i64 = terms.iter().map(|t| t.0).sum();
+        let expected: i64 = terms
             .iter()
-            .map(|v| (i128::from(*v) * 333 / 10_000) as i64)
+            .map(|t| (i128::from(t.0) * 333 / 10_000) as i64)
             .sum();
-        assert_ne!(
-            expected,
-            (i128::from(gross.iter().sum::<i64>()) * 333 / 10_000) as i64
-        );
-        set_commission(&mut db, 1, 333).unwrap();
+        assert_ne!(expected, (i128::from(gross) * 333 / 10_000) as i64);
         let state = db.snapshot(true).unwrap();
         let contribution = state
             .contributions
@@ -1762,59 +1829,41 @@ mod tests {
             .find(|c| c.id == delegated.id)
             .unwrap();
         assert_eq!(contribution.commission_sparks, expected.to_string());
-        assert_eq!(
-            contribution.reward_sparks,
-            (gross.iter().sum::<i64>() - expected).to_string()
-        );
+        assert_eq!(contribution.reward_sparks, (gross - expected).to_string());
 
         let mut db = database();
         let service = db.submit(service_request(1, 1)).unwrap();
         db.submit(delegated_request(1, 2, service.user_id)).unwrap();
-        db.tick().unwrap();
         for rate in [0, 10_000, 333] {
             set_commission(&mut db, 1, rate).unwrap();
-            assert_eq!(
-                db.rewards().unwrap()[0].reward_sparks,
-                BLOCK_REWARD_SPARKS.to_string()
-            );
+            db.tick().unwrap();
         }
-        db.connection
-            .execute(
-                "UPDATE accounts SET reward_sparks=?1 WHERE id=?2",
-                params![i64::MAX, service.user_id],
-            )
-            .unwrap();
-        set_commission(&mut db, 1, 10_000).unwrap();
-        assert_eq!(db.rewards().unwrap()[0].reward_sparks, i64::MAX.to_string());
+        assert_eq!(
+            db.rewards().unwrap()[0].reward_sparks,
+            (3 * BLOCK_REWARD_SPARKS).to_string()
+        );
     }
 
     #[test]
-    fn identity_repricing_overflow_or_underflow_rolls_back_name_rate_cache_and_balances() {
+    fn saving_a_rate_touches_no_balance_even_at_the_integer_limit() {
         let mut db = database();
         let service = db.submit(service_request(1, 1)).unwrap();
         db.submit(delegated_request(2, 2, service.user_id)).unwrap();
         db.tick().unwrap();
-        for (balance, rate) in [(i64::MAX - 1, 10_000), (0, 0)] {
+        for (balance, rate) in [(i64::MAX, 10_000), (0, 0)] {
             db.connection
                 .execute(
                     "UPDATE accounts SET reward_sparks=?1 WHERE id=?2",
                     params![balance, service.user_id],
                 )
                 .unwrap();
-            let before = serde_json::to_value(db.snapshot(true).unwrap()).unwrap();
-            let mut profile = minter_request(1, Some("Must roll back"));
+            let mut profile = minter_request(1, Some("Saved"));
             profile.service_commission_bps = Some(rate);
-            assert!(matches!(db.minter(profile), Err(Error::Invalid(_))));
             assert_eq!(
-                serde_json::to_value(db.snapshot(true).unwrap()).unwrap(),
-                before
+                db.minter(profile).unwrap().service_commission_bps,
+                Some(rate)
             );
-            assert_eq!(
-                db.minter(minter_request(1, None))
-                    .unwrap()
-                    .service_commission_bps,
-                Some(200)
-            );
+            assert_eq!(db.rewards().unwrap()[0].reward_sparks, balance.to_string());
         }
     }
 
@@ -1858,6 +1907,11 @@ mod tests {
             assert!(state.contributions.iter().all(|c| c.commission_bps == 500));
             assert_eq!(state.contributions[0].commission_sparks, "83333333");
             assert_eq!(state.contributions[1].commission_sparks, "83333333");
+            // Version 4 records the rate those commissions were priced at.
+            for id in [2, 3] {
+                assert_eq!(accrual_terms(&db, id)[0].2, 500);
+            }
+            assert_eq!(accrual_terms(&db, 1)[0].2, 0);
             for (mut retry, quote, id) in [
                 (original_service.clone(), 200, 1),
                 (first.clone(), 0, 2),

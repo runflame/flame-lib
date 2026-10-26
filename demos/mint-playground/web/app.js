@@ -463,7 +463,7 @@ if (typeof document !== 'undefined') {
         element('commission').value = String(minter.service_commission_bps / 100);
         await poll(false);
       }
-      if (wallet?.address === address && minterRequest === request) status.textContent = changingCommission ? 'Saved · applies to all past and future rewards.' : name === undefined ? '' : 'Saved';
+      if (wallet?.address === address && minterRequest === request) status.textContent = changingCommission ? 'Saved · applies from the next block.' : name === undefined ? '' : 'Saved';
     } catch (error) {
       if (wallet?.address === address && minterRequest === request) status.textContent = error.message || String(error);
     } finally {
