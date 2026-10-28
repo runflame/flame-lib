@@ -1,0 +1,132 @@
+:root {
+  --bg: #f7f7f5;
+  --panel: #ffffff;
+  --text: #1d1d1b;
+  --muted: #6b6b66;
+  --line: #deded8;
+  --accent: #c2410c;
+  --series-1: #c2410c;
+  --series-2: #2563eb;
+  --series-3: #8a8a84;
+  --bad: #b91c1c;
+  --good: #15803d;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615;
+    --panel: #20201e;
+    --text: #ecece8;
+    --muted: #a3a39c;
+    --line: #3a3a36;
+    --accent: #fb923c;
+    --series-1: #fb923c;
+    --series-2: #60a5fa;
+    --series-3: #8a8a84;
+    --bad: #f87171;
+    --good: #4ade80;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 system-ui, sans-serif;
+}
+
+header, main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline; }
+h1 { font-size: 20px; margin: 0; }
+h2 { font-size: 16px; margin: 0 0 4px; }
+#summary { margin: 0; color: var(--muted); flex: 1; }
+#summary.bad { color: var(--bad); }
+.range { color: var(--muted); }
+
+main { display: grid; gap: 16px; padding-top: 0; }
+
+section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  min-width: 0;
+}
+
+.about { color: var(--muted); margin: 0 0 12px; }
+.state { font-weight: normal; font-size: 13px; margin-left: 8px; }
+.state.on { color: var(--good); }
+.state.off { color: var(--muted); }
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px 16px;
+  margin: 0 0 12px;
+}
+.stats div { min-width: 0; }
+.stats dt { color: var(--muted); font-size: 12px; }
+.stats dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.stats .bad { color: var(--bad); }
+
+.charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.chart h3 { font-size: 12px; font-weight: normal; color: var(--muted); margin: 0 0 4px; }
+.chart svg { display: block; width: 100%; height: 110px; border-bottom: 1px solid var(--line); }
+.chart polyline { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.chart .s1 { stroke: var(--series-1); }
+.chart .s2 { stroke: var(--series-2); }
+.chart .s3 { stroke: var(--series-3); stroke-dasharray: 4 3; }
+.chart .scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
+.chart .legend span { margin-right: 10px; font-size: 11px; }
+.chart .legend .s1 { color: var(--series-1); }
+.chart .legend .s2 { color: var(--series-2); }
+.chart .legend .s3 { color: var(--series-3); }
+
+form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: end;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+form label { display: grid; gap: 2px; color: var(--muted); font-size: 12px; }
+form label.toggle { display: flex; align-items: center; gap: 6px; color: var(--text); font-size: 14px; align-self: center; }
+input, select, button {
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 6px;
+}
+input[name="name"] { width: 160px; }
+input[type="number"] { width: 140px; }
+button { cursor: pointer; padding: 4px 14px; }
+button:hover { border-color: var(--accent); }
+output { color: var(--muted); font-size: 12px; }
+output.bad { color: var(--bad); }
+
+#journal select { margin: 4px 0 8px; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: normal; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.when { white-space: nowrap; }
+tr.error td, tr.rejected td { color: var(--bad); }
+tr.recovered td { color: var(--good); }
+#older { margin-top: 8px; }
+
+@media (max-width: 600px) {
+  input[name="name"], input[type="number"] { width: 100%; }
+  form label { flex: 1 1 140px; }
+}
