@@ -57,9 +57,15 @@ async fn public_handle_and_indexer_share_state_across_arrivals_restart_and_bitco
         handle
             .on_flame_block_arrival(block.header.block_tip())
             .await?;
+        // The canonical tip moves at `ApplyTransition`, but pending endorsements are only
+        // removed in the final `RemovePending` stage, so wait for both.
         timeout(Duration::from_secs(10), async {
             while ctx.orchestrator.get_canonical_storage().get_tip().await?
                 != Some(block.header.block_tip())
+                || !consensus
+                    .get_pending_endorsements_for_block(core_tip)
+                    .await?
+                    .is_empty()
             {
                 sleep(Duration::from_millis(20)).await;
             }
@@ -71,12 +77,6 @@ async fn public_handle_and_indexer_share_state_across_arrivals_restart_and_bitco
         assert_eq!(counted.len(), 1);
         assert_eq!(counted[0].original.btc_block, confirmation);
         assert_eq!(counted[0].effective_minting_power, 200);
-        assert!(
-            consensus
-                .get_pending_endorsements_for_block(core_tip)
-                .await?
-                .is_empty()
-        );
         handle
             .on_flame_block_arrival(block.header.block_tip())
             .await?;
