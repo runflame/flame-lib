@@ -1,0 +1,100 @@
+name: Mint bots image
+
+# Builds demos/mint-bots/Dockerfile, starts it and checks that it serves its
+# control page, then, from main only, pushes it to GHCR as
+# ghcr.io/runflame/mint-bots:<short commit> and moves `:main` to it. A pull
+# request into main runs the same build and check and pushes nothing.
+#
+# The paths are what the image is built from: the bots and flamekd.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'demos/mint-bots/**'
+      - 'flamekd/**'
+      - '.github/workflows/mint-bots-image.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'demos/mint-bots/**'
+      - 'flamekd/**'
+      - '.github/workflows/mint-bots-image.yml'
+  workflow_dispatch:
+
+# A newer push supersedes a build still running; its commit gets no image.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/runflame/mint-bots
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Tag
+      id: tag
+      run: echo "tag=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+    - name: Build
+      env:
+        TAG: ${{ steps.tag.outputs.tag }}
+        REVISION: ${{ github.sha }}
+      run: |
+        docker build -f demos/mint-bots/Dockerfile \
+          --label "org.opencontainers.image.revision=$REVISION" \
+          --build-arg "MINT_REVISION=$REVISION" \
+          -t "$IMAGE:$TAG" .
+
+    # Starts the image with a throwaway phrase and no playground to reach,
+    # checks the page and the revision it reports, then stops it and
+    # expects a clean exit.
+    - name: Smoke test
+      env:
+        TAG: ${{ steps.tag.outputs.tag }}
+        REVISION: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        key="$(mktemp -d)"
+        docker run --rm "$IMAGE:$TAG" --new-key > "$key/phrase"
+        chmod -R a+rX "$key"
+        docker run -d --name bots -p 127.0.0.1:3100:3100 \
+          -v "$key/phrase:/run/secrets/phrase:ro" \
+          -e MINT_BOTS_MNEMONIC_FILE=/run/secrets/phrase \
+          "$IMAGE:$TAG"
+        trap 'docker logs bots' EXIT
+        for _ in $(seq 30); do
+          curl -sf -o /dev/null http://127.0.0.1:3100/api/status && break
+          sleep 1
+        done
+        curl -sf -o /dev/null http://127.0.0.1:3100/
+        curl -sf -o /dev/null http://127.0.0.1:3100/app.js
+        served="$(curl -sf http://127.0.0.1:3100/api/status | jq -r .status.revision)"
+        [ "$served" = "$REVISION" ] || { echo "revision is '$served', expected $REVISION"; exit 1; }
+        docker stop bots
+        [ "$(docker inspect -f '{{ .State.ExitCode }}' bots)" = 0 ] || { echo "did not shut down cleanly"; exit 1; }
+
+    # Only from main: a pull request or a manual run elsewhere deploys nothing.
+    - name: Push
+      if: github.ref == 'refs/heads/main'
+      env:
+        TAG: ${{ steps.tag.outputs.tag }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -euo pipefail
+        echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+        docker push "$IMAGE:$TAG"
+        docker tag "$IMAGE:$TAG" "$IMAGE:main"
+        docker push "$IMAGE:main"
+        docker logout ghcr.io
+        echo "Pushed \`$IMAGE:$TAG\` and moved \`:main\` to it." >> "$GITHUB_STEP_SUMMARY"
