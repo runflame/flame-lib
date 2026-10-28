@@ -63,7 +63,7 @@
     fit();
     showOnly(idx);
     syncChrome();
-    if (inDemo()) { if (location.hash !== '#demo') { history.pushState(null, '', '#demo'); demoPushed = true; } }
+    if (inDemo()) { if (location.hash !== '#demo') { history.pushState(null, '', '#demo'); demoPushed = true; } try { localStorage.setItem('flame.seenDemo', '1'); } catch (e) {} }
     else { demoPushed = false; history.replaceState(null, '', idx ? '#' + idx : location.pathname + location.search); scrollTo(0, 0); }
     fadeTo(0, FADE_IN, 'ease-out');
   }
@@ -161,12 +161,15 @@
 
   (function wait() {
     const s = document.querySelectorAll('[data-screen-label]');
-    if (s.length < 10) return requestAnimationFrame(wait);
+    if (s.length < 11) return requestAnimationFrame(wait);
     slides = [...s];
     demoIdx = slides.findIndex(el => /^M /.test(el.dataset.screenLabel || ''));
     tutLast = (demoIdx >= 0 ? slides.filter((_, i) => i !== demoIdx) : slides).length - 1;
     buildChrome();
     idx = fromHash();
+    // Whoever has opened the playground once skips the tutorial on later visits; "Repeat tutorial" still brings it back.
+    let seen = false; try { seen = localStorage.getItem('flame.seenDemo') === '1'; } catch (e) {}
+    if (!location.hash && seen && demoIdx >= 0) { idx = demoIdx; history.replaceState(null, '', '#demo'); }
     if (idx !== demoIdx) idx = Math.max(0, Math.min(tutLast, idx));
     root.toggleAttribute('data-demo', inDemo());
     fit();
