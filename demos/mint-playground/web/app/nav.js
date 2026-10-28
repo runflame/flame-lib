@@ -161,7 +161,7 @@
 
   (function wait() {
     const s = document.querySelectorAll('[data-screen-label]');
-    if (s.length < 10) return requestAnimationFrame(wait);
+    if (s.length < 11) return requestAnimationFrame(wait);
     slides = [...s];
     demoIdx = slides.findIndex(el => /^M /.test(el.dataset.screenLabel || ''));
     tutLast = (demoIdx >= 0 ? slides.filter((_, i) => i !== demoIdx) : slides).length - 1;
