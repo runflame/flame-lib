@@ -21,9 +21,10 @@
     </label>
   </header>
 
-  <main>
-    <section class="bot" data-bot="clock">
-      <h2>Clock bot <span class="state"></span></h2>
+  <!-- One section per bot, from its strategy's template, in roster order. -->
+  <template id="strategy-clock">
+    <section class="bot">
+      <h2><span class="name"></span> <span class="role">clock</span> <span class="state"></span></h2>
       <p class="about">Mints a minimal Independent contribution whenever no one else is minting, so no block's reward is lost.</p>
       <dl class="stats"></dl>
       <div class="charts"></div>
@@ -37,9 +38,11 @@
         <output></output>
       </form>
     </section>
+  </template>
 
-    <section class="bot" data-bot="minimax">
-      <h2>Minimax bot <span class="state"></span></h2>
+  <template id="strategy-minimax">
+    <section class="bot">
+      <h2><span class="name"></span> <span class="role">minimax</span> <span class="state"></span></h2>
       <p class="about">A service that spends its budget evenly over its window, putting each hour's share into the cheapest window it can see. Its commission applies to every delegation to it, past ones included.</p>
       <dl class="stats"></dl>
       <div class="charts"></div>
@@ -55,13 +58,36 @@
         <output></output>
       </form>
     </section>
+  </template>
+
+  <template id="strategy-farmer">
+    <section class="bot">
+      <h2><span class="name"></span> <span class="role">commission farmer</span> <span class="state"></span></h2>
+      <p class="about">A service at a low commission, living on what its delegators pay it. It opens once enough players mint Independent below its break-even burn, so they would gain by delegating, and then keeps a minimal Service contribution running; it closes when they have been gone a while, leaving empty blocks to the clock bot. Open or closed, it covers every delegation to it in advance, to the delegation's end. Its commission applies to every delegation to it, past ones included.</p>
+      <dl class="stats"></dl>
+      <div class="charts"></div>
+      <form>
+        <label class="toggle"><input type="checkbox" name="enabled"> Enabled</label>
+        <label>Name <input name="name" required maxlength="64"></label>
+        <label>Commission, % <input name="commission" type="number" min="0" max="100" step="0.01" required></label>
+        <label>Burn, sat per block <input name="burn_per_block" type="number" min="1" step="1" required></label>
+        <label>Duration, blocks <input name="duration" type="number" min="144" max="86400" step="1" required></label>
+        <label>Lookahead, blocks <input name="lookahead_blocks" type="number" min="10" max="10000" step="1" required></label>
+        <label>Opens for players <input name="min_players" type="number" min="1" max="1000" step="1" required></label>
+        <label>Stays open, blocks <input name="linger_blocks" type="number" min="0" max="100000" step="1" required></label>
+        <button>Save</button>
+        <output></output>
+      </form>
+    </section>
+  </template>
+
+  <main>
+    <div id="bots"></div>
 
     <section id="journal">
       <h2>Journal</h2>
       <select id="filter" aria-label="Show">
         <option value="">Everything</option>
-        <option value="clock">Clock bot</option>
-        <option value="minimax">Minimax bot</option>
         <option value="errors">Errors and refusals</option>
       </select>
       <div class="scroll">

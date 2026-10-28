@@ -37,7 +37,25 @@ function stat(list, label, value, bad) {
   list.append(item);
 }
 
+// The bots' sections, from their strategies' templates, the first time
+// their status arrives.
+function build(bots) {
+  if ($("#bots").children.length) return;
+  for (const bot of bots) {
+    const section = $(`#strategy-${bot.strategy}`).content.firstElementChild.cloneNode(true);
+    section.dataset.bot = bot.bot;
+    section.dataset.strategy = bot.strategy;
+    $("form", section).addEventListener("submit", save);
+    $("#bots").append(section);
+    $("#filter").insertBefore(element("option", bot.bot), $('#filter [value="errors"]')).value = bot.bot;
+  }
+}
+
+const block = (height) => height == null ? "—" : `block ${height.toLocaleString("en-US")}`;
+const percent = (bps) => `${(bps / 100).toLocaleString("en-US", { maximumFractionDigits: 2 })}%`;
+
 function renderStatus({ config: current, status }) {
+  build(status.bots);
   const summary = [
     status.height == null ? "No block seen yet" : `Block ${status.height.toLocaleString("en-US")}`,
     `ledger ${status.epoch}`,
@@ -52,6 +70,7 @@ function renderStatus({ config: current, status }) {
   for (const bot of status.bots) {
     const section = $(`[data-bot="${bot.bot}"]`);
     const settings = current[bot.bot];
+    $(".name", section).textContent = settings.name;
     const state = $(".state", section);
     state.textContent = settings.enabled ? "running" : "paused";
     state.className = `state ${settings.enabled ? "on" : "off"}`;
@@ -61,7 +80,7 @@ function renderStatus({ config: current, status }) {
     const sample = bot.sample;
     stat(list, "Identity", bot.user_id == null ? "not registered" : `${settings.name} · user #${bot.user_id}`);
     stat(list, "Address", bot.address);
-    if (bot.bot === "minimax") {
+    if (bot.strategy === "minimax") {
       stat(list, "Budget / committed", sample ? `${sats(sample.budget_sats)} / ${sats(sample.committed_sats)}` : "—");
       stat(list, "Pace allows by now", sample ? sats(sample.allowance_sats) : "—");
       stat(list, "Next chunk", bot.pace ? sats(bot.pace.chunk) : "—");
@@ -69,6 +88,20 @@ function renderStatus({ config: current, status }) {
         ? `${bot.best.price.toFixed(1)} sat/FLM: ${bot.best.duration} blocks in ${bot.best.delay_blocks}`
         : "—");
       stat(list, "Going rate", bot.reference_price == null ? "—" : `${bot.reference_price.toFixed(1)} sat/FLM`);
+    } else if (bot.strategy === "farmer") {
+      const ahead = (until) => until == null || status.height == null ? "—"
+        : `${block(until)}, ${(until - status.height - 1).toLocaleString("en-US")} ahead`;
+      const players = `${bot.prospects ?? "—"} of ${settings.min_players} players`;
+      stat(list, "Open for business", !settings.enabled ? "no: paused"
+        : bot.open ? `yes: ${players}${bot.prospects >= settings.min_players ? "" : `, seen at ${block(bot.crowd_seen_at)}`}`
+        : `no: ${players}`);
+      stat(list, "Committed", sample ? sats(sample.committed_sats) : "—");
+      stat(list, "Serving until", ahead(bot.served_until), bot.open && bot.served_until === status.height + 1);
+      stat(list, "Delegations until", ahead(bot.delegated_until),
+        bot.delegated_until != null && bot.served_until != null && bot.delegated_until > bot.served_until);
+      stat(list, "Commission", percent(settings.commission_bps));
+      stat(list, "Pays to delegate under", bot.break_even_burn == null ? "any burn" : `${bot.break_even_burn.toLocaleString("en-US")} sat/block`);
+      stat(list, "Cheapest rival", bot.rival ? `${bot.rival.name} #${bot.rival.user_id} at ${percent(bot.rival.commission_bps)}` : "none active");
     } else {
       stat(list, "Committed", sample ? sats(sample.committed_sats) : "—");
     }
@@ -178,7 +211,8 @@ function chart(title, times, series) {
 async function refreshCharts() {
   const range = Number($("#range").value);
   const since = range ? Date.now() - range : 0;
-  for (const bot of ["clock", "minimax"]) {
+  for (const section of document.querySelectorAll("[data-bot]")) {
+    const { bot, strategy } = section.dataset;
     let samples;
     try {
       samples = await api(`/api/samples?bot=${bot}&since=${since}`);
@@ -190,7 +224,12 @@ async function refreshCharts() {
     const satsOf = (value) => sats(value);
     const flmOf = (value) => flm(value);
     const perBlock = (value) => `${Math.round(value).toLocaleString("en-US")} sat/block`;
-    const charts = bot === "minimax"
+    const burns = [
+      { label: "own", values: pick("own_burn"), format: perBlock },
+      { label: "delegated to it", values: pick("delegated_burn"), format: perBlock },
+      { label: "everyone eligible", values: pick("network_burn"), format: perBlock },
+    ];
+    const charts = strategy === "minimax"
       ? [
         chart("Spending", times, [
           { label: "committed", values: pick("committed_sats"), format: satsOf },
@@ -198,11 +237,13 @@ async function refreshCharts() {
           { label: "budget", values: pick("budget_sats"), format: satsOf },
         ]),
         chart("Earned", times, [{ label: "earned", values: pick("reward_sparks"), format: flmOf }]),
-        chart("Burn per block", times, [
-          { label: "own", values: pick("own_burn"), format: perBlock },
-          { label: "delegated to it", values: pick("delegated_burn"), format: perBlock },
-          { label: "everyone eligible", values: pick("network_burn"), format: perBlock },
-        ]),
+        chart("Burn per block", times, burns),
+      ]
+      : strategy === "farmer"
+      ? [
+        chart("Committed", times, [{ label: "committed", values: pick("committed_sats"), format: satsOf }]),
+        chart("Earned, mostly commissions", times, [{ label: "earned", values: pick("reward_sparks"), format: flmOf }]),
+        chart("Burn per block", times, burns),
       ]
       : [
         chart("Committed", times, [{ label: "committed", values: pick("committed_sats"), format: satsOf }]),
@@ -212,7 +253,7 @@ async function refreshCharts() {
           { label: "everyone eligible", values: pick("network_burn"), format: perBlock },
         ]),
       ];
-    $(`[data-bot="${bot}"] .charts`).replaceChildren(...charts);
+    $(".charts", section).replaceChildren(...charts);
   }
 }
 
@@ -256,7 +297,6 @@ async function refreshStatus() {
   }
 }
 
-for (const form of document.querySelectorAll("form")) form.addEventListener("submit", save);
 $("#range").addEventListener("change", refreshCharts);
 $("#filter").addEventListener("change", () => loadEvents().catch(() => {}));
 $("#older").addEventListener("click", () => loadEvents(oldest).catch(() => {}));

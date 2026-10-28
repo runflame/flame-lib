@@ -1,6 +1,7 @@
 //! The bots' receiving addresses: `m/35263'/1'/0'/0/n` of one BIP-39
-//! phrase, the receiving addresses `flamewallet restore` gives on testnet,
-//! so whoever holds the phrase can spend what the playground pays the bots.
+//! phrase for the roster's `n`th bot, the receiving addresses
+//! `flamewallet restore` gives on testnet, so whoever holds the phrase can
+//! spend what the playground pays the bots.
 
 use std::io::Read;
 
@@ -10,25 +11,26 @@ use flamekd::{
 };
 use zeroize::Zeroizing;
 
-/// The clock bot's address, then the minimax bot's.
-pub fn addresses(phrase: &str) -> Result<[String; 2], String> {
+/// The first `count` receiving addresses: one per bot, in roster order.
+pub fn addresses(phrase: &str, count: u32) -> Result<Vec<String>, String> {
     let mnemonic = Mnemonic::parse(phrase.trim())
         // The parse error can name a word of the phrase: never print it.
         .map_err(|_| "the bots' phrase is not a valid BIP-39 mnemonic".to_string())?;
-    let derive = || -> Result<[String; 2], flamekd::Error> {
+    let derive = || -> Result<Vec<String>, flamekd::Error> {
         let receiving = SpendKey::from_mnemonic(&mnemonic, "")?
             .derive_child(HARDENED | PURPOSE)?
             .derive_child(HARDENED | TESTNET)?
             .derive_child(HARDENED)?
             .to_recv()
             .derive_child(RECEIVING)?;
-        let address = |n| -> Result<String, flamekd::Error> {
-            Ok(receiving
-                .derive_child(n)?
-                .to_address()
-                .to_bech32(Network::Testnet))
-        };
-        Ok([address(0)?, address(1)?])
+        (0..count)
+            .map(|n| {
+                Ok(receiving
+                    .derive_child(n)?
+                    .to_address()
+                    .to_bech32(Network::Testnet))
+            })
+            .collect()
     };
     derive().map_err(|error| format!("the bots' addresses: {error}"))
 }
@@ -50,7 +52,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn addresses_are_the_wallets_first_two_receiving_addresses() {
+    fn addresses_are_the_wallets_receiving_addresses_in_roster_order() {
         let mut out = Vec::new();
         new_key(&mut out).unwrap();
         let phrase = String::from_utf8(out).unwrap();
@@ -59,14 +61,17 @@ mod tests {
 
         let seed = Mnemonic::parse(phrase.trim()).unwrap().to_seed("");
         let account = flamepayments::SpendAccount::from_seed(&seed, Network::Testnet, 0).unwrap();
-        let wallet = [0, 1].map(|n| {
-            account
-                .address_at(RECEIVING, n)
-                .unwrap()
-                .to_bech32(Network::Testnet)
-        });
-        assert_eq!(addresses(&phrase).unwrap(), wallet);
+        let wallet: Vec<String> = (0..3)
+            .map(|n| {
+                account
+                    .address_at(RECEIVING, n)
+                    .unwrap()
+                    .to_bech32(Network::Testnet)
+            })
+            .collect();
+        assert_eq!(addresses(&phrase, 3).unwrap(), wallet);
         assert_ne!(wallet[0], wallet[1]);
-        assert!(addresses("not a phrase").is_err());
+        assert_ne!(wallet[1], wallet[2]);
+        assert!(addresses("not a phrase", 3).is_err());
     }
 }

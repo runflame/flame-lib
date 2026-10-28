@@ -13,15 +13,13 @@ use serde_json::json;
 use tokio::sync::RwLock;
 
 use crate::{
-    config::Config,
+    config::{self, Config, Kind, Settings},
     journal::{Sample, Submission},
     now_ms,
-    playground::{self, ContributionRequest, MinterRequest, Playground},
+    playground::{self, ContributionRequest, MinterRequest, Playground, Service},
     strategy::{self, Live, Pace, Plan, Window},
     Store,
 };
-
-pub const BOTS: [&str; 2] = ["clock", "minimax"];
 
 const POLL: Duration = Duration::from_secs(5);
 const SAMPLE_EVERY_MS: i64 = 60_000;
@@ -55,6 +53,7 @@ pub struct Status {
 #[derive(Clone, Debug, Serialize)]
 pub struct BotStatus {
     pub bot: &'static str,
+    pub strategy: Kind,
     pub address: String,
     pub user_id: Option<i64>,
     pub pending: Option<Submission>,
@@ -64,6 +63,18 @@ pub struct BotStatus {
     pub pace: Option<Pace>,
     pub reference_price: Option<f64>,
     pub best: Option<Window>,
+    /// A service's own window and its delegators', from the next block.
+    pub served_until: Option<i64>,
+    pub delegated_until: Option<i64>,
+    /// The cheapest other active service, and the burn under which
+    /// delegating to this one beats minting alone.
+    pub rival: Option<Service>,
+    pub break_even_burn: Option<i64>,
+    /// A farmer's market: players who would gain by delegating to it now,
+    /// whether it is open for them, and the last block it saw enough.
+    pub prospects: Option<i64>,
+    pub open: bool,
+    pub crowd_seen_at: Option<i64>,
 }
 
 /// A bot's sample of one poll and what it reports now.
@@ -71,6 +82,7 @@ type Observed = (Sample, Live);
 
 struct Bot {
     name: &'static str,
+    kind: Kind,
     address: String,
     user_id: Option<i64>,
     /// The name and commission last registered in this ledger.
@@ -80,6 +92,13 @@ struct Bot {
     pace: Option<Pace>,
     reference_price: Option<f64>,
     best: Option<Window>,
+    served_until: Option<i64>,
+    delegated_until: Option<i64>,
+    rival: Option<Service>,
+    break_even_burn: Option<i64>,
+    prospects: Option<i64>,
+    open: bool,
+    crowd_seen_at: Option<i64>,
 }
 
 pub struct Runner {
@@ -161,7 +180,7 @@ impl Runner {
     pub async fn new(
         store: Store,
         playground: Playground,
-        addresses: [String; 2],
+        addresses: Vec<String>,
         config: Arc<RwLock<Config>>,
         status: Arc<Mutex<Status>>,
     ) -> Result<Self, String> {
@@ -170,16 +189,19 @@ impl Runner {
                 Ok((
                     journal.setting::<i64>("epoch")?.unwrap_or(0),
                     journal.setting::<i64>("last_height")?,
-                    [journal.pending(BOTS[0])?, journal.pending(BOTS[1])?],
+                    config::ids()
+                        .map(|id| journal.pending(id))
+                        .collect::<Result<Vec<_>, _>>()?,
                 ))
             })
             .await?;
-        let bots = BOTS
+        let bots = config::ROSTER
             .into_iter()
             .zip(addresses)
             .zip(pending)
-            .map(|((name, address), pending)| Bot {
+            .map(|(((name, _, kind), address), pending)| Bot {
                 name,
+                kind,
                 address,
                 user_id: None,
                 profile: None,
@@ -188,6 +210,13 @@ impl Runner {
                 pace: None,
                 reference_price: None,
                 best: None,
+                served_until: None,
+                delegated_until: None,
+                rival: None,
+                break_even_burn: None,
+                prospects: None,
+                open: false,
+                crowd_seen_at: None,
             })
             .collect();
         Ok(Self {
@@ -289,6 +318,10 @@ impl Runner {
                 bot.user_id = None;
                 bot.profile = None;
                 bot.reference_price = None;
+                bot.served_until = None;
+                bot.delegated_until = None;
+                bot.prospects = None;
+                bot.crowd_seen_at = None;
                 bot.pending.take().map(|pending| pending.request_id)
             })
             .collect();
@@ -318,20 +351,16 @@ impl Runner {
     async fn step(&mut self, index: usize, state: &playground::State, config: &Config, now: i64) {
         let (store, playground, epoch) = (&self.store, &self.playground, self.epoch);
         let height = Some(state.height);
+        let ours: Vec<i64> = self.bots.iter().filter_map(|bot| bot.user_id).collect();
         let bot = &mut self.bots[index];
-        let (name, commission, enabled) = match bot.name {
-            "clock" => (&config.clock.name, None, config.clock.enabled),
-            _ => {
-                let minimax = &config.minimax;
-                (
-                    &minimax.name,
-                    minimax.enabled.then_some(minimax.commission_bps),
-                    minimax.enabled,
-                )
-            }
-        };
+        let settings = config.bot(bot.name);
+        let (name, enabled) = (settings.name(), settings.enabled());
+        let commission = settings.commission_bps().filter(|_| enabled);
+        bot.break_even_burn = settings
+            .commission_bps()
+            .and_then(strategy::break_even_burn);
 
-        let profile = (name.clone(), commission);
+        let profile = (name.to_string(), commission);
         if bot.user_id.is_none() || bot.profile.as_ref() != Some(&profile) {
             let request = MinterRequest {
                 address: &bot.address,
@@ -370,20 +399,86 @@ impl Runner {
             }
         }
 
+        if let Settings::Farmer(farmer) = settings {
+            let me = bot.user_id.unwrap_or_default();
+            let next = state.height + 1;
+            bot.served_until = Some(strategy::served_until(&state.chart_contributions, me, next));
+            bot.delegated_until = Some(strategy::delegated_until(
+                &state.chart_contributions,
+                me,
+                next,
+            ));
+            bot.rival = strategy::rival(&state.services, bot.user_id).cloned();
+            let prospects =
+                strategy::prospects(&state.chart_contributions, &ours, next, bot.break_even_burn);
+            bot.prospects = Some(prospects);
+            if prospects >= farmer.min_players {
+                bot.crowd_seen_at = Some(state.height);
+            }
+            let open = enabled
+                && bot
+                    .crowd_seen_at
+                    .is_some_and(|seen| state.height - seen <= farmer.linger_blocks);
+            if open != bot.open {
+                bot.open = open;
+                let under = bot
+                    .break_even_burn
+                    .map(|limit| format!(" under {limit} sat a block"))
+                    .unwrap_or_default();
+                let (kind, message) = if open {
+                    (
+                        "open",
+                        format!("Open: {prospects} player(s) mint Independent{under}, and would gain by delegating."),
+                    )
+                } else if enabled {
+                    (
+                        "closed",
+                        format!(
+                            "Closed: fewer than {} such player(s) for {} blocks. Delegations to it stay covered.",
+                            farmer.min_players, farmer.linger_blocks
+                        ),
+                    )
+                } else {
+                    (
+                        "closed",
+                        "Closed: paused. Delegations covered so far stay covered; later ones are not.".into(),
+                    )
+                };
+                log(
+                    store,
+                    Some(bot.name),
+                    kind,
+                    height,
+                    message,
+                    Some(json!({ "prospects": prospects, "min_players": farmer.min_players })),
+                )
+                .await;
+            }
+        }
+
         if bot.pending.is_none() && enabled {
-            let plan = match bot.name {
-                "clock" => strategy::clock_in(
+            let plan = match settings {
+                Settings::Clock(clock) => strategy::clock_in(
                     &state.chart_contributions,
                     state.height,
-                    config.clock.burn_per_block,
-                    config.clock.duration,
-                    config.clock.lookahead_blocks,
+                    clock.burn_per_block,
+                    clock.duration,
+                    clock.lookahead_blocks,
                 ),
-                _ => {
-                    let minimax = &config.minimax;
+                Settings::Farmer(farmer) => strategy::farm(
+                    &state.chart_contributions,
+                    bot.user_id.unwrap_or_default(),
+                    state.height,
+                    farmer.burn_per_block,
+                    farmer.duration,
+                    farmer.lookahead_blocks,
+                    bot.open,
+                ),
+                Settings::Minimax(minimax) => {
                     let since = minimax.starts_at.saturating_mul(1_000);
+                    let id = bot.name;
                     let committed = match store
-                        .call(move |journal| journal.committed("minimax", epoch, since))
+                        .call(move |journal| journal.committed(id, epoch, since))
                         .await
                     {
                         Ok(committed) => committed,
@@ -446,12 +541,7 @@ impl Runner {
                     budget_sats: plan.budget_sats,
                     duration: plan.duration,
                     delay_blocks: plan.delay_blocks,
-                    mode: if bot.name == "clock" {
-                        "independent"
-                    } else {
-                        "service"
-                    }
-                    .into(),
+                    mode: settings.mode().into(),
                     reason: plan.reason,
                 };
                 let record = submission.clone();
@@ -546,12 +636,11 @@ impl Runner {
         now: i64,
     ) -> Option<Observed> {
         let user_id = bot.user_id?;
-        let minimax = bot.name == "minimax";
-        let since = if minimax {
-            config.minimax.starts_at.saturating_mul(1_000)
-        } else {
-            0
+        let minimax = match config.bot(bot.name) {
+            Settings::Minimax(minimax) => Some(minimax),
+            _ => None,
         };
+        let since = minimax.map_or(0, |minimax| minimax.starts_at.saturating_mul(1_000));
         let (name, epoch) = (bot.name, self.epoch);
         let committed_sats = self
             .store
@@ -568,13 +657,13 @@ impl Runner {
             bot: bot.name.into(),
             height: state.height,
             committed_sats,
-            budget_sats: minimax.then_some(config.minimax.budget_sats),
-            allowance_sats: minimax.then(|| {
+            budget_sats: minimax.map(|minimax| minimax.budget_sats),
+            allowance_sats: minimax.map(|minimax| {
                 strategy::pace(
-                    config.minimax.budget_sats,
+                    minimax.budget_sats,
                     committed_sats,
-                    config.minimax.starts_at,
-                    config.minimax.ends_at,
+                    minimax.starts_at,
+                    minimax.ends_at,
                     now / 1_000,
                 )
                 .allowance
@@ -616,6 +705,7 @@ impl Runner {
             .zip(samples.into_iter().chain(std::iter::repeat(None)))
             .map(|(bot, observed)| BotStatus {
                 bot: bot.name,
+                strategy: bot.kind,
                 address: bot.address.clone(),
                 user_id: bot.user_id,
                 pending: bot.pending.clone(),
@@ -625,6 +715,13 @@ impl Runner {
                 pace: bot.pace,
                 reference_price: bot.reference_price,
                 best: bot.best.clone(),
+                served_until: bot.served_until,
+                delegated_until: bot.delegated_until,
+                rival: bot.rival.clone(),
+                break_even_burn: bot.break_even_burn,
+                prospects: bot.prospects,
+                open: bot.open,
+                crowd_seen_at: bot.crowd_seen_at,
             })
             .collect();
     }

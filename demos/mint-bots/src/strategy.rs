@@ -7,7 +7,7 @@
 //! delegation burns its whole budget and is eligible only while its service
 //! has an active Service contribution.
 
-use crate::playground::Schedule;
+use crate::playground::{Schedule, Service};
 
 pub const FEE_PER_BLOCK: i64 = 1_000;
 pub const MIN_DURATION: i64 = 144;
@@ -16,10 +16,13 @@ const BLOCK_REWARD_FLM: f64 = 50.0;
 /// The smallest contribution that pays its fees and burns a sat a block.
 pub const MIN_BUDGET: i64 = MIN_DURATION * (FEE_PER_BLOCK + 1);
 
-/// The clock bot starts this many blocks before the gap it sees: the
-/// playground counts a delay from its height when it accepts the
+/// The clock and farmer bots start this many blocks before the gap they
+/// see: the playground counts a delay from its height when it accepts the
 /// submission, a block or two after the snapshot the delay came from.
-const CLOCK_SLACK: i64 = 3;
+const SLACK: i64 = 3;
+
+/// The longest contribution the farmer bot makes at once: a day of blocks.
+pub const MAX_COVER: i64 = 86_400;
 
 /// Durations the minimax bot weighs, up to the UI's 31 days.
 const DURATIONS: [i64; 6] = [144, 288, 576, 1_152, 2_304, 4_464];
@@ -101,9 +104,112 @@ pub fn clock_in(
     Some(Plan {
         budget_sats: (burn_per_block + FEE_PER_BLOCK) * duration,
         duration,
-        delay_blocks: (idle - next - CLOCK_SLACK).max(0),
+        delay_blocks: (idle - next - SLACK).max(0),
         reason: serde_json::json!({ "idle_from_block": idle }),
     })
+}
+
+/// The first block at or after `from` where `me` has no Service
+/// contribution: where its service, and every delegation to it, stops
+/// earning.
+pub fn served_until(schedules: &[Schedule], me: i64, from: i64) -> i64 {
+    let mine: Vec<Schedule> = schedules
+        .iter()
+        .filter(|schedule| schedule.user_id == me && schedule.mode == "service")
+        .cloned()
+        .collect();
+    first_idle_block(&mine, from)
+}
+
+/// The end of the last delegation to `me`, or `from` if none outlasts it.
+pub fn delegated_until(schedules: &[Schedule], me: i64, from: i64) -> i64 {
+    schedules
+        .iter()
+        .filter(|schedule| delegating(schedule) && schedule.service_user_id == Some(me))
+        .map(end)
+        .fold(from, i64::max)
+}
+
+/// Players the farmer bot's offer is for at `block`: minters other than the
+/// bots `ours` minting Independent there, burning less in all than
+/// `break_even`, so they would earn more delegating to it. `None` is no
+/// limit: a free service suits everyone.
+pub fn prospects(schedules: &[Schedule], ours: &[i64], block: i64, break_even: Option<i64>) -> i64 {
+    let mut burns: std::collections::HashMap<i64, i64> = Default::default();
+    for schedule in schedules {
+        if schedule.mode == "independent"
+            && active(schedule, block)
+            && !ours.contains(&schedule.user_id)
+        {
+            *burns.entry(schedule.user_id).or_default() += burn(schedule);
+        }
+    }
+    burns
+        .values()
+        .filter(|&&burn| break_even.is_none_or(|limit| burn < limit))
+        .count() as i64
+}
+
+/// A Service contribution for the farmer bot `me`. While `open`, it keeps
+/// serving: once its service ends within `lookahead` blocks of `height`, it
+/// adds the next contribution where the service ends. Open or not, a
+/// delegation to it that outlasts its service is covered at once, to its
+/// end, so a delegator never burns ineligibly while the bot runs, nor after
+/// it closes or is paused.
+pub fn farm(
+    schedules: &[Schedule],
+    me: i64,
+    height: i64,
+    burn_per_block: i64,
+    duration: i64,
+    lookahead: i64,
+    open: bool,
+) -> Option<Plan> {
+    let next = height + 1;
+    let served = served_until(schedules, me, next);
+    let promised = delegated_until(schedules, me, next);
+    let start = if promised > served && !open {
+        // Closed: only from where a delegation to it first needs it.
+        schedules
+            .iter()
+            .filter(|schedule| {
+                delegating(schedule)
+                    && schedule.service_user_id == Some(me)
+                    && end(schedule) > served
+            })
+            .map(|schedule| schedule.start_block.max(served))
+            .min()
+            .unwrap_or(served)
+    } else if promised > served || (open && served - next <= lookahead) {
+        served
+    } else {
+        return None;
+    };
+    let delay_blocks = (start - next - SLACK).max(0);
+    // From where it starts, slack included: ending a few blocks short would
+    // take a whole new contribution to cover them.
+    let duration = (promised - next - delay_blocks).clamp(duration, MAX_COVER.max(duration));
+    Some(Plan {
+        budget_sats: (burn_per_block + FEE_PER_BLOCK) * duration,
+        duration,
+        delay_blocks,
+        reason: serde_json::json!({ "open": open, "served_until_block": served, "delegated_until_block": promised }),
+    })
+}
+
+/// The cheapest rival: the lowest commission among other active services.
+pub fn rival<'a>(services: &'a [Service], me: Option<i64>) -> Option<&'a Service> {
+    services
+        .iter()
+        .filter(|service| service.active && Some(service.user_id) != me)
+        .min_by_key(|service| service.commission_bps)
+}
+
+/// The largest burn, in sat a block, for which delegating at `commission_bps`
+/// earns more FLM per sat than minting independently, which pays the
+/// 1,000-sat fee a block on top of the same burn: `1,000 × (1 − c) / c`.
+pub fn break_even_burn(commission_bps: i64) -> Option<i64> {
+    (commission_bps > 0).then(|| FEE_PER_BLOCK * (10_000 - commission_bps) / commission_bps)
 }
 
 /// Eligible burn per block, constant over `[start, end)`: other minters'
@@ -400,11 +506,122 @@ mod tests {
         // Idle from 155: 145 blocks away from 10, beyond a 30-block lookahead.
         assert_eq!(clock_in(&schedules, 10, 1, 144, 30), None);
         let plan = clock_in(&schedules, 130, 1, 144, 30).unwrap();
-        assert_eq!(plan.delay_blocks, 155 - 131 - CLOCK_SLACK);
+        assert_eq!(plan.delay_blocks, 155 - 131 - SLACK);
         assert_eq!(plan.budget_sats, 1_001 * 144);
         assert_eq!(plan.duration, 144);
         // Already idle: start now.
         assert_eq!(clock_in(&[], 10, 1, 144, 30).unwrap().delay_blocks, 0);
+    }
+
+    #[test]
+    fn farmer_extends_its_service_and_covers_every_delegation_to_it() {
+        // Nothing yet: serve from the next block.
+        let plan = farm(&[], 9, 10, 1, 1_440, 60, true).unwrap();
+        assert_eq!((plan.delay_blocks, plan.duration), (0, 1_440));
+        assert_eq!(plan.budget_sats, 1_001 * 1_440);
+
+        // Serving until 1,011: nothing to do until that end is near, then
+        // chain the next contribution onto it.
+        let serving = [schedule(9, 11, 1_000, 1, "service")];
+        assert_eq!(farm(&serving, 9, 10, 1, 1_440, 60, true), None);
+        let plan = farm(&serving, 9, 960, 1, 1_440, 60, true).unwrap();
+        assert_eq!(plan.delay_blocks, 1_011 - 961 - SLACK);
+        // Someone else's service or an independent contribution does not count.
+        let others = [
+            schedule(1, 0, 5_000, 1, "service"),
+            schedule(9, 0, 5_000, 1, "independent"),
+        ];
+        assert_eq!(
+            farm(&others, 9, 10, 1, 1_440, 60, true)
+                .unwrap()
+                .delay_blocks,
+            0
+        );
+
+        // A delegation to it running past its service: covered at once, to its end.
+        let delegated = [serving[0].clone(), delegation(3, 9, 500, 3_000, 5)];
+        let plan = farm(&delegated, 9, 10, 1, 1_440, 60, true).unwrap();
+        assert_eq!(plan.delay_blocks, 1_011 - 11 - SLACK);
+        // It starts a little early, and still ends where the delegation does.
+        assert_eq!(11 + plan.delay_blocks + plan.duration, 3_500);
+        let after = [
+            serving[0].clone(),
+            delegated[1].clone(),
+            schedule(9, 11 + plan.delay_blocks, plan.duration, 1, "service"),
+        ];
+        assert_eq!(farm(&after, 9, 10, 1, 1_440, 60, true), None);
+        // Delegations to others are not its promise.
+        let elsewhere = [serving[0].clone(), delegation(3, 2, 500, 3_000, 5)];
+        assert_eq!(farm(&elsewhere, 9, 10, 1, 1_440, 60, true), None);
+        // A very long one is covered a day at a time.
+        let long = [delegation(3, 9, 0, 1_000_000, 5)];
+        assert_eq!(
+            farm(&long, 9, 10, 1, 1_440, 60, true).unwrap().duration,
+            MAX_COVER
+        );
+    }
+
+    #[test]
+    fn closed_farmer_spends_nothing_but_still_covers_delegations_to_it() {
+        let farm_closed =
+            |schedules: &[Schedule], height| farm(schedules, 9, height, 1, 1_440, 60, false);
+        // No crowd, no service: silent.
+        assert_eq!(farm_closed(&[], 10), None);
+        let serving = [schedule(9, 11, 1_000, 1, "service")];
+        assert_eq!(farm_closed(&serving, 960), None);
+        // A delegation from block 2,000 to 2,500: covered just for it, now.
+        let delegated = [delegation(3, 9, 2_000, 500, 5)];
+        let plan = farm_closed(&delegated, 10).unwrap();
+        assert_eq!(plan.delay_blocks, 2_000 - 11 - SLACK);
+        assert_eq!(plan.duration, 1_440);
+        // Already running into it: from where its service ends.
+        let partly = [serving[0].clone(), delegation(3, 9, 500, 3_000, 5)];
+        let plan = farm_closed(&partly, 10).unwrap();
+        assert_eq!(plan.delay_blocks, 1_011 - 11 - SLACK);
+        assert_eq!(11 + plan.delay_blocks + plan.duration, 3_500);
+    }
+
+    #[test]
+    fn prospects_are_other_small_independent_minters() {
+        let schedules = [
+            schedule(1, 0, 200, 50_000, "independent"),
+            // Two contributions of one player count together.
+            schedule(2, 0, 200, 60_000, "independent"),
+            schedule(2, 0, 200, 60_000, "independent"),
+            schedule(3, 0, 200, 10, "service"),
+            delegation(4, 3, 0, 200, 10),
+            // Ours, and someone not minting yet.
+            schedule(7, 0, 200, 1, "independent"),
+            schedule(5, 150, 200, 10, "independent"),
+        ];
+        assert_eq!(prospects(&schedules, &[7], 100, Some(99_000)), 1);
+        assert_eq!(prospects(&schedules, &[7], 100, None), 2);
+        assert_eq!(prospects(&schedules, &[], 100, Some(99_000)), 2);
+        assert_eq!(prospects(&schedules, &[7], 160, Some(99_000)), 2);
+        assert_eq!(prospects(&schedules, &[7], 300, Some(99_000)), 1);
+    }
+
+    #[test]
+    fn rival_and_break_even() {
+        let service = |user_id, commission_bps, active| Service {
+            user_id,
+            name: String::new(),
+            commission_bps,
+            active,
+        };
+        let services = [
+            service(9, 50, true),
+            service(2, 100, false),
+            service(3, 300, true),
+            service(4, 200, true),
+        ];
+        assert_eq!(rival(&services, Some(9)).unwrap().user_id, 4);
+        assert_eq!(rival(&services, None).unwrap().user_id, 9);
+        assert!(rival(&services[..2], Some(9)).is_none());
+        // 1%: delegating pays for anyone burning under 99,000 sat a block.
+        assert_eq!(break_even_burn(100), Some(99_000));
+        assert_eq!(break_even_burn(10_000), Some(0));
+        assert_eq!(break_even_burn(0), None);
     }
 
     #[test]

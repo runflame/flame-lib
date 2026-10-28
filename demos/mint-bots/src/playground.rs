@@ -47,6 +47,18 @@ pub struct State {
     #[serde(default)]
     pub chart_contributions: Vec<Schedule>,
     pub minters: Vec<MinterSummary>,
+    #[serde(default)]
+    pub services: Vec<Service>,
+}
+
+/// A service offer: the identity's current commission, and whether it has
+/// a Service contribution running.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Service {
+    pub user_id: i64,
+    pub name: String,
+    pub commission_bps: i64,
+    pub active: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]

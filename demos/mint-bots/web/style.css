@@ -46,7 +46,8 @@ h2 { font-size: 16px; margin: 0 0 4px; }
 #summary.bad { color: var(--bad); }
 .range { color: var(--muted); }
 
-main { display: grid; gap: 16px; padding-top: 0; }
+main, #bots { display: grid; gap: 16px; }
+main { padding-top: 0; }
 
 section {
   background: var(--panel);
@@ -57,6 +58,7 @@ section {
 }
 
 .about { color: var(--muted); margin: 0 0 12px; }
+.role { font-weight: normal; font-size: 13px; color: var(--muted); }
 .state { font-weight: normal; font-size: 13px; margin-left: 8px; }
 .state.on { color: var(--good); }
 .state.off { color: var(--muted); }

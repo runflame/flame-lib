@@ -173,7 +173,7 @@ async fn samples(
     State(app): State<App>,
     Query(query): Query<SamplesQuery>,
 ) -> Result<Json<Vec<journal::Sample>>, ApiError> {
-    if !bots::BOTS.contains(&query.bot.as_str()) {
+    if !config::ids().any(|id| id == query.bot) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "Unknown bot.".into()));
     }
     app.store
@@ -216,11 +216,11 @@ async fn update_config(
     Ok(Json(config))
 }
 
-/// `clock.enabled: false → true` for each field that differs.
+/// `alice.enabled: false → true` for each field that differs.
 fn changes(from: &Config, to: &Config) -> Vec<String> {
     let (from, to) = (serde_json::json!(from), serde_json::json!(to));
     let mut changes = Vec::new();
-    for bot in bots::BOTS {
+    for bot in config::ids() {
         let (Some(before), Some(after)) = (from[bot].as_object(), to[bot].as_object()) else {
             continue;
         };
@@ -325,7 +325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::read_to_string(&file)
             .map_err(|error| format!("{}: {error}", file.to_string_lossy()))?,
     );
-    let addresses = keys::addresses(&phrase)?;
+    let addresses = keys::addresses(&phrase, config::ROSTER.len() as u32)?;
     drop(phrase);
     let playground = playground::Playground::new(
         &std::env::var("MINT_BOTS_PLAYGROUND").unwrap_or_else(|_| "http://127.0.0.1:3000".into()),
@@ -340,7 +340,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .call(|journal| journal.setting::<Config>("config"))
         .await?
     {
-        Some(config) => config,
+        Some(config) => {
+            // Saved by a build with another roster: keep what still fits.
+            let adopted = Config::adopt(config.clone(), started_at / 1_000);
+            if adopted != config {
+                let saved = adopted.clone();
+                store
+                    .call(move |journal| journal.set_setting("config", &saved))
+                    .await?;
+            }
+            adopted
+        }
         None => {
             let config = Config::new(started_at / 1_000);
             let saved = config.clone();
@@ -353,19 +363,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let revision = std::env::var("MINT_REVISION")
         .ok()
         .filter(|revision| !revision.is_empty());
+    let roster: Vec<String> = config::ids()
+        .zip(&addresses)
+        .map(|(id, address)| format!("{id} {address}"))
+        .collect();
     bots::log(
         &store,
         None,
         "start",
         None,
         format!(
-            "Started{}: clock bot {}, minimax bot {}, playground {}.",
+            "Started{}: {}, playground {}.",
             revision
                 .as_deref()
                 .map(|revision| format!(" at {revision}"))
                 .unwrap_or_default(),
-            addresses[0],
-            addresses[1],
+            roster.join(", "),
             playground.url()
         ),
         Some(serde_json::json!({ "revision": revision, "addresses": addresses })),
