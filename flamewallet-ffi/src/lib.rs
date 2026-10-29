@@ -31,8 +31,8 @@ pub use keys::{
 };
 pub use note::{NoteFailure, ReceivedNote};
 pub use transfer::{
-    issued_flavor, memo_max_bytes, CreatedOutput, IssueRequest, Opening, Transfer, TransferInput,
-    TransferOutput, TransferRequest,
+    issued_flavor, memo_max_bytes, replace_proofs, CreatedOutput, IssueRequest, Opening, Transfer,
+    TransferInput, TransferOutput, TransferRequest,
 };
 
 /// Branch `0` of the standard path: addresses handed out to payers.

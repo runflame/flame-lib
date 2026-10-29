@@ -37,3 +37,4 @@ zeroize = "1"
 # built from this crate carries `devnet_genesis`.
 [dev-dependencies]
 flamechain = { path = "../flamechain", features = ["devnet"] }
+merkle = { path = "../merkle" }

@@ -54,7 +54,7 @@ export interface Opening {
 export interface TransferInput {
   /** The contract's published bytes, as the indexer served them. */
   contract: Uint8Array;
-  /** Its Utreexo membership proof at the tip the transfer targets. */
+  /** Its Utreexo membership proof at the tip the transfer targets; `replaceProofs` refreshes it after the tip moves. */
   proof: Uint8Array;
   /** The path of the key the contract is locked to. */
   path: KeyPath;
@@ -131,7 +131,7 @@ export interface FlameError extends Error {
     | "note"
     | "transfer";
   reason?: string;
-  /** For `invalidBytes`: contract, proof, predicate, flavor or blinding. */
+  /** For `invalidBytes`: contract, proof, proofs, block_tx, predicate, flavor or blinding. */
   what?: string;
   /** For `keyMismatch`: the input's position. */
   input?: number;

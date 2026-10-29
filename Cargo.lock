@@ -1383,6 +1383,7 @@ dependencies = [
  "flamekd",
  "flamepayments",
  "flamevm",
+ "merkle",
  "rand 0.8.8",
  "thiserror 2.0.21",
  "uniffi",

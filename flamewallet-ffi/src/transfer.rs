@@ -206,6 +206,66 @@ pub(crate) fn issue(account: &SpendAccount, request: IssueRequest) -> Result<Tra
     })
 }
 
+/// `block_tx` with its Utreexo proofs replaced by `proofs`, one per input in
+/// request order. Proofs are neither signed nor part of the txid, so a
+/// transfer whose proofs went stale when the tip moved is brought up to date
+/// without its keys: fetch fresh proofs and submit the result. The txid stays.
+///
+/// Bytes are checked against the upstream limits mainnet and testnet run: a
+/// proof deeper than `max_proof_depth` is a bad `proof`, and proofs that push
+/// the transaction past `max_witness_bytes` are bad `proofs`. A devnet whose
+/// `chainparams.toml` changes those limits is judged by the upstream ones.
+#[uniffi::export]
+pub fn replace_proofs(block_tx: Vec<u8>, proofs: Vec<Vec<u8>>) -> Result<Vec<u8>, FlameError> {
+    let params = flamechain::ChainParams::default();
+    let limits = params.limits;
+    let mut decoded =
+        flamechain::BlockTx::from_bytes_bounded(&block_tx, params.version, params.limits)
+            .map_err(|error| FlameError::bytes("block_tx", format!("{error:?}")))?;
+    if proofs.len() != decoded.proofs.len() {
+        return Err(FlameError::bytes(
+            "proofs",
+            format!(
+                "{} proofs for {} inputs",
+                proofs.len(),
+                decoded.proofs.len()
+            ),
+        ));
+    }
+    decoded.proofs = proofs
+        .iter()
+        .map(|proof| {
+            let proof = flamechain::codec::proof_from_bytes(proof)
+                .map_err(|error| FlameError::bytes("proof", format!("{error:?}")))?;
+            match proof.as_path() {
+                Some(path) if path.neighbors.len() > limits.max_proof_depth => {
+                    Err(FlameError::bytes(
+                        "proof",
+                        format!(
+                            "depth {} over the limit of {}",
+                            path.neighbors.len(),
+                            limits.max_proof_depth
+                        ),
+                    ))
+                }
+                _ => Ok(proof),
+            }
+        })
+        .collect::<Result<_, _>>()?;
+    let replaced = decoded.to_bytes().map_err(FlameError::transfer)?;
+    if replaced.len() > limits.max_witness_bytes {
+        return Err(FlameError::bytes(
+            "proofs",
+            format!(
+                "{} bytes with them, over the limit of {}",
+                replaced.len(),
+                limits.max_witness_bytes
+            ),
+        ));
+    }
+    Ok(replaced)
+}
+
 /// The flavor an issuance mints under `predicate` (32 bytes, as
 /// [`crate::receiving_address_to_predicate`] gives it) and `tag`: 32 bytes.
 #[uniffi::export]
