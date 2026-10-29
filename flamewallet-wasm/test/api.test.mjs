@@ -222,6 +222,25 @@ test('spending a confidential input with its opening', () => {
     bob.free();
 });
 
+test('replacing proofs keeps the transaction', () => {
+    const alice = wasm.Wallet.fromSeed(bytes(clear.seed), 'testnet', 1);
+    const spend = request(clear.request);
+    const transfer = alice.buildTransfer(spend);
+    const proof = spend.inputs[0].proof;
+    // Proofs are not signed, so the same proof gives back the same bytes.
+    assert.deepEqual(wasm.replaceProofs(transfer.blockTx, [proof]), transfer.blockTx);
+
+    assert.throws(() => wasm.replaceProofs(new Uint8Array([1, 2, 3]), [proof]),
+        flameError('invalidBytes', { what: 'block_tx' }));
+    assert.throws(() => wasm.replaceProofs(transfer.blockTx, []),
+        flameError('invalidBytes', { what: 'proofs' }));
+    assert.throws(() => wasm.replaceProofs(transfer.blockTx, [proof, proof]),
+        flameError('invalidBytes', { what: 'proofs' }));
+    assert.throws(() => wasm.replaceProofs(transfer.blockTx, [new Uint8Array([0xff])]),
+        flameError('invalidBytes', { what: 'proof' }));
+    assert.throws(() => wasm.replaceProofs(transfer.blockTx, [1]), TypeError);
+});
+
 test('errors name what was wrong', () => {
     const alice = wasm.Wallet.fromSeed(bytes(clear.seed), 'testnet', 1);
     assert.throws(() => wasm.decodeContract(new Uint8Array([1, 2, 3])), flameError('invalidBytes', { what: 'contract' }));

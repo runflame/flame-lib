@@ -46,6 +46,8 @@ extern "C" {
     pub type JsTransferRequest;
     #[wasm_bindgen(typescript_type = "Transfer")]
     pub type JsTransfer;
+    #[wasm_bindgen(typescript_type = "Uint8Array[]")]
+    pub type JsProofs;
 }
 
 /// A fresh English mnemonic of `wordCount` words: 12, 15, 18, 21 or 24.
@@ -138,6 +140,23 @@ pub fn decode_contract(bytes: Vec<u8>) -> Result<JsContractInfo, JsValue> {
 pub fn opening_matches(contract: Vec<u8>, opening: JsOpening) -> Result<bool, JsValue> {
     let opening: Opening = from_js(opening.into())?;
     flamewallet_ffi::opening_matches(contract, opening.into()).map_err(error)
+}
+
+/// `blockTx` with its proofs replaced by `proofs`, one per input in request
+/// order. Proofs are neither signed nor part of the txid, so a transfer whose
+/// proofs went stale when the tip moved needs no wallet: fetch fresh proofs
+/// and submit the result. The txid stays.
+#[wasm_bindgen(js_name = replaceProofs)]
+pub fn replace_proofs(
+    #[wasm_bindgen(js_name = blockTx)] block_tx: Vec<u8>,
+    proofs: JsProofs,
+) -> Result<Vec<u8>, JsValue> {
+    let proofs: Vec<serde_bytes::ByteBuf> = from_js(proofs.into())?;
+    flamewallet_ffi::replace_proofs(
+        block_tx,
+        proofs.into_iter().map(serde_bytes::ByteBuf::into_vec).collect(),
+    )
+    .map_err(error)
 }
 
 /// One account, `m/35263'/network'/0'`. Its keys live in this module's

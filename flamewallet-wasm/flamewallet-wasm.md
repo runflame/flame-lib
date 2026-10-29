@@ -10,6 +10,10 @@ are functions; call them once and keep the result.
 
 `buildTransfer` is synchronous (~80 ms) — run it in a Web Worker.
 
+Proofs go stale when the tip moves; `replaceProofs(blockTx, proofs)` swaps
+in fresh ones without the wallet, keeping the txid (see
+`flamewallet-ffi/flamewallet-ffi.md`).
+
 ## Building
 
 ```sh

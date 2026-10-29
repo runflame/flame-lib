@@ -541,6 +541,134 @@ fn two_wallets_spend_across_two_blocks() {
     assert!(received.memo.is_empty());
 }
 
+fn allocation_to(address: &IssuedAddress, anchor: u8) -> Contract {
+    Contract::new(
+        Predicate::opaque(curve25519_dalek::ristretto::CompressedRistretto(
+            address.predicate.clone().try_into().expect("32 bytes"),
+        )),
+        Anchor([anchor; 32]),
+        Value::ClearToken(ClearToken::new(Scalar::from(ALLOCATION), FLAME_FLAVOR)),
+    )
+    .expect("a non-negative clear token is portable")
+}
+
+fn spend_all(wallet: &Wallet, allocation: &Contract, proof: Vec<u8>, to: &str) -> Transfer {
+    wallet
+        .build_transfer(TransferRequest {
+            inputs: vec![TransferInput {
+                contract: contract_bytes(allocation).expect("encode"),
+                proof,
+                path: receiving(0),
+                opening: None,
+            }],
+            outputs: vec![TransferOutput {
+                address: to.to_owned(),
+                qty: ALLOCATION - FEE,
+                flavor: None,
+                memo: Vec::new(),
+            }],
+            fee: FEE,
+            gas: GAS,
+            locktime: 0,
+        })
+        .expect("build the transfer")
+}
+
+#[test]
+fn stale_proofs_are_replaced_without_rebuilding() {
+    let alice = wallet(&A_SEED);
+    let bob = wallet(&B_SEED);
+    let alice_address = alice.next_address().expect("issue");
+    let bob_address = bob.next_address().expect("issue");
+    let first = allocation_to(&alice_address, 0x07);
+    let second = allocation_to(&alice_address, 0x08);
+    let (mut chain, genesis) =
+        Blockchain::devnet_genesis(ChainParams::default(), &[first.id(), second.id()])
+            .expect("devnet genesis");
+    let first_proof = served_proof(&chain, &genesis, first.id(), Proof::Transient);
+    let second_proof = served_proof(&chain, &genesis, second.id(), Proof::Transient);
+
+    // Two transfers built at the same tip; the second is mined first.
+    let late = spend_all(
+        &alice,
+        &first,
+        first_proof.clone(),
+        &bob_address.receiving_address,
+    );
+    let early = spend_all(
+        &alice,
+        &second,
+        second_proof,
+        &bob_address.receiving_address,
+    );
+    let applied = connect(&mut chain, 1, &early);
+
+    let params = ChainParams::default();
+    let stale =
+        BlockTx::from_bytes_bounded(&late.block_tx, params.version, params.limits).expect("decode");
+    assert!(
+        chain.build_block([2; 32], vec![stale]).is_err(),
+        "a proof against the parent tip no longer verifies"
+    );
+
+    let old = flamechain::codec::proof_from_bytes(&first_proof).expect("proof");
+    let fresh = served_proof(&chain, &applied.catchup, first.id(), old);
+    let refreshed = Transfer {
+        block_tx: replace_proofs(late.block_tx.clone(), vec![fresh]).expect("replace"),
+        ..late.clone()
+    };
+    let decoded = BlockTx::from_bytes_bounded(&refreshed.block_tx, params.version, params.limits)
+        .expect("decode");
+    assert_eq!(decoded.tx.txid.0.to_vec(), late.txid);
+    connect(&mut chain, 2, &refreshed);
+}
+
+#[test]
+fn replace_proofs_refuses_what_does_not_fit() {
+    let alice = wallet(&A_SEED);
+    let alice_address = alice.next_address().expect("issue");
+    let allocation = allocation_to(&alice_address, 0x07);
+    let (chain, genesis) = Blockchain::devnet_genesis(ChainParams::default(), &[allocation.id()])
+        .expect("devnet genesis");
+    let proof = served_proof(&chain, &genesis, allocation.id(), Proof::Transient);
+    let transfer = spend_all(
+        &alice,
+        &allocation,
+        proof.clone(),
+        &alice_address.receiving_address,
+    );
+
+    let bad = |what: &str, error: FlameError| match error {
+        FlameError::InvalidBytes { what: named, .. } => assert_eq!(named, what),
+        other => panic!("expected InvalidBytes({what}), got {other:?}"),
+    };
+    bad(
+        "block_tx",
+        replace_proofs(vec![1, 2, 3], vec![proof.clone()]).unwrap_err(),
+    );
+    bad(
+        "proofs",
+        replace_proofs(transfer.block_tx.clone(), Vec::new()).unwrap_err(),
+    );
+    bad(
+        "proofs",
+        replace_proofs(transfer.block_tx.clone(), vec![proof.clone(), proof]).unwrap_err(),
+    );
+    bad(
+        "proof",
+        replace_proofs(transfer.block_tx.clone(), vec![vec![0xff]]).unwrap_err(),
+    );
+    // One level deeper than the decoder takes: refused here, not by the node.
+    let deep = proof_bytes(&Proof::Committed(merkle::Path {
+        position: 0,
+        neighbors: vec![merkle::Hash([0; 32]); ChainParams::default().limits.max_proof_depth + 1],
+    }));
+    bad(
+        "proof",
+        replace_proofs(transfer.block_tx, vec![deep]).unwrap_err(),
+    );
+}
+
 #[test]
 fn malformed_bytes_are_named() {
     let alice = wallet(&A_SEED);

@@ -33,6 +33,21 @@ an opaque handle; spending keys never leave a call. Keys are named by
 | `build_transfer(request)` | Txid, `BlockTx` bytes, each output with its note; spend wallet only. |
 | `build_issue(request)` | The same, for a confidential issuance spending one coin; spend wallet only. |
 | `issued_flavor(predicate, tag)` | Flavor an issuance spending a coin under `predicate` mints for `tag`. |
+| `replace_proofs(block_tx, proofs)` | The same `BlockTx` with fresh proofs, one per input; no wallet, the txid is unchanged. |
+
+A node admits a new transaction only with proofs against its current tip, so
+proofs fetched before a block that changed the contract set are refused
+(`MEMPOOL_REJECTED`). Proofs are neither signed nor part of the txid: build
+once, and before each `submit_tx` fetch fresh proofs and `replace_proofs`.
+
+`MEMPOOL_REJECTED` is not always stale proofs: the pool also refuses a txid
+it already holds, and the txid survives `replace_proofs`. A submit whose
+answer was lost may have landed, so on any rejection ask `tx_status(txid)`
+first: `mempool` or `confirmed` means it was sent, and only `unknown` calls
+for fresh proofs and another submit.
+
+`replace_proofs` checks proof depth and transaction size against the
+upstream limits mainnet and testnet run, not a devnet's `chainparams.toml`.
 
 Errors are `FlameError`; `InvalidBytes { what }` names the bad field,
 `Note { failure }` says why a note did not open, and `NotPermitted { wallet,
