@@ -108,7 +108,8 @@ android {
 
 dependencies {
   // \`api\`: the generated classes expose JNA types to whoever calls them.
-  api 'net.java.dev.jna:jna:5.15.0@aar'
+  // 5.17.0 or later: earlier libjnidispatch.so fails on 16 KB page devices.
+  api 'net.java.dev.jna:jna:5.19.1@aar'
 }
 GRADLE
 

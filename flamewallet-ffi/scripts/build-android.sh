@@ -3,7 +3,7 @@
 # out as `jniLibs/<abi>/`, and the UniFFI-generated Kotlin that loads it.
 # Needs the NDK (ANDROID_NDK_HOME, or found by cargo-ndk under ANDROID_HOME)
 # and `cargo install cargo-ndk`. The Kotlin needs `net.java.dev.jna:jna`
-# (`@aar`) on the app's classpath.
+# (`@aar`, 5.17.0 or later for 16 KB pages) on the app's classpath.
 #
 #   flamewallet-ffi/scripts/build-android.sh          # into target/flamewallet-ffi/android
 #   ABIS="arm64-v8a" flamewallet-ffi/scripts/build-android.sh

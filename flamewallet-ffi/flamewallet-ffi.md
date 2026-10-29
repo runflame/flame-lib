@@ -33,6 +33,21 @@ an opaque handle; spending keys never leave a call. Keys are named by
 | `build_transfer(request)` | Txid, `BlockTx` bytes, each output with its note; spend wallet only. |
 | `build_issue(request)` | The same, for a confidential issuance spending one coin; spend wallet only. |
 | `issued_flavor(predicate, tag)` | Flavor an issuance spending a coin under `predicate` mints for `tag`. |
+| `replace_proofs(block_tx, proofs)` | The same `BlockTx` with fresh proofs, one per input; no wallet, the txid is unchanged. |
+
+A node admits a new transaction only with proofs against its current tip, so
+proofs fetched before a block that changed the contract set are refused
+(`MEMPOOL_REJECTED`). Proofs are neither signed nor part of the txid: build
+once, and before each `submit_tx` fetch fresh proofs and `replace_proofs`.
+
+`MEMPOOL_REJECTED` is not always stale proofs: the pool also refuses a txid
+it already holds, and the txid survives `replace_proofs`. A submit whose
+answer was lost may have landed, so on any rejection ask `tx_status(txid)`
+first: `mempool` or `confirmed` means it was sent, and only `unknown` calls
+for fresh proofs and another submit.
+
+`replace_proofs` checks proof depth and transaction size against the
+upstream limits mainnet and testnet run, not a devnet's `chainparams.toml`.
 
 Errors are `FlameError`; `InvalidBytes { what }` names the bad field,
 `Note { failure }` says why a note did not open, and `NotPermitted { wallet,
@@ -57,7 +72,8 @@ cd flamewallet-ffi/host-tests/swift && swift test
 ```
 
 Extra rustflags go in `FLAME_RUSTFLAGS`, not `RUSTFLAGS`. Android needs the
-NDK and `cargo-ndk`; the app needs `net.java.dev.jna:jna:<version>@aar`.
+NDK and `cargo-ndk`; the app needs `net.java.dev.jna:jna:<version>@aar`,
+5.17.0 or later: older `libjnidispatch.so` fails on 16 KB page devices.
 The package ships `android/consumer-rules.pro` with the R8 rules for JNA and
 the UniFFI bindings, so minified release builds need no extra config.
 No build here runs that Kotlin through Gradle and R8, so after bumping JNA or
