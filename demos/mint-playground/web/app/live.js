@@ -6,6 +6,8 @@ import { BUDGET_MIN, DURATION_MIN, contributionFee, parseBtcUsdQuote, projectedR
 // Shared with the classic pages, so both use one identity and one pending request.
 const WALLET_KEY = 'flame-mint-playground-wallet-v1';
 const PENDING_KEY = 'flame-mint-playground-pending-v1';
+// Wallets left by Start again, newest first, so the person can switch back to them.
+const HISTORY_KEY = 'flame-mint-playground-wallets-v1';
 const MODES = ['independent', 'service', 'delegating'];
 
 const live = {
@@ -109,8 +111,30 @@ live.prepareWallet = async () => {
   if (live.wallet) loadMinter().catch(() => {});
 };
 
+live.previousWallets = () => {
+  try {
+    const list = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+    return Array.isArray(list) ? list.filter(wallet => typeof wallet?.address === 'string' && typeof wallet?.mnemonic === 'string') : [];
+  } catch { return []; }
+};
+
+// Puts `keep` at the top of the history and drops `take` from it.
+const updateHistory = (keep, take) => {
+  const list = live.previousWallets().filter(wallet => wallet.address !== keep?.address && wallet.address !== take);
+  if (keep) list.unshift({ address: keep.address, mnemonic: keep.mnemonic });
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+};
+
 live.resetWallet = () => {
-  try { localStorage.removeItem(WALLET_KEY); } catch { /* A new wallet is created anyway. */ }
+  try { updateHistory(live.wallet); localStorage.removeItem(WALLET_KEY); } catch { /* A new wallet is created anyway. */ }
+  return live.prepareWallet();
+};
+
+live.switchWallet = address => {
+  const target = live.previousWallets().find(wallet => wallet.address === address);
+  if (!target) throw new Error('This wallet is no longer saved');
+  updateHistory(live.wallet, address);
+  localStorage.setItem(WALLET_KEY, JSON.stringify(target));
   return live.prepareWallet();
 };
 
