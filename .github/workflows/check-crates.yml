@@ -30,3 +30,24 @@ jobs:
         persist-credentials: false
     - name: Build benchmarks
       run: RUSTFLAGS="-C opt-level=0" cargo bench --no-run
+
+  # The same check release-wallet.yml runs before publishing, so a PR fails
+  # here instead of the release after it merges. Keep the version in step
+  # with CARGO_DENY_VERSION there.
+  cargo-deny:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CARGO_DENY_VERSION: 0.20.2
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+    - name: cargo deny
+      run: |
+        cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
+        for crate in flamewallet-ffi flamewallet-wasm; do
+          cargo deny --locked --manifest-path "$crate/Cargo.toml" check
+        done
