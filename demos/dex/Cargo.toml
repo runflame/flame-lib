@@ -19,6 +19,7 @@ flamevm = { path = "../../flamevm" }
 # Only for its BIP-39 seed derivation, the one a `flamewallet` file's phrase is read with.
 flamewallet-ffi = { path = "../../flamewallet-ffi" }
 hex = "0.3"
+musig = { path = "../../musig" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "time"] }

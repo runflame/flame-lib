@@ -30,6 +30,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// The execution budget of one DEX transaction, its message grant included.
 const TX_GAS: u64 = 10_000_000;
+/// The branch of the wallet's tree the issuer key is at, `m/…/2/0`: next
+/// to the receiving (0) and change (1) branches, and never handed out as an
+/// address, so it holds nothing for a signed program to be run against.
+const ISSUER_BRANCH: u32 = 2;
+
 /// The grant each message carries. A delivery that runs out fails and
 /// bounces, so it is generous: unused message gas is not charged.
 pub const MESSAGE_GAS: u64 = 2_000_000;
@@ -139,6 +144,36 @@ impl Client {
             .to_bytes())
     }
 
+    /// The key this wallet issues coins under.
+    pub fn issuer(&self) -> Result<[u8; 32]> {
+        Ok(self
+            .wallet()?
+            .account
+            .predicate_at(ISSUER_BRANCH, 0)?
+            .to_point()
+            .to_bytes())
+    }
+
+    /// Where a coin deploy's message goes if it bounces: a key next to the
+    /// issuer key that no wallet scans. A bounced message is sealed whole in
+    /// a contract nothing spends, and one that carries a program, as a coin
+    /// deploy does, makes `flamewallet` fail to read the address it lands at.
+    pub fn deploy_refund(&self) -> Result<[u8; 32]> {
+        Ok(self
+            .wallet()?
+            .account
+            .predicate_at(ISSUER_BRANCH, 1)?
+            .to_point()
+            .to_bytes())
+    }
+
+    /// The issuer key's signature on `program`, for `signcall`.
+    pub fn sign_as_issuer(&self, program: &ScriptBuilder) -> Result<[u8; 64]> {
+        let program = program.to_cell()?;
+        let key = self.wallet()?.account.spending_key_at(ISSUER_BRANCH, 0)?;
+        Ok(musig::Signature::sign(&mut flamevm::signcall_transcript(&program), key).to_bytes())
+    }
+
     fn change(&self) -> Result<[u8; 32]> {
         Ok(self
             .wallet()?
@@ -166,7 +201,12 @@ impl Client {
                 let (Some(_), Some(proof)) = (entry.height, entry.proof) else {
                     continue;
                 };
-                let contract = contract_from_bytes(&entry.bytes.0)?;
+                // A bounced message comes back as a contract holding the
+                // whole message; one carrying a program does not decode,
+                // and no wallet spends it either way.
+                let Ok(contract) = contract_from_bytes(&entry.bytes.0) else {
+                    continue;
+                };
                 let proof = proof_from_bytes(&Vec::from(proof))
                     .map_err(|e| format!("a proof the node sent: {e:?}"))?;
                 let (qty, flavor, opening) = match contract.payload() {
@@ -221,10 +261,23 @@ impl Client {
         needs: &[Need],
         payload: impl Fn(ScriptBuilder) -> ScriptBuilder,
     ) -> Result<TxId> {
+        self.send_refunding(to, needs, payload, self.recipient()?)
+            .await
+    }
+
+    /// `send`, with a bounce sealed under `refund` instead of the wallet's
+    /// receiving address.
+    pub async fn send_refunding(
+        &self,
+        to: &ActorAddress,
+        needs: &[Need],
+        payload: impl Fn(ScriptBuilder) -> ScriptBuilder,
+        refund: [u8; 32],
+    ) -> Result<TxId> {
         let mut retried = false;
         loop {
             let coins = self.coins().await?;
-            let bytes = self.build(&coins, to, needs, &payload)?;
+            let bytes = self.build(&coins, to, needs, &payload, refund)?;
             match self.rpc.submit_tx(BlockTxEnvelope(bytes)).await {
                 Ok(txid) => return Ok(txid),
                 Err(ClientError::Call(e)) if e.code() == codes::MEMPOOL_REJECTED && !retried => {
@@ -241,6 +294,7 @@ impl Client {
         to: &ActorAddress,
         needs: &[Need],
         payload: &impl Fn(ScriptBuilder) -> ScriptBuilder,
+        refund: [u8; 32],
     ) -> Result<Vec<u8>> {
         // Every transaction spends at least one coin: `send` needs the
         // anchor an input seeds. With nothing to pay, a Flame coin goes in
@@ -300,9 +354,8 @@ impl Client {
             }
             // need
         }
-        let recipient = self.recipient()?;
         let script = payload(script)
-            .push_literal(CellValue::from_bytes(recipient.to_vec())?)
+            .push_literal(CellValue::from_bytes(refund.to_vec())?)
             .push_int(MESSAGE_GAS)
             .push_cell(to.to_cell()?)
             .send();

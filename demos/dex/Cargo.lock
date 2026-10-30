@@ -640,6 +640,7 @@ dependencies = [
  "flamevm",
  "flamewallet-ffi",
  "hex",
+ "musig",
  "serde",
  "serde_json",
  "tokio",

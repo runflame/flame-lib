@@ -9,8 +9,17 @@
 //!
 //! Both are deployed by an `Init` address whose constructor buys storage
 //! with the Flame it is sent, installs the runtime code and saves the first
-//! state. The constructor carries the coin's tag and limits or the pool's
-//! two flavors, so the actor id names what the actor is.
+//! state. The constructor carries the coin's tag and its issuer's key, or
+//! the pool's two flavors, so the actor id names what the actor is: one
+//! coin per tag and issuer, one pool per pair. Every coin runs the same
+//! code, and every pool does.
+//!
+//! A coin's limits are not part of its name. Its issuer signs them in a
+//! small program, the terms, and the deploy message carries that program
+//! and the signature; the constructor runs it with `signcall` against the
+//! issuer's key, and the terms check that they run for this coin. So only
+//! the issuer can deploy `TAG` under its key, and only with the limits it
+//! signed.
 //!
 //! Every message is one Dict:
 //!
@@ -21,6 +30,9 @@
 //! | 2 | — | token B (add) |
 //! | 3 | recipient point | recipient point |
 //! | 4 | — | minimum out (swap) |
+//!
+//! A deploy message is `{1: Flame}`, and for a coin also `5: terms` and
+//! `6: signature`.
 //!
 //! `OP_RENEW` on either actor merges an optional Flame token (key 1) into
 //! the actor's storage fund and buys another `RENEW_BYTES` lease from it,
@@ -47,6 +59,8 @@ pub const KEY_TOKEN: u64 = 1;
 pub const KEY_TOKEN_B: u64 = 2;
 pub const KEY_RECIPIENT: u64 = 3;
 pub const KEY_MIN: u64 = 4;
+pub const KEY_TERMS: u64 = 5;
+pub const KEY_SIG: u64 = 6;
 
 /// What a constructor buys before it installs the code: room for the code,
 /// the state and the lease records.
@@ -59,10 +73,14 @@ pub const COIN_SUPPLY: u64 = 0;
 pub const COIN_TAG: u64 = 1;
 pub const COIN_MAX: u64 = 2;
 pub const COIN_CAP: u64 = 3;
+pub const COIN_ISSUER: u64 = 4;
 pub const POOL_A: u64 = 0;
 pub const POOL_B: u64 = 1;
 pub const POOL_SUPPLY: u64 = 2;
 pub const FUND: u64 = 9;
+
+/// What the terms may spend running.
+const TERMS_GAS: u64 = 100_000;
 
 /// The LP flavor's tag under the pool's actor id.
 pub const LP_TAG: &[u8] = b"LP";
@@ -114,6 +132,21 @@ trait Ops: Sized {
         self.op().amount().drop_()
     }
 
+    /// `c` → `c'`: a byte Cell copied into one this frame constructs. `save`
+    /// keeps the bodies a frame constructs but not the ones it was handed,
+    /// such as its own literals, so a literal saved as is would leave only
+    /// its id in the state.
+    fn fresh(self) -> ScriptBuilder {
+        self.op()
+            .size()
+            .builder()
+            .roll_k(1)
+            .write_zeros()
+            .roll_k(1)
+            .bit_or()
+            .endcell()
+    }
+
     /// `d` → ø, failing unless the Dict is empty: a message's stray fields,
     /// tokens among them, must not vanish.
     fn drop_empty(self) -> ScriptBuilder {
@@ -139,7 +172,8 @@ fn code(script: ScriptBuilder) -> CellValue {
 
 /// The constructor every actor shares: `P{1: Flame}` → buys `DEPLOY_BYTES`,
 /// keeps the rest of the Flame as the storage fund, saves what `init`
-/// makes of `S{9: fund}` and installs `runtime`.
+/// makes of `P S{9: fund}` and installs `runtime`. `init` leaves `P S'`,
+/// and what it leaves of `P` must be empty.
 fn constructor(
     runtime: ScriptBuilder,
     init: impl FnOnce(ScriptBuilder) -> ScriptBuilder,
@@ -147,19 +181,21 @@ fn constructor(
     let s = ScriptBuilder::new()
         // P
         .take(KEY_TOKEN)
-        .drop_empty()
-        // flame
+        .roll_k(1)
+        // P flame
         .push_int(DEPLOY_BYTES)
         .addstorage()
         .verify()
         .merge()
         .verify()
-        // fund
+        // P fund
         .push_int(0u64)
         .dict()
         .store(FUND);
-    // S
+    // P S
     init(s)
+        .roll_k(1)
+        .drop_empty()
         .push_literal(code(runtime))
         .setcode()
         .load()
@@ -207,10 +243,10 @@ fn dispatch(s: ScriptBuilder) -> ScriptBuilder {
     s.take(KEY_OP).roll_k(1).dup_k(0).push_int(OP_RENEW).eqd()
 }
 
-/// The coin's runtime: mint and renew.
-pub fn coin_runtime(tag: &[u8]) -> ScriptBuilder {
-    let tag = tag.to_vec();
-    dispatch(ScriptBuilder::new()).build_if_else(renew, move |s| {
+/// The coin's runtime: mint and renew. The tag it issues under is in its
+/// state, so every coin runs this same code.
+pub fn coin_runtime() -> ScriptBuilder {
+    dispatch(ScriptBuilder::new()).build_if_else(renew, |s| {
         s.push_int(OP_MINT)
             .eqd()
             .verify()
@@ -246,33 +282,87 @@ pub fn coin_runtime(tag: &[u8]) -> ScriptBuilder {
             .verify()
             // amt >= 1, which also keeps a negative amount out
             .store(COIN_SUPPLY)
-            .save()
-            // amt rcpt
+            // amt rcpt S
+            .push_int(COIN_TAG)
+            .get_dup()
+            .verify()
             .roll_k(1)
-            .push_literal(bytes(&tag))
+            .save()
+            // amt rcpt tag
+            .roll_k(2)
+            .roll_k(1)
             .issuepub()
             .roll_k(1)
             .output()
     })
 }
 
-/// The coin's constructor: supply 0 of `max`, at most `cap` per mint.
-pub fn coin_constructor(tag: &[u8], max: u64, cap: u64) -> ScriptBuilder {
+/// The coin's constructor: `tag` under `issuer`'s key, supply 0, and the
+/// limits the issuer's signed terms (message keys 5 and 6) return.
+pub fn coin_constructor(tag: &[u8], issuer: [u8; 32]) -> ScriptBuilder {
     let tag = tag.to_vec();
-    constructor(coin_runtime(&tag), move |s| {
+    constructor(coin_runtime(), move |s| {
+        // P S
         s.push_int(0u64)
             .roll_k(1)
             .store(COIN_SUPPLY)
             .push_literal(bytes(&tag))
+            .fresh()
             .roll_k(1)
             .store(COIN_TAG)
-            .push_int(max)
+            .push_literal(bytes(&issuer))
+            .fresh()
             .roll_k(1)
-            .store(COIN_MAX)
-            .push_int(cap)
+            .store(COIN_ISSUER)
             .roll_k(1)
+            .take(KEY_TERMS)
+            .take(KEY_SIG)
+            // S terms sig P
+            .roll_k(3)
+            .roll_k(3)
+            .roll_k(3)
+            // P S terms sig; a contract under the issuer's key to sign for
+            .push_int(0u64)
+            .push_point(issuer)
+            .contract()
+            .roll_k(2)
+            .roll_k(2)
+            .push_int(TERMS_GAS)
+            .push_int(0u64)
+            .signcall()
+            .verify()
+            // P S {max, cap}
+            .take(COIN_MAX)
+            .take(COIN_CAP)
+            .drop_empty()
+            .roll_k(2)
             .store(COIN_CAP)
+            .store(COIN_MAX)
     })
+}
+
+/// The program an issuer signs to deploy the coin `coin` with these limits:
+/// it fails unless the coin's constructor runs it, and returns
+/// `{max, cap}`. The key it is signed with should hold nothing, since the
+/// signature lets anyone run it on a contract under that key.
+pub fn coin_terms(coin: [u8; 32], max: u64, cap: u64) -> ScriptBuilder {
+    ScriptBuilder::new()
+        // payload arg
+        .drop_()
+        .drop_()
+        .callerid()
+        .push_literal(bytes(&coin))
+        .eqd()
+        .verify()
+        .push_int(0u64)
+        .dict()
+        .push_int(max)
+        .roll_k(1)
+        .store(COIN_MAX)
+        .push_int(cap)
+        .roll_k(1)
+        .store(COIN_CAP)
+        .return_()
 }
 
 /// The pool's runtime over flavors `a` and `b`; only `a` is needed to tell
