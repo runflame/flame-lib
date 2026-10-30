@@ -74,6 +74,16 @@ print(sum(int(c['qty']) for c in json.load(sys.stdin)['coins']
           if (c['branch'], c['index']) == (branch, index) and c.get('flavor') == sys.argv[2]
           and c['height'] is not None))" "$path" "$flavor"
 }
+# The confirmed amount of one flavor held in cleartext coins, 0 if none.
+clear_held() {
+    local flavor="$1"; shift
+    [[ "$flavor" == FLM ]] && flavor="$flame"
+    "$wallet" "$@" --json coins | python3 -c "
+import json, sys
+print(sum(int(c['qty']) for c in json.load(sys.stdin)['coins']
+          if c['kind'] == 'clear' and c.get('flavor') == sys.argv[1]
+          and c['height'] is not None))" "$flavor"
+}
 expect() { [[ "$2" == "$3" ]] || { echo "FAIL: $1: expected $3, got $2" >&2; exit 1; }; }
 say() { printf '\n== %s\n' "$*"; }
 show() { echo "-- $1"; "$wallet" "${@:2}" balance | sed 's/^/   /'; }

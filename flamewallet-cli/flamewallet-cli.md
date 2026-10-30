@@ -44,7 +44,7 @@ $ printf 'a1%.0s' $(seq 64) | flamewallet restore --seed   # the devnet's genesi
 $ flamewallet address [--new | --path 2/0]
 $ flamewallet balance
 $ flamewallet coins
-$ flamewallet send ADDRESS 12.5 [--from PATH] [--memo TEXT] [--flavor HEX] [--fee SPARKS] [--wait]
+$ flamewallet send ADDRESS 12.5 [--from PATH] [--memo TEXT] [--flavor HEX] [--clear] [--fee SPARKS] [--wait]
 $ flamewallet issue 1000 --tag soot [--from PATH] [--to ADDRESS] [--memo TEXT] [--fee SPARKS] [--wait]
 $ flamewallet flavor soot [--from PATH]   # the flavor that issue mints
 $ flamewallet history [--limit N] [--older CURSOR]
@@ -75,6 +75,11 @@ the wallet holds, Flame first.
 
 `send --flavor HEX` pays another flavor. The fee is always Flame, so such
 a send spends coins of both flavors and returns change in each.
+
+`send --clear` pays a cleartext token: its amount, flavor and recipient are
+public on chain, it has no note, and the memo follows it in the clear. The
+change stays confidential, and nothing about the coins spent is revealed.
+The recipient's `coins` lists it as `clear`.
 
 ## Issuing
 

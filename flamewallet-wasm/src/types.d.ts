@@ -70,6 +70,8 @@ export interface TransferOutput {
   flavor?: Uint8Array;
   /** Sealed into the note for the recipient alone; at most `memoMaxBytes()`. */
   memo?: Uint8Array;
+  /** Publish a cleartext token: amount and flavor public, no note, `memo` in the clear. */
+  clear?: boolean;
 }
 
 export interface TransferRequest {

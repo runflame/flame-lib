@@ -1,4 +1,6 @@
 //! Pays the ledger's rewards on chain, in FLM, from one funded wallet.
+//! Each reward is a cleartext token, so anyone can audit what was paid
+//! to whom; the payout wallet's change stays confidential.
 //!
 //! Enabled by `MINT_PAYOUT_MNEMONIC_FILE` (a file holding the payout
 //! wallet's BIP-39 phrase, such as a podman secret) together with
@@ -132,6 +134,7 @@ impl Payout {
                 qty: item.qty_sparks as u64,
                 flavor: Flavor::flame(),
                 memo: MEMO.to_vec(),
+                clear: true,
             })
             .collect();
         let built = self

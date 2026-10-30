@@ -48,6 +48,10 @@ pub struct TransferOutput {
     /// Sealed into the output's note with the amount; only the recipient
     /// reads it. At most [`crate::memo_max_bytes`]; empty for none.
     pub memo: Vec<u8>,
+    /// Publish the output as a cleartext token: its amount and flavor are
+    /// public, it has no note, and `memo` follows it in the clear.
+    #[uniffi(default = false)]
+    pub clear: bool,
 }
 
 /// The longest memo, in bytes, one [`TransferOutput`] takes: what fits the
@@ -96,7 +100,7 @@ pub struct CreatedOutput {
     pub contract: Vec<u8>,
     /// The encrypted note that follows it on chain, as an indexer's scan
     /// serves it. Its recipient opens it with [`crate::Wallet::open_note`];
-    /// so does this wallet, for its change.
+    /// so does this wallet, for its change. For a clear output, its memo.
     pub note: Vec<u8>,
 }
 
@@ -318,6 +322,7 @@ fn output_specs(
                 qty: output.qty,
                 flv: convert::flavor(output.flavor.as_deref())?,
                 memo: output.memo.clone(),
+                clear: output.clear,
             })
         })
         .collect()
