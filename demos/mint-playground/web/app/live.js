@@ -6,9 +6,33 @@ import { BUDGET_MIN, DURATION_MIN, contributionFee, parseBtcUsdQuote, projectedR
 // Shared with the classic pages, so both use one identity and one pending request.
 const WALLET_KEY = 'flame-mint-playground-wallet-v1';
 const PENDING_KEY = 'flame-mint-playground-pending-v1';
-// Wallets left by Start again, newest first, so the person can switch back to them.
+// Every account made in this browser, the current one included, newest first, so the person can switch between them.
 const HISTORY_KEY = 'flame-mint-playground-wallets-v1';
 const MODES = ['independent', 'service', 'delegating'];
+// A new account starts with one of these names instead of the server's numbered default.
+const NAMES = [
+  'Ember', 'Blaze', 'Glow', 'Kindle', 'Flicker', 'Torch', 'Phoenix', 'Sparky', 'Sunny', 'Sparkle', 'Ignite', 'Glimmer', 'Sizzle', 'Lantern', 'Beacon',
+  'Shimmer', 'Twinkle', 'Sunbeam', 'Radiant', 'Dazzle', 'Candle', 'Firefly', 'Bonfire', 'Sunrise', 'Daybreak', 'Lumen', 'Lumina', 'Prism', 'Flare', 'Comet',
+  'Nova', 'Quasar', 'Zephyr', 'Nebula', 'Orbit', 'Pulsar', 'Aurora', 'Rainbow', 'Galaxy', 'Stardust', 'Cosmo', 'Astro', 'Rocket', 'Saturn', 'Jupiter',
+  'Venus', 'Luna', 'Solar', 'Celeste', 'Skylark', 'Starling', 'Polaris', 'Vega', 'Sirius', 'Orion', 'Lyra', 'Zenith', 'Breeze', 'Cloudy', 'Moonbeam',
+  'Otter', 'Bunny', 'Falcon', 'Lynx', 'Panda', 'Koala', 'Gecko', 'Dolphin', 'Wombat', 'Narwhal', 'Puffin', 'Ferret', 'Axolotl', 'Capybara', 'Hedgehog',
+  'Kitten', 'Puppy', 'Penguin', 'Llama', 'Alpaca', 'Quokka', 'Lemur', 'Sloth', 'Chipmunk', 'Meerkat', 'Hamster', 'Bumble', 'Ladybug', 'Robin', 'Sparrow',
+  'Finch', 'Flamingo', 'Peacock', 'Parrot', 'Toucan', 'Manatee', 'Orca', 'Starfish', 'Seahorse', 'Turtle', 'Pony', 'Fawn', 'Duckling', 'Owlet', 'Kitty',
+  'Cheetah', 'Leopard', 'Jaguar', 'Tiger', 'Zebra', 'Giraffe', 'Reindeer', 'Corgi', 'Poodle', 'Beagle', 'Husky', 'Shiba', 'Mochi', 'Mango', 'Pepper',
+  'Waffle', 'Biscuit', 'Noodle', 'Pickle', 'Muffin', 'Nugget', 'Pretzel', 'Cookie', 'Popcorn', 'Pancake', 'Dumpling', 'Truffle', 'Cupcake', 'Donut', 'Brownie',
+  'Cocoa', 'Latte', 'Mocha', 'Caramel', 'Toffee', 'Fudge', 'Nougat', 'Sorbet', 'Gelato', 'Sundae', 'Churro', 'Macaron', 'Praline', 'Honey', 'Maple',
+  'Vanilla', 'Cinnamon', 'Ginger', 'Papaya', 'Peach', 'Cherry', 'Berry', 'Lemon', 'Lime', 'Melon', 'Coconut', 'Banana', 'Apricot', 'Plum', 'Ramen',
+  'Sushi', 'Bonbon', 'Gumdrop', 'Candy', 'Sprinkle', 'Daisy', 'Tulip', 'Lotus', 'Orchid', 'Poppy', 'Clover', 'Jasmine', 'Lavender', 'Acorn', 'Pebble',
+  'Meadow', 'Blossom', 'Petal', 'Bloom', 'Bamboo', 'Coral', 'Lagoon', 'Oasis', 'Magnolia', 'Camellia', 'Peony', 'Violet', 'Marigold', 'Dahlia', 'Zinnia',
+  'Pixel', 'Gizmo', 'Widget', 'Turbo', 'Bolt', 'Zigzag', 'Lucky', 'Yoyo', 'Kazoo', 'Banjo', 'Tango', 'Mambo', 'Salsa', 'Disco', 'Jazzy',
+  'Groovy', 'Bingo', 'Bongo', 'Ukulele', 'Piccolo', 'Fiddle', 'Maraca', 'Conga', 'Polka', 'Rumba', 'Samba', 'Boogie', 'Funky', 'Zippy', 'Snappy',
+  'Peppy', 'Bouncy', 'Giggles', 'Chuckle', 'Doodle', 'Bubbles', 'Jetpack', 'Kite', 'Frisbee', 'Marble', 'Puzzle', 'Confetti', 'Balloon', 'Carousel', 'Pinwheel',
+  'Dreamer', 'Wonder', 'Jolly', 'Merry', 'Cheery', 'Breezy', 'Happy', 'Smiley', 'Bliss', 'Delight', 'Charm', 'Spirit', 'Champ', 'Captain', 'Pilot',
+  'Voyager', 'Ranger', 'Scout', 'Explorer', 'Rover', 'Nomad', 'Wizard', 'Genie', 'Pixie', 'Sprite', 'Fairy', 'Unicorn', 'Dragon', 'Griffin', 'Pegasus',
+  'Yeti', 'Gnome', 'Harmony', 'Melody', 'Rhythm', 'Tempo', 'Lyric', 'Haiku', 'Poet', 'Sketch', 'Canvas', 'Pastel', 'Crayon', 'Quill', 'Ribbon',
+  'Tinsel', 'Glitter', 'Sequin', 'Jewel', 'Pearl', 'Amber', 'Topaz', 'Sapphire', 'Emerald', 'Crystal', 'Diamond', 'Indigo', 'Azure', 'Teal', 'Lilac',
+];
+const randomName = () => NAMES[Math.floor(Math.random() * NAMES.length)];
 
 const live = {
   state: null,
@@ -25,6 +49,9 @@ const live = {
   contributionFee,
 };
 window.FlameLive = live;
+
+// Names are Latin letters and digits, with single spaces between words.
+live.cleanName = text => String(text ?? '').replace(/[^A-Za-z0-9 ]/g, '').replace(/ {2,}/g, ' ').replace(/^ /, '');
 
 const changed = () => { live.version++; window.dispatchEvent(new Event('flamelive')); };
 const post = async (path, body) => {
@@ -67,20 +94,26 @@ async function refreshQuote() {
   }
 }
 
+async function fetchMinter(address, fields = {}) {
+  const result = await post('/api/minter', { address, ...fields });
+  if (!Number.isSafeInteger(result.user_id) || result.user_id < 1 || typeof result.name !== 'string') throw new Error('Invalid minter profile');
+  return { user_id: result.user_id, name: result.name, service_commission_bps: result.service_commission_bps ?? null };
+}
+
 async function loadMinter(fields = {}) {
   const address = live.wallet?.address;
   if (!address) throw new Error('Wallet not ready');
-  const result = await post('/api/minter', { address, ...fields });
-  if (!Number.isSafeInteger(result.user_id) || result.user_id < 1 || typeof result.name !== 'string') throw new Error('Invalid minter profile');
+  const minter = await fetchMinter(address, fields);
   if (live.wallet?.address !== address) return null;
-  live.minter = { user_id: result.user_id, name: result.name, service_commission_bps: result.service_commission_bps ?? null };
+  live.minter = minter;
+  rememberCurrent();
   changed();
   return live.minter;
 }
 
-live.prepareWallet = async () => {
-  live.wallet = null; live.minter = null; live.walletError = null;
-  changed();
+live.prepareWallet = async name => {
+  live.walletError = null;
+  let wallet, isNew = false;
   try {
     const stored = JSON.parse(localStorage.getItem(WALLET_KEY) || 'null');
     if (stored && (typeof stored.address !== 'string' || typeof stored.mnemonic !== 'string')) throw new Error('The saved wallet is unreadable');
@@ -97,50 +130,66 @@ live.prepareWallet = async () => {
     };
     let timeout;
     try {
-      live.wallet = await Promise.race([load(), new Promise((_, reject) => {
+      wallet = await Promise.race([load(), new Promise((_, reject) => {
         timeout = setTimeout(() => reject(new Error('The browser wallet did not finish loading.')), 15000);
       })]);
     } finally { clearTimeout(timeout); }
     // Saving must succeed before accepting contributions for this identity.
-    localStorage.setItem(WALLET_KEY, JSON.stringify(live.wallet));
+    localStorage.setItem(WALLET_KEY, JSON.stringify(wallet));
+    isNew = !stored;
   } catch (error) {
-    live.wallet = null;
+    live.wallet = null; live.minter = null;
     live.walletError = error.message || String(error);
+    changed();
+    return;
   }
+  // The new identity replaces the old one in a single step, together with its profile when the server
+  // answers quickly, so switching accounts does not flash an empty screen.
+  const fields = name ? { name } : isNew ? { name: randomName() } : {};
+  const minter = await Promise.race([fetchMinter(wallet.address, fields), new Promise(resolve => setTimeout(resolve, 1500))]).catch(() => null);
+  live.wallet = wallet; live.minter = minter || null;
+  rememberCurrent();
   changed();
-  if (live.wallet) loadMinter().catch(() => {});
+  if (!minter) loadMinter().catch(() => {});
 };
 
-live.previousWallets = () => {
+live.accounts = () => {
   try {
     const list = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
     return Array.isArray(list) ? list.filter(wallet => typeof wallet?.address === 'string' && typeof wallet?.mnemonic === 'string') : [];
   } catch { return []; }
 };
 
-// Puts `keep` at the top of the history and drops `take` from it.
-const updateHistory = (keep, take) => {
-  const list = live.previousWallets().filter(wallet => wallet.address !== keep?.address && wallet.address !== take);
-  if (keep) list.unshift({ address: keep.address, mnemonic: keep.mnemonic });
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+// Records the current account with its latest name: in place when it is listed, so switching keeps the order,
+// and on top when it is new.
+const rememberCurrent = () => {
+  const wallet = live.wallet;
+  if (!wallet) return;
+  try {
+    const list = live.accounts(), at = list.findIndex(account => account.address === wallet.address);
+    const entry = { address: wallet.address, mnemonic: wallet.mnemonic, name: live.minter?.name ?? list[at]?.name };
+    if (at < 0) list.unshift(entry); else list[at] = entry;
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+  } catch { /* The list is a convenience; the current wallet itself is saved separately. */ }
 };
 
 live.resetWallet = () => {
-  try { updateHistory(live.wallet); localStorage.removeItem(WALLET_KEY); } catch { /* A new wallet is created anyway. */ }
+  rememberCurrent();
+  try { localStorage.removeItem(WALLET_KEY); } catch { /* A new wallet is created anyway. */ }
   return live.prepareWallet();
 };
 
 live.switchWallet = address => {
-  const target = live.previousWallets().find(wallet => wallet.address === address);
+  const target = live.accounts().find(wallet => wallet.address === address);
   if (!target) throw new Error('This wallet is no longer saved');
-  updateHistory(live.wallet, address);
-  localStorage.setItem(WALLET_KEY, JSON.stringify(target));
-  return live.prepareWallet();
+  rememberCurrent();
+  localStorage.setItem(WALLET_KEY, JSON.stringify({ address: target.address, mnemonic: target.mnemonic }));
+  return live.prepareWallet(target.name);
 };
 
 live.saveName = async name => {
   name = String(name ?? '').trim();
-  if (!name || [...name].length > 64 || /[\u0000-\u001f\u007f-\u009f]/.test(name)) throw new Error('Use 1–64 characters without control characters.');
+  if (!name || name.length > 64 || !/^[A-Za-z0-9]+( [A-Za-z0-9]+)*$/.test(name)) throw new Error('Use Latin letters and digits only.');
   if (name === live.minter?.name) return live.minter;
   return loadMinter({ name });
 };
