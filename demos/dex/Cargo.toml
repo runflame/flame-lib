@@ -1,0 +1,27 @@
+[package]
+name = "flamedex"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "A constant-product DEX on persistent Flame actors: coin and pool actors, a CLI that drives them, and a web page that reads them"
+
+# Keep the demo's dependencies and lockfile separate from the protocol workspace.
+[workspace]
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+curve25519-dalek = { version = "4", features = ["serde", "legacy_compatibility", "rand_core"] }
+flamechain = { path = "../../flamechain" }
+flamed-rpc = { path = "../../flamed-rpc" }
+flamekd = { path = "../../flamekd" }
+flamepayments = { path = "../../flamepayments" }
+flamevm = { path = "../../flamevm" }
+# Only for its BIP-39 seed derivation, the one a `flamewallet` file's phrase is read with.
+flamewallet-ffi = { path = "../../flamewallet-ffi" }
+hex = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+
+[patch.crates-io]
+merlin = { git = "https://github.com/runflame/merlin", rev = "fcc51efb4fc0b47e1a004cfe3aef65f47c5612f0" }
