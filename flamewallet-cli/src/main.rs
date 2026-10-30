@@ -97,6 +97,10 @@ enum Command {
         flavor: Flavor,
         #[arg(long, default_value = "")]
         memo: String,
+        /// Pay a cleartext token: the amount, flavor and memo are public;
+        /// the change stays confidential.
+        #[arg(long)]
+        clear: bool,
         /// In sparks, always paid in Flame.
         #[arg(long, default_value_t = DEFAULT_FEE)]
         fee: u64,
@@ -362,6 +366,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
             from,
             flavor,
             memo,
+            clear,
             fee,
             gas,
             wait,
@@ -376,6 +381,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
                     qty: parse_qty(amount, flavor)?,
                     flavor,
                     memo: memo.as_bytes().to_vec(),
+                    clear: *clear,
                     fee,
                     gas,
                 })

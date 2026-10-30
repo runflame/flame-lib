@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use flamed_rpc::{
-    codes, BlockTxEnvelope, ClientError, ContractId, Counterparty, FlamedApiClient, HistoryContract,
-    HistoryEntry, HttpClient, HttpClientBuilder, TipResult, TxId, TxStatusResult,
+    codes, BlockTxEnvelope, ClientError, ContractId, Counterparty, FlamedApiClient,
+    HistoryContract, HistoryEntry, HttpClient, HttpClientBuilder, TipResult, TxId, TxStatusResult,
 };
 use flamewallet_ffi::{
     ContractValue, FlameError, IssueRequest as FfiIssueRequest, IssuedAddress, KeyPath, Opening,
@@ -171,6 +171,8 @@ pub struct SendRequest {
     pub qty: u64,
     pub flavor: Flavor,
     pub memo: Vec<u8>,
+    /// Pay a cleartext token: the amount public, the memo in the clear.
+    pub clear: bool,
     /// In sparks.
     pub fee: u64,
     pub gas: u64,
@@ -183,6 +185,8 @@ pub struct Payment {
     pub qty: u64,
     pub flavor: Flavor,
     pub memo: Vec<u8>,
+    /// Pay a cleartext token: the amount public, the memo in the clear.
+    pub clear: bool,
 }
 
 /// A signed transfer the node has not seen yet.
@@ -378,6 +382,7 @@ impl Session {
             qty: request.qty,
             flavor: request.flavor,
             memo: request.memo.clone(),
+            clear: request.clear,
         };
         loop {
             let coins = self.coins_from(request.from).await?;
@@ -473,6 +478,7 @@ impl Session {
                 qty: payment.qty,
                 flavor: native_or(payment.flavor),
                 memo: payment.memo.clone(),
+                clear: payment.clear,
             })
             .collect();
         for (&flavor, &amount) in &need {
@@ -489,6 +495,7 @@ impl Session {
                     })?,
                     flavor: native_or(flavor),
                     memo: Vec::new(),
+                    clear: false,
                 });
             }
         }
@@ -590,6 +597,7 @@ impl Session {
             qty: request.qty,
             flavor: native_or(flavor),
             memo: request.memo.clone(),
+            clear: false,
         }];
         if held > request.fee {
             outputs.push(TransferOutput {
@@ -597,6 +605,7 @@ impl Session {
                 qty: held - request.fee,
                 flavor: None,
                 memo: Vec::new(),
+                clear: false,
             });
         }
         let transfer = self.wallet.build_issue(FfiIssueRequest {

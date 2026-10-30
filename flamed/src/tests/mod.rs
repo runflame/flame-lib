@@ -80,6 +80,7 @@ pub(crate) fn output<K: AccountKey>(
         qty,
         flv: FLAME_FLAVOR,
         memo: Vec::new(),
+        clear: false,
     }
 }
 

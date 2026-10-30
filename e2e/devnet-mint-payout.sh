@@ -3,7 +3,8 @@
 # wallet funds a payout wallet, fourteen minters contribute (more than one
 # payout transaction holds), the playground is killed and restarted midway,
 # and once every contribution has ended, each minter's on-chain balance must
-# equal both its reward and what the playground reports as paid. Takes about
+# equal both its reward and what the playground reports as paid, all of it
+# in cleartext coins, while the payout wallet keeps none. Takes about
 # three minutes, most of it the shortest contribution the playground takes.
 #
 #   e2e/devnet-mint-payout.sh
@@ -88,8 +89,10 @@ for i in $(seq "$minters"); do
 import json, sys
 print(next(r['reward_sparks'] for r in json.loads(sys.argv[1]) if r['address'] == sys.argv[2]))" "$rewards" "$address")"
     expect "minter $i on chain" "$(balance FLM --wallet "$dir/m$i.json")" "$reward"
+    expect "minter $i paid clear" "$(clear_held FLM --wallet "$dir/m$i.json")" "$reward"
     paid_total=$((paid_total + reward))
 done
+expect "payout change stays confidential" "$(clear_held FLM "${p[@]}")" 0
 fees=$((funded - paid_total - $(balance FLM "${p[@]}")))
 (( fees > 0 && fees % 1000 == 0 )) || { echo "FAIL: payout fees $fees" >&2; exit 1; }
 grep '^Payout' "$dir/mint.log" | sed 's/^/   /'

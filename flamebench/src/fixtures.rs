@@ -633,6 +633,7 @@ fn native_output(address: ReceivingAddress, qty: u64) -> OutputSpec {
         qty,
         flv: FLAME_FLAVOR,
         memo: Vec::new(),
+        clear: false,
     }
 }
 

@@ -12,11 +12,14 @@
 //! the `Data` entry right after it, so its recipient needs nothing delivered
 //! out of band.
 //!
-//! The VM offers a second way to open a token, one that puts the quantity
-//! and both blinding factors into the bytecode as literals, where every
-//! verifier re-executes them and every spent amount becomes public one hop
-//! after receipt. This module never emits that opcode; `flamepayments.md`
-//! names it and explains the difference.
+//! The VM offers a second way to open a token, `decrypt`, one that puts the
+//! quantity and both blinding factors into the bytecode as literals, where
+//! every verifier re-executes them and every spent amount becomes public one
+//! hop after receipt. This module never emits it on an input;
+//! `flamepayments.md` names it and explains the difference. It emits it on
+//! a [`OutputSpec::clear`] output only, which `mix` has just created under
+//! fresh blinding factors: opening that token publishes its amount and
+//! nothing about any other.
 
 use cells::Cell;
 use core::fmt;
@@ -166,6 +169,10 @@ pub struct OutputSpec {
     pub qty: u64,
     pub flv: Scalar,
     pub memo: Vec<u8>,
+    /// Publish a `ClearToken` instead: its amount and flavor in the clear,
+    /// and no note. The `Data` entry after it holds `memo` as plain bytes,
+    /// which anyone reads and its recipient's wallet ignores.
+    pub clear: bool,
 }
 
 /// Builds the unsigned transfer.
@@ -177,8 +184,10 @@ pub struct OutputSpec {
 /// fee > 0:      push_int(fee)  fee                    one more mix input
 /// per output:   push_literal(CellValue::commitment(qty))  push_literal(CellValue::commitment(flv))
 ///               push_int(m)  push_int(n)  mix
-/// per output i: roll_k(n-1-i) if > 0;  push_point(S_i)  output
-///               pushcell(note_i)  log
+/// per output i: roll_k(n-1-i) if > 0
+///               clear: push_int(flv)  push_int(f')  push_int(qty)  push_int(q')
+///                      decrypt
+///               push_point(S_i)  output  pushcell(note_i)  log
 /// ```
 ///
 /// `signtx` pushes the contract's single payload Value and no count, so with
@@ -189,7 +198,9 @@ pub struct OutputSpec {
 /// each `output` keeps every commitment, predicate and note in that one
 /// order: `mix` leaves the tokens in the order they were pushed and `output`
 /// pops from the top, which would otherwise reverse them. `pushcell(note)
-/// log` leaves the stack as it found it.
+/// log` leaves the stack as it found it. A clear output's `decrypt` opens
+/// the token `mix` just made for it, under blinding factors drawn for it
+/// alone, into the `ClearToken` it publishes; its note is its memo.
 ///
 /// `rng` draws each output's `r`, hedged as `payments.md` "Sender
 /// randomness" recommends: a Merlin transcript binds the header, the
@@ -396,7 +407,12 @@ fn mix_and_output(
     // holds its blinding factor.
     let (commitments, published): (Vec<_>, Vec<_>) = sealed
         .into_iter()
-        .map(|output| ((output.qty, output.flv), (output.predicate, output.note)))
+        .map(|output| {
+            (
+                (output.qty, output.flv),
+                (output.predicate, output.opening, output.note),
+            )
+        })
         .unzip();
 
     for (qty, flv) in commitments {
@@ -409,10 +425,18 @@ fn mix_and_output(
         .push_int(count as u64)
         .mix();
 
-    for (index, (predicate, note)) in published.into_iter().enumerate() {
+    for (index, (predicate, opening, note)) in published.into_iter().enumerate() {
         let depth = count - 1 - index;
         if depth > 0 {
             program = program.roll_k(depth as u8);
+        }
+        if let Some(opening) = opening {
+            program = program
+                .push_int(opening.flv)
+                .push_int(opening.flv_blinding)
+                .push_int(opening.qty)
+                .push_int(opening.qty_blinding)
+                .decrypt();
         }
         program = program
             .push_point(predicate.to_bytes())
@@ -425,17 +449,46 @@ fn mix_and_output(
 
 /// One output, sealed: its commitments, the point it is sorted by, and its
 /// note. The note's secrets are gone by the time this exists: they were
-/// wiped as soon as the commitments were built from them.
+/// wiped as soon as the commitments were built from them. A clear output
+/// keeps its opening instead, which the script publishes.
 struct SealedOutput {
     predicate: CompressedRistretto,
     qty: Commitment,
     flv: Commitment,
     qty_point: CompressedRistretto,
+    opening: Option<ClearOpening>,
     note: Vec<u8>,
+}
+
+/// What `decrypt` takes to open a clear output's token: public by design.
+struct ClearOpening {
+    qty: u64,
+    qty_blinding: DalekScalar,
+    flv: Scalar,
+    flv_blinding: DalekScalar,
 }
 
 impl SealedOutput {
     fn new<R: RngCore + CryptoRng>(output: &OutputSpec, rng: &mut R) -> SealedOutput {
+        if output.clear {
+            let opening = ClearOpening {
+                qty: output.qty,
+                qty_blinding: nonzero_scalar(rng),
+                flv: output.flv,
+                flv_blinding: nonzero_scalar(rng),
+            };
+            let qty =
+                Commitment::blinded_with_factor(Scalar::from(output.qty), opening.qty_blinding);
+            let flv = Commitment::blinded_with_factor(output.flv, opening.flv_blinding);
+            return SealedOutput {
+                predicate: output.address.spending_key().compress(),
+                qty_point: qty.to_point(),
+                qty,
+                flv,
+                opening: Some(opening),
+                note: output.memo.clone(),
+            };
+        }
         let r = Zeroizing::new(nonzero_scalar(rng));
         let sealed = note::seal(&output.address, &r, output.qty, output.flv, &output.memo);
         let qty =
@@ -446,6 +499,7 @@ impl SealedOutput {
             qty_point: qty.to_point(),
             qty,
             flv,
+            opening: None,
             note: sealed.note,
         }
     }
@@ -473,6 +527,7 @@ fn hedged_rng<R: RngCore + CryptoRng>(
         transcript.append_u64(b"qty", output.qty);
         transcript.append_message(b"flv", output.flv.as_bytes());
         transcript.append_message(b"memo", &output.memo);
+        transcript.append_u64(b"clear", u64::from(output.clear));
     }
     inputs
         .iter()
