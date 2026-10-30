@@ -10,8 +10,8 @@ Two kinds of actor, both in [`src/actors.rs`](src/actors.rs):
 
 - A **coin** issues one public flavor, `flavor_from_actor(coin, tag)`, with
   `issuepub`: anyone may mint up to a per-request cap until a fixed supply is
-  reached. Its id commits its tag and limits, so two deployments of the same
-  coin are the same actor.
+  reached. Its id commits its tag and limits, so the same coin cannot be
+  deployed twice.
 - A **pool** holds a reserve of FLM and of one coin and trades them at
   `x·y = k`, keeping 0.3% of every input for its liquidity providers. It
   issues its own `LP` flavor for deposits and retires it on withdrawal. Its id
@@ -62,26 +62,45 @@ chain, less as the pool of units grows.
 
 ```sh
 cargo build                 # its own lockfile; CARGO_TARGET_DIR=../mint-playground/target reuses that build
-flamedex --wallet w.json --registry dex.json deploy-coin EMBER --name Ember --max 21000000 --cap 10000
-flamedex --wallet w.json --registry dex.json deploy-pool EMBER
-flamedex --wallet w.json --registry dex.json mint EMBER 10000
-flamedex --wallet w.json --registry dex.json add EMBER 100 --amount 5000   # the first deposit sets the price
-flamedex --wallet w.json --registry dex.json add EMBER 10                  # later ones follow it
-flamedex --wallet w.json --registry dex.json swap EMBER flm 1.5 --slippage 1
-flamedex --wallet w.json --registry dex.json swap EMBER coin 100 --min-out 1.9
-flamedex --wallet w.json --registry dex.json remove EMBER 5000000000
-flamedex --wallet w.json --registry dex.json renew pool:EMBER --fund 10
-flamedex --registry dex.json --node URL status
-flamedex --wallet w.json --registry dex.json balance
+flamedex --wallet w.json deploy-coin EMBER                     # max 21,000,000, at most 10,000 per mint
+flamedex --wallet w.json deploy-coin ASH --max 1000 --cap 500
+flamedex --wallet w.json deploy-pool EMBER
+flamedex --wallet w.json mint EMBER 10000
+flamedex --wallet w.json mint ASH:1000:500 100
+flamedex --wallet w.json add EMBER 100 --amount 5000           # the first deposit sets the price
+flamedex --wallet w.json add EMBER 10                          # later ones follow it
+flamedex --wallet w.json swap EMBER flm 1.5 --slippage 1
+flamedex --wallet w.json swap EMBER coin 100 --min-out 1.9
+flamedex --wallet w.json remove EMBER 5000000000
+flamedex --wallet w.json renew EMBER --pool --fund 10
+flamedex --node URL status EMBER ASH:1000:500
+flamedex --node URL describe EMBER ASH:1000:500 > dex.json     # what the web page reads
+flamedex --wallet w.json balance EMBER
 ```
+
+There is no registry. A coin's actor id is the hash of its constructor,
+which is built from its tag, max supply and per-mint cap and nothing else;
+its flavor is `flavor_from_actor(id, tag)`. A pool's constructor holds only
+FLM and the coin's flavor. So a COIN argument is enough to compute every id
+and flavor: `TAG` for a coin with the default limits, `TAG:MAX:CAP` for
+other limits, or a coin actor's id in hex. An id is accepted only if the
+constructor rebuilt from the tag and limits in its state hashes to that id.
+Anything else is refused as not a flamedex coin. Before sending, every
+command checks that its actor exists, and `deploy-*` checks that it does not:
+a message to the wrong side of that bounces, and a bounce seals its tokens
+in a contract no wallet spends.
+
+What the client cannot compute is which coins exist; nothing on chain lists
+actors. `describe` prints the web page's `dex.json` for the coins it is
+given, until the page can discover them itself.
 
 `--wallet` (`FLAMEWALLET`) is a `flamewallet` file; the client reads its
 secret, network and node, and watches its receiving addresses and its change
-address `1/0`. `--node` (`FLAMEWALLET_NODE`) overrides the node. The registry
-(`FLAMEDEX_REGISTRY`, default `dex.json`) is where `deploy-*` record what
-they deployed, and what every other command and the web page look actors up
-in. FLM amounts are in flames with up to eight decimals; coin and LP amounts
-in whole units. Each command waits for its block unless `--no-wait`.
+address `1/0`. `--node` (`FLAMEWALLET_NODE`) overrides the node; `status` and
+`describe` need only a node. FLM amounts are in flames with up to eight
+decimals; coin and LP amounts in whole units. Each command waits for its
+block unless `--no-wait`. `balance` names FLM and the flavors of the coins
+it is given, with their LP; other flavors print as hex.
 
 Every DEX transaction spends at least one coin, because a `send` needs the
 anchor an input seeds. A mint or a renewal with nothing to pay spends a Flame
@@ -95,10 +114,12 @@ demos/dex/e2e.sh
 ```
 
 It starts a throwaway devnet node and runs the whole DEX on it. The genesis
-wallet deploys two coins and a pool, mints, and deposits. A fresh wallet
+wallet deploys two coins and a pool, mints, and deposits; deploying a coin
+again is refused. A fresh wallet
 mints and swaps both ways. A swap that misses its minimum is refunded, a mint
 over the cap bounces, and liquidity is added at the pool's price and taken
-out again. Anyone renews a lease. It checks balances on the way. `KEEP=1`
+out again. Anyone renews a lease. A coin named by its actor id is checked against its
+state, and a pool's id is refused as a coin. It checks balances on the way. `KEEP=1`
 and `PORT` (default 18548) work as in [`e2e/devnet.sh`](../../e2e/devnet.sh).
 
 ## FlameVM notes

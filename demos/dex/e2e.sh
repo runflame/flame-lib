@@ -16,7 +16,6 @@ here="$root/demos/dex"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/demos/mint-playground/target}" \
     cargo build --manifest-path "$here/Cargo.toml"
 dex="${CARGO_TARGET_DIR:-$root/demos/mint-playground/target}/debug/flamedex"
-export FLAMEDEX_REGISTRY="$dir/dex.json"
 
 a=(--wallet "$dir/a.json")
 b=(--wallet "$dir/b.json")
@@ -28,9 +27,16 @@ say "A pays B 50 Flame"
 "$wallet" "${a[@]}" send "$b_address" 50 --wait
 
 say "A deploys the coins EMBER and ASH"
-"$dex" "${a[@]}" deploy-coin EMBER --name Ember --cap 10000
-"$dex" "${a[@]}" deploy-coin ASH --name Ash --max 1000 --cap 500
-ember="$(python3 -c "import json,sys; print(next(c['flavor'] for c in json.load(open(sys.argv[1]))['coins'] if c['tag']=='EMBER'))" "$FLAMEDEX_REGISTRY")"
+"$dex" "${a[@]}" deploy-coin EMBER
+"$dex" "${a[@]}" deploy-coin ASH --max 1000 --cap 500
+# No registry: both are named by what they were built from, ASH with its limits.
+ember="$("$dex" describe EMBER | field "['coins'][0]['flavor']")"
+
+say "deploying EMBER again is refused before anything is sent"
+if "$dex" "${a[@]}" deploy-coin EMBER 2>"$dir/err"; then
+    echo "FAIL: a second EMBER deployed" >&2; exit 1
+fi
+grep -q "already deployed" "$dir/err" || { cat "$dir/err" >&2; exit 1; }
 
 say "A mints 10000 EMBER, B mints 300"
 "$dex" "${a[@]}" mint EMBER 10000
@@ -39,13 +45,13 @@ expect "A's EMBER" "$(balance "$ember" "${a[@]}")" 10000
 expect "B's EMBER" "$(balance "$ember" "${b[@]}")" 300
 
 say "a mint over the cap bounces and changes nothing"
-"$dex" "${b[@]}" mint ASH 501
+"$dex" "${b[@]}" mint ASH:1000:500 501
 expect "B's EMBER" "$(balance "$ember" "${b[@]}")" 300
 
 say "A deploys FLM/EMBER and deposits 100 FLM + 5000 EMBER"
 "$dex" "${a[@]}" deploy-pool EMBER
 "$dex" "${a[@]}" add EMBER 100 --amount 5000
-"$dex" status
+"$dex" status EMBER ASH:1000:500
 expect "A's EMBER" "$(balance "$ember" "${a[@]}")" 5000
 
 say "B sells 1 FLM for EMBER"
@@ -69,16 +75,25 @@ expect "B's FLM" "$(balance FLM "${b[@]}")" "$before_flm"
 
 say "A deposits 10 FLM more at the pool's price"
 "$dex" "${a[@]}" add EMBER 10
-"$dex" status
+"$dex" status EMBER ASH:1000:500
 
 say "A takes half of its first share back out"
 "$dex" "${a[@]}" remove EMBER 5000000000
-"$dex" status
+"$dex" status EMBER ASH:1000:500
 
 say "anyone renews a lease, topping up the fund"
-"$dex" "${b[@]}" renew pool:EMBER --fund 5
+"$dex" "${b[@]}" renew EMBER --pool --fund 5
 "$dex" "${b[@]}" renew EMBER
 
-"$dex" "${a[@]}" balance
-"$dex" "${b[@]}" balance
+"$dex" "${a[@]}" balance EMBER
+"$dex" "${b[@]}" balance EMBER
+
+say "a coin named by its actor id is checked against its state"
+ash_id="$("$dex" describe ASH:1000:500 | field "['coins'][0]['actor']")"
+"$dex" status "$ash_id"
+pool_id="$("$dex" describe EMBER | field "['pools'][0]['actor']")"
+if "$dex" status "$pool_id" 2>"$dir/err"; then
+    echo "FAIL: a pool passed for a coin" >&2; exit 1
+fi
+grep -q "not a flamedex coin" "$dir/err" || { cat "$dir/err" >&2; exit 1; }
 say "PASS"

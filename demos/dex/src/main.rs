@@ -4,12 +4,11 @@
 mod actors;
 mod client;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use flamed_rpc::TxValue;
+use flamed_rpc::{FlamedApiClient, TxValue};
 use flamevm::{flavor_from_actor, ActorAddress, ActorID, Scalar, ScriptBuilder, FLAME_FLAVOR};
-use serde::{Deserialize, Serialize};
 
 use crate::client::{Client, Need, Result};
 
@@ -24,9 +23,6 @@ struct Cli {
     /// The node's JSON-RPC URL; the wallet file's by default.
     #[arg(long, env = "FLAMEWALLET_NODE")]
     node: Option<String>,
-    /// The registry of deployed coins and pools, which the web page reads.
-    #[arg(long, env = "FLAMEDEX_REGISTRY", default_value = "dex.json")]
-    registry: PathBuf,
     /// Return once the node takes the transaction, without waiting for a block.
     #[arg(long)]
     no_wait: bool,
@@ -34,21 +30,21 @@ struct Cli {
     command: Command,
 }
 
+/// Every COIN below is `TAG` (the default limits), `TAG:MAX:CAP`, or a coin
+/// actor's id in hex, which is checked against the state it holds. A pool is
+/// named by its coin: there is one FLM/COIN pool per coin.
 #[derive(Subcommand)]
 enum Command {
     /// Deploys a coin actor that issues TAG, up to MAX units, at most CAP per mint.
     DeployCoin {
         tag: String,
-        #[arg(long, default_value_t = 21_000_000)]
+        #[arg(long, default_value_t = DEFAULT_MAX)]
         max: u64,
-        #[arg(long, default_value_t = 10_000)]
+        #[arg(long, default_value_t = DEFAULT_CAP)]
         cap: u64,
         /// Flame sent along to buy storage; what is left stays as the actor's renewal fund.
         #[arg(long, default_value = "50")]
         fund: String,
-        /// A display name for the web page.
-        #[arg(long)]
-        name: Option<String>,
     },
     /// Deploys the FLM/COIN pool.
     DeployPool {
@@ -81,89 +77,162 @@ enum Command {
         #[arg(long)]
         min_out: Option<String>,
     },
-    /// Buys another storage lease for a coin or pool, adding FUND flames to its fund first.
+    /// Buys another storage lease for COIN, or with `--pool` for its pool,
+    /// adding FUND flames to the actor's fund first.
     Renew {
-        /// A coin's tag, or `pool:TAG`.
-        actor: String,
+        coin: String,
+        #[arg(long)]
+        pool: bool,
         #[arg(long, default_value = "0")]
         fund: String,
     },
-    /// Reserves, prices and storage of every pool and coin in the registry.
-    Status,
-    /// This wallet's confirmed balance, named by the registry.
-    Balance,
+    /// Supply, reserves, prices and storage of these coins and their pools.
+    Status { coins: Vec<String> },
+    /// This wallet's confirmed balance; flavors of the COINs named, and their LP, by name.
+    Balance { coins: Vec<String> },
+    /// The ids and flavors of these coins and their pools, as JSON: what the
+    /// web page reads as dex.json, for coins and pools that exist.
+    Describe { coins: Vec<String> },
     /// Prints a coin's or pool's code size: what storage it needs.
     Sizes,
 }
 
-#[derive(Default, Serialize, Deserialize)]
-struct Registry {
-    #[serde(default)]
-    coins: Vec<CoinEntry>,
-    #[serde(default)]
-    pools: Vec<PoolEntry>,
-}
+/// The limits `deploy-coin` and a bare `TAG` mean.
+const DEFAULT_MAX: u64 = 21_000_000;
+const DEFAULT_CAP: u64 = 10_000;
 
-#[derive(Clone, Serialize, Deserialize)]
-struct CoinEntry {
+/// A coin actor, from what its constructor is built of. Its id and flavor
+/// follow; nothing has to be looked up.
+#[derive(Clone)]
+struct Coin {
     tag: String,
-    name: String,
-    actor: String,
-    flavor: String,
     max: u64,
     cap: u64,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-struct PoolEntry {
-    coin: String,
-    actor: String,
-    flavor_a: String,
-    flavor_b: String,
-    lp_flavor: String,
+impl Coin {
+    fn constructor(&self) -> ScriptBuilder {
+        actors::coin_constructor(self.tag.as_bytes(), self.max, self.cap)
+    }
+
+    fn id(&self) -> Result<ActorID> {
+        init_id(self.constructor())
+    }
+
+    fn flavor(&self) -> Result<Scalar> {
+        Ok(flavor_from_actor(&self.id()?, self.tag.as_bytes()))
+    }
+
+    /// `TAG:MAX:CAP` when the limits are not the defaults.
+    fn spec(&self) -> String {
+        if (self.max, self.cap) == (DEFAULT_MAX, DEFAULT_CAP) {
+            self.tag.clone()
+        } else {
+            format!("{}:{}:{}", self.tag, self.max, self.cap)
+        }
+    }
+
+    fn pool(&self) -> Result<Pool> {
+        Ok(Pool {
+            b: self.flavor()?,
+        })
+    }
 }
 
-impl Registry {
-    fn load(path: &Path) -> Result<Registry> {
-        match std::fs::read_to_string(path) {
-            Ok(text) => Ok(serde_json::from_str(&text)?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
-            Err(e) => Err(format!("{}: {e}", path.display()).into()),
-        }
+/// The FLM/coin pool: its constructor holds only the two flavors.
+struct Pool {
+    b: Scalar,
+}
+
+impl Pool {
+    fn id(&self) -> Result<ActorID> {
+        init_id(actors::pool_constructor(FLAME_FLAVOR, self.b))
     }
 
-    fn save(&self, path: &Path) -> Result<()> {
-        std::fs::write(path, serde_json::to_string_pretty(self)? + "\n")?;
-        Ok(())
+    fn lp(&self) -> Result<Scalar> {
+        Ok(flavor_from_actor(&self.id()?, actors::LP_TAG))
     }
+}
 
-    fn coin(&self, tag: &str) -> Result<&CoinEntry> {
-        self.coins
-            .iter()
-            .find(|c| c.tag.eq_ignore_ascii_case(tag))
-            .ok_or_else(|| format!("no coin {tag} in the registry").into())
+/// The id an `Init` address with this constructor deploys to.
+fn init_id(ctor: ScriptBuilder) -> Result<ActorID> {
+    Ok(ActorAddress::Init {
+        ctor: ctor.to_cell()?.into(),
     }
+    .to_actor_id())
+}
 
-    fn pool(&self, tag: &str) -> Result<&PoolEntry> {
-        self.pools
-            .iter()
-            .find(|p| p.coin.eq_ignore_ascii_case(tag))
-            .ok_or_else(|| format!("no FLM/{tag} pool in the registry").into())
+/// Reads a COIN argument. An actor id is trusted only once the constructor
+/// rebuilt from its state hashes to that id: then its code is a coin's.
+async fn coin(client: &Client, spec: &str) -> Result<Coin> {
+    if spec.len() == 64 && spec.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let id = actor_id(spec)?;
+        let actor = client.actor(&id).await?;
+        let state = actor
+            .decoded_state
+            .ok_or("the actor's state is unavailable: frozen?")?;
+        let entries = dict_entries(&state)?;
+        let tag = match entry(entries, actors::COIN_TAG)? {
+            TxValue::Cells { root, cells } => cells
+                .iter()
+                .find(|c| c.id == *root)
+                .map(|c| String::from_utf8_lossy(&c.data).into_owned())
+                .ok_or("the coin's tag is unavailable")?,
+            _ => return Err(format!("{spec} is not a flamedex coin").into()),
+        };
+        let found = Coin {
+            tag,
+            max: u64::try_from(number(entry(entries, actors::COIN_MAX)?)?)?,
+            cap: u64::try_from(number(entry(entries, actors::COIN_CAP)?)?)?,
+        };
+        if found.id()? != id {
+            return Err(format!("{spec} is not a flamedex coin").into());
+        }
+        return Ok(found);
     }
+    let mut parts = spec.split(':');
+    let tag = parts.next().unwrap_or_default().to_string();
+    let coin = match (parts.next(), parts.next(), parts.next()) {
+        (None, None, None) => Coin {
+            tag,
+            max: DEFAULT_MAX,
+            cap: DEFAULT_CAP,
+        },
+        (Some(max), Some(cap), None) => Coin {
+            tag,
+            max: max.parse()?,
+            cap: cap.parse()?,
+        },
+        _ => return Err(format!("{spec}: a coin is TAG, TAG:MAX:CAP or an actor id").into()),
+    };
+    if coin.tag.is_empty() {
+        return Err("a coin's tag is empty".into());
+    }
+    Ok(coin)
+}
 
-    fn name_of(&self, flavor: &[u8; 32]) -> String {
-        let hex = hex::encode(flavor);
-        if *flavor == FLAME_FLAVOR.to_bytes() {
-            return "FLM".into();
+/// Whether an actor exists. Sending to one that does not, or deploying one
+/// that does, bounces the message, and a bounce seals its tokens in a
+/// contract no wallet spends: so every command asks first.
+async fn exists(client: &Client, id: &ActorID) -> Result<bool> {
+    match client.rpc.actor(flamed_rpc::ActorId(id.to_hash())).await {
+        Ok(_) => Ok(true),
+        Err(flamed_rpc::ClientError::Call(e)) if e.code() == flamed_rpc::codes::NOT_FOUND => {
+            Ok(false)
         }
-        if let Some(c) = self.coins.iter().find(|c| c.flavor == hex) {
-            return c.tag.clone();
-        }
-        if let Some(p) = self.pools.iter().find(|p| p.lp_flavor == hex) {
-            return format!("LP-{}", p.coin);
-        }
-        hex
+        Err(e) => Err(e.into()),
     }
+}
+
+async fn require(client: &Client, id: &ActorID, what: &str) -> Result<ActorAddress> {
+    if !exists(client, id).await? {
+        return Err(format!(
+            "{what} is not deployed (actor {})",
+            hex::encode(id.to_hash())
+        )
+        .into());
+    }
+    Ok(ActorAddress::from(*id))
 }
 
 fn actor_id(hex_id: &str) -> Result<ActorID> {
@@ -171,13 +240,6 @@ fn actor_id(hex_id: &str) -> Result<ActorID> {
         .try_into()
         .map_err(|_| "an actor id is 32 bytes")?;
     Ok(ActorID::from(bytes))
-}
-
-fn flavor(hex_flavor: &str) -> Result<Scalar> {
-    let bytes: [u8; 32] = hex::decode(hex_flavor)?
-        .try_into()
-        .map_err(|_| "a flavor is 32 bytes")?;
-    Scalar::from_bytes(bytes).ok_or_else(|| "not a canonical flavor".into())
 }
 
 /// Flames with up to eight decimals, in sparks.
@@ -255,8 +317,8 @@ fn number(value: &TxValue) -> Result<u128> {
     Ok(text.parse()?)
 }
 
-async fn reserves(client: &Client, pool: &PoolEntry) -> Result<Reserves> {
-    let actor = client.actor(&actor_id(&pool.actor)?).await?;
+async fn reserves(client: &Client, id: &ActorID) -> Result<Reserves> {
+    let actor = client.actor(id).await?;
     let state = actor
         .decoded_state
         .ok_or("the pool's state is unavailable: frozen?")?;
@@ -292,11 +354,19 @@ async fn deploy(
     client: &Client,
     ctor: ScriptBuilder,
     fund: u64,
+    what: &str,
 ) -> Result<(ActorID, flamed_rpc::TxId)> {
     let address = ActorAddress::Init {
         ctor: ctor.to_cell()?.into(),
     };
-    let id = ActorID::from(address.to_hash());
+    let id = address.to_actor_id();
+    if exists(client, &id).await? {
+        return Err(format!(
+            "{what} is already deployed (actor {})",
+            hex::encode(id.to_hash())
+        )
+        .into());
+    }
     let txid = client
         .send(
             &address,
@@ -310,9 +380,15 @@ async fn deploy(
     Ok((id, txid))
 }
 
-async fn status(registry: &Registry, client: &Client) -> Result<()> {
-    for coin in &registry.coins {
-        let a = client.actor(&actor_id(&coin.actor)?).await?;
+async fn status(client: &Client, specs: &[String]) -> Result<()> {
+    for spec in specs {
+        let coin = coin(client, spec).await?;
+        let id = coin.id()?;
+        if !exists(client, &id).await? {
+            println!("{:<8} not deployed", coin.tag);
+            continue;
+        }
+        let a = client.actor(&id).await?;
         let supply = a
             .decoded_state
             .as_ref()
@@ -327,37 +403,72 @@ async fn status(registry: &Registry, client: &Client) -> Result<()> {
             a.storage_used,
             a.storage_capacity,
             if a.frozen { " FROZEN" } else { "" },
-            coin.actor
+            hex::encode(id.to_hash())
         );
-    }
-    for pool in &registry.pools {
-        let a = client.actor(&actor_id(&pool.actor)?).await?;
-        match reserves(client, pool).await {
+        let pool = coin.pool()?.id()?;
+        if !exists(client, &pool).await? {
+            println!("FLM/{:<6} not deployed", coin.tag);
+            continue;
+        }
+        let a = client.actor(&pool).await?;
+        match reserves(client, &pool).await {
             Ok(r) => {
                 let price = if r.b > 0 {
                     format!(
                         "{:.8} FLM per {}",
                         r.a as f64 / SPARKS_PER_FLAME as f64 / r.b as f64,
-                        pool.coin
+                        coin.tag
                     )
                 } else {
                     "no price".into()
                 };
                 println!(
-                    "FLM/{:<6} {} FLM + {} {}  LP {}  {}  storage {}/{} B",
-                    pool.coin,
+                    "FLM/{:<6} {} FLM + {} {}  LP {}  {}  storage {}/{} B  {}",
+                    coin.tag,
                     flames(r.a),
                     r.b,
-                    pool.coin,
+                    coin.tag,
                     r.supply,
                     price,
                     a.storage_used,
-                    a.storage_capacity
+                    a.storage_capacity,
+                    hex::encode(pool.to_hash())
                 );
             }
-            Err(e) => println!("FLM/{}: {e}", pool.coin),
+            Err(e) => println!("FLM/{}: {e}", coin.tag),
         }
     }
+    Ok(())
+}
+
+/// The page's dex.json for the coins named, and the pools of theirs that exist.
+async fn describe(client: &Client, specs: &[String]) -> Result<()> {
+    let (mut coins, mut pools) = (Vec::new(), Vec::new());
+    for spec in specs {
+        let c = coin(client, spec).await?;
+        let id = c.id()?;
+        if !exists(client, &id).await? {
+            return Err(format!("{} is not deployed", c.spec()).into());
+        }
+        let flavor = hex::encode(c.flavor()?.to_bytes());
+        coins.push(serde_json::json!({
+            "tag": c.tag, "name": c.tag, "actor": hex::encode(id.to_hash()),
+            "flavor": flavor, "max": c.max, "cap": c.cap,
+        }));
+        let pool = c.pool()?;
+        let pid = pool.id()?;
+        if exists(client, &pid).await? {
+            pools.push(serde_json::json!({
+                "coin": c.tag, "actor": hex::encode(pid.to_hash()),
+                "flavor_a": hex::encode(FLAME_FLAVOR.to_bytes()), "flavor_b": flavor,
+                "lp_flavor": hex::encode(pool.lp()?.to_bytes()),
+            }));
+        }
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({ "coins": coins, "pools": pools }))?
+    );
     Ok(())
 }
 
@@ -370,7 +481,6 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    let mut registry = Registry::load(&cli.registry)?;
     if let Command::Sizes = cli.command {
         let a = FLAME_FLAVOR;
         let b = Scalar::from(7u64);
@@ -384,8 +494,15 @@ async fn run(cli: Cli) -> Result<()> {
         }
         return Ok(());
     }
-    if let (Command::Status, Some(node), false) = (&cli.command, &cli.node, cli.wallet.exists()) {
-        return status(&registry, &Client::reader(node)?).await;
+    // Reading needs only a node; a wallet file supplies one if none is named.
+    if let (Command::Status { coins } | Command::Describe { coins }, Some(node), false) =
+        (&cli.command, &cli.node, cli.wallet.exists())
+    {
+        let reader = Client::reader(node)?;
+        return match cli.command {
+            Command::Status { .. } => status(&reader, coins).await,
+            _ => describe(&reader, coins).await,
+        };
     }
     let client = Client::open(&cli.wallet, cli.node.as_deref())?;
     let recipient = client.recipient()?;
@@ -396,57 +513,30 @@ async fn run(cli: Cli) -> Result<()> {
             max,
             cap,
             fund,
-            name,
         } => {
-            if registry.coin(&tag).is_ok() {
-                return Err(format!("{tag} is already in the registry").into());
-            }
-            let (id, txid) = deploy(
-                &client,
-                actors::coin_constructor(tag.as_bytes(), max, cap),
-                sparks(&fund)?,
-            )
-            .await?;
-            let flavor = flavor_from_actor(&id, tag.as_bytes());
-            println!("coin {tag}: actor {}", hex::encode(id.to_hash()));
-            println!("flavor {}", hex::encode(flavor.to_bytes()));
-            registry.coins.push(CoinEntry {
-                name: name.unwrap_or_else(|| tag.clone()),
-                tag,
-                actor: hex::encode(id.to_hash()),
-                flavor: hex::encode(flavor.to_bytes()),
-                max,
-                cap,
-            });
-            registry.save(&cli.registry)?;
+            let c = Coin { tag, max, cap };
+            let (id, txid) = deploy(&client, c.constructor(), sparks(&fund)?, &c.spec()).await?;
+            println!("coin {}: actor {}", c.spec(), hex::encode(id.to_hash()));
+            println!("flavor {}", hex::encode(c.flavor()?.to_bytes()));
             finish(&client, cli.no_wait, txid).await
         }
-        Command::DeployPool { coin, fund } => {
-            let coin = registry.coin(&coin)?.clone();
-            if registry.pool(&coin.tag).is_ok() {
-                return Err(format!("FLM/{} is already in the registry", coin.tag).into());
-            }
-            let b = flavor(&coin.flavor)?;
+        Command::DeployPool { coin: spec, fund } => {
+            let c = coin(&client, &spec).await?;
+            require(&client, &c.id()?, &c.spec()).await?;
+            let pool = c.pool()?;
             let (id, txid) = deploy(
                 &client,
-                actors::pool_constructor(FLAME_FLAVOR, b),
+                actors::pool_constructor(FLAME_FLAVOR, pool.b),
                 sparks(&fund)?,
+                &format!("FLM/{}", c.spec()),
             )
             .await?;
-            println!("pool FLM/{}: actor {}", coin.tag, hex::encode(id.to_hash()));
-            registry.pools.push(PoolEntry {
-                coin: coin.tag.clone(),
-                actor: hex::encode(id.to_hash()),
-                flavor_a: hex::encode(FLAME_FLAVOR.to_bytes()),
-                flavor_b: coin.flavor.clone(),
-                lp_flavor: hex::encode(flavor_from_actor(&id, actors::LP_TAG).to_bytes()),
-            });
-            registry.save(&cli.registry)?;
+            println!("pool FLM/{}: actor {}", c.spec(), hex::encode(id.to_hash()));
             finish(&client, cli.no_wait, txid).await
         }
-        Command::Mint { coin, amount } => {
-            let coin = registry.coin(&coin)?;
-            let to = ActorAddress::from(actor_id(&coin.actor)?);
+        Command::Mint { coin: spec, amount } => {
+            let c = coin(&client, &spec).await?;
+            let to = require(&client, &c.id()?, &c.spec()).await?;
             let txid = client
                 .send(&to, &[], |s| {
                     let s = s.push_int(0u64).dict();
@@ -458,13 +548,16 @@ async fn run(cli: Cli) -> Result<()> {
             finish(&client, cli.no_wait, txid).await
         }
         Command::Add {
-            coin,
+            coin: spec,
             flame,
             amount,
         } => {
-            let pool = registry.pool(&coin)?.clone();
+            let c = coin(&client, &spec).await?;
+            let pool = c.pool()?;
+            let id = pool.id()?;
+            let to = require(&client, &id, &format!("FLM/{}", c.spec())).await?;
             let qa = sparks(&flame)?;
-            let r = reserves(&client, &pool).await?;
+            let r = reserves(&client, &id).await?;
             let qb = match amount {
                 Some(qb) => qb,
                 None if r.supply > 0 && r.a > 0 => {
@@ -474,19 +567,14 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 None => return Err("the first deposit sets the price: pass --amount".into()),
             };
-            println!(
-                "depositing {} FLM and {qb} {}",
-                flames(qa.into()),
-                pool.coin
-            );
-            let to = ActorAddress::from(actor_id(&pool.actor)?);
+            println!("depositing {} FLM and {qb} {}", flames(qa.into()), c.tag);
             let needs = [
                 Need {
                     flavor: FLAME_FLAVOR,
                     qty: qa,
                 },
                 Need {
-                    flavor: flavor(&pool.flavor_b)?,
+                    flavor: pool.b,
                     qty: qb,
                 },
             ];
@@ -502,11 +590,12 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?;
             finish(&client, cli.no_wait, txid).await
         }
-        Command::Remove { coin, lp } => {
-            let pool = registry.pool(&coin)?.clone();
-            let to = ActorAddress::from(actor_id(&pool.actor)?);
+        Command::Remove { coin: spec, lp } => {
+            let c = coin(&client, &spec).await?;
+            let pool = c.pool()?;
+            let to = require(&client, &pool.id()?, &format!("FLM/{}", c.spec())).await?;
             let needs = [Need {
-                flavor: flavor(&pool.lp_flavor)?,
+                flavor: pool.lp()?,
                 qty: lp,
             }];
             let txid = client
@@ -519,17 +608,20 @@ async fn run(cli: Cli) -> Result<()> {
             finish(&client, cli.no_wait, txid).await
         }
         Command::Swap {
-            coin,
+            coin: spec,
             sell,
             amount,
             slippage,
             min_out,
         } => {
-            let pool = registry.pool(&coin)?.clone();
-            let r = reserves(&client, &pool).await?;
+            let c = coin(&client, &spec).await?;
+            let pool = c.pool()?;
+            let id = pool.id()?;
+            let to = require(&client, &id, &format!("FLM/{}", c.spec())).await?;
+            let r = reserves(&client, &id).await?;
             let (sold, qty, x, y) = match sell.to_ascii_lowercase().as_str() {
                 "flm" => (FLAME_FLAVOR, sparks(&amount)?, r.a, r.b),
-                "coin" => (flavor(&pool.flavor_b)?, amount.parse()?, r.b, r.a),
+                "coin" => (pool.b, amount.parse()?, r.b, r.a),
                 other => return Err(format!("sell `flm` or `coin`, not {other}").into()),
             };
             let out = quote(qty.into(), x, y);
@@ -542,12 +634,11 @@ async fn run(cli: Cli) -> Result<()> {
                 None => ((out as f64) * (1.0 - slippage / 100.0)).floor().max(1.0) as u64,
             };
             let (got, least) = if sold == FLAME_FLAVOR {
-                (format!("{out} {}", pool.coin), format!("{min}"))
+                (format!("{out} {}", c.tag), format!("{min}"))
             } else {
                 (format!("{} FLM", flames(out)), flames(min.into()))
             };
             println!("expecting {got}, at least {least}");
-            let to = ActorAddress::from(actor_id(&pool.actor)?);
             let txid = client
                 .send(&to, &[Need { flavor: sold, qty }], |s| {
                     let s = wrap(s, actors::KEY_TOKEN);
@@ -558,12 +649,17 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?;
             finish(&client, cli.no_wait, txid).await
         }
-        Command::Renew { actor, fund } => {
-            let id = match actor.strip_prefix("pool:") {
-                Some(tag) => registry.pool(tag)?.actor.clone(),
-                None => registry.coin(&actor)?.actor.clone(),
+        Command::Renew {
+            coin: spec,
+            pool,
+            fund,
+        } => {
+            let c = coin(&client, &spec).await?;
+            let to = if pool {
+                require(&client, &c.pool()?.id()?, &format!("FLM/{}", c.spec())).await?
+            } else {
+                require(&client, &c.id()?, &c.spec()).await?
             };
-            let to = ActorAddress::from(actor_id(&id)?);
             let fund = sparks(&fund)?;
             let needs: Vec<Need> = if fund > 0 {
                 vec![Need {
@@ -585,10 +681,23 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?;
             finish(&client, cli.no_wait, txid).await
         }
-        Command::Status => status(&registry, &client).await,
-        Command::Balance => {
+        Command::Status { coins } => status(&client, &coins).await,
+        Command::Describe { coins } => describe(&client, &coins).await,
+        Command::Balance { coins } => {
+            // Names for the flavors of the coins asked about and their LP.
+            let mut names = std::collections::BTreeMap::new();
+            names.insert(FLAME_FLAVOR.to_bytes(), "FLM".to_string());
+            for spec in &coins {
+                let c = coin(&client, spec).await?;
+                let pool = c.pool()?;
+                names.insert(c.flavor()?.to_bytes(), c.tag.clone());
+                names.insert(pool.lp()?.to_bytes(), format!("LP-{}", c.tag));
+            }
             for (flavor, qty) in client.balances().await? {
-                let name = registry.name_of(&flavor);
+                let name = names
+                    .get(&flavor)
+                    .cloned()
+                    .unwrap_or_else(|| hex::encode(flavor));
                 if flavor == FLAME_FLAVOR.to_bytes() {
                     println!("{} FLM", flames(qty));
                 } else {
