@@ -79,8 +79,9 @@ per input:    push_literal(CellValue::contract(contract))  input  signtx
 fee > 0:      push_int(fee)  fee                     one more mix input
 per output:   push_literal(CellValue::commitment(qty))  push_literal(CellValue::commitment(flv))
               push_int(m)  push_int(n)  mix
-per output i: roll_k(n-1-i) if > 0;  push_point(S_i)  output
-              pushcell(note_i)  log
+per output i: roll_k(n-1-i) if > 0
+              clear: push_int(flv)  push_int(f')  push_int(qty)  push_int(q')  decrypt
+              push_point(S_i)  output  pushcell(note_i)  log
 ```
 
 The outputs are sorted by their quantity commitment, compared as bytes,
@@ -100,6 +101,16 @@ tokens in the order their commitments were pushed and `output` pops from the
 top, so without it every multi-output transfer would pair the first
 predicate and note with the last amount. `pushcell(note) log` leaves the
 stack as it found it, so the notes change no roll depth.
+
+An `OutputSpec` with `clear` set is published as a `ClearToken`: its amount
+and flavor are public, it has no note, and the `Data` entry after it holds
+its memo as plain bytes. `mix` still creates it as a `Token`, under two
+blinding factors drawn for it alone; `decrypt` then opens that token with
+them, as literals, into the `ClearToken` that `output` publishes. What this
+reveals is the output's own amount, which a clear output publishes anyway,
+and nothing about the inputs or the other outputs: their openings never
+reach the script. A payer whose payments should be auditable, such as a
+rewards payout, pays them clear and keeps its change confidential.
 
 ## Notes
 
@@ -142,7 +153,8 @@ factors off the stack, which means they were pushed — as script literals, in
 the bytecode. The verifier re-executes the same bytes. Every amount spent this
 way is public on chain one hop after it was received, and the confidentiality
 the commitments bought is spent along with it. **This crate emits no
-`decrypt`.**
+`decrypt` on an input.** It emits one only on a clear output it has just
+created ([A transfer](#a-transfer)), whose amount is public by request.
 
 The right way is the witness path. `CellValue::contract(c)` takes a whole
 contract whose token halves are `Commitment::Open` — carrying the prover's

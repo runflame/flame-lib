@@ -143,14 +143,18 @@ live.prepareWallet = async name => {
     changed();
     return;
   }
-  // The new identity replaces the old one in a single step, together with its profile when the server
-  // answers quickly, so switching accounts does not flash an empty screen.
+  // The new identity replaces the old one in a single step with the profile already known here (its name
+  // in the account list, its id from the last snapshot), so switching neither waits for the server nor
+  // flashes an empty screen. The server's answer then confirms or completes it.
   const fields = name ? { name } : isNew ? { name: randomName() } : {};
-  const minter = await Promise.race([fetchMinter(wallet.address, fields), new Promise(resolve => setTimeout(resolve, 1500))]).catch(() => null);
-  live.wallet = wallet; live.minter = minter || null;
+  const known = live.state?.minters?.find(account => account.address === wallet.address);
+  const saved = live.accounts().find(account => account.address === wallet.address);
+  const knownName = fields.name ?? known?.name ?? saved?.name;
+  live.wallet = wallet;
+  live.minter = knownName ? { user_id: known?.user_id ?? null, name: knownName, service_commission_bps: null } : null;
   rememberCurrent();
   changed();
-  if (!minter) loadMinter().catch(() => {});
+  loadMinter(fields).catch(() => {});
 };
 
 live.accounts = () => {

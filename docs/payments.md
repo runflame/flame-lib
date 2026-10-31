@@ -343,7 +343,10 @@ path described in
 Input and membership-proof fields are defined in
 [Cell-based encoding](encoding.md#blocks-and-utreexo). A spender MUST NOT open the
 token with `decrypt`, which takes the quantity and both blinding factors as
-script literals that every verifier re-executes.
+script literals that every verifier re-executes. A sender MAY `decrypt` a
+token that `mix` has just created for an output it means to publish as a
+`ClearToken`, under blinding factors used for nothing else: that reveals the
+output's amount, which the `ClearToken` publishes anyway, and nothing more.
 
 A spend needs neither the note nor `siv_key`: the opening and `s_n` are
 enough.

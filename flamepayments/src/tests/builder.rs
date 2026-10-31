@@ -4,10 +4,15 @@
 use curve25519_dalek::scalar::Scalar as DalekScalar;
 use flamechain::utreexo::Proof;
 use flamekd::{util, Network};
-use flamevm::{Anchor, ClearToken, Contract, ContractID, Scalar, TxLog, Value, FLAME_FLAVOR};
+use flamevm::{
+    Anchor, ClearToken, Contract, ContractID, ExternalTx, Limits, Scalar, TxLog, Value,
+    FLAME_FLAVOR,
+};
 use rand::rngs::StdRng;
 
-use super::{fees, header, inputs, limits, native_output, outputs, publish, receive, rng};
+use super::{
+    fees, header, inputs, limits, native_output, output_to, outputs, publish, receive, rng,
+};
 use crate::builder::{
     build_transfer, sign, BuilderError, InputSpec, Opening, OutputSpec, MAX_OUTPUTS,
 };
@@ -200,6 +205,133 @@ fn a_confidential_spend_publishes_no_amounts() {
         !contains(&bytes, opening.flv_blinding.as_bytes()),
         "the flavor blinding factor must not appear"
     );
+}
+
+/// A clear payment from a confidential input: the payment is published as
+/// a `ClearToken` with its memo in the clear, the change stays a confidential
+/// output with its note, and the spent amount appears nowhere.
+#[test]
+fn a_clear_output_publishes_its_amount_and_nothing_else() {
+    let account = account();
+    let mut rng = rng(10);
+    let payment = cleartext_payment(&account, 0, &mut rng);
+    let opening = payment.opening;
+    let spend_key = account
+        .spending_key_at(util::RECEIVING, 4)
+        .expect("spending key");
+    let input = InputSpec::confidential(
+        &payment.received,
+        &payment.opening,
+        Proof::Transient,
+        spend_key,
+    )
+    .expect("confidential input");
+    let paid = 200_000_000;
+    let fee = 1_000;
+    let clear_to = account.address_at(util::RECEIVING, 6).expect("address");
+    let clear = OutputSpec {
+        memo: b"reward".to_vec(),
+        clear: true,
+        ..native_output(clear_to.clone(), paid)
+    };
+    let change = native_output(
+        account.address_at(util::RECEIVING, 5).expect("address"),
+        opening.qty - paid - fee,
+    );
+
+    let unsigned = build_transfer(
+        &[input],
+        &[clear, change],
+        fee,
+        header(),
+        limits(),
+        &mut rng,
+    )
+    .expect("build");
+    let tx = sign(unsigned, &[spend_key]).expect("sign");
+    let (bytes, log) = publish(&tx);
+
+    let (contract, memo) = output_to(&log, &clear_to);
+    match contract.payload() {
+        Value::ClearToken(token) => {
+            assert_eq!(token.qty(), Scalar::from(paid));
+            assert_eq!(token.flv(), FLAME_FLAVOR);
+        }
+        other => panic!("expected a ClearToken, got {other:?}"),
+    }
+    assert_eq!(
+        memo,
+        Some(&b"reward"[..]),
+        "the memo follows it in the clear"
+    );
+    let key = account.spending_key_at(util::RECEIVING, 6).expect("key");
+    InputSpec::clear(contract.clone(), Proof::Transient, key).expect("spendable as published");
+
+    let (_, received) = receive(&log, &account, util::RECEIVING, 5);
+    assert_eq!(received.opening.qty, opening.qty - paid - fee, "the change");
+
+    assert!(!contains(&bytes, &opening.qty.to_le_bytes()));
+    assert!(!contains(&bytes, &Scalar::from(opening.qty).to_bytes()));
+    assert!(!contains(&bytes, opening.qty_blinding.as_bytes()));
+    assert!(!contains(&bytes, received.opening.qty_blinding.as_bytes()));
+}
+
+/// The mint playground's payout: twelve clear payments and confidential
+/// change from one confidential input, proved at the proving ceiling and
+/// verified within the wallet's default gas.
+#[test]
+fn twelve_clear_payments_and_change_prove_within_a_million_gas() {
+    let account = account();
+    let mut rng = rng(11);
+    let payment = cleartext_payment(&account, 0, &mut rng);
+    let spend_key = account
+        .spending_key_at(util::RECEIVING, 4)
+        .expect("spending key");
+    let input = InputSpec::confidential(
+        &payment.received,
+        &payment.opening,
+        Proof::Transient,
+        spend_key,
+    )
+    .expect("confidential input");
+    let fee = 1_000;
+    let paid = 100_000_000;
+    let mut specs: Vec<OutputSpec> = (0..PROVABLE_OUTPUTS as u32 - 1)
+        .map(|n| OutputSpec {
+            memo: b"Mint playground reward".to_vec(),
+            clear: true,
+            ..native_output(
+                account
+                    .address_at(util::RECEIVING, 20 + n)
+                    .expect("address"),
+                paid,
+            )
+        })
+        .collect();
+    let change = payment.opening.qty - fee - paid * specs.len() as u64;
+    specs.push(native_output(
+        account.address_at(util::CHANGE, 0).expect("address"),
+        change,
+    ));
+
+    let unsigned =
+        build_transfer(&[input], &specs, fee, header(), limits(), &mut rng).expect("build");
+    let tx = sign(unsigned, &[spend_key]).expect("sign");
+    let bytes = tx.to_bytes().expect("transaction bytes");
+    let decoded =
+        ExternalTx::from_bytes_bounded(&bytes, 1, tx.script.len(), tx.proof_bytes().len())
+            .expect("decode");
+    let log = decoded
+        .verify(Limits { gas: 1_000_000 })
+        .expect("verifies within a million gas");
+
+    let clear = outputs(&log)
+        .iter()
+        .filter(|contract| matches!(contract.payload(), Value::ClearToken(_)))
+        .count();
+    assert_eq!(clear, PROVABLE_OUTPUTS - 1);
+    let (_, received) = receive(&log, &account, util::CHANGE, 0);
+    assert_eq!(received.opening.qty, change);
 }
 
 #[test]

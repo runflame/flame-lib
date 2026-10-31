@@ -86,6 +86,8 @@ pub struct TransferOutput {
     pub flavor: Option<Vec<u8>>,
     #[serde(default, with = "serde_bytes")]
     pub memo: Vec<u8>,
+    #[serde(default)]
+    pub clear: bool,
 }
 
 #[derive(Deserialize)]
@@ -240,6 +242,7 @@ impl From<TransferRequest> for ffi::TransferRequest {
                     qty: output.qty,
                     flavor: output.flavor,
                     memo: output.memo,
+                    clear: output.clear,
                 })
                 .collect(),
             fee: request.fee,

@@ -143,6 +143,7 @@ impl Scratch {
                     qty: output.qty,
                     flv: FLAME_FLAVOR,
                     memo: Vec::new(),
+                    clear: false,
                 },
                 path: output.path,
             })
