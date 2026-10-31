@@ -1,0 +1,40 @@
+name: Flame DEX
+
+# Tests demos/dex, which is its own workspace, so the main `cargo test`
+# does not reach it. Among its tests: every entry of the coin list,
+# demos/dex/coins.json, is what its symbol and issuer derive, so a pull
+# request that lists a coin is checked here. A change to how actors are
+# addressed or built shows up here too, as entries that no longer derive.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'demos/dex/**'
+      - 'flamevm/**'
+      - 'flamepayments/**'
+      - '.github/workflows/dex.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'demos/dex/**'
+      - 'flamevm/**'
+      - 'flamepayments/**'
+      - '.github/workflows/dex.yml'
+
+permissions: {}
+
+jobs:
+  cargo-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        workspaces: demos/dex
+    - name: Cargo test
+      run: cargo test --locked --manifest-path demos/dex/Cargo.toml
