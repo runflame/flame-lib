@@ -1,5 +1,33 @@
 {
   "name": "Flame DEX coins",
   "network": "devnet",
-  "coins": []
+  "coins":  [
+    {
+      "symbol": "EMBER",
+      "name": "EMBER",
+      "issuer": "c403f16d148b9f52cb6f119c30f453f8adb3df58fdc6e26ac647da446b58cf46",
+      "actor": "a0481c2457db3a8be4251901ab6c54d9fc351dc9e3c03bfb0cabf0bb7836e58f",
+      "flavor": "5ef6784190ef2dfb3438d89aac9321715532c62aad35dae4af33be3086ffe00e",
+      "pool": "297a0c0fc1fe4c1df140ecce853a17d381961a7c9eca76d976a2ffd4fcac6dc8",
+      "lp_flavor": "56c142d7b4626c4d40a3499b1fff2e30eaf88a0a01a59751cccfdfad8ce9020f"
+    },
+    {
+      "symbol": "ASH",
+      "name": "ASH",
+      "issuer": "c403f16d148b9f52cb6f119c30f453f8adb3df58fdc6e26ac647da446b58cf46",
+      "actor": "e15edb90cc7de5dea043ca764126b6efaab1ed405142a8dd046935eba2fdf53e",
+      "flavor": "4ea5ae94f0553bba1553898ee9fe28c549931292b1cd6a08a40c4121d08c9402",
+      "pool": "34aa9c9774f17f672eabd0f7dd93c9da0b7c156fedc56ab06202182c97499a8c",
+      "lp_flavor": "e99466d97c641e5b070ba96dd6c5ad98692bad11a626bb362e3302db9345ca07"
+    },
+    {
+      "symbol": "SOOT",
+      "name": "SOOT",
+      "issuer": "c403f16d148b9f52cb6f119c30f453f8adb3df58fdc6e26ac647da446b58cf46",
+      "actor": "ea6e182b9f2d3c3badb3be0ceaf52a202e5d3b52ed59f98109280bd02e74e851",
+      "flavor": "bb712ef9e6a5f5dcbab41410cce70a28967fcc2e751339e044b39b2fe717690e",
+      "pool": "294746039e261a0e210b0104b6fbf36d5196b62befab38db5a5bf96e6919fd64",
+      "lp_flavor": "9bcda4324703cd486eae4a6771cf79077c1098d571128c320d0c2da18c59190e"
+    }
+  ]
 }
