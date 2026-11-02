@@ -4,14 +4,18 @@ mod db;
 mod payout;
 
 use axum::{
-    extract::{DefaultBodyLimit, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
 };
-use std::{path::PathBuf, sync::LazyLock, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 use tokio::sync::{mpsc, oneshot};
 
 type Reply<T> = oneshot::Sender<Result<T, db::Error>>;
@@ -214,119 +218,76 @@ fn check_origin(headers: &HeaderMap) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn wallet_asset(js: bool) -> Response {
-    let filename = if js {
-        "flamewallet_wasm.js"
-    } else {
-        "flamewallet_wasm_bg.wasm"
-    };
-    // `MINT_WALLET_DIR` for a deployed binary (the container image); otherwise
-    // where ./run.sh builds the wallet, next to this source tree.
-    let directory = std::env::var_os("MINT_WALLET_DIR")
+/// Where the built frontend is: `MINT_WEB_DIR` for a deployed binary (the container
+/// image); otherwise where `npm run build` in web/ puts it, next to this source tree.
+fn web_dir() -> PathBuf {
+    std::env::var_os("MINT_WEB_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/wallet-wasm/pkg")
-        });
-    let path = directory.join(filename);
-    match tokio::fs::read(path).await {
-        Ok(bytes) => (
-            [(
-                header::CONTENT_TYPE,
-                if js {
-                    "text/javascript; charset=utf-8"
-                } else {
-                    "application/wasm"
-                },
-            )],
-            bytes,
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Browser wallet is not built. Start the app with ./run.sh; see README.md.",
-        )
-            .into_response(),
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web/dist"))
+}
+
+const NOT_BUILT: &str = "The frontend is not built. Start the app with ./run.sh; see README.md.";
+
+/// One of the frontend's pages, or 503 while it is not built.
+async fn page(web: &std::path::Path, file: &str) -> Response {
+    match tokio::fs::read(web.join(file)).await {
+        Ok(bytes) => Html(bytes).into_response(),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, NOT_BUILT).into_response(),
     }
 }
 
-// The app's design runtime compiles its component with `new Function` and styles
-// every element inline; everything else stays as strict as the classic pages.
-const APP_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.coinbase.com; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
-
-fn script(source: &'static str) -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        source,
-    )
+/// A file the frontend build wrote to `assets/`, named by its content and so cached
+/// for good. One plain path segment: nothing outside that directory is reachable.
+async fn asset(web: &std::path::Path, name: &str) -> Response {
+    let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"._-".contains(&byte);
+    if name.is_empty() || name.starts_with('.') || !name.bytes().all(plain) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let content_type = match name.rsplit_once('.').map(|(_, extension)| extension) {
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("wasm") => "application/wasm",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("woff2") => "font/woff2",
+        Some("json" | "map") => "application/json",
+        _ => "application/octet-stream",
+    };
+    match tokio::fs::read(web.join("assets").join(name)).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, content_type),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
-fn router(store: Store) -> Router {
+fn router(store: Store, web: PathBuf) -> Router {
+    let web = Arc::new(web);
+    let page_route = |file: &'static str| {
+        let web = web.clone();
+        get(move || {
+            let web = web.clone();
+            async move { page(&web, file).await }
+        })
+    };
+    let assets = {
+        let web = web.clone();
+        get(move |Path(name): Path<String>| {
+            let web = web.clone();
+            async move { asset(&web, &name).await }
+        })
+    };
     Router::new()
-        .route(
-            "/",
-            get(|| async {
-                (
-                    [(header::CONTENT_SECURITY_POLICY, APP_CSP)],
-                    Html(include_str!("../web/app/index.html")),
-                )
-            }),
-        )
+        .route("/", page_route("index.html"))
         .route("/mint", get(|| async { Redirect::to("/#demo") }))
-        .route(
-            "/live.js",
-            get(|| async { script(include_str!("../web/app/live.js")) }),
-        )
-        .route(
-            "/nav.js",
-            get(|| async { script(include_str!("../web/app/nav.js")) }),
-        )
-        .route(
-            "/support.js",
-            get(|| async { script(include_str!("../web/app/support.js")) }),
-        )
-        .route(
-            "/vendor/react.production.min.js",
-            get(|| async { script(include_str!("../web/app/vendor/react.production.min.js")) }),
-        )
-        .route(
-            "/vendor/react-dom.production.min.js",
-            get(|| async {
-                script(include_str!(
-                    "../web/app/vendor/react-dom.production.min.js"
-                ))
-            }),
-        )
-        .route(
-            "/classic",
-            get(|| async { Html(include_str!("../web/index.html")) }),
-        )
-        .route(
-            "/classic/mint",
-            get(|| async { Html(include_str!("../web/index.html")) }),
-        )
-        .route(
-            "/app.js",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-                    include_str!("../web/app.js"),
-                )
-            }),
-        )
-        .route(
-            "/style.css",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-                    include_str!("../web/style.css"),
-                )
-            }),
-        )
-        .route("/wallet/flamewallet_wasm.js", get(|| wallet_asset(true)))
-        .route(
-            "/wallet/flamewallet_wasm_bg.wasm",
-            get(|| wallet_asset(false)),
-        )
+        .route("/classic", page_route("classic.html"))
+        .route("/classic/mint", page_route("classic.html"))
+        .route("/assets/{name}", assets)
         .route("/api/state", get(snapshot))
         .route("/api/rewards", get(rewards))
         .route("/api/contributions", post(submit))
@@ -365,7 +326,9 @@ async fn security_headers(request: axum::extract::Request, next: Next) -> Respon
     }
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
     headers.insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
-    headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    if !headers.contains_key(header::CACHE_CONTROL) {
+        headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    }
     response
 }
 
@@ -415,6 +378,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let payout = payout::Payout::from_env().map_err(std::io::Error::other)?;
     let (store, thread) = Store::open(path).map_err(std::io::Error::other)?;
+    let web = web_dir();
+    if !web.join("index.html").is_file() {
+        eprintln!("{NOT_BUILT} (expected it in {})", web.display());
+    }
     let address = std::env::var("MINT_LISTEN").unwrap_or_else(|_| "127.0.0.1:3000".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
     println!("Mint playground: http://{address} (simulated funds, testnet addresses only)");
@@ -422,7 +389,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Build: {}", revision.to_str().unwrap_or_default());
     }
     let result = tokio::select! {
-        result = axum::serve(listener, router(store.clone())) => result,
+        result = axum::serve(listener, router(store.clone(), web)) => result,
         result = clock(store.clone()) => Err(std::io::Error::other(result.err().map(|error| error.1).unwrap_or_default())),
         result = async {
             match payout {
@@ -500,7 +467,7 @@ mod tests {
     #[tokio::test]
     async fn contribution_api_accepts_service_and_delegation_and_rejects_bad_settings() {
         let (store, thread) = Store::open(PathBuf::from(":memory:")).unwrap();
-        let app = router(store.clone());
+        let app = router(store.clone(), PathBuf::from("unbuilt"));
         let mut service = contribution();
         service["mode"] = "service".into();
         service["duration"] = 144.into();
@@ -614,7 +581,7 @@ mod tests {
     async fn identity_commission_api_registers_offers_reprices_history_and_ignores_old_retry_quotes(
     ) {
         let (store, thread) = Store::open(PathBuf::from(":memory:")).unwrap();
-        let app = router(store.clone());
+        let app = router(store.clone(), PathBuf::from("unbuilt"));
         let mut service = contribution();
         service["mode"] = "service".into();
         service["duration"] = 144.into();
@@ -758,7 +725,7 @@ mod tests {
     #[tokio::test]
     async fn minter_route_registers_loads_and_renames_one_account_before_minting() {
         let (store, thread) = Store::open(PathBuf::from(":memory:")).unwrap();
-        let app = router(store.clone());
+        let app = router(store.clone(), PathBuf::from("unbuilt"));
         let address = contribution()["address"].as_str().unwrap().to_owned();
         let profile = serde_json::json!({"address": address});
         let response = app.clone().oneshot(minter_request(&profile)).await.unwrap();
@@ -838,7 +805,7 @@ mod tests {
     #[tokio::test]
     async fn minter_route_rejects_bad_names_networks_private_fields_origin_and_large_bodies() {
         let (store, thread) = Store::open(PathBuf::from(":memory:")).unwrap();
-        let app = router(store.clone());
+        let app = router(store.clone(), PathBuf::from("unbuilt"));
         let address = contribution()["address"].as_str().unwrap().to_owned();
         let mainnet = flamekd::ReceivingAddress::from_bech32(&address, flamekd::Network::Testnet)
             .unwrap()
@@ -945,44 +912,100 @@ mod tests {
         task.abort();
     }
 
+    /// A frontend build as Vite lays it out, for the routes that serve it.
+    fn built_web() -> tempfile::TempDir {
+        let web = tempfile::tempdir().unwrap();
+        std::fs::create_dir(web.path().join("assets")).unwrap();
+        for (file, content) in [
+            (
+                "index.html",
+                "<!doctype html><script type=\"module\" src=\"/assets/app-1234abcd.js\"></script>",
+            ),
+            ("classic.html", "<!doctype html>classic"),
+            ("assets/app-1234abcd.js", "console.log('app')"),
+            ("assets/app-1234abcd.css", "body{}"),
+            ("assets/flamewallet_wasm_bg-1234abcd.wasm", "\0asm"),
+        ] {
+            std::fs::write(web.path().join(file), content).unwrap();
+        }
+        web
+    }
+
     #[tokio::test]
     async fn routes_submission_retry_and_public_reward_export() {
         let (store, thread) = Store::open(PathBuf::from(":memory:")).unwrap();
-        let app = router(store.clone());
+        let web = built_web();
+        let app = router(store.clone(), web.path().to_path_buf());
+        let fetch = |path: &str| {
+            app.clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+        };
         for path in [
             "/",
-            "/live.js",
-            "/nav.js",
-            "/support.js",
-            "/vendor/react.production.min.js",
-            "/vendor/react-dom.production.min.js",
             "/classic",
             "/classic/mint",
-            "/app.js",
-            "/style.css",
+            "/assets/app-1234abcd.js",
+            "/assets/app-1234abcd.css",
+            "/assets/flamewallet_wasm_bg-1234abcd.wasm",
             "/api/state",
         ] {
-            let response = app
+            let response = fetch(path).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap();
+            assert!(csp.contains("connect-src 'self' https://api.coinbase.com;"));
+            // Nothing is evaluated or styled inline; the wallet is the only WebAssembly.
+            assert!(!csp.contains("'unsafe-eval'") && !csp.contains("'unsafe-inline'"));
+            assert!(csp.contains("script-src 'self' 'wasm-unsafe-eval';"));
+        }
+        // Built files are named by their content and cached for good; the pages are not.
+        for (path, content_type) in [
+            ("/assets/app-1234abcd.js", "text/javascript; charset=utf-8"),
+            ("/assets/app-1234abcd.css", "text/css; charset=utf-8"),
+            (
+                "/assets/flamewallet_wasm_bg-1234abcd.wasm",
+                "application/wasm",
+            ),
+        ] {
+            let response = fetch(path).await.unwrap();
+            assert_eq!(response.headers()[header::CONTENT_TYPE], content_type);
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "public, max-age=31536000, immutable"
+            );
+        }
+        let response = fetch("/").await.unwrap();
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        // Only the build's assets directory, by plain file names.
+        for path in [
+            "/assets/..%2fclassic.html",
+            "/assets/.hidden",
+            "/assets/missing.js",
+            "/assets/app-1234abcd.js/x",
+            "/assets/",
+        ] {
+            let response = fetch(path).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        // Without a build, the pages say so; the API works regardless.
+        let unbuilt = router(store.clone(), web.path().join("missing"));
+        for (path, status) in [
+            ("/", StatusCode::SERVICE_UNAVAILABLE),
+            ("/classic", StatusCode::SERVICE_UNAVAILABLE),
+            ("/assets/app-1234abcd.js", StatusCode::NOT_FOUND),
+            ("/api/state", StatusCode::OK),
+        ] {
+            let response = unbuilt
                 .clone()
                 .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            assert!(response
-                .headers()
-                .contains_key(header::CONTENT_SECURITY_POLICY));
-            assert!(response.headers()[header::CONTENT_SECURITY_POLICY]
-                .to_str()
-                .unwrap()
-                .contains("connect-src 'self' https://api.coinbase.com;"));
-            // Only the app page may evaluate its design runtime.
-            assert_eq!(
-                response.headers()[header::CONTENT_SECURITY_POLICY]
-                    .to_str()
-                    .unwrap()
-                    .contains("'unsafe-eval'"),
-                path == "/"
-            );
+            assert_eq!(response.status(), status, "{path}");
         }
         let response = app
             .clone()
@@ -1099,7 +1122,7 @@ mod tests {
             )
             .unwrap();
         let (store, thread) = Store::open(path).unwrap();
-        let app = router(store.clone());
+        let app = router(store.clone(), PathBuf::from("unbuilt"));
         let mut states = Vec::new();
         for path in ["/api/state", "/api/state?full_history=true"] {
             let response = app
@@ -1139,7 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn schedules_nonstep_duration_and_validates_delay_through_json_api() {
         let (store, thread) = Store::open(PathBuf::from(":memory:")).unwrap();
-        let app = router(store.clone());
+        let app = router(store.clone(), PathBuf::from("unbuilt"));
         let mut value = contribution();
         value["duration"] = 145.into();
         value["delay_blocks"] = 4_464.into();
@@ -1204,7 +1227,7 @@ mod tests {
     #[tokio::test]
     async fn accepts_manual_values_above_slider_limits_through_json_api() {
         let (store, thread) = Store::open(PathBuf::from(":memory:")).unwrap();
-        let app = router(store.clone());
+        let app = router(store.clone(), PathBuf::from("unbuilt"));
         let mut value = contribution();
         value["budget_sats"] = 200_000_000.into();
         value["duration"] = 5_001.into();
@@ -1227,7 +1250,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_cross_origin_private_fields_and_invalid_input() {
         let (store, thread) = Store::open(PathBuf::from(":memory:")).unwrap();
-        let app = router(store.clone());
+        let app = router(store.clone(), PathBuf::from("unbuilt"));
         let mut request = post_request(&contribution());
         request
             .headers_mut()

@@ -1,32 +1,30 @@
-# The mint playground as one image: the service and the browser wallet it
-# serves. Build context is the repository root, which the wallet and flamekd
-# are built from:
+# The mint playground as one image: the service and the frontend it serves. Build
+# context is the repository root, which flamekd and the payout wallet are built from:
 #   docker build -f demos/mint-playground/Dockerfile -t mint-playground .
-# Dockerfile.dockerignore next to this file keeps target/ and .git out of the
-# context; podman does not read it, so pass it there:
+# Dockerfile.dockerignore next to this file keeps target/, node_modules/ and .git
+# out of the context; podman does not read it, so pass it there:
 #   podman build --ignorefile demos/mint-playground/Dockerfile.dockerignore ...
 # CI builds and pushes it as ghcr.io/runflame/mint-playground:<commit> and
 # `:main` (.github/workflows/mint-playground-image.yml).
+
+# The frontend: React, Vite and the browser wallet (@runflame/wallet-wasm) from npm.
+# Dependencies are a layer of their own, invalidated by the lockfile alone.
+FROM docker.io/library/node:24-bookworm-slim AS web
+WORKDIR /web
+COPY demos/mint-playground/web/package.json demos/mint-playground/web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY demos/mint-playground/web ./
+RUN npm run build
+
 FROM docker.io/library/rust:1.90-bookworm AS build
 
 # The image already ships 1.90.0. Naming it here overrides
 # rust-toolchain.toml, whose clippy/rustfmt/rust-analyzer components a
 # release build does not need and rustup would otherwise download.
 ENV RUSTUP_TOOLCHAIN=1.90.0
-RUN rustup target add wasm32-unknown-unknown
-
-# wasm-bindgen-cli must match the wasm-bindgen in Cargo.lock exactly. A layer
-# of its own, invalidated by Cargo.lock alone, not by every source change.
-COPY Cargo.lock /tmp/Cargo.lock
-RUN version="$(grep -A1 '^name = "wasm-bindgen"$' /tmp/Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')" \
-    && cargo install wasm-bindgen-cli --locked --version "$version"
 
 WORKDIR /src
 COPY . .
-
-# No binaryen in this image, so the wasm is not run through wasm-opt: larger,
-# not slower to matter for a demo.
-RUN OUT=/out/wallet bash flamewallet-wasm/scripts/build.sh
 RUN cargo build --release --locked --manifest-path demos/mint-playground/Cargo.toml
 
 FROM docker.io/library/debian:bookworm-slim
@@ -41,10 +39,10 @@ RUN groupadd --system --gid 10001 mint \
     && chown mint:mint /var/lib/mint-playground
 
 COPY --from=build /src/demos/mint-playground/target/release/mint-playground /usr/local/bin/mint-playground
-COPY --from=build /out/wallet/flamewallet_wasm.js /out/wallet/flamewallet_wasm_bg.wasm /usr/share/mint-playground/wallet/
+COPY --from=web /web/dist /usr/share/mint-playground/web
 
 ENV MINT_LISTEN=0.0.0.0:3000
-ENV MINT_WALLET_DIR=/usr/share/mint-playground/wallet
+ENV MINT_WEB_DIR=/usr/share/mint-playground/web
 
 # The commit, sent as the X-Mint-Revision response header; CI passes it.
 # Last, so a new commit rebuilds only this layer of the final stage.

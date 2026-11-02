@@ -1,0 +1,336 @@
+/* The design's base. */
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #141518;
+  color: #ffffff;
+  -webkit-font-smoothing: antialiased;
+  font-family:
+    'SF Pro',
+    'SF Pro Text',
+    -apple-system,
+    BlinkMacSystemFont,
+    system-ui,
+    sans-serif;
+}
+a {
+  color: #ff8a6b;
+}
+a:hover {
+  color: #ffb6a3;
+}
+[data-noscroll]::-webkit-scrollbar {
+  display: none;
+}
+/* Pressed buttons (the design's `style-active`). */
+.press:active {
+  opacity: 0.85 !important;
+}
+
+:root {
+  --s: 1;
+  --lh: 844px;
+  --st: calc(env(safe-area-inset-top) / var(--s));
+  --mst: var(--st);
+  --sb: max(24px, calc(env(safe-area-inset-bottom) / var(--s)));
+  --tb: calc(49px + max(8px, calc(env(safe-area-inset-bottom) / var(--s))));
+}
+html {
+  background: #0038c3 !important;
+}
+/* Safari tints the status bar from a fixed element at the top (else from the page color, which is
+   the gradient's bottom colour so the area under the bottom bar continues the gradient). */
+#edge-top {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 24px;
+  background: #0c0c0d;
+  z-index: 0;
+  pointer-events: none;
+}
+html,
+body {
+  margin: 0;
+  width: 100%;
+  overflow-x: clip;
+  overscroll-behavior: none;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+/* The page itself is not fixed: the background runs on below the viewport so iOS 26's floating
+   browser bar has page content to blur. Content and controls are fixed to the visible area. */
+body {
+  background: transparent !important;
+  min-height: 100%;
+}
+#bg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: calc(100vh + 120px);
+  height: calc(100lvh + 120px);
+  background: #0c0c0d;
+  pointer-events: none;
+  z-index: 0;
+}
+#bg .sheet {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 100vh;
+  height: 100svh;
+  border-radius: 0;
+  background: linear-gradient(
+    180deg,
+    #0c0c0d 0%,
+    #0c0c0d 45%,
+    #0b0b0c 50%,
+    #08090c 60%,
+    #050b18 70%,
+    #021440 80%,
+    #012484 90%,
+    #0038c3 100%
+  );
+}
+#bg .sheet::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 300px;
+  background: #0038c3;
+}
+/* Mint Playground: solid app background, real inputs and its own scrolling. */
+html[data-demo] {
+  background: #0c0c0d !important;
+}
+html[data-demo] #bg .sheet,
+html[data-demo] #bg .sheet::after,
+html[data-demo] #edge-top {
+  background: #0c0c0d;
+}
+input,
+select,
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+@keyframes mpSheetIn {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes mpFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes mpPushIn {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes mpSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes mpDot2 {
+  0% {
+    opacity: 0;
+  }
+  33.3% {
+    opacity: 1;
+  }
+}
+@keyframes mpDot3 {
+  0% {
+    opacity: 0;
+  }
+  66.6% {
+    opacity: 1;
+  }
+}
+@keyframes mpToastIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.88);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+[data-set-card] > :first-child {
+  border-top: none !important;
+}
+@keyframes mpGrow {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+@keyframes mpFlash {
+  0% {
+    filter: brightness(1);
+  }
+  30% {
+    filter: brightness(1.9);
+  }
+  100% {
+    filter: brightness(1);
+  }
+}
+@keyframes mpTipOut {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(4px) scale(0.96);
+  }
+}
+[data-name-field] input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+  font-weight: 400;
+}
+#stage :focus,
+#stage :focus-visible {
+  outline: none;
+}
+/* Allow vertical finger scrolling inside the app; the page itself stays exactly one screen tall. */
+html[data-demo],
+html[data-demo] body {
+  touch-action: pan-y;
+}
+html[data-demo] #bg {
+  height: 100%;
+  overflow: hidden;
+}
+@media (hover: hover) and (pointer: fine) and (min-width: 700px) {
+  html,
+  html[data-demo] {
+    background: #141518 !important;
+  }
+  /* the demo needs only a little air under the desktop frame's rounded top, not a status bar */
+  :root {
+    --sb: 34px;
+    --tb: 83px;
+    --st: 54px;
+    --mst: 20px;
+  }
+  body {
+    position: fixed;
+    overflow: clip;
+    min-height: 0;
+    inset: auto;
+    left: 50%;
+    top: 50%;
+    width: 390px !important;
+    height: 844px !important;
+    transform: translate(-50%, -50%) scale(var(--k, 1));
+    border-radius: 48px;
+    box-shadow:
+      0 0 0 10px #000,
+      0 30px 80px rgba(0, 0, 0, 0.6);
+  }
+  #bg {
+    height: 100%;
+  }
+  #edge-top {
+    display: none;
+  }
+  #bg .sheet {
+    height: auto;
+    bottom: 0;
+  }
+  html {
+    overflow: hidden;
+  }
+}
+/* The close button and bottom bars sit in their own fixed layer beneath the screens, so they never
+   blink while a screen dissolves. */
+#chrome {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+/* The screens: exactly one is displayed at a time. */
+#stage {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  background: transparent;
+}
+#stage,
+#stage * {
+  pointer-events: none;
+}
+#stage :is(a, button, [data-noswipe], [data-noswipe] *) {
+  pointer-events: auto;
+}
+#stage [data-screen-label^='M '],
+#stage [data-screen-label^='M '] * {
+  pointer-events: auto;
+}
+[data-cell] {
+  position: absolute !important;
+  inset: 0;
+}
+#chrome .frame {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 390px;
+  height: var(--lh);
+  margin-left: -195px;
+  transform: scale(var(--s));
+  transform-origin: 50% 0;
+}
+#chrome .row {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  bottom: calc(16px + var(--sb));
+  visibility: hidden;
+  opacity: 0;
+  transition:
+    opacity 200ms ease,
+    visibility 0s 200ms;
+}
+#chrome .row.on {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transition: opacity 200ms ease;
+}
+#chrome .row.on * {
+  pointer-events: auto;
+}
+a {
+  -webkit-user-select: none;
+}
