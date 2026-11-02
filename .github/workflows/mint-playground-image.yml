@@ -8,54 +8,19 @@ name: Mint playground image
 # host runs `:main` with podman auto-update and pulls a new image on its own
 # within a minute or two (infrastructure repo, dev README → mint-playground).
 #
-# The paths are what the image is built from: the demo (its frontend's
-# dependencies, React and the browser wallet among them, come from npm),
-# flamekd and the payout wallet (flamewallet-cli, flamed-rpc) with the
-# workspace crates they depend on, and the toolchain.
+# Only the demo's own changes build it; flamekd, the payout wallet and the
+# other crates it is built with are picked up by the next such change, or by
+# running the workflow by hand.
 
 on:
   push:
     branches: [ main ]
     paths:
       - 'demos/mint-playground/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'cells/**'
-      - 'flamechain/**'
-      - 'flamed-rpc/**'
-      - 'flamekd/**'
-      - 'flamepayments/**'
-      - 'flamevm/**'
-      - 'flamewallet-cli/**'
-      - 'flamewallet-ffi/**'
-      - 'merkle/**'
-      - 'musig/**'
-      - 'readerwriter/**'
-      - 'spacesuit/**'
-      - 'starsig/**'
-      - '.github/workflows/mint-playground-image.yml'
   pull_request:
     branches: [ main ]
     paths:
       - 'demos/mint-playground/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'cells/**'
-      - 'flamechain/**'
-      - 'flamed-rpc/**'
-      - 'flamekd/**'
-      - 'flamepayments/**'
-      - 'flamevm/**'
-      - 'flamewallet-cli/**'
-      - 'flamewallet-ffi/**'
-      - 'merkle/**'
-      - 'musig/**'
-      - 'readerwriter/**'
-      - 'spacesuit/**'
-      - 'starsig/**'
-      - '.github/workflows/mint-playground-image.yml'
   workflow_dispatch:
 
 # A newer push supersedes a build still running; its commit gets no image.
