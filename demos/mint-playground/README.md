@@ -1,6 +1,6 @@
 # Mint playground
 
-Multi-player minting simulator: a Rust web service, SQLite ledger, and a small HTML/JavaScript UI. Satoshis and minting are simulated, and it records rewards by Flame receiving address; **it does not accept Bitcoin payments**. Given a payout wallet and a `flamed` node, it also pays those rewards on chain in FLM ([On-chain payouts](#on-chain-payouts)); without them, nothing leaves the ledger.
+Multi-player minting simulator: a Rust web service, SQLite ledger, and a React UI built with Vite, with the classic plain-HTML pages beside it. Satoshis and minting are simulated, and it records rewards by Flame receiving address; **it does not accept Bitcoin payments**. Given a payout wallet and a `flamed` node, it also pays those rewards on chain in FLM ([On-chain payouts](#on-chain-payouts)); without them, nothing leaves the ledger.
 
 ## Run
 
@@ -10,7 +10,7 @@ From this directory:
 ./run.sh
 ```
 
-Open [the app](http://127.0.0.1:3000/) ([`/mint`](http://127.0.0.1:3000/mint) opens its playground directly), or the classic [dashboard](http://127.0.0.1:3000/classic) and [minting page](http://127.0.0.1:3000/classic/mint). The script builds the existing `flamewallet-wasm` browser wallet and starts the service. It needs the repository's Rust toolchain, the `wasm32-unknown-unknown` target, and `wasm-bindgen-cli` matching the repository's `Cargo.lock`. If the CLI is missing, the script prints an installation command. Browser wallet generation needs a secure context: localhost works; a remote deployment needs HTTPS.
+Open [the app](http://127.0.0.1:3000/) ([`/mint`](http://127.0.0.1:3000/mint) opens its playground directly), or the classic [dashboard](http://127.0.0.1:3000/classic) and [minting page](http://127.0.0.1:3000/classic/mint). The script builds the frontend in [`web/`](web) and starts the service. It needs the repository's Rust toolchain and Node.js 22 or later with npm: React, Vite and the browser wallet ([`@runflame/wallet-wasm`](../../flamewallet-wasm/flamewallet-wasm.md), the published `flamewallet-wasm`) are npm dependencies, so no wasm toolchain is needed. Browser wallet generation needs a secure context: localhost works; a remote deployment needs HTTPS.
 
 The default database is `data/mint.sqlite3` in this directory. To choose a persistent file and a different listening address:
 
@@ -18,12 +18,14 @@ The default database is `data/mint.sqlite3` in this directory. To choose a persi
 MINT_LISTEN=127.0.0.1:3001 ./run.sh /absolute/path/mint.sqlite3
 ```
 
-Once browser-wallet assets have been built, `cargo run --locked` starts just the service. A binary deployed away from this source tree finds them through `MINT_WALLET_DIR`, the directory holding `flamewallet_wasm.js` and `flamewallet_wasm_bg.wasm`; the [container image](Dockerfile) sets it, along with `MINT_LISTEN`. This is a standalone crate with its own lockfile; it does not change the protocol workspace's dependencies.
+Once the frontend has been built (`npm run build` in `web/`, which `run.sh` does), `cargo run --locked` starts just the service. A binary deployed away from this source tree finds the build through `MINT_WEB_DIR`, the directory holding `index.html`, `classic.html` and `assets/`; the [container image](Dockerfile) sets it, along with `MINT_LISTEN`. This is a standalone crate with its own lockfile; it does not change the protocol workspace's dependencies.
 
 ```sh
 cargo test --locked
-node --test web/test.mjs
+cd web && npm test
 ```
+
+While working on the frontend, `npm run dev` in `web/` serves it with hot reloading on <http://127.0.0.1:5173> and proxies `/api` to a service started with `cargo run --locked`.
 
 ### Reset the database
 
@@ -114,7 +116,7 @@ Service offers contain `{user_id, name, commission_bps, active}`. Contribution r
 
 The reward export represents **currently attributed lifetime rewards**, not a spendable balance or an instruction to pay them again. Balances may decrease after a retrospective commission change, even for finished contributions; they are not an append-only entitlement. On-chain payouts pay only increases: a balance that falls below what was already paid is owed nothing until it grows past it again, and the excess stays paid.
 
-The database retains all contributions and per-block accruals; the dashboard list limit does not delete or archive records. The server selects the latest 200 before aggregating their accrued amounts. Separate chart schedules retain mode, provider and commission alongside IDs, budgets and block windows, so older service activity and delegates still affect charts and forecasts. The mint page retains full history for personal totals and estimates. Pagination, archival, authentication, real Bitcoin/Flame connectivity, cancellation and withdrawals are intentionally absent. No external assets, analytics or third-party scripts are loaded by the UI; React for the app is served from `web/app/vendor`. Every page makes a public price-data request for the BTC/USD ticker.
+The database retains all contributions and per-block accruals; the dashboard list limit does not delete or archive records. The server selects the latest 200 before aggregating their accrued amounts. Separate chart schedules retain mode, provider and commission alongside IDs, budgets and block windows, so older service activity and delegates still affect charts and forecasts. The mint page retains full history for personal totals and estimates. Pagination, archival, authentication, real Bitcoin/Flame connectivity, cancellation and withdrawals are intentionally absent. No external assets, analytics or third-party scripts are loaded by the UI; React and the browser wallet are bundled from their npm packages when the frontend is built. Every page makes a public price-data request for the BTC/USD ticker.
 
 The sat / BTC / USD switch changes display only and remembers the selection in this browser. FLM counts remain whole numbers; sat amounts and rates have no decimals, BTC has exactly eight, and USD has two (three in the top total, up to six for $/FLM rates). Top counters use short currency-free labels (`Burned`, `Earned`, and `Current rate` or `Effective rate`) above values with units: `$X.XXX`, `X btc`, or `X sat`; `X FLM`; and `X $/FLM`, `X BTC/FLM`, or `X sat/FLM`, using non-breaking spaces between numbers and units. Decimal fractions are truncated for display only. Calculations, stored satoshis/sparks, submissions, and API values retain their precision. Effective rates use the untruncated reward amount, not the displayed whole-FLM value.
 
@@ -134,14 +136,14 @@ The ledger and the chain must start together. A database reset forgets what was 
 
 URL: `/` (`/mint` redirects to `/#demo`, its playground)
 
-A phone-sized introduction to Flame followed by the Mint Playground, with Network, Mint, Portfolio and Settings tabs. It is a design export (`web/app/index.html` with its runtime `support.js` and tutorial navigation `nav.js`). Its component reads everything from `live.js`, which polls `/api/state?full_history=true` every second, refreshes the BTC/USD quote every minute, loads the same browser wallet, and submits through `/api/minter` and `/api/contributions`. It shares the browser wallet and pending request with the classic Mint page, so both act as one identity. Estimates use `projectedReward` from `app.js`.
+A phone-sized introduction to Flame followed by the Mint Playground, with Network, Mint, Portfolio and Settings tabs. It is a React app in `web/src`: `App.jsx` shows one screen at a time; `tutorial/navigator.js` dissolves between them and handles swipes, arrow keys, the URL hash and the phone frame on a desktop; `tutorial/slides.jsx` holds the ten tutorial screens and their charts; `playground/Playground.jsx` is the playground's state and everything derived from it, `playground/views.jsx` what it shows. The playground reads everything from `live.js`, which polls `/api/state?full_history=true` every second, refreshes the BTC/USD quote every minute, loads the browser wallet (`wallet.js`), and submits through `/api/minter` and `/api/contributions`. It shares the browser wallet and pending request with the classic Mint page, so both act as one identity. Estimates use `projectedReward` from `mint.js`, the minting math both UIs share.
 
 - Independent with *Accept delegations* submits a Service contribution. A commission changed there is saved to the identity when the burn is confirmed, before submitting, and the field says so. Delegating lists every service, active ones first. An inactive service is shown as such and can still be chosen.
 - Totals, minters, earned FLM and commissions come from the server; charts and the network mint rate are derived from the schedules. Without a BTC/USD quote, USD amounts fall back to sats.
 - A failed submission stays saved and is retried unchanged; it can be discarded after a warning.
 - *Connect Safely* on the Portfolio tab is still the design's mock; it connects nothing.
 
-The design runtime compiles its component with `new Function` and styles elements inline, so this page alone is served with `script-src 'self' 'unsafe-eval'` and `style-src 'self' 'unsafe-inline'`. It has no inline scripts.
+Styles are inline, as in the design the app was built from, with the few shared rules in `app.css`; the page has no inline scripts or styles and is served with the same Content-Security-Policy as the classic pages. The built files under `/assets/` are named by their content and may be cached indefinitely; the pages are not cached.
 
 ## Classic Mint page
 

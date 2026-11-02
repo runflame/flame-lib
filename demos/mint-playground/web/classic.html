@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Mint playground · Flame</title>
+  <link rel="stylesheet" href="/src/classic/style.css">
+  <script type="module" src="/src/classic/app.js"></script>
+</head>
+<body>
+  <header class="topbar wrap">
+    <div class="topbar-main">
+      <nav class="page-navigation" aria-label="Pages"><a id="nav-dashboard" href="/classic" aria-current="page">Dashboard</a><a id="nav-mint" href="/classic/mint" aria-current="false">Mint</a></nav>
+      <h1 id="page-title">Mint playground</h1>
+      <form id="minter-profile" class="minter-profile" hidden><label for="minter-name">Name</label><input id="minter-name" type="text" placeholder="Minter name" maxlength="64" autocomplete="off" disabled><button id="save-minter-name" type="submit" disabled>Save</button><span id="minter-name-status" class="small" role="status"></span></form>
+    </div>
+    <div class="topbar-actions"><div class="unit-switch" role="group" aria-label="Chart zoom"><button id="zoom-out" type="button" aria-label="Zoom out" title="Zoom out" aria-controls="chart">−</button><button id="zoom-in" type="button" aria-label="Zoom in" title="Zoom in" aria-controls="chart">+</button></div><div class="unit-switch" role="group" aria-label="Display time"><button id="time-blocks" type="button" aria-pressed="true">blocks</button><button id="time-days" type="button" aria-pressed="false">days</button></div><div class="unit-switch" role="group" aria-label="Display currency"><button id="unit-sat" type="button" aria-pressed="true">sat</button><button id="unit-btc" type="button" aria-pressed="false">BTC</button><button id="unit-usd" type="button" aria-pressed="false">USD</button></div></div>
+  </header>
+  <form id="commission-profile" aria-label="Service commission"></form>
+  <main class="wrap">
+    <div class="service-status"><p id="connection" class="connection" role="status">Connecting…</p></div>
+    <p id="price-status" class="small price-status" role="status">Loading BTC/USD…</p>
+
+    <section class="metrics" aria-label="Minting metrics">
+      <div><p id="total-burned-label">Burned</p><p class="metric-value" id="total-burned">—&nbsp;sat</p></div>
+      <div><p>Mining fees</p><p class="metric-value" id="total-fees">—&nbsp;sat</p></div>
+      <div><p>Earned</p><p class="metric-value" id="total-reward">—&nbsp;FLM</p></div>
+      <div><p id="total-rate-label" title="Current block's burn divided by 50 FLM, excluding fees">Current rate</p><p class="metric-value" id="total-rate">—&nbsp;sat/FLM</p></div>
+    </section>
+
+    <section class="panel chart-panel" aria-labelledby="chart-title">
+      <div class="section-heading"><h2 id="chart-title">Burn rate and mining fees</h2></div>
+      <div class="chart-legend"><span><i class="swatch other"></i><span id="others-label">Burn ↑</span></span><span id="own-legend" hidden><i id="own-swatch" class="swatch own"></i>You</span><span id="draft-legend" hidden><i id="draft-swatch" class="swatch draft"></i>Draft</span><span id="fees-legend"><i class="swatch fees"></i>Mining fees ↓</span></div>
+      <div class="chart-units"><span id="chart-burn-unit">sat/block</span><span id="chart-rate-unit">sat/FLM</span></div>
+      <div id="chart-wrap" class="canvas-wrap with-fees"><canvas id="chart" role="img" aria-label="Burn above zero and mining fees below zero share a satoshis-per-block scale on the left. Right-hand values are divided by 50 FLM. Previous and next 500 blocks. All known contribution schedules included."></canvas></div>
+      <div class="chart-footer"><span><span id="current-block-label">Block</span> <strong id="current-block">—</strong> · <span id="chart-window">±500 blocks</span></span><span id="chart-note">Known schedules</span></div>
+    </section>
+
+    <section id="mint-form" class="panel mint-panel" hidden aria-labelledby="mint-title">
+      <div class="section-heading"><h2 id="mint-title">Contribution</h2><span id="fee-label" class="muted">Fee: 1,000 sat/block</span></div>
+      <div class="mint-grid">
+        <form id="contribution-form">
+          <fieldset class="mint-modes"><legend>Mode</legend><label><input id="mode-independent" type="radio" name="mode" value="independent" checked> Independent</label><label><input id="mode-service" type="radio" name="mode" value="service"> Service</label><label><input id="mode-delegating" type="radio" name="mode" value="delegating"> Delegating</label></fieldset>
+          <div id="service-options" class="mode-options" hidden><label for="commission">Commission</label> <input id="commission" form="commission-profile" type="number" min="0" max="100" step="0.01" value="2"> % <button id="save-commission" type="button" disabled>Save</button> <span id="commission-status" class="small" role="status"></span></div>
+          <div id="delegation-options" class="mode-options" hidden><label for="service-select">Service</label> <select id="service-select"><option value="">Select a service</option></select></div>
+          <div class="slider-heading"><label for="budget">Budget, incl. fees</label><span class="value-field"><input id="budget-value" class="value-input" type="text" inputmode="decimal" autocomplete="off" aria-label="Budget, typed value"><span id="budget-unit" class="value-unit"></span></span></div>
+          <input id="budget" type="range" min="100000" max="100000000" step="100000" value="1000000">
+          <div class="range-labels"><span id="budget-min">100,000 sat</span><span id="budget-max">100,000,000 sat</span></div>
+          <div class="slider-heading duration-heading"><label for="duration">Duration</label><span class="value-field"><input id="duration-value" class="value-input" type="text" inputmode="decimal" autocomplete="off" aria-label="Duration, typed value"><span id="duration-unit" class="value-unit"></span></span></div>
+          <input id="duration" type="range" min="144" max="4464" step="1" value="500">
+          <div class="range-labels"><span id="duration-min">144 blocks</span><span id="duration-max">4,464 blocks</span></div>
+          <div class="slider-heading duration-heading"><label for="delay">Start delay</label><span class="value-field"><input id="delay-value" class="value-input" type="text" inputmode="decimal" autocomplete="off" aria-label="Start delay, typed value"><span id="delay-unit" class="value-unit"></span></span></div>
+          <input id="delay" type="range" min="0" max="4464" step="1" value="0">
+          <div class="range-labels"><span id="delay-min">0 blocks</span><span id="delay-max">4,464 blocks</span></div>
+          <p id="budget-error" class="form-message" role="status"></p>
+          <button id="submit" type="submit" disabled>Loading wallet…</button>
+          <p id="submit-message" class="form-message" role="status"></p>
+          <button id="discard-pending" class="text-button" type="button" hidden>Discard pending request</button>
+        </form>
+        <div class="projection">
+          <h3>Estimate</h3>
+          <dl><div><dt>Reward (FLM)</dt><dd id="projected-reward">—</dd></div><div><dt>Fees</dt><dd id="projected-fees">—</dd></div><div><dt>Burn</dt><dd id="projected-burn">—</dd></div><div><dt id="projected-rate-label">sat/FLM</dt><dd id="projected-rate">—</dd></div></dl>
+          <p id="projection-note" class="muted small">Known contribution schedules included. Starts next block.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="minters-panel" class="panel table-panel" aria-labelledby="minters-title" hidden>
+      <div class="section-heading"><h2 id="minters-title">Minters</h2></div>
+      <div class="table-scroll"><table><thead><tr><th aria-sort="ascending"><button id="sort-name" type="button" class="text-button">Name</button></th><th class="number"><button id="sort-burned_sats" type="button" class="text-button">Burned</button></th><th class="number"><button id="sort-reward_sparks" type="button" class="text-button">Earned (FLM)</button></th><th class="number"><button id="sort-fees_sats" type="button" class="text-button">Mining fees</button></th><th class="number"><button id="sort-rate" type="button" class="text-button">sat / FLM</button></th></tr></thead><tbody id="minters"></tbody></table></div>
+    </section>
+
+    <section class="panel table-panel" aria-labelledby="contributions-title">
+      <div class="section-heading"><h2 id="contributions-title">Contributions</h2><a href="/api/rewards" target="_blank" rel="noopener">Rewards JSON</a></div>
+      <div class="table-scroll"><table><thead><tr><th>Contribution</th><th>Minter</th><th>Status</th><th id="table-burned-label" class="number">Sats burned</th><th class="number">FLM earned</th><th id="table-fees-label" class="number">Mining fees (sat)</th><th class="number"><span id="table-rate-label">sat / FLM</span></th></tr></thead><tbody id="contributions"></tbody><tfoot id="contribution-totals"></tfoot></table></div>
+      <p id="empty-table" class="empty" hidden>No contributions.</p>
+    </section>
+    <section id="wallet-panel" class="panel wallet" aria-labelledby="wallet-title" hidden><h2 id="wallet-title">Reward address (testnet)</h2><p id="wallet-status" class="muted small">Loading wallet…</p><code id="wallet-address">—</code><details id="seed-details"><summary>Recovery phrase</summary><p class="muted small">Demo only. Anyone with this phrase controls the wallet. Stored in this browser.</p><p id="seed-phrase" class="seed-phrase"></p></details><button id="retry-wallet" type="button" hidden>Retry wallet</button> <button id="reset-wallet" type="button" hidden>Reset wallet</button></section>
+    <div id="palette-preview" class="palette-preview" role="list" aria-label="Participant color palette"></div>
+  </main>
+</body>
+</html>

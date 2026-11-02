@@ -3,14 +3,16 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
 
-const source = await readFile(new URL('./app.js', import.meta.url), 'utf8');
-const { BUDGET_MIN, BUDGET_MAX, DURATION_MIN, DURATION_MAX, DELAY_MAX, BLOCKS_PER_DAY, TIME_KEY, ZOOM_KEY, ZOOM_MIN, ZOOM_DEFAULT, chartBlocks, blockDate, burnAt, feeAt, contributionFee, projectedReward, PALETTE, userColor, contributionStatus, FEE, SPARKS, UNIT_KEY, formatMoney, parseBtcUsdQuote, BUDGET_STEP, parseInputNumber, snapToRange, inputToSats, inputToBlocks } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const source = await readFile(new URL('./src/classic/app.js', import.meta.url), 'utf8');
+const library = await readFile(new URL('./src/mint.js', import.meta.url), 'utf8');
+const helpers = await import('./src/mint.js');
+const { BUDGET_MIN, BUDGET_MAX, DURATION_MIN, DURATION_MAX, DELAY_MAX, BLOCKS_PER_DAY, TIME_KEY, ZOOM_KEY, ZOOM_MIN, ZOOM_DEFAULT, chartBlocks, blockDate, burnAt, feeAt, contributionFee, projectedReward, PALETTE, userColor, contributionStatus, FEE, SPARKS, UNIT_KEY, formatMoney, parseBtcUsdQuote, BUDGET_STEP, parseInputNumber, snapToRange, inputToSats, inputToBlocks } = helpers;
 const DEFAULT_ZOOM = 500;
 const BLUE_PALETTE = ['#64b5ff', '#2354d8', '#409bff', '#173a9e', '#2478ed', '#83c7ff', '#3865ba', '#a3d9ff', '#3289f5', '#2b46ad', '#51a8ff', '#2d68db'];
 const plan = (options = {}) => ({ user_id: 1, budget_sats: 300005, duration: 100, start_block: 10, burned_sats: '0', fees_sats: '0', reward_sparks: '0', commission_sparks: '0', ...options });
 
 test('budget is a native linear slider with the requested endpoints', async () => {
-  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('./classic.html', import.meta.url), 'utf8');
   const slider = html.match(/<input\b[^>]*\bid="budget"[^>]*>/)[0];
   const attribute = name => Number(slider.match(new RegExp(`\\b${name}="([^"]+)"`))[1]);
   assert.equal(BUDGET_MIN, 100000);
@@ -22,7 +24,7 @@ test('budget is a native linear slider with the requested endpoints', async () =
 });
 
 test('duration and delay sliders use exact integer block bounds at single-block resolution', async () => {
-  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('./classic.html', import.meta.url), 'utf8');
   assert.equal(BLOCKS_PER_DAY, 144);
   assert.equal(DURATION_MIN, 144);
   assert.equal(DURATION_MAX, 4464);
@@ -54,7 +56,7 @@ test('exponential zoom has a ten-block minimum and a fresh five-hundred-block de
   assert.equal(ZOOM_KEY, 'flame-mint-playground-zoom-v2');
   assert.equal(ZOOM_MIN, 10);
   assert.equal(ZOOM_DEFAULT, DEFAULT_ZOOM);
-  assert.doesNotMatch(source, /ZOOM_LEVELS/);
+  assert.doesNotMatch(library + source, /ZOOM_LEVELS/);
 });
 
 test('integer schedule spreads the remainder into the first blocks and conserves sats', () => {
@@ -275,7 +277,7 @@ test('the twelve-color fixed palette preserves the originals and their rounded R
   assert.equal(userColor(12), PALETTE[0]);
   assert.equal(userColor(13), PALETTE[1]);
   for (const id of [0, 1, 2, 3, 4, 5, 6, 7, 11, 12, 13, 18, 26, 999, Number.MAX_SAFE_INTEGER]) assert.equal(userColor(id), PALETTE[id % PALETTE.length]);
-  assert.doesNotMatch(source, /Math\.random|shuffledPalette|addressColors|paletteKey/);
+  assert.doesNotMatch(library + source, /Math\.random|shuffledPalette|addressColors|paletteKey/);
 });
 
 test('delegating user colors use the specified stable blue palette while services remain warm', () => {
@@ -287,7 +289,7 @@ test('delegating user colors use the specified stable blue palette while service
 });
 
 test('every referenced UI element exists once in the page', async () => {
-  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('./classic.html', import.meta.url), 'utf8');
   const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
   assert.equal(ids.length, new Set(ids).size, 'duplicate element IDs');
   for (const [, id] of source.matchAll(/element\('([^']+)'\)/g)) assert.ok(ids.includes(id), `missing #${id}`);
@@ -295,7 +297,7 @@ test('every referenced UI element exists once in the page', async () => {
 });
 
 test('both pages keep Dashboard and Mint links together on the left and mark the active page', async () => {
-  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('./classic.html', import.meta.url), 'utf8');
   const header = html.match(/<header\b[^>]*>[\s\S]*?<\/header>/)[0];
   assert.match(header, /<a\b[^>]*id="nav-dashboard"[^>]*href="\/classic"[^>]*>Dashboard<\/a>/);
   assert.match(header, /<a\b[^>]*id="nav-mint"[^>]*href="\/classic\/mint"[^>]*>Mint<\/a>/);
@@ -313,7 +315,7 @@ test('both pages keep Dashboard and Mint links together on the left and mark the
 });
 
 test('minter names load only on the mint page after the wallet has been saved, not on polls or display changes', async () => {
-  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('./classic.html', import.meta.url), 'utf8');
   assert.match(html, /<input\b[^>]*id="minter-name"[^>]*maxlength="64"/);
   assert.match(html, /<[^>]*id="minter-name-status"[^>]*role="status"/);
   const dashboard = await openPage('/');
@@ -657,7 +659,7 @@ test('commission saves preserve unsaved edits, isolate failures, and refresh rep
 });
 
 test('a pending Service contribution does not freeze the separate identity commission setting', async () => {
-  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('./classic.html', import.meta.url), 'utf8');
   assert.match(html, /<input\b[^>]*id="commission"[^>]*form="commission-profile"/, 'identity-rate validity is separate from payment-form validity');
   const page = await openPage('/mint', new Map(), async () => { throw new Error('Response lost'); });
   await page.event('mode-service', 'change');
@@ -718,7 +720,7 @@ test('an older in-flight snapshot cannot overwrite balances refreshed by a succe
 });
 
 test('reward address follows the contribution table outside the mint form, with the palette footer last', async () => {
-  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('./classic.html', import.meta.url), 'utf8');
   const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/)[1];
   const mint = main.match(/<section\b[^>]*id="mint-form"[^>]*>([\s\S]*?)<\/section>/)[1];
   assert.doesNotMatch(mint, /id="(?:wallet-panel|wallet-address|seed-details)"/, 'wallet controls do not belong to the contribution form');
@@ -787,7 +789,7 @@ const profileResponse = (name = 'Minter 1', user_id = 1, service_commission_bps 
 const profileRequests = page => page.requests.filter(request => request.url === '/api/minter');
 
 async function openPage(pathname, storage = new Map(), post = async () => ({ id: 2, user_id: 1, start_block: 11 }), walletReady = Promise.resolve(), pageOptions = {}) {
-  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('./classic.html', import.meta.url), 'utf8');
   const draws = [];
   class Element {
     constructor(tag = 'div') { this.tag = tag; this.children = []; this.style = {}; this.handlers = {}; this.value = ''; this.hidden = false; this.disabled = false; this.checked = false; }
@@ -822,6 +824,7 @@ async function openPage(pathname, storage = new Map(), post = async () => ({ id:
   let profileCommission = null;
   const snapshot = { height: 10, totals: { contribution_count: 1, burned_sats: '100000', fees_sats: '1000', reward_sparks: '50000000000' }, contributions: [{ id: 1, user_id: 1, address: 'tf1demo-address', budget_sats: 300000, duration: 100, start_block: 10, burned_sats: '2000', fees_sats: '1000', reward_sparks: '5000000000' }] };
   const context = vm.createContext({
+    ...helpers,
     document: { getElementById: id => elements.get(id), createElement: tag => new Element(tag), createDocumentFragment: () => new Element('fragment') },
     location: { pathname }, window: { devicePixelRatio: 1 }, console,
     AbortSignal: { timeout: delay => { abortTimeouts.push(delay); return AbortSignal.timeout(delay); } },
@@ -846,7 +849,8 @@ async function openPage(pathname, storage = new Map(), post = async () => ({ id:
       return { ok: true, json: async () => post(JSON.parse(options.body)) };
     },
   });
-  const script = source.replace(/^export /gm, '').replace("await import('/wallet/flamewallet_wasm.js')", 'await Promise.resolve(walletModule)');
+  // The page imports its helpers; here they are globals of the context instead.
+  const script = source.replace(/^import \{[\s\S]*?\} from '\.\.\/mint\.js';/m, '').replace("await import('../wallet.js')", 'await Promise.resolve(walletModule)');
   vm.runInContext(script, context);
   const settle = async () => { for (let i = 0; i < 4; i++) await new Promise(resolve => setImmediate(resolve)); while (frames.length) frames.shift()(); };
   await settle();
@@ -871,7 +875,7 @@ async function openPage(pathname, storage = new Map(), post = async () => ({ id:
 }
 
 test('both charts center now between five hundred past and future blocks by default', async () => {
-  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('./classic.html', import.meta.url), 'utf8');
   assert.match(html, /<canvas\b[^>]*aria-label="[^"]*Previous and next 500 blocks\./);
   for (const pathname of ['/', '/mint']) {
     const page = await openPage(pathname);
@@ -2202,7 +2206,7 @@ const footerValues = page => page.elements.get('contribution-totals').children[0
 const chartGeometry = page => page.draws.filter(call => call.canvas === page.elements.get('chart') && ['moveTo', 'lineTo'].includes(call.method)).map(call => [call.method, call.args[1]]);
 
 test('both pages offer an accessible three-state unit selection while always showing the BTC/USD quote', async () => {
-  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const html = await readFile(new URL('./classic.html', import.meta.url), 'utf8');
   const quoteRow = html.match(/<p\b[^>]*id="price-status"[^>]*>[^<]*<\/p>/)[0];
   assert.doesNotMatch(quoteRow, /\bhidden\b/);
   assert.match(quoteRow, />Loading BTC\/USD…<\/p>/);

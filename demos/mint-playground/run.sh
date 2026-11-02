@@ -2,19 +2,18 @@
 set -euo pipefail
 
 APP="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$APP/../.." && pwd)"
-export PATH="$ROOT/target/mint-playground-tools/bin:$PATH"
 
-LOCKED="$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;}' "$ROOT/Cargo.lock")"
-FOUND="$(wasm-bindgen --version 2>/dev/null | awk '{print $2}' || true)"
-if [ "$FOUND" != "$LOCKED" ]; then
-  echo "Browser wallet needs wasm-bindgen $LOCKED (found ${FOUND:-none}). Install it locally with:" >&2
-  echo "  cargo install wasm-bindgen-cli --version $LOCKED --locked --root \"$ROOT/target/mint-playground-tools\"" >&2
+if ! command -v npm >/dev/null; then
+  echo "The frontend is built with npm: install Node.js (https://nodejs.org) and run this again." >&2
   exit 1
 fi
 
-OUT="$ROOT/target/wallet-wasm/pkg" CARGO_TARGET_DIR="$ROOT/target" \
-  bash "$ROOT/flamewallet-wasm/scripts/build.sh"
+# The frontend, into web/dist. React, Vite and the browser wallet come from npm.
+cd "$APP/web"
+if [ ! -d node_modules ] || [ package-lock.json -nt node_modules ]; then
+  npm ci --no-audit --no-fund
+fi
+npm run build
 
 cd "$APP"
 exec cargo run --locked --manifest-path "$APP/Cargo.toml" -- "$@"
