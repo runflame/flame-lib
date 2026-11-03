@@ -473,7 +473,9 @@ fn capacity_table(results: &Results) -> String {
             ),
             None => ("not observable".to_owned(), "—".to_owned()),
         };
-        let proves = if attempt.proves {
+        let proves = if attempt.over_limit(&results.limits) {
+            "yes, ✕ over the limit".to_owned()
+        } else if attempt.proves {
             "yes".to_owned()
         } else {
             match &attempt.error {

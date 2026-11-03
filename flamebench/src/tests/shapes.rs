@@ -7,13 +7,12 @@
 use std::sync::OnceLock;
 
 use flamechain::BlockTx;
-use flamepayments::BuilderError;
-use flamevm::{TxEntry, TxLog, VMError};
+use flamevm::{TxEntry, TxLog};
 use merlin::Transcript;
 use musig::{Multisignature, VerificationKey};
 
 use crate::first_send::{contract_bytes, contract_from_bytes, Scratch};
-use crate::fixtures::{self, SendError, Shape, Transfer, OVER_CAPACITY, SHAPES};
+use crate::fixtures::{self, Shape, Transfer, OVER_CAPACITY, SHAPES};
 
 fn built() -> &'static (Vec<Shape>, Transfer) {
     static BUILT: OnceLock<(Vec<Shape>, Transfer)> = OnceLock::new();
@@ -161,19 +160,37 @@ fn the_sign_step_computes_what_sign_does() {
     );
 }
 
+/// The prover's generators reach past the consensus limit, so the transfer
+/// one output past the widest shape proves and verifies; what keeps it out
+/// of the chain is its gate count. This is the attempt the send benchmark
+/// records.
 #[test]
-fn one_output_past_the_capacity_does_not_prove() {
+fn one_output_past_the_capacity_proves_over_the_consensus_limit() {
     let transfer = &built().1;
     assert_eq!(transfer.inputs.len(), OVER_CAPACITY.inputs);
     assert_eq!(transfer.outputs.len(), OVER_CAPACITY.outputs);
+    let inputs = transfer.prepare().expect("prepare");
+    let unsigned = transfer
+        .build(
+            &inputs,
+            &transfer.output_specs(),
+            &mut fixtures::rng(fixtures::SEND_RNG_SEED),
+        )
+        .unwrap_or_else(|e| panic!("{} proves: {e:?}", OVER_CAPACITY.label));
+    let gates = unsigned.metrics().multiplications;
+    let (signature, _) = fixtures::signature(&unsigned, &transfer.keys()).expect("sign");
+    let (_, metrics) = unsigned
+        .sign(signature)
+        .verify_with_metrics(fixtures::limits())
+        .unwrap_or_else(|e| panic!("{} verifies: {e:?}", OVER_CAPACITY.label));
+    assert_eq!(metrics.multiplications, gates);
+    let limit = fixtures::chain_params()
+        .limits
+        .max_multiplications_per_transaction;
     assert!(
-        matches!(
-            transfer.send(&mut fixtures::rng(fixtures::SEND_RNG_SEED)),
-            Err(SendError::Build(BuilderError::Vm(
-                VMError::R1CSProofConstruction
-            )))
-        ),
-        "1 → 14 fails to prove, for the proof's capacity"
+        gates > limit,
+        "{}: {gates} gates fit the {limit}-gate limit, so the widest shape can grow",
+        OVER_CAPACITY.label
     );
 }
 

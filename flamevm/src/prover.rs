@@ -7,11 +7,12 @@ use bulletproofs::{BulletproofGens, PedersenGens};
 use curve25519_dalek::ristretto::CompressedRistretto;
 use merlin::Transcript;
 
-/// Shared singleton bulletproof generators (1024 generators ×
-/// 1 party) — sized to cover Phase-12 64-bit range proofs plus
-/// Phase-13 cloak multi-range proofs with headroom. `BulletproofGens`
-/// allocation is ~16 KB; sharing across all prover/verifier
-/// instances saves that cost per tx. Same sizing for both sides —
+/// Shared singleton bulletproof generators (16384 generators ×
+/// 1 party) — well past the consensus limit on multiplication gates
+/// per transaction (`BlockLimits::max_multiplications_per_transaction`,
+/// 1,024), so that limit, not the generators, bounds what a valid
+/// transaction proves. Sharing one table across all prover/verifier
+/// instances saves building it per tx. Same sizing for both sides —
 /// any divergence silently invalidates every proof.
 fn shared_bp_gens() -> &'static BulletproofGens {
     static BP_GENS: OnceLock<BulletproofGens> = OnceLock::new();

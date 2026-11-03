@@ -101,8 +101,9 @@ pub struct ShapeSpec {
     pub outputs: usize,
 }
 
-/// The four shapes, in the order every table lists them. 1→13 is the most
-/// outputs one transaction can prove; [`OVER_CAPACITY`] is one more.
+/// The four shapes, in the order every table lists them. 1→15 is the most
+/// outputs one transaction fits in the consensus limit on multiplication
+/// gates; [`OVER_CAPACITY`] is one more.
 pub const SHAPES: [ShapeSpec; 4] = [
     ShapeSpec {
         id: "1to2",
@@ -123,19 +124,21 @@ pub const SHAPES: [ShapeSpec; 4] = [
         outputs: 4,
     },
     ShapeSpec {
-        id: "1to13",
-        label: "1 → 13",
+        id: "1to15",
+        label: "1 → 15",
         inputs: 1,
-        outputs: 13,
+        outputs: 15,
     },
 ];
 
-/// The transfer one output past the proof's capacity. It never proves.
+/// The transfer one output past the capacity. It proves, the prover's
+/// generators cover it, but it needs more multiplication gates than
+/// consensus allows one transaction, so no block or mempool accepts it.
 pub const OVER_CAPACITY: ShapeSpec = ShapeSpec {
-    id: "1to14",
-    label: "1 → 14",
+    id: "1to16",
+    label: "1 → 16",
     inputs: 1,
-    outputs: 14,
+    outputs: 16,
 };
 
 /// How the decode group decodes a shape's bytes.
@@ -379,10 +382,10 @@ pub fn shapes() -> Vec<Shape> {
     shapes_and_over_capacity().0
 }
 
-/// The four shapes, and the transfer past the proof's capacity: one more
-/// input of the same funding, paid out to 13 recipients plus change. That
-/// transfer is never built here: building it fails, and that failure is
-/// what the benchmark records.
+/// The four shapes, and the transfer past the capacity: one more input of
+/// the same funding, paid out to 15 recipients plus change. That transfer
+/// is never built here: its gate count, over the consensus limit, is what
+/// the benchmark records.
 pub fn shapes_and_over_capacity() -> (Vec<Shape>, Transfer) {
     let mut wallet = Wallet::new();
     let mut inputs = wallet.fund(1).into_iter();

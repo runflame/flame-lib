@@ -21,8 +21,8 @@ use flamewallet_ffi::{Network, Wallet};
 
 use crate::{db, Command, Store};
 
-/// Recipients per transaction. With the change that makes 13 outputs, the
-/// most a single-input transfer proves (`flamepayments::MAX_OUTPUTS`).
+/// Recipients per transaction. With the change that makes 13 outputs, under
+/// the 15 a single-input transfer fits in the consensus gate limit.
 const RECIPIENTS: i64 = 12;
 
 /// How often the ledger and the node are checked.

@@ -172,6 +172,23 @@ pub struct CapacityAttempt {
     pub multiplications: Option<usize>,
 }
 
+impl CapacityAttempt {
+    /// Whether it proved with more gates than consensus allows one
+    /// transaction: a valid proof that no mempool or block accepts.
+    pub fn over_limit(&self, limits: &ChainLimits) -> bool {
+        self.proves
+            && self
+                .multiplications
+                .is_some_and(|gates| gates > limits.max_multiplications_per_transaction)
+    }
+
+    /// Whether it makes a transaction consensus accepts: it proves, within
+    /// the per-transaction gate limit.
+    pub fn fits(&self, limits: &ChainLimits) -> bool {
+        self.proves && !self.over_limit(limits)
+    }
+}
+
 /// The consensus limits the report needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -424,8 +441,8 @@ impl Results {
         )
     }
 
-    /// The most outputs a transaction proved with: a shape, or a transfer
-    /// tried past the shapes that proved.
+    /// The most outputs a transaction fit: a shape, or a transfer tried
+    /// past the shapes that proved within the gate limit.
     pub fn most_outputs(&self) -> Option<usize> {
         self.shapes
             .iter()
@@ -433,17 +450,18 @@ impl Results {
             .chain(
                 self.over_capacity
                     .iter()
-                    .filter(|attempt| attempt.proves)
+                    .filter(|attempt| attempt.fits(&self.limits))
                     .map(|attempt| attempt.outputs),
             )
             .max()
     }
 
-    /// The fewest outputs a transfer failed to prove with, if one did.
+    /// The fewest outputs a transfer did not fit with, if one did not:
+    /// it failed to prove, or proved over the gate limit.
     pub fn fewest_failing_outputs(&self) -> Option<usize> {
         self.over_capacity
             .iter()
-            .filter(|attempt| !attempt.proves)
+            .filter(|attempt| !attempt.fits(&self.limits))
             .map(|attempt| attempt.outputs)
             .min()
     }

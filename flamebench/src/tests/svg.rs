@@ -220,6 +220,24 @@ fn a_transfer_past_the_shapes_that_proves_is_drawn_as_one() {
 }
 
 #[test]
+fn a_transfer_that_proves_over_the_limit_is_drawn_as_not_fitting() {
+    let mut results = sample_results();
+    results.over_capacity[0].proves = true;
+    results.over_capacity[0].error = None;
+    results.over_capacity[0].multiplications = Some(1_081);
+    assert_eq!(results.most_outputs(), Some(13));
+    assert_eq!(results.fewest_failing_outputs(), Some(14));
+    let charts = charts(&results);
+    let svg = chart(&charts, "proof-capacity").render(Theme::Light);
+    assert_eq!(count(&svg, "class=\"bar s1\""), results.shapes.len());
+    assert_eq!(count(&svg, "class=\"bar crit\""), 1);
+    assert_eq!(count(&svg, "✕ over the limit"), 1);
+    assert!(!svg.contains("does not prove"));
+    assert!(svg.contains("1 → 14: 1,081 gates, over the limit; proves over the limit"));
+    assert!(svg.contains("13 outputs fit, 14 do not."));
+}
+
+#[test]
 fn zero_and_extreme_numbers_stay_finite() {
     let mut results = sample_results();
     results.shapes[0].r1cs_estimate_ns = 0.0;

@@ -1256,7 +1256,8 @@ fn proof_capacity(results: &Results) -> Chart {
     );
     let sub = "Multiplication gates each shape's proof needs.";
     // A transfer tried past the shapes is drawn as what it did: one that
-    // proved is a bar like a shape's, and only one that failed is critical.
+    // fits is a bar like a shape's, and one that failed to prove or proved
+    // over the limit is critical.
     enum Row<'a> {
         Proves {
             label: &'a str,
@@ -1272,7 +1273,7 @@ fn proof_capacity(results: &Results) -> Chart {
             gates: Some(shape.multiplications),
         })
         .chain(results.over_capacity.iter().map(|attempt| {
-            if attempt.proves {
+            if attempt.fits(&results.limits) {
                 Row::Proves {
                     label: &attempt.label,
                     gates: attempt.multiplications,
@@ -1361,24 +1362,34 @@ fn proof_capacity(results: &Results) -> Chart {
                 let end = attempt
                     .multiplications
                     .map_or(limit_x, |gates| sx(gates as f64));
+                // It failed to prove, or proved past what consensus allows.
+                let verdict = if attempt.proves {
+                    "proves over the limit"
+                } else {
+                    "does not prove"
+                };
                 let tip = match attempt.multiplications {
                     Some(gates) => format!(
-                        "{}: {} gates, over the limit; does not prove",
+                        "{}: {} gates, over the limit; {verdict}",
                         attempt.label,
                         thousands(gates as u64)
                     ),
-                    None => format!("{}: does not prove", attempt.label),
+                    None => format!("{}: {verdict}", attempt.label),
                 };
                 body.text(left - 12.0, text_y, &attempt.label, "label", Anchor::End);
                 body.hbar(left, y, end, "crit", true, &tip);
                 body.text(
                     end.max(limit_x) + 8.0,
                     text_y,
-                    "✕ does not prove",
+                    if attempt.proves {
+                        "✕ over the limit"
+                    } else {
+                        "✕ does not prove"
+                    },
                     "crit-ink",
                     Anchor::Start,
                 );
-                desc_rows.push(format!("{}: does not prove.", attempt.label));
+                desc_rows.push(format!("{}: {verdict}.", attempt.label));
             }
         }
     }
@@ -1388,7 +1399,10 @@ fn proof_capacity(results: &Results) -> Chart {
         limit_x,
         base_y,
         "ref",
-        &format!("The limit: {} gates per proof", thousands(limit as u64)),
+        &format!(
+            "The limit: {} gates per transaction",
+            thousands(limit as u64)
+        ),
     );
     body.text(
         limit_x,
@@ -1410,7 +1424,10 @@ fn proof_capacity(results: &Results) -> Chart {
 
     Chart {
         name: "proof-capacity",
-        alt: "Proof capacity used by shape, against the 1,024-gate limit".into(),
+        alt: format!(
+            "Proof capacity used by shape, against the {}-gate limit",
+            thousands(limit as u64)
+        ),
         desc: format!("{sub} {}", desc_rows.join(" ")),
         title,
         height,

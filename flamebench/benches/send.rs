@@ -9,8 +9,8 @@
 //!   `send/sign`, `send/package` and `send/open_note` measure a send's
 //!   steps; `send/r1cs_prove_synthetic` estimates the proving share.
 //! - **Outside criterion**, in the full run only, with no filter or other
-//!   option: the peak heap of one warm send per shape, the 1→14 transfer
-//!   that must fail, and the first send in new processes:
+//!   option: the peak heap of one warm send per shape, the 1→16 transfer
+//!   past the gate limit, and the first send in new processes:
 //!   [`FIRST_SEND_RUNS`] runs of the `first-send` binary per shape, each
 //!   pinned with `taskset` to the CPU this bench is pinned to.
 //!
@@ -224,8 +224,9 @@ fn attempt(transfer: &Transfer) -> CapacityAttempt {
         &transfer.output_specs(),
         &mut fixtures::rng(SEND_RNG_SEED),
     );
-    // It fails for the known reason, or it proves; anything else is a bug
-    // to look at, not a result to publish.
+    // It proves, over the gate limit the report checks it against, or it
+    // fails for the known reason; anything else is a bug to look at, not a
+    // result to publish.
     let (proves, error, multiplications) = match built {
         Ok(unsigned) => (true, None, Some(unsigned.metrics().multiplications)),
         Err(BuilderError::Vm(error @ VMError::R1CSProofConstruction)) => {

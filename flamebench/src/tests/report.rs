@@ -103,6 +103,25 @@ fn a_results_file_round_trips() {
 }
 
 #[test]
+fn a_transfer_that_proves_over_the_limit_is_reported_as_not_fitting() {
+    let dir = TempDir::new("over-limit");
+    let mut results = sample_results();
+    results.over_capacity[0].proves = true;
+    results.over_capacity[0].error = None;
+    results.over_capacity[0].multiplications = Some(1_081);
+    let options = options_for(dir.path(), &results);
+    let output = run(&options).expect("report --results");
+    assert!(
+        output.contains("1 → 14: proves, over the limit, 1081 gates"),
+        "{output}"
+    );
+
+    let page = fs::read_to_string(&options.page).expect("page");
+    assert!(page.contains("| 1 → 14 | 14 | 1,081 | 106% | yes, ✕ over the limit |"));
+    assert!(page.contains("| Most outputs in one transaction | 13 |"));
+}
+
+#[test]
 fn report_results_draws_fourteen_svgs_and_the_blocks() {
     let dir = TempDir::new("draw");
     let options = options_for(dir.path(), &sample_results());

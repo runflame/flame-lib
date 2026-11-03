@@ -525,7 +525,9 @@ pub fn developer_table(results: &Results) -> String {
         out.push_str(&format!(
             "\n{}: {}{}\n",
             attempt.label,
-            if attempt.proves {
+            if attempt.over_limit(&results.limits) {
+                "proves, over the limit".to_owned()
+            } else if attempt.proves {
                 "proves".to_owned()
             } else {
                 format!(

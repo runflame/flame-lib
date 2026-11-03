@@ -439,13 +439,12 @@ fn more_than_sixteen_outputs_is_refused() {
     );
 }
 
-/// The most outputs that can actually be proven, which is **not**
-/// [`MAX_OUTPUTS`]. `MAX_OUTPUTS` is the `roll_k` encoding bound; the
-/// prover's shared `BulletproofGens::new(1024, 1)` runs out first, because
-/// `mix` range-proves every output over 64 bits. Measured: 13 proves, 14
-/// does not. If this constant has to move, flamevm's generator capacity
-/// changed.
-const PROVABLE_OUTPUTS: usize = 13;
+/// The most outputs that can be proven: [`MAX_OUTPUTS`], the `roll_k`
+/// encoding bound, which the prover's shared `BulletproofGens::new(16384, 1)`
+/// reaches. Its widest roll is the one most worth checking. Consensus caps a
+/// valid single-input transfer lower, at 15 outputs, by its gate limit; that
+/// limit is not this crate's to check.
+const PROVABLE_OUTPUTS: usize = MAX_OUTPUTS;
 
 /// The widest transfer in the suite, and the one that proves the roll keeps
 /// each output's commitments, predicate and note together. The predicate is

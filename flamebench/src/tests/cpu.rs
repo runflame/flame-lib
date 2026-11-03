@@ -112,7 +112,7 @@ fn only_the_documented_command_is_a_full_run() {
         "--bench",
         "--profile-time",
         "10",
-        "tx_cost/verify/1to13"
+        "tx_cost/verify/1to15"
     ]));
     assert!(!run(&["--test"]), "criterion's test mode");
     assert!(!run(&["--bench", "--noplot"]), "any other option");
