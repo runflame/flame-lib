@@ -97,7 +97,7 @@ jobs:
         docker push "$IMAGE:main"
         docker logout ghcr.io
         {
-          echo "Pushed \`$IMAGE:$TAG\` and moved \`:main\` to it: dev picks it up within a minute or two. \`curl -sI https://dev-mint.runflame.org/api/state | grep -i x-mint-revision\` shows this commit once it has."
+          echo "Pushed \`$IMAGE:$TAG\` and moved \`:main\` to it: dev picks it up within a minute or two. \`curl -sI https://demo-mint.runflame.org/api/state | grep -i x-mint-revision\` shows this commit once it has."
           echo
           echo "To pin dev to this build instead, in the infrastructure repo: \`image_tag: \"$TAG\"\` in \`dev/playground/mint_playground/vars_service.yml\`, then \`ansible-playbook mint_playground/deploy.yml --ask-vault-pass\`."
         } >> "$GITHUB_STEP_SUMMARY"
