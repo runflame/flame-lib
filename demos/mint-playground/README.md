@@ -104,6 +104,8 @@ A pending public request is saved locally before submission, keeping its ID and 
 
 ### HTTP API and future wallet integration
 
+Any origin may call the API, so a wallet on its own site can submit for its user. The server checks no `Origin` and sends no CORS headers: a deployment that serves other sites adds them in front, as angie does for `demo-mint.runflame.org`. Nothing is lost by this, because writes carry no credentials. As above, anyone can already submit for any address.
+
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/state` | Dashboard snapshot: height, server-computed lifetime totals/count, `minters` summaries, persistent `services` offers, latest 200 detailed contributions by descending ID (no age filter), and lightweight `chart_contributions` schedules for all contributions. |

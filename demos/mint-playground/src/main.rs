@@ -5,7 +5,7 @@ mod payout;
 
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -162,10 +162,8 @@ async fn rewards(State(store): State<Store>) -> Result<Json<Vec<db::RewardBalanc
 
 async fn submit(
     State(store): State<Store>,
-    headers: HeaderMap,
     request: Result<Json<db::ContributionRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<db::Submitted>, ApiError> {
-    check_origin(&headers)?;
     let Json(request) = request.map_err(|error| {
         ApiError(
             error.status(),
@@ -180,10 +178,8 @@ async fn submit(
 
 async fn minter(
     State(store): State<Store>,
-    headers: HeaderMap,
     request: Result<Json<db::MinterRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<db::Minter>, ApiError> {
-    check_origin(&headers)?;
     let Json(request) = request.map_err(|error| {
         ApiError(
             error.status(),
@@ -195,27 +191,6 @@ async fn minter(
         .request(|reply| Command::Minter(request, reply))
         .await
         .map(Json)
-}
-
-fn check_origin(headers: &HeaderMap) -> Result<(), ApiError> {
-    // JSON-only writes, no CORS, and an origin check keep other sites out of this local demo.
-    if let Some(origin) = headers.get(header::ORIGIN) {
-        let host = headers
-            .get(header::HOST)
-            .and_then(|value| value.to_str().ok());
-        let origin = origin.to_str().ok().and_then(|origin| {
-            origin
-                .strip_prefix("http://")
-                .or_else(|| origin.strip_prefix("https://"))
-        });
-        if host.is_none() || origin != host {
-            return Err(ApiError(
-                StatusCode::FORBIDDEN,
-                "Cross-origin submissions are not allowed.".into(),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Where the built frontend is: `MINT_WEB_DIR` for a deployed binary (the container
@@ -803,7 +778,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn minter_route_rejects_bad_names_networks_private_fields_origin_and_large_bodies() {
+    async fn minter_route_rejects_bad_names_networks_private_fields_and_large_bodies() {
         let (store, thread) = Store::open(PathBuf::from(":memory:")).unwrap();
         let app = router(store.clone(), PathBuf::from("unbuilt"));
         let address = contribution()["address"].as_str().unwrap().to_owned();
@@ -841,17 +816,6 @@ mod tests {
                 .to_string()
                 .contains("must never be accepted"));
         }
-        let mut request = minter_request(&serde_json::json!({"address":address}));
-        request
-            .headers_mut()
-            .insert(header::HOST, "127.0.0.1:3000".parse().unwrap());
-        request
-            .headers_mut()
-            .insert(header::ORIGIN, "https://evil.example".parse().unwrap());
-        assert_eq!(
-            app.clone().oneshot(request).await.unwrap().status(),
-            StatusCode::FORBIDDEN
-        );
         let oversized = serde_json::json!({"address":address,"name":"x".repeat(3_000)});
         assert_eq!(
             app.clone()
@@ -1248,20 +1212,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_cross_origin_private_fields_and_invalid_input() {
+    async fn writes_from_other_origins_are_accepted() {
         let (store, thread) = Store::open(PathBuf::from(":memory:")).unwrap();
         let app = router(store.clone(), PathBuf::from("unbuilt"));
-        let mut request = post_request(&contribution());
-        request
-            .headers_mut()
-            .insert(header::HOST, "127.0.0.1:3000".parse().unwrap());
-        request
-            .headers_mut()
-            .insert(header::ORIGIN, "https://evil.example".parse().unwrap());
-        assert_eq!(
-            app.clone().oneshot(request).await.unwrap().status(),
-            StatusCode::FORBIDDEN
-        );
+        let address = contribution()["address"].as_str().unwrap().to_owned();
+        for mut request in [
+            minter_request(&serde_json::json!({"address": address})),
+            post_request(&contribution()),
+        ] {
+            request
+                .headers_mut()
+                .insert(header::HOST, "127.0.0.1:3000".parse().unwrap());
+            request
+                .headers_mut()
+                .insert(header::ORIGIN, "https://wallet.example".parse().unwrap());
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::OK
+            );
+        }
+        store.stop().await;
+        thread.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_private_fields_and_invalid_input() {
+        let (store, thread) = Store::open(PathBuf::from(":memory:")).unwrap();
+        let app = router(store.clone(), PathBuf::from("unbuilt"));
         let mut value = contribution();
         value["mnemonic"] = "must never be accepted".into();
         assert_eq!(
