@@ -15,7 +15,7 @@ use merlin::Transcript;
 /// any divergence silently invalidates every proof.
 fn shared_bp_gens() -> &'static BulletproofGens {
     static BP_GENS: OnceLock<BulletproofGens> = OnceLock::new();
-    BP_GENS.get_or_init(|| BulletproofGens::new(16384, 1))
+    BP_GENS.get_or_init(|| BulletproofGens::new(1024, 1))
 }
 
 use crate::constraints::Commitment;
