@@ -3,7 +3,9 @@ name: Mint bots image
 # Builds demos/mint-bots/Dockerfile, starts it and checks that it serves its
 # control page, then, from main only, pushes it to GHCR as
 # ghcr.io/runflame/mint-bots:<short commit> and moves `:main` to it. A pull
-# request into main runs the same build and check and pushes nothing.
+# request into main runs the same build and check and pushes nothing. Nothing
+# reaches dev from here: the dev host runs `:demo`, which only
+# deploy-mint-demo.yml moves.
 #
 # The paths are what the image is built from: the bots and flamekd.
 
@@ -97,4 +99,4 @@ jobs:
         docker tag "$IMAGE:$TAG" "$IMAGE:main"
         docker push "$IMAGE:main"
         docker logout ghcr.io
-        echo "Pushed \`$IMAGE:$TAG\` and moved \`:main\` to it." >> "$GITHUB_STEP_SUMMARY"
+        echo "Pushed \`$IMAGE:$TAG\` and moved \`:main\` to it. To put it on dev, run *Deploy mint demo* with \`main\`, or \`$TAG\` for this build exactly." >> "$GITHUB_STEP_SUMMARY"

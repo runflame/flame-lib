@@ -1,0 +1,74 @@
+name: Deploy mint demo
+
+# Moves `:demo` of ghcr.io/runflame/mint-playground and mint-bots to a build
+# from main. The dev host runs both under `:demo` with podman auto-update and
+# pulls a moved tag on its own within a minute or two (infrastructure repo,
+# dev README → mint-playground); the job holds no keys to any server. A push
+# to main only builds `:<short commit>` and moves `:main`: nothing reaches dev
+# until this runs.
+#
+# Who may deploy is the `demo` environment's (Settings → Environments →
+# demo): its required reviewers are the people allowed, and its deployment
+# branches are main alone. A run waits until one of them approves it, the
+# one who started it included.
+#
+# Each input is a tag of that image: `main`, its latest build, or a short
+# commit from an image run's summary, to roll back to; `-` leaves that
+# image's `:demo` where it is.
+
+on:
+  workflow_dispatch:
+    inputs:
+      playground:
+        description: 'mint-playground: main, a short commit, or - to leave it'
+        required: true
+        default: main
+        type: string
+      bots:
+        description: 'mint-bots: main, a short commit, or - to leave it'
+        required: true
+        default: main
+        type: string
+
+# One deployment at a time, and never cancel one half done.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: demo
+    permissions:
+      packages: write
+    steps:
+    # Retags in the registry, by digest: no pull, no rebuild, and `:demo` is
+    # the very image the tag pointed at when it was read.
+    - name: Move :demo
+      env:
+        PLAYGROUND: ${{ inputs.playground }}
+        BOTS: ${{ inputs.bots }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -euo pipefail
+        promote() {
+          local image="$1" tag="$2" digest
+          if [ "$tag" = - ]; then
+            echo "\`$image:demo\` left where it was." >> "$GITHUB_STEP_SUMMARY"
+            return
+          fi
+          [[ "$tag" =~ ^(main|[0-9a-f]{7})$ ]] || { echo "$image: '$tag' is neither main nor a short commit"; exit 1; }
+          digest="$(docker buildx imagetools inspect "$image:$tag" --format '{{ .Manifest.Digest }}')"
+          docker buildx imagetools create -t "$image:demo" "$image@$digest"
+          echo "Moved \`$image:demo\` to \`:$tag\` (\`$digest\`)." >> "$GITHUB_STEP_SUMMARY"
+        }
+        echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+        trap 'docker logout ghcr.io' EXIT
+        promote ghcr.io/runflame/mint-playground "$PLAYGROUND"
+        promote ghcr.io/runflame/mint-bots "$BOTS"
+        {
+          echo
+          echo "Dev picks it up within a minute or two. \`curl -sI https://demo-mint.runflame.org/api/state | grep -i x-mint-revision\` shows the playground's commit once it has."
+        } >> "$GITHUB_STEP_SUMMARY"

@@ -4,9 +4,8 @@ name: Mint playground image
 # serves, then, from main only, pushes it to GHCR as
 # ghcr.io/runflame/mint-playground:<short commit> and moves `:main` to it.
 # A pull request into main runs the same build and check and pushes nothing:
-# the dry run before merging. The job holds no keys to any server: the dev
-# host runs `:main` with podman auto-update and pulls a new image on its own
-# within a minute or two (infrastructure repo, dev README → mint-playground).
+# the dry run before merging. Nothing reaches dev from here: the dev host
+# runs `:demo`, which only deploy-mint-demo.yml moves.
 #
 # Only the demo's own changes build it; flamekd, the payout wallet and the
 # other crates it is built with are picked up by the next such change, or by
@@ -97,7 +96,5 @@ jobs:
         docker push "$IMAGE:main"
         docker logout ghcr.io
         {
-          echo "Pushed \`$IMAGE:$TAG\` and moved \`:main\` to it: dev picks it up within a minute or two. \`curl -sI https://dev-mint.runflame.org/api/state | grep -i x-mint-revision\` shows this commit once it has."
-          echo
-          echo "To pin dev to this build instead, in the infrastructure repo: \`image_tag: \"$TAG\"\` in \`dev/playground/mint_playground/vars_service.yml\`, then \`ansible-playbook mint_playground/deploy.yml --ask-vault-pass\`."
+          echo "Pushed \`$IMAGE:$TAG\` and moved \`:main\` to it. To put it on dev, run *Deploy mint demo* with \`main\`, or \`$TAG\` for this build exactly."
         } >> "$GITHUB_STEP_SUMMARY"
