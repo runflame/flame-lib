@@ -1574,8 +1574,18 @@ export default class Playground extends React.Component {
       );
     };
     o.mpName = s.mpName ?? ((L && L.minter && L.minter.name) || '');
-    o.mpOnName = (e) =>
-      this.setState({ mpName: L && L.cleanName ? L.cleanName(e.target.value) : e.target.value });
+    o.mpOnName = (e) => {
+      const raw = e.target.value;
+      this.setState({ mpName: L && L.cleanName ? L.cleanName(raw) : raw });
+      // Letters from another keyboard layout are dropped silently, so say why nothing appeared.
+      if (/[^A-Za-z0-9 ]/.test(raw)) {
+        const hint = 'Use Latin letters and digits only';
+        if (!(s.mpToast === true && s.mpToastT1 === hint))
+          this.setState({ mpToast: true, mpToastT1: hint });
+        clearTimeout(this._mpToastT);
+        this._mpToastT = setTimeout(() => this.mpToastOut(), 3000);
+      }
+    };
     o.mpNameBlur = () => saveName();
     o.mpResetGo = () => {
       L && L.resetWallet();
