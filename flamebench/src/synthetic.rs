@@ -28,11 +28,11 @@ use merlin::Transcript;
 /// The label both sides of the synthetic proof use.
 const LABEL: &[u8] = b"flamebench.r1cs";
 
-/// The generators `flamevm`'s prover and verifier use, 1,024 multipliers
+/// The generators `flamevm`'s prover and verifier use, 16,384 multipliers
 /// for one party, built once per process as `flamevm` builds its own.
 pub fn bulletproof_gens() -> &'static BulletproofGens {
     static BP_GENS: OnceLock<BulletproofGens> = OnceLock::new();
-    BP_GENS.get_or_init(|| BulletproofGens::new(1024, 1))
+    BP_GENS.get_or_init(|| BulletproofGens::new(16384, 1))
 }
 
 /// A prover holding `multipliers` multipliers, each constrained to

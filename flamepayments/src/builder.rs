@@ -47,12 +47,10 @@ use crate::note::{self, MEMO_MAX};
 /// The first of `n` outputs is rolled from depth `n - 1`, which makes 16 the
 /// exact encoding bound.
 ///
-/// It is not a reachable one. `mix` range-proves every output over 64 bits,
-/// and the prover's shared `BulletproofGens::new(1024, 1)` runs out of
-/// multipliers first: a single-input transfer proves at 13 outputs and fails
-/// at 14 with `VMError::R1CSProofConstruction`. A bigger `m` lowers that
-/// further. This guard is therefore defensive — it keeps a `roll_k` overflow
-/// out of the bytecode, but a caller meets the proving ceiling before it.
+/// It is also the ceiling a caller meets. `mix` range-proves every output
+/// over 64 bits, about 68 multipliers each, and the prover's shared
+/// `BulletproofGens::new(16384, 1)` holds far more than sixteen outputs and
+/// their inputs need: 17 outputs are refused here, before any proving.
 pub const MAX_OUTPUTS: usize = 16;
 
 /// The secret behind a confidential token: what its recipient spends the

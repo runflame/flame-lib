@@ -3,11 +3,11 @@
 //!
 //! Two entry points, because their costs differ by an order of magnitude:
 //! [`shapes`] builds the four shapes from one funding transaction, and
-//! [`pool`] builds the 256-transaction verifier-scaling pool from twenty.
+//! [`pool`] builds the 256-transaction verifier-scaling pool from sixteen.
 //! Tests call `shapes` only.
 //!
 //! Every shape spends confidential inputs the way a wallet does: a clear
-//! allocation funds a 1→13 transfer to the sender's own addresses, the
+//! allocation funds a 1→16 transfer to the sender's own addresses, the
 //! sender opens each output's note, and the openings become
 //! [`InputSpec::confidential`] inputs. `verify` does not check Utreexo
 //! membership, so every input carries [`Proof::Transient`].
@@ -54,9 +54,9 @@ const PAYMENT: u64 = SPARKS_PER_FLAME;
 pub const FEE: u64 = 1_000;
 
 /// Outputs of one funding transaction, and so inputs it yields.
-const FUNDING_OUTPUTS: usize = 13;
+const FUNDING_OUTPUTS: usize = 16;
 /// Funding transactions behind the throughput pool.
-const POOL_FUNDING: usize = 20;
+const POOL_FUNDING: usize = 16;
 /// Transactions in the verifier-scaling pool.
 pub const POOL_SIZE: usize = 256;
 
@@ -101,8 +101,8 @@ pub struct ShapeSpec {
     pub outputs: usize,
 }
 
-/// The four shapes, in the order every table lists them. 1→13 is the most
-/// outputs one transaction can prove; [`OVER_CAPACITY`] is one more.
+/// The four shapes, in the order every table lists them. 1→16 is the most
+/// outputs one transaction can carry; [`OVER_CAPACITY`] is one more.
 pub const SHAPES: [ShapeSpec; 4] = [
     ShapeSpec {
         id: "1to2",
@@ -123,19 +123,20 @@ pub const SHAPES: [ShapeSpec; 4] = [
         outputs: 4,
     },
     ShapeSpec {
-        id: "1to13",
-        label: "1 → 13",
+        id: "1to16",
+        label: "1 → 16",
         inputs: 1,
-        outputs: 13,
+        outputs: 16,
     },
 ];
 
-/// The transfer one output past the proof's capacity. It never proves.
+/// The transfer one output past what a transaction carries. It never proves:
+/// the builder refuses it first (`flamepayments::MAX_OUTPUTS`).
 pub const OVER_CAPACITY: ShapeSpec = ShapeSpec {
-    id: "1to14",
-    label: "1 → 14",
+    id: "1to17",
+    label: "1 → 17",
     inputs: 1,
-    outputs: 14,
+    outputs: 17,
 };
 
 /// How the decode group decodes a shape's bytes.
@@ -373,14 +374,14 @@ pub fn decode(bytes: &[u8], method: DecodeMethod) -> Result<ExternalTx, CellErro
     }
 }
 
-/// Builds the four shapes from one funding transaction: 13 inputs, of which
+/// Builds the four shapes from one funding transaction: 16 inputs, of which
 /// 8 are spent.
 pub fn shapes() -> Vec<Shape> {
     shapes_and_over_capacity().0
 }
 
 /// The four shapes, and the transfer past the proof's capacity: one more
-/// input of the same funding, paid out to 13 recipients plus change. That
+/// input of the same funding, paid out to 16 recipients plus change. That
 /// transfer is never built here: building it fails, and that failure is
 /// what the benchmark records.
 pub fn shapes_and_over_capacity() -> (Vec<Shape>, Transfer) {
@@ -399,8 +400,8 @@ pub fn shapes_and_over_capacity() -> (Vec<Shape>, Transfer) {
     (shapes, wallet.transfer(OVER_CAPACITY, spare))
 }
 
-/// The inputs of one funding transaction: 13 confidential outputs of a
-/// 1→13 transfer to the sender's own addresses, as the sender holds them.
+/// The inputs of one funding transaction: 16 confidential outputs of a
+/// 1→16 transfer to the sender's own addresses, as the sender holds them.
 /// One transaction proved, nothing else.
 pub fn funding() -> Vec<Spend> {
     Wallet::new().fund(1)
@@ -412,8 +413,8 @@ pub fn transfer(spec: ShapeSpec, spent: Vec<Spend>) -> Transfer {
     Wallet::new().transfer(spec, spent)
 }
 
-/// Builds the verifier-scaling pool from twenty funding transactions: 260
-/// inputs, of which 256 are spent. Several seconds of proving.
+/// Builds the verifier-scaling pool from sixteen funding transactions: 256
+/// inputs, every one spent. Several seconds of proving.
 pub fn pool() -> Pool {
     let mut wallet = Wallet::new();
     let inputs = wallet.fund(POOL_FUNDING);
@@ -450,7 +451,7 @@ impl Wallet {
         }
     }
 
-    /// `count` clear allocations, each spent by one 1→13 transaction to the
+    /// `count` clear allocations, each spent by one 1→16 transaction to the
     /// sender's own addresses, whose outputs come back as confidential
     /// inputs.
     fn fund(&mut self, count: usize) -> Vec<Spend> {

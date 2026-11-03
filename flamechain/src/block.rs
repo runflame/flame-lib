@@ -53,7 +53,9 @@ impl Default for BlockLimits {
             max_gas_credit: 10_000_000,
             max_external_gas: 100_000_000,
             max_internal_gas: 25_000_000,
-            max_multiplications_per_transaction: 1_024,
+            // flamevm's BulletproofGens: a transaction any wallet can prove is
+            // one the chain accepts.
+            max_multiplications_per_transaction: 16_384,
             max_multiplications: 100_000,
             max_messages: 100_000,
             max_proofs_per_transaction: 100_000,
