@@ -8,55 +8,19 @@ name: Mint playground image
 # host runs `:main` with podman auto-update and pulls a new image on its own
 # within a minute or two (infrastructure repo, dev README → mint-playground).
 #
-# The paths are what the image is built from: the demo, the browser wallet,
-# flamekd and the payout wallet (flamewallet-cli, flamed-rpc) with the
-# workspace crates they depend on, and the toolchain.
+# Only the demo's own changes build it; flamekd, the payout wallet and the
+# other crates it is built with are picked up by the next such change, or by
+# running the workflow by hand.
 
 on:
   push:
     branches: [ main ]
     paths:
       - 'demos/mint-playground/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'cells/**'
-      - 'flamechain/**'
-      - 'flamed-rpc/**'
-      - 'flamekd/**'
-      - 'flamepayments/**'
-      - 'flamevm/**'
-      - 'flamewallet-cli/**'
-      - 'flamewallet-ffi/**'
-      - 'flamewallet-wasm/**'
-      - 'merkle/**'
-      - 'musig/**'
-      - 'readerwriter/**'
-      - 'spacesuit/**'
-      - 'starsig/**'
-      - '.github/workflows/mint-playground-image.yml'
   pull_request:
     branches: [ main ]
     paths:
       - 'demos/mint-playground/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'cells/**'
-      - 'flamechain/**'
-      - 'flamed-rpc/**'
-      - 'flamekd/**'
-      - 'flamepayments/**'
-      - 'flamevm/**'
-      - 'flamewallet-cli/**'
-      - 'flamewallet-ffi/**'
-      - 'flamewallet-wasm/**'
-      - 'merkle/**'
-      - 'musig/**'
-      - 'readerwriter/**'
-      - 'spacesuit/**'
-      - 'starsig/**'
-      - '.github/workflows/mint-playground-image.yml'
   workflow_dispatch:
 
 # A newer push supersedes a build still running; its commit gets no image.
@@ -95,8 +59,8 @@ jobs:
           --build-arg "MINT_REVISION=$REVISION" \
           -t "$IMAGE:$TAG" .
 
-    # Starts the image as the host does and checks the page, the wallet and
-    # the revision header, then stops it with its STOPSIGNAL and expects a
+    # Starts the image as the host does and checks the pages, a built script
+    # and the revision header, then stops it with its STOPSIGNAL and expects a
     # clean exit.
     - name: Smoke test
       env:
@@ -110,8 +74,10 @@ jobs:
           curl -sf -o /dev/null http://127.0.0.1:3000/api/state && break
           sleep 1
         done
-        curl -sf -o /dev/null http://127.0.0.1:3000/
-        curl -sf -o /dev/null http://127.0.0.1:3000/wallet/flamewallet_wasm.js
+        script="$(curl -sf http://127.0.0.1:3000/ | grep -o '/assets/[^"]*\.js' | head -1)"
+        [ -n "$script" ] || { echo "the page references no built script"; exit 1; }
+        curl -sf -o /dev/null "http://127.0.0.1:3000$script"
+        curl -sf -o /dev/null http://127.0.0.1:3000/classic
         served="$(curl -sfI http://127.0.0.1:3000/api/state | tr -d '\r' | sed -n 's/^x-mint-revision: //Ip')"
         [ "$served" = "$REVISION" ] || { echo "X-Mint-Revision is '$served', expected $REVISION"; exit 1; }
         docker stop mint

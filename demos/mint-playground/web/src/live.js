@@ -1,0 +1,641 @@
+// Live engine state for the main app: server snapshots, the browser wallet, the
+// minter profile and contribution submissions. The playground reads `live` and
+// re-renders whenever a subscriber is called.
+import {
+  BUDGET_MIN,
+  DURATION_MIN,
+  contributionFee,
+  parseBtcUsdQuote,
+  projectedReward,
+} from './mint.js';
+
+// Shared with the classic pages, so both use one identity and one pending request.
+const WALLET_KEY = 'flame-mint-playground-wallet-v1';
+const PENDING_KEY = 'flame-mint-playground-pending-v1';
+// Every account made in this browser, the current one included, newest first, so the person can switch between them.
+const HISTORY_KEY = 'flame-mint-playground-wallets-v1';
+const MODES = ['independent', 'service', 'delegating'];
+// A new account starts with one of these names instead of the server's numbered default.
+const NAMES = [
+  'Ember',
+  'Blaze',
+  'Glow',
+  'Kindle',
+  'Flicker',
+  'Torch',
+  'Phoenix',
+  'Sparky',
+  'Sunny',
+  'Sparkle',
+  'Ignite',
+  'Glimmer',
+  'Sizzle',
+  'Lantern',
+  'Beacon',
+  'Shimmer',
+  'Twinkle',
+  'Sunbeam',
+  'Radiant',
+  'Dazzle',
+  'Candle',
+  'Firefly',
+  'Bonfire',
+  'Sunrise',
+  'Daybreak',
+  'Lumen',
+  'Lumina',
+  'Prism',
+  'Flare',
+  'Comet',
+  'Nova',
+  'Quasar',
+  'Zephyr',
+  'Nebula',
+  'Orbit',
+  'Pulsar',
+  'Aurora',
+  'Rainbow',
+  'Galaxy',
+  'Stardust',
+  'Cosmo',
+  'Astro',
+  'Rocket',
+  'Saturn',
+  'Jupiter',
+  'Venus',
+  'Luna',
+  'Solar',
+  'Celeste',
+  'Skylark',
+  'Starling',
+  'Polaris',
+  'Vega',
+  'Sirius',
+  'Orion',
+  'Lyra',
+  'Zenith',
+  'Breeze',
+  'Cloudy',
+  'Moonbeam',
+  'Otter',
+  'Bunny',
+  'Falcon',
+  'Lynx',
+  'Panda',
+  'Koala',
+  'Gecko',
+  'Dolphin',
+  'Wombat',
+  'Narwhal',
+  'Puffin',
+  'Ferret',
+  'Axolotl',
+  'Capybara',
+  'Hedgehog',
+  'Kitten',
+  'Puppy',
+  'Penguin',
+  'Llama',
+  'Alpaca',
+  'Quokka',
+  'Lemur',
+  'Sloth',
+  'Chipmunk',
+  'Meerkat',
+  'Hamster',
+  'Bumble',
+  'Ladybug',
+  'Robin',
+  'Sparrow',
+  'Finch',
+  'Flamingo',
+  'Peacock',
+  'Parrot',
+  'Toucan',
+  'Manatee',
+  'Orca',
+  'Starfish',
+  'Seahorse',
+  'Turtle',
+  'Pony',
+  'Fawn',
+  'Duckling',
+  'Owlet',
+  'Kitty',
+  'Cheetah',
+  'Leopard',
+  'Jaguar',
+  'Tiger',
+  'Zebra',
+  'Giraffe',
+  'Reindeer',
+  'Corgi',
+  'Poodle',
+  'Beagle',
+  'Husky',
+  'Shiba',
+  'Mochi',
+  'Mango',
+  'Pepper',
+  'Waffle',
+  'Biscuit',
+  'Noodle',
+  'Pickle',
+  'Muffin',
+  'Nugget',
+  'Pretzel',
+  'Cookie',
+  'Popcorn',
+  'Pancake',
+  'Dumpling',
+  'Truffle',
+  'Cupcake',
+  'Donut',
+  'Brownie',
+  'Cocoa',
+  'Latte',
+  'Mocha',
+  'Caramel',
+  'Toffee',
+  'Fudge',
+  'Nougat',
+  'Sorbet',
+  'Gelato',
+  'Sundae',
+  'Churro',
+  'Macaron',
+  'Praline',
+  'Honey',
+  'Maple',
+  'Vanilla',
+  'Cinnamon',
+  'Ginger',
+  'Papaya',
+  'Peach',
+  'Cherry',
+  'Berry',
+  'Lemon',
+  'Lime',
+  'Melon',
+  'Coconut',
+  'Banana',
+  'Apricot',
+  'Plum',
+  'Ramen',
+  'Sushi',
+  'Bonbon',
+  'Gumdrop',
+  'Candy',
+  'Sprinkle',
+  'Daisy',
+  'Tulip',
+  'Lotus',
+  'Orchid',
+  'Poppy',
+  'Clover',
+  'Jasmine',
+  'Lavender',
+  'Acorn',
+  'Pebble',
+  'Meadow',
+  'Blossom',
+  'Petal',
+  'Bloom',
+  'Bamboo',
+  'Coral',
+  'Lagoon',
+  'Oasis',
+  'Magnolia',
+  'Camellia',
+  'Peony',
+  'Violet',
+  'Marigold',
+  'Dahlia',
+  'Zinnia',
+  'Pixel',
+  'Gizmo',
+  'Widget',
+  'Turbo',
+  'Bolt',
+  'Zigzag',
+  'Lucky',
+  'Yoyo',
+  'Kazoo',
+  'Banjo',
+  'Tango',
+  'Mambo',
+  'Salsa',
+  'Disco',
+  'Jazzy',
+  'Groovy',
+  'Bingo',
+  'Bongo',
+  'Ukulele',
+  'Piccolo',
+  'Fiddle',
+  'Maraca',
+  'Conga',
+  'Polka',
+  'Rumba',
+  'Samba',
+  'Boogie',
+  'Funky',
+  'Zippy',
+  'Snappy',
+  'Peppy',
+  'Bouncy',
+  'Giggles',
+  'Chuckle',
+  'Doodle',
+  'Bubbles',
+  'Jetpack',
+  'Kite',
+  'Frisbee',
+  'Marble',
+  'Puzzle',
+  'Confetti',
+  'Balloon',
+  'Carousel',
+  'Pinwheel',
+  'Dreamer',
+  'Wonder',
+  'Jolly',
+  'Merry',
+  'Cheery',
+  'Breezy',
+  'Happy',
+  'Smiley',
+  'Bliss',
+  'Delight',
+  'Charm',
+  'Spirit',
+  'Champ',
+  'Captain',
+  'Pilot',
+  'Voyager',
+  'Ranger',
+  'Scout',
+  'Explorer',
+  'Rover',
+  'Nomad',
+  'Wizard',
+  'Genie',
+  'Pixie',
+  'Sprite',
+  'Fairy',
+  'Unicorn',
+  'Dragon',
+  'Griffin',
+  'Pegasus',
+  'Yeti',
+  'Gnome',
+  'Harmony',
+  'Melody',
+  'Rhythm',
+  'Tempo',
+  'Lyric',
+  'Haiku',
+  'Poet',
+  'Sketch',
+  'Canvas',
+  'Pastel',
+  'Crayon',
+  'Quill',
+  'Ribbon',
+  'Tinsel',
+  'Glitter',
+  'Sequin',
+  'Jewel',
+  'Pearl',
+  'Amber',
+  'Topaz',
+  'Sapphire',
+  'Emerald',
+  'Crystal',
+  'Diamond',
+  'Indigo',
+  'Azure',
+  'Teal',
+  'Lilac',
+];
+const randomName = () => NAMES[Math.floor(Math.random() * NAMES.length)];
+
+const listeners = new Set();
+
+export const live = {
+  state: null,
+  offline: false,
+  lastReceived: 0,
+  wallet: null,
+  walletError: null,
+  minter: null,
+  btcUsd: null,
+  pending: null,
+  submitting: false,
+  version: 0,
+  projectedReward,
+  contributionFee,
+  /** Calls `listener` after every change; returns the function that stops the calls. */
+  subscribe(listener) {
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  },
+};
+
+// Names are Latin letters and digits, with single spaces between words.
+live.cleanName = (text) =>
+  String(text ?? '')
+    .replace(/[^A-Za-z0-9 ]/g, '')
+    .replace(/ {2,}/g, ' ')
+    .replace(/^ /, '');
+
+const changed = () => {
+  live.version++;
+  for (const listener of listeners) listener();
+};
+const post = async (path, body) => {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(10000),
+    body: JSON.stringify(body),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `Server returned ${response.status}`);
+  return result;
+};
+
+live.ownUserId = () =>
+  live.minter?.user_id ??
+  live.state?.minters?.find((account) => account.address === live.wallet?.address)?.user_id ??
+  null;
+// Without a saved rate a new Service contribution starts at 2%.
+live.serviceCommissionBps = () =>
+  live.minter?.service_commission_bps ??
+  live.state?.services?.find((service) => service.user_id === live.ownUserId())?.commission_bps ??
+  null;
+live.connected = () => !!live.state && !live.offline && Date.now() - live.lastReceived <= 5000;
+
+async function poll() {
+  try {
+    const response = await fetch('/api/state?full_history=true', {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error(`Server returned ${response.status}`);
+    live.state = await response.json();
+    live.lastReceived = Date.now();
+    live.offline = false;
+  } catch {
+    live.offline = true;
+  } finally {
+    changed();
+    setTimeout(poll, 1000);
+  }
+}
+
+async function refreshQuote() {
+  try {
+    const response = await fetch('https://api.coinbase.com/v2/prices/BTC-USD/spot', {
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error(`Quote returned ${response.status}`);
+    live.btcUsd = parseBtcUsdQuote(await response.json());
+  } catch {
+    live.btcUsd = null;
+  } finally {
+    changed();
+    setTimeout(refreshQuote, 60000);
+  }
+}
+
+async function fetchMinter(address, fields = {}) {
+  const result = await post('/api/minter', { address, ...fields });
+  if (
+    !Number.isSafeInteger(result.user_id) ||
+    result.user_id < 1 ||
+    typeof result.name !== 'string'
+  )
+    throw new Error('Invalid minter profile');
+  return {
+    user_id: result.user_id,
+    name: result.name,
+    service_commission_bps: result.service_commission_bps ?? null,
+  };
+}
+
+async function loadMinter(fields = {}) {
+  const address = live.wallet?.address;
+  if (!address) throw new Error('Wallet not ready');
+  const minter = await fetchMinter(address, fields);
+  if (live.wallet?.address !== address) return null;
+  live.minter = minter;
+  rememberCurrent();
+  changed();
+  return live.minter;
+}
+
+live.prepareWallet = async (name) => {
+  live.walletError = null;
+  let wallet,
+    isNew = false;
+  try {
+    const stored = JSON.parse(localStorage.getItem(WALLET_KEY) || 'null');
+    if (stored && (typeof stored.address !== 'string' || typeof stored.mnemonic !== 'string'))
+      throw new Error('The saved wallet is unreadable');
+    const load = async () => {
+      const { default: init, generateMnemonic, Wallet } = await import('./wallet.js');
+      await init();
+      const mnemonic = stored ? stored.mnemonic : generateMnemonic(12);
+      const keys = Wallet.fromMnemonic(mnemonic, '', 'testnet', 0);
+      try {
+        const address = keys.nextAddress().receivingAddress;
+        if (stored && stored.address !== address)
+          throw new Error('The saved address does not match the recovery phrase');
+        return { mnemonic, address };
+      } finally {
+        keys.free();
+      }
+    };
+    let timeout;
+    try {
+      wallet = await Promise.race([
+        load(),
+        new Promise((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('The browser wallet did not finish loading.')),
+            15000,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
+    // Saving must succeed before accepting contributions for this identity.
+    localStorage.setItem(WALLET_KEY, JSON.stringify(wallet));
+    isNew = !stored;
+  } catch (error) {
+    live.wallet = null;
+    live.minter = null;
+    live.walletError = error.message || String(error);
+    changed();
+    return;
+  }
+  // The new identity replaces the old one in a single step with the profile already known here (its name
+  // in the account list, its id from the last snapshot), so switching neither waits for the server nor
+  // flashes an empty screen. The server's answer then confirms or completes it.
+  const fields = name ? { name } : isNew ? { name: randomName() } : {};
+  const known = live.state?.minters?.find((account) => account.address === wallet.address);
+  const saved = live.accounts().find((account) => account.address === wallet.address);
+  const knownName = fields.name ?? known?.name ?? saved?.name;
+  live.wallet = wallet;
+  live.minter = knownName
+    ? { user_id: known?.user_id ?? null, name: knownName, service_commission_bps: null }
+    : null;
+  rememberCurrent();
+  changed();
+  loadMinter(fields).catch(() => {});
+};
+
+live.accounts = () => {
+  try {
+    const list = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+    return Array.isArray(list)
+      ? list.filter(
+          (wallet) => typeof wallet?.address === 'string' && typeof wallet?.mnemonic === 'string',
+        )
+      : [];
+  } catch {
+    return [];
+  }
+};
+
+// Records the current account with its latest name: in place when it is listed, so switching keeps the order,
+// and on top when it is new.
+const rememberCurrent = () => {
+  const wallet = live.wallet;
+  if (!wallet) return;
+  try {
+    const list = live.accounts(),
+      at = list.findIndex((account) => account.address === wallet.address);
+    const entry = {
+      address: wallet.address,
+      mnemonic: wallet.mnemonic,
+      name: live.minter?.name ?? list[at]?.name,
+    };
+    if (at < 0) list.unshift(entry);
+    else list[at] = entry;
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+  } catch {
+    /* The list is a convenience; the current wallet itself is saved separately. */
+  }
+};
+
+live.resetWallet = () => {
+  rememberCurrent();
+  try {
+    localStorage.removeItem(WALLET_KEY);
+  } catch {
+    /* A new wallet is created anyway. */
+  }
+  return live.prepareWallet();
+};
+
+live.switchWallet = (address) => {
+  const target = live.accounts().find((wallet) => wallet.address === address);
+  if (!target) throw new Error('This wallet is no longer saved');
+  rememberCurrent();
+  localStorage.setItem(
+    WALLET_KEY,
+    JSON.stringify({ address: target.address, mnemonic: target.mnemonic }),
+  );
+  return live.prepareWallet(target.name);
+};
+
+live.saveName = async (name) => {
+  name = String(name ?? '').trim();
+  if (!name || name.length > 64 || !/^[A-Za-z0-9]+( [A-Za-z0-9]+)*$/.test(name))
+    throw new Error('Use Latin letters and digits only.');
+  if (name === live.minter?.name) return live.minter;
+  return loadMinter({ name });
+};
+
+// Applies to every past and future allocation of this identity's delegators.
+live.saveCommission = async (bps) => {
+  if (!Number.isInteger(bps) || bps < 0 || bps > 10000)
+    throw new Error('Use 0–100%, with at most two decimal places.');
+  return loadMinter({ service_commission_bps: bps });
+};
+
+live.validDraft = (draft) =>
+  [draft.budget_sats, draft.duration, draft.delay_blocks].every(Number.isSafeInteger) &&
+  draft.budget_sats >= BUDGET_MIN &&
+  draft.duration >= DURATION_MIN &&
+  draft.delay_blocks >= 0 &&
+  draft.budget_sats >= draft.duration * (contributionFee(draft) + 1) &&
+  MODES.includes(draft.mode) &&
+  (draft.mode !== 'delegating' ||
+    live.state?.services?.some((service) => service.user_id === draft.service_user_id));
+
+// A request is saved before it is sent and resent unchanged until accepted, so a retry never
+// creates a second contribution.
+live.submit = async (draft) => {
+  if (live.submitting) throw new Error('Already submitting');
+  if (!live.wallet) throw new Error('Wallet not ready');
+  if (!live.pending) {
+    if (!live.validDraft(draft)) throw new Error('Invalid contribution');
+    const request = {
+      address: live.wallet.address,
+      budget_sats: draft.budget_sats,
+      duration: draft.duration,
+      delay_blocks: draft.delay_blocks,
+      request_id: crypto.randomUUID(),
+    };
+    if (draft.mode !== 'independent') request.mode = draft.mode;
+    if (draft.mode === 'delegating') request.service_user_id = draft.service_user_id;
+    localStorage.setItem(PENDING_KEY, JSON.stringify(request));
+    live.pending = request;
+  }
+  live.submitting = true;
+  changed();
+  try {
+    const result = await post('/api/contributions', live.pending);
+    localStorage.removeItem(PENDING_KEY);
+    live.pending = null;
+    if (live.minter) live.minter.user_id = result.user_id;
+    return result;
+  } finally {
+    live.submitting = false;
+    changed();
+  }
+};
+
+live.discardPending = () => {
+  localStorage.removeItem(PENDING_KEY);
+  live.pending = null;
+  changed();
+};
+
+/** Starts polling, the price quote and the wallet. Called once by the app's entry. */
+export function start() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PENDING_KEY) || 'null');
+    if (
+      saved &&
+      typeof saved.address === 'string' &&
+      typeof saved.request_id === 'string' &&
+      Number.isSafeInteger(saved.budget_sats) &&
+      Number.isSafeInteger(saved.duration)
+    )
+      live.pending = { delay_blocks: 0, ...saved };
+  } catch {
+    /* An unreadable request is ignored here; the classic Mint page can discard it. */
+  }
+
+  poll();
+  refreshQuote();
+  live.prepareWallet();
+}
