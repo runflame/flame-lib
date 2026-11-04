@@ -172,7 +172,7 @@ fn write_fixtures() {
         .outputs
         .iter()
         .find(|output| {
-            flamewallet_ffi::decode_contract(output.contract.clone())
+            flamewallet_ffi::decode_contract(output.contract.clone(), None)
                 .expect("decode")
                 .predicate
                 == bob_at.predicate

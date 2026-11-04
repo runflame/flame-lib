@@ -134,6 +134,7 @@ test('a transfer from served bytes to signed bytes', () => {
     assert.equal(typeof allocation.value.qty, 'bigint');
     assert.deepEqual(allocation.value.flavor, wasm.nativeFlavor());
     assert.equal(allocation.value.isNative, true);
+    assert.deepEqual(allocation.value.memo, new Uint8Array());
     assert.deepEqual(alice.owns(allocation.predicate, 0), { branch: 0, index: 0 });
 
     const transfer = alice.buildTransfer(request(clear.request));

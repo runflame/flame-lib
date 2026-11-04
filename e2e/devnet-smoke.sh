@@ -36,6 +36,7 @@ c_address="$("$wallet" "${c[@]}" --json address | field "[0]['address']")"
 "$wallet" "${b[@]}" send "$c_address" 3 --clear --memo audit --wait >/dev/null
 expect "C after a clear payment" "$(balance FLM "${c[@]}")" 300000000
 expect "C's clear coin" "$(clear_held FLM "${c[@]}")" 300000000
+expect "C's clear memo" "$("$wallet" "${c[@]}" --json history | field "['items'][0]['memo']")" audit
 expect "B's change stays confidential" "$(clear_held FLM "${b[@]}")" 0
 expect "B after paying clear" "$(balance FLM "${b[@]}")" 749998000
 

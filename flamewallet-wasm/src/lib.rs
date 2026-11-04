@@ -128,10 +128,11 @@ pub fn native_flavor() -> Vec<u8> {
     flamewallet_ffi::native_flavor()
 }
 
-/// Id, predicate, and a cleartext amount if the contract has one.
+/// Id, predicate, and a cleartext amount if the contract has one. With the
+/// note a scan served after it, a clear output's memo too.
 #[wasm_bindgen(js_name = decodeContract)]
-pub fn decode_contract(bytes: Vec<u8>) -> Result<JsContractInfo, JsValue> {
-    let info = flamewallet_ffi::decode_contract(bytes).map_err(error)?;
+pub fn decode_contract(bytes: Vec<u8>, note: Option<Vec<u8>>) -> Result<JsContractInfo, JsValue> {
+    let info = flamewallet_ffi::decode_contract(bytes, note).map_err(error)?;
     Ok(to_js(&ContractInfo::from(info))?.into())
 }
 
@@ -154,7 +155,10 @@ pub fn replace_proofs(
     let proofs: Vec<serde_bytes::ByteBuf> = from_js(proofs.into())?;
     flamewallet_ffi::replace_proofs(
         block_tx,
-        proofs.into_iter().map(serde_bytes::ByteBuf::into_vec).collect(),
+        proofs
+            .into_iter()
+            .map(serde_bytes::ByteBuf::into_vec)
+            .collect(),
     )
     .map_err(error)
 }

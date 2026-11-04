@@ -329,8 +329,13 @@ async fn run(cli: Cli) -> Result<(), Error> {
                     .iter()
                     .map(|coin| {
                         let what = match &coin.value {
-                            flamewallet_cli::CoinValue::Clear { qty, flavor } => {
-                                format!("{} {flavor} clear", format_qty(*qty as i128, *flavor))
+                            flamewallet_cli::CoinValue::Clear { qty, flavor, memo } => {
+                                let mut what =
+                                    format!("{} {flavor} clear", format_qty(*qty as i128, *flavor));
+                                if !memo.is_empty() {
+                                    what += &format!("  memo {memo:?}");
+                                }
+                                what
                             }
                             flamewallet_cli::CoinValue::Confidential { qty, flavor, memo } => {
                                 let mut what =

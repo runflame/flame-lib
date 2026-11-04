@@ -60,10 +60,12 @@ pub struct Coin {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CoinValue {
     /// A cleartext token; a genesis allocation and `issuepub` output are.
+    /// Its memo is the `Data` entry after it, in the clear; empty if none.
     Clear {
         #[serde(serialize_with = "as_string")]
         qty: u64,
         flavor: Flavor,
+        memo: String,
     },
     /// A confidential token whose note opened.
     Confidential {
@@ -81,7 +83,7 @@ pub enum CoinValue {
 impl CoinValue {
     pub fn token(&self) -> Option<(u64, Flavor)> {
         match self {
-            CoinValue::Clear { qty, flavor } | CoinValue::Confidential { qty, flavor, .. } => {
+            CoinValue::Clear { qty, flavor, .. } | CoinValue::Confidential { qty, flavor, .. } => {
                 Some((*qty, *flavor))
             }
             CoinValue::Unreadable { .. } | CoinValue::NotToken => None,
@@ -695,11 +697,12 @@ impl Session {
         for (contracts, sign) in [(&entry.created, 1), (&entry.spent, -1)] {
             for contract in contracts {
                 match self.read_history(contract, paths)? {
-                    CoinValue::Clear { qty, flavor } => {
-                        *deltas.entry((!flavor.is_flame(), flavor)).or_default() +=
-                            sign * i128::from(qty);
+                    CoinValue::Clear {
+                        qty,
+                        flavor,
+                        memo: text,
                     }
-                    CoinValue::Confidential {
+                    | CoinValue::Confidential {
                         qty,
                         flavor,
                         memo: text,
@@ -758,12 +761,15 @@ impl Session {
         note: Option<Vec<u8>>,
         path: KeyPath,
     ) -> Result<(CoinValue, Option<Opening>), Error> {
-        let info = flamewallet_ffi::decode_contract(contract.to_vec())?;
+        let info = flamewallet_ffi::decode_contract(contract.to_vec(), note.clone())?;
         Ok(match info.value {
-            ContractValue::Clear { qty, flavor, .. } => (
+            ContractValue::Clear {
+                qty, flavor, memo, ..
+            } => (
                 CoinValue::Clear {
                     qty,
                     flavor: Flavor::from_bytes(&flavor)?,
+                    memo: String::from_utf8_lossy(&memo).into_owned(),
                 },
                 None,
             ),
@@ -842,7 +848,11 @@ pub(crate) fn coin_for_test(id: u8, qty: u64, flavor: Flavor, confirmed: bool) -
         branch: RECEIVING,
         index: 0,
         height: confirmed.then_some(1),
-        value: CoinValue::Clear { qty, flavor },
+        value: CoinValue::Clear {
+            qty,
+            flavor,
+            memo: String::new(),
+        },
         contract: Vec::new(),
         proof: confirmed.then(Vec::new),
         opening: None,

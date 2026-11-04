@@ -27,7 +27,7 @@ fn wallet_on(seed: &[u8; 64], network: Network) -> std::sync::Arc<Wallet> {
 /// so one is found by what it pays, never by its position.
 fn paying<'a>(transfer: &'a Transfer, predicate: &[u8]) -> &'a CreatedOutput {
     let mut found = transfer.outputs.iter().filter(|output| {
-        decode_contract(output.contract.clone())
+        decode_contract(output.contract.clone(), None)
             .expect("decode")
             .predicate
             == predicate
@@ -230,6 +230,79 @@ fn constants() {
 }
 
 #[test]
+fn a_clear_output_reads_its_memo_from_its_note() {
+    let alice = wallet(&A_SEED);
+    let bob = wallet(&B_SEED);
+    let alice_address = alice.next_address().expect("issue");
+    let allocation = Contract::new(
+        Predicate::opaque(curve25519_dalek::ristretto::CompressedRistretto(
+            alice_address
+                .predicate
+                .clone()
+                .try_into()
+                .expect("32 bytes"),
+        )),
+        Anchor([0x07; 32]),
+        Value::ClearToken(ClearToken::new(Scalar::from(ALLOCATION), FLAME_FLAVOR)),
+    )
+    .expect("a non-negative clear token is portable");
+    let (chain, genesis) = Blockchain::devnet_genesis(ChainParams::default(), &[allocation.id()])
+        .expect("devnet genesis");
+    let bob_address = bob.next_address().expect("issue");
+    let change = alice
+        .address(KeyPath {
+            branch: CHANGE,
+            index: 0,
+        })
+        .expect("change");
+    let payment = 400 * FLAME;
+    let transfer = alice
+        .build_transfer(TransferRequest {
+            inputs: vec![TransferInput {
+                contract: contract_bytes(&allocation).expect("encode"),
+                proof: served_proof(&chain, &genesis, allocation.id(), Proof::Transient),
+                path: receiving(0),
+                opening: None,
+            }],
+            outputs: vec![
+                TransferOutput {
+                    address: bob_address.receiving_address.clone(),
+                    qty: payment,
+                    flavor: None,
+                    memo: b"mint reward".to_vec(),
+                    clear: true,
+                },
+                TransferOutput {
+                    address: change.receiving_address.clone(),
+                    qty: ALLOCATION - payment - FEE,
+                    flavor: None,
+                    memo: Vec::new(),
+                    clear: false,
+                },
+            ],
+            fee: FEE,
+            gas: GAS,
+            locktime: 0,
+        })
+        .expect("build the payment");
+
+    let to_bob = paying(&transfer, &bob_address.predicate);
+    let info = decode_contract(to_bob.contract.clone(), Some(to_bob.note.clone())).expect("decode");
+    assert_eq!(
+        info.value,
+        ContractValue::Clear {
+            qty: payment,
+            flavor: native_flavor(),
+            is_native: true,
+            memo: b"mint reward".to_vec(),
+        }
+    );
+    // Without the note there is no memo to read, and nothing else changes.
+    let bare = decode_contract(to_bob.contract.clone(), None).expect("decode");
+    assert!(matches!(bare.value, ContractValue::Clear { memo, .. } if memo.is_empty()));
+}
+
+#[test]
 fn two_wallets_spend_across_two_blocks() {
     let alice = wallet(&A_SEED);
     let bob = wallet(&B_SEED);
@@ -254,7 +327,7 @@ fn two_wallets_spend_across_two_blocks() {
             .expect("devnet genesis");
     let allocation_proof = served_proof(&chain, &genesis, allocation.id(), Proof::Transient);
 
-    let info = decode_contract(allocation_bytes.clone()).expect("decode");
+    let info = decode_contract(allocation_bytes.clone(), None).expect("decode");
     assert_eq!(info.id, allocation.id().to_vec());
     assert_eq!(
         info.value,
@@ -262,6 +335,7 @@ fn two_wallets_spend_across_two_blocks() {
             qty: ALLOCATION,
             flavor: native_flavor(),
             is_native: true,
+            memo: Vec::new(),
         }
     );
     assert_eq!(
@@ -335,7 +409,7 @@ fn two_wallets_spend_across_two_blocks() {
     // other's.
     let to_bob = paying(&transfer, &bob_address.predicate);
     let to_change = paying(&transfer, &change.predicate);
-    let info = decode_contract(to_bob.contract.clone()).expect("decode");
+    let info = decode_contract(to_bob.contract.clone(), None).expect("decode");
     assert_eq!(info.value, ContractValue::Confidential);
     assert_eq!(
         bob.owns(info.predicate, 20).expect("owns"),
@@ -681,7 +755,10 @@ fn malformed_bytes_are_named() {
         FlameError::InvalidBytes { what: named, .. } => assert_eq!(named, what),
         other => panic!("expected InvalidBytes({what}), got {other:?}"),
     };
-    bad("contract", decode_contract(vec![1, 2, 3]).unwrap_err());
+    bad(
+        "contract",
+        decode_contract(vec![1, 2, 3], None).unwrap_err(),
+    );
     bad("predicate", alice.owns(vec![0; 31], 1).unwrap_err());
     assert!(matches!(
         Wallet::new(vec![0; 63], Network::Testnet, 0),
