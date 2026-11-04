@@ -1,4 +1,4 @@
-//! The loop that runs both bots: every few seconds it reads the
+//! The loop that runs the bots: every few seconds it reads the
 //! playground's state and lets each bot act on it; once a minute it records
 //! a telemetry sample. Nothing here stops the loop: failures are journaled
 //! (once per run of identical ones) and retried on the next poll.
@@ -460,6 +460,7 @@ impl Runner {
             let plan = match settings {
                 Settings::Clock(clock) => strategy::clock_in(
                     &state.chart_contributions,
+                    bot.user_id.unwrap_or_default(),
                     state.height,
                     clock.burn_per_block,
                     clock.duration,
