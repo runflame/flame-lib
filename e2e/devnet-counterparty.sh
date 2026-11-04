@@ -10,6 +10,8 @@
 #
 # KEEP=1, PORT (default 18547) and CARGO_BUILD_JOBS as in devnet.sh.
 port=18547
+# The pending checks run between two blocks: this is their time.
+block_interval=10
 source "$(dirname "${BASH_SOURCE[0]}")/devnet.sh"
 
 a=(--wallet "$dir/a.json")
@@ -40,6 +42,7 @@ expect "A's allocation, to" "$(newest to "${a[@]}")" ""
 expect "A's allocation paid no fee" "$(newest fee_sparks "${a[@]}")" 0
 
 say "A pays B 12.5 Flame; pending, both sides name the other"
+next_block
 "$wallet" "${a[@]}" send "$b_address" 12.5 --memo "from A" >/dev/null
 expect "B's item is pending" "$(newest pending "${b[@]}")" True
 expect "B was paid from A" "$(newest from "${b[@]}")" "$(tracking "$a_address")"

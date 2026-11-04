@@ -1,5 +1,6 @@
 # Sourced by the devnet scripts beside it: builds flamed and flamewallet,
-# starts a throwaway node with one-second blocks, points FLAMEWALLET_NODE
+# starts a throwaway node with one-second blocks (a script that sets
+# `block_interval` before sourcing gets that many seconds), points FLAMEWALLET_NODE
 # at it, and defines the helpers the scripts check balances with. The node
 # is stopped and its scratch directory removed on exit; on a failure the
 # end of the node's log is printed first.
@@ -36,7 +37,7 @@ cat >"$dir/flamed.toml" <<TOML
 data_dir = "$dir/data"
 genesis = "$dir/genesis.json"
 rpc_bind = "127.0.0.1:$port"
-block_interval_secs = 1
+block_interval_secs = ${block_interval:-1}
 minimum_fee = 0
 TOML
 "$flamed" run --config "$dir/flamed.toml" >"$dir/node.log" 2>&1 &
@@ -86,4 +87,11 @@ print(sum(int(c['qty']) for c in json.load(sys.stdin)['coins']
 }
 expect() { [[ "$2" == "$3" ]] || { echo "FAIL: $1: expected $3, got $2" >&2; exit 1; }; }
 say() { printf '\n== %s\n' "$*"; }
+# Returns as the node mints its next block. A transaction sent right after
+# stays pending for a whole block interval, whatever the clock said before.
+next_block() {
+    local seen
+    seen="$(grep -c '^block ' "$dir/node.log" || true)"
+    until (( $(grep -c '^block ' "$dir/node.log" || true) > seen )); do sleep 0.05; done
+}
 show() { echo "-- $1"; "$wallet" "${@:2}" balance | sed 's/^/   /'; }

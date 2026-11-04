@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use flamechain::BlockTx;
 use flamepayments::BuilderError;
-use flamevm::{TxEntry, TxLog, VMError};
+use flamevm::{TxEntry, TxLog};
 use merlin::Transcript;
 use musig::{Multisignature, VerificationKey};
 
@@ -169,11 +169,9 @@ fn one_output_past_the_capacity_does_not_prove() {
     assert!(
         matches!(
             transfer.send(&mut fixtures::rng(fixtures::SEND_RNG_SEED)),
-            Err(SendError::Build(BuilderError::Vm(
-                VMError::R1CSProofConstruction
-            )))
+            Err(SendError::Build(BuilderError::TooManyOutputs(17)))
         ),
-        "1 → 14 fails to prove, for the proof's capacity"
+        "1 → 17 is refused before proving, past what a transaction carries"
     );
 }
 
