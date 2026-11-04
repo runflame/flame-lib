@@ -230,6 +230,128 @@ fn constants() {
 }
 
 #[test]
+fn a_clear_output_reads_its_memo_from_its_note() {
+    let alice = wallet(&A_SEED);
+    let bob = wallet(&B_SEED);
+    let alice_address = alice.next_address().expect("issue");
+    let allocation = Contract::new(
+        Predicate::opaque(curve25519_dalek::ristretto::CompressedRistretto(
+            alice_address
+                .predicate
+                .clone()
+                .try_into()
+                .expect("32 bytes"),
+        )),
+        Anchor([0x07; 32]),
+        Value::ClearToken(ClearToken::new(Scalar::from(ALLOCATION), FLAME_FLAVOR)),
+    )
+    .expect("a non-negative clear token is portable");
+    let (chain, genesis) = Blockchain::devnet_genesis(ChainParams::default(), &[allocation.id()])
+        .expect("devnet genesis");
+    let bob_address = bob.next_address().expect("issue");
+    let change = alice
+        .address(KeyPath {
+            branch: CHANGE,
+            index: 0,
+        })
+        .expect("change");
+    let payment = 400 * FLAME;
+    let transfer = alice
+        .build_transfer(TransferRequest {
+            inputs: vec![TransferInput {
+                contract: contract_bytes(&allocation).expect("encode"),
+                proof: served_proof(&chain, &genesis, allocation.id(), Proof::Transient),
+                path: receiving(0),
+                opening: None,
+            }],
+            outputs: vec![
+                TransferOutput {
+                    address: bob_address.receiving_address.clone(),
+                    qty: payment,
+                    flavor: None,
+                    memo: b"mint reward".to_vec(),
+                    clear: true,
+                },
+                TransferOutput {
+                    address: change.receiving_address.clone(),
+                    qty: ALLOCATION - payment - FEE,
+                    flavor: None,
+                    memo: Vec::new(),
+                    clear: false,
+                },
+            ],
+            fee: FEE,
+            gas: GAS,
+            locktime: 0,
+        })
+        .expect("build the payment");
+
+    let to_bob = paying(&transfer, &bob_address.predicate);
+    let to_change = paying(&transfer, &change.predicate);
+    assert_eq!(
+        decode_contract(to_bob.contract.clone())
+            .expect("decode")
+            .value,
+        ContractValue::Clear {
+            qty: payment,
+            flavor: native_flavor(),
+            is_native: true,
+        }
+    );
+    assert_eq!(
+        open_clear_note(to_bob.contract.clone(), Some(to_bob.note.clone())).expect("memo"),
+        b"mint reward".to_vec()
+    );
+
+    let failure = |result: Result<Vec<u8>, FlameError>| match result {
+        Err(FlameError::Note { failure, .. }) => failure,
+        other => panic!("expected a note failure, got {other:?}"),
+    };
+    // No entry followed it.
+    assert_eq!(
+        failure(open_clear_note(to_bob.contract.clone(), None)),
+        NoteFailure::Missing
+    );
+    // An entry longer than any memo is not one.
+    assert_eq!(
+        failure(open_clear_note(
+            to_bob.contract.clone(),
+            Some(vec![b'x'; memo_max_bytes() as usize + 1])
+        )),
+        NoteFailure::Malformed
+    );
+    // The longest memo still is.
+    let longest = vec![b'x'; memo_max_bytes() as usize];
+    assert_eq!(
+        open_clear_note(to_bob.contract.clone(), Some(longest.clone())).expect("memo"),
+        longest
+    );
+    // A confidential output's note is not a clear memo, and the reverse.
+    assert_eq!(
+        failure(open_clear_note(
+            to_change.contract.clone(),
+            Some(to_change.note.clone())
+        )),
+        NoteFailure::NotClear
+    );
+    assert!(matches!(
+        bob.open_note(
+            to_bob.contract.clone(),
+            Some(to_bob.note.clone()),
+            receiving(0)
+        ),
+        Err(FlameError::Note {
+            failure: NoteFailure::NotConfidential,
+            ..
+        })
+    ));
+    assert!(matches!(
+        open_clear_note(vec![1, 2, 3], None),
+        Err(FlameError::InvalidBytes { .. })
+    ));
+}
+
+#[test]
 fn two_wallets_spend_across_two_blocks() {
     let alice = wallet(&A_SEED);
     let bob = wallet(&B_SEED);

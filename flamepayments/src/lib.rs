@@ -23,7 +23,9 @@ pub use builder::{
 pub use keys::{
     Account, AccountKey, KeyError, ReceiveAccount, SpendAccount, ViewAccount, ViewingKey,
 };
-pub use note::{open_note, outputs_with_notes, NoteError, ReceivedNote, MEMO_MAX, NOTE_VERSION};
+pub use note::{
+    open_clear_note, open_note, outputs_with_notes, NoteError, ReceivedNote, MEMO_MAX, NOTE_VERSION,
+};
 
 #[cfg(test)]
 mod tests;

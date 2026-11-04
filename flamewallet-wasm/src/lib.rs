@@ -135,6 +135,17 @@ pub fn decode_contract(bytes: Vec<u8>) -> Result<JsContractInfo, JsValue> {
     Ok(to_js(&ContractInfo::from(info))?.into())
 }
 
+/// The memo of a clear `contract`, from the note a scan served after it
+/// (`undefined` if none): `Wallet.openNote`'s counterpart for a cleartext
+/// token. Needs no key, as the memo is public. Throws `invalidBytes` if
+/// `contract` does not decode, and a `note` failure: `notClear` for any
+/// other contract, `missing` without a note, and `malformed` for one longer
+/// than `memoMaxBytes()`.
+#[wasm_bindgen(js_name = openClearNote)]
+pub fn open_clear_note(contract: Vec<u8>, note: Option<Vec<u8>>) -> Result<Vec<u8>, JsValue> {
+    flamewallet_ffi::open_clear_note(contract, note).map_err(error)
+}
+
 /// Whether `opening` opens the confidential contract in `contract`.
 #[wasm_bindgen(js_name = openingMatches)]
 pub fn opening_matches(contract: Vec<u8>, opening: JsOpening) -> Result<bool, JsValue> {
@@ -365,6 +376,7 @@ fn note_failure(failure: flamewallet_ffi::NoteFailure) -> &'static str {
         F::Undecryptable => "undecryptable",
         F::OpeningMismatch => "openingMismatch",
         F::NotConfidential => "notConfidential",
+        F::NotClear => "notClear",
     }
 }
 

@@ -116,7 +116,8 @@ export type NoteFailure =
   | "unknownVersion"
   | "undecryptable"
   | "openingMismatch"
-  | "notConfidential";
+  | "notConfidential"
+  | "notClear";
 
 /** What every call throws. Fields beyond `kind` depend on it. */
 export interface FlameError extends Error {

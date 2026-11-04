@@ -79,7 +79,8 @@ a send spends coins of both flavors and returns change in each.
 `send --clear` pays a cleartext token: its amount, flavor and recipient are
 public on chain, it has no note, and the memo follows it in the clear. The
 change stays confidential, and nothing about the coins spent is revealed.
-The recipient's `coins` lists it as `clear`.
+The recipient's `coins` lists it as `clear`, with its memo, and `history`
+shows the memo as it does a confidential payment's.
 
 ## Issuing
 

@@ -242,9 +242,12 @@ nothing about which output is the payment: every confidential output has a
 note in the same place. If only payments carried notes, the notes would mark
 them.
 
-An output whose payload is a `ClearToken` carries no note, and a recipient
-ignores whatever entry follows it. Outputs locked by other predicates, such
-as actors or script branches, are outside this document.
+An output whose payload is a `ClearToken` carries no note: its amount and
+flavor are already public. The `Data` entry immediately following it, if
+any, is its memo as plain bytes, public like the amount; `flamepayments`
+always logs one, empty when the sender wrote no memo. Outputs locked by
+other predicates, such as actors or script branches, are outside this
+document.
 
 ### Output order
 
@@ -268,8 +271,13 @@ A wallet processes each `Output` of a transaction's log as follows:
 1. If the predicate point is not `enc(S_n)` of an address the wallet owns,
    skip the output. Otherwise note which `(branch, n)` it is.
 2. If the payload is a `ClearToken`, the output is owned and open; it needs
-   no note. If the payload is a `Token`, continue. Any other payload is
-   outside this document.
+   no note. Its memo is the entry immediately following the `Output` if
+   that entry is `Data` of at most 4006 bytes, read as plain bytes, and
+   empty otherwise: whoever pays a `ClearToken` chooses that entry, and
+   nothing longer is a memo a sender writes. Neither case affects the
+   amount. If the
+   payload is a `Token`, continue. Any other payload is outside this
+   document.
 3. Take the entry immediately following the `Output`. If there is none, or
    it is not `Data`, the result is **no note**.
 4. If the note is empty, the result is **malformed**. If byte 0 is not

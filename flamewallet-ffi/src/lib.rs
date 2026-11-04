@@ -29,7 +29,7 @@ pub use keys::{
     receiving_address_to_predicate, validate_mnemonic, validate_receiving_address,
     validate_tracking_address, IssuedAddress, KeyPath, Network, Wallet, WalletKind,
 };
-pub use note::{NoteFailure, ReceivedNote};
+pub use note::{open_clear_note, NoteFailure, ReceivedNote};
 pub use transfer::{
     issued_flavor, memo_max_bytes, replace_proofs, CreatedOutput, IssueRequest, Opening, Transfer,
     TransferInput, TransferOutput, TransferRequest,

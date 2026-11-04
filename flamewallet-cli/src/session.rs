@@ -9,8 +9,9 @@ use flamed_rpc::{
     HistoryContract, HistoryEntry, HttpClient, HttpClientBuilder, TipResult, TxId, TxStatusResult,
 };
 use flamewallet_ffi::{
-    ContractValue, FlameError, IssueRequest as FfiIssueRequest, IssuedAddress, KeyPath, Opening,
-    Transfer, TransferInput, TransferOutput, TransferRequest, Wallet, CHANGE, RECEIVING,
+    ContractValue, FlameError, IssueRequest as FfiIssueRequest, IssuedAddress, KeyPath,
+    NoteFailure, Opening, Transfer, TransferInput, TransferOutput, TransferRequest, Wallet, CHANGE,
+    RECEIVING,
 };
 use serde::{Serialize, Serializer};
 
@@ -60,10 +61,16 @@ pub struct Coin {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CoinValue {
     /// A cleartext token; a genesis allocation and `issuepub` output are.
+    /// Its memo is the `Data` entry after it, in the clear; empty if none.
     Clear {
         #[serde(serialize_with = "as_string")]
         qty: u64,
         flavor: Flavor,
+        memo: String,
+        /// Why the entry after it was not taken as its memo; the amount
+        /// still counts.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        memo_rejected: Option<String>,
     },
     /// A confidential token whose note opened.
     Confidential {
@@ -81,7 +88,7 @@ pub enum CoinValue {
 impl CoinValue {
     pub fn token(&self) -> Option<(u64, Flavor)> {
         match self {
-            CoinValue::Clear { qty, flavor } | CoinValue::Confidential { qty, flavor, .. } => {
+            CoinValue::Clear { qty, flavor, .. } | CoinValue::Confidential { qty, flavor, .. } => {
                 Some((*qty, *flavor))
             }
             CoinValue::Unreadable { .. } | CoinValue::NotToken => None,
@@ -695,11 +702,13 @@ impl Session {
         for (contracts, sign) in [(&entry.created, 1), (&entry.spent, -1)] {
             for contract in contracts {
                 match self.read_history(contract, paths)? {
-                    CoinValue::Clear { qty, flavor } => {
-                        *deltas.entry((!flavor.is_flame(), flavor)).or_default() +=
-                            sign * i128::from(qty);
+                    CoinValue::Clear {
+                        qty,
+                        flavor,
+                        memo: text,
+                        ..
                     }
-                    CoinValue::Confidential {
+                    | CoinValue::Confidential {
                         qty,
                         flavor,
                         memo: text,
@@ -760,13 +769,32 @@ impl Session {
     ) -> Result<(CoinValue, Option<Opening>), Error> {
         let info = flamewallet_ffi::decode_contract(contract.to_vec())?;
         Ok(match info.value {
-            ContractValue::Clear { qty, flavor, .. } => (
-                CoinValue::Clear {
-                    qty,
-                    flavor: Flavor::from_bytes(&flavor)?,
-                },
-                None,
-            ),
+            ContractValue::Clear { qty, flavor, .. } => {
+                // The amount counts whatever follows it; a rejected entry
+                // is reported, a missing one is just no memo.
+                let (memo, memo_rejected) =
+                    match flamewallet_ffi::open_clear_note(contract.to_vec(), note) {
+                        Ok(memo) => (String::from_utf8_lossy(&memo).into_owned(), None),
+                        Err(FlameError::Note {
+                            failure: NoteFailure::Missing,
+                            ..
+                        }) => (String::new(), None),
+                        Err(FlameError::Note {
+                            failure: NoteFailure::Malformed,
+                            reason,
+                        }) => (String::new(), Some(reason)),
+                        Err(error) => return Err(error.into()),
+                    };
+                (
+                    CoinValue::Clear {
+                        qty,
+                        flavor: Flavor::from_bytes(&flavor)?,
+                        memo,
+                        memo_rejected,
+                    },
+                    None,
+                )
+            }
             ContractValue::Confidential => {
                 match self.wallet.open_note(contract.to_vec(), note, path) {
                     Ok(received) => (
@@ -842,7 +870,12 @@ pub(crate) fn coin_for_test(id: u8, qty: u64, flavor: Flavor, confirmed: bool) -
         branch: RECEIVING,
         index: 0,
         height: confirmed.then_some(1),
-        value: CoinValue::Clear { qty, flavor },
+        value: CoinValue::Clear {
+            qty,
+            flavor,
+            memo: String::new(),
+            memo_rejected: None,
+        },
         contract: Vec::new(),
         proof: confirmed.then(Vec::new),
         opening: None,

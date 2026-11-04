@@ -37,8 +37,13 @@ pub enum NoteFailure {
     /// Keep and flag it; never count it.
     OpeningMismatch,
     /// The contract is a cleartext token, or not a token: there is no note
-    /// to open, and [`crate::decode_contract`] reads its amount.
+    /// to open, and [`crate::decode_contract`] reads its amount and
+    /// [`open_clear_note`] its memo.
     NotConfidential,
+    /// The contract is not a cleartext token: [`open_clear_note`] has no
+    /// memo to read; a confidential one's is opened with
+    /// [`crate::Wallet::open_note`].
+    NotClear,
 }
 
 impl From<NoteError> for NoteFailure {
@@ -50,8 +55,34 @@ impl From<NoteError> for NoteFailure {
             NoteError::Undecryptable => NoteFailure::Undecryptable,
             NoteError::OpeningMismatch => NoteFailure::OpeningMismatch,
             NoteError::NotConfidential => NoteFailure::NotConfidential,
+            NoteError::NotClear => NoteFailure::NotClear,
         }
     }
+}
+
+fn note_error(error: NoteError) -> FlameError {
+    FlameError::Note {
+        failure: error.into(),
+        reason: error.to_string(),
+    }
+}
+
+/// Reads the memo that followed the clear `contract` in its log, as a scan
+/// serves the pair; `note` is `None` when the scan served none. This is
+/// [`crate::Wallet::open_note`]'s counterpart for a cleartext token: its
+/// amount is public, so its note is the memo as plain bytes, and no key is
+/// needed to read it.
+///
+/// Anyone paying a cleartext token picks the entry after it, so it is
+/// checked first: a contract that is not a cleartext token fails with
+/// [`NoteFailure::NotClear`], a missing note with [`NoteFailure::Missing`],
+/// and one longer than [`crate::memo_max_bytes`] with
+/// [`NoteFailure::Malformed`]. A wallet shows no memo for any of these; the
+/// coin itself stays readable through [`crate::decode_contract`].
+#[uniffi::export]
+pub fn open_clear_note(contract: Vec<u8>, note: Option<Vec<u8>>) -> Result<Vec<u8>, FlameError> {
+    let published = contract::decode(&contract)?;
+    flamepayments::open_clear_note(&published, note.as_deref()).map_err(note_error)
 }
 
 pub(crate) fn open<K: ViewingKey>(
@@ -72,12 +103,7 @@ pub(crate) fn open<K: ViewingKey>(
     }
     let view_key = zeroize::Zeroizing::new(account.viewing_key_at(branch, index)?);
     let received =
-        flamepayments::open_note(&published, note, &address, &view_key).map_err(|error| {
-            FlameError::Note {
-                failure: error.into(),
-                reason: error.to_string(),
-            }
-        })?;
+        flamepayments::open_note(&published, note, &address, &view_key).map_err(note_error)?;
     Ok(ReceivedNote {
         opening: Opening::from_wallet(&received.opening),
         is_native: contract::is_native(received.opening.flv),

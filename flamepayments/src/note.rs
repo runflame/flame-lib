@@ -96,6 +96,10 @@ pub enum NoteError {
     /// The output's payload is not a `Token`; there is nothing to open.
     #[error("the output holds no confidential Token")]
     NotConfidential,
+
+    /// The output's payload is not a `ClearToken`; it has no clear memo.
+    #[error("the output holds no ClearToken")]
+    NotClear,
 }
 
 /// Opens the note that followed `published` in its log. `address` and
@@ -193,6 +197,19 @@ pub fn open_note(
 
     // 9.
     Ok(ReceivedNote { opening, memo })
+}
+
+/// [`open_note`] for a `ClearToken`: its note is its memo in plain bytes, taken
+/// only if one follows it and is at most [`MEMO_MAX`] long (`payments.md` "Receiving", step 2).
+pub fn open_clear_note(published: &Contract, note: Option<&[u8]>) -> Result<Vec<u8>, NoteError> {
+    if !matches!(published.payload(), Value::ClearToken(_)) {
+        return Err(NoteError::NotClear);
+    }
+    let note = note.ok_or(NoteError::Missing)?;
+    if note.len() > MEMO_MAX {
+        return Err(NoteError::Malformed);
+    }
+    Ok(note.to_vec())
 }
 
 /// Every output of a log with its note: the `Data` entry immediately after

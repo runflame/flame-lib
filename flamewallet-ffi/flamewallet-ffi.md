@@ -29,6 +29,7 @@ an opaque handle; spending keys never leave a call. Keys are named by
 | `native_flavor()` | Flavor of flames, as contracts and notes give it. |
 | `decode_contract(bytes)` | Id, predicate, cleartext amount and whether it is flames. |
 | `open_note(contract, note, path)` | Opening, whether it is flames, and memo from an output's note; not on a receive wallet. |
+| `open_clear_note(contract, note)` | A cleartext output's memo from its note, checked: the contract must be cleartext and the note at most `memo_max_bytes()` long. Needs no key. |
 | `opening_matches(contract, opening)` | Whether an opening opens a contract. |
 | `build_transfer(request)` | Txid, `BlockTx` bytes, each output with its note; spend wallet only. |
 | `build_issue(request)` | The same, for a confidential issuance spending one coin; spend wallet only. |
