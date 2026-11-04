@@ -22,13 +22,10 @@ pub struct ContractInfo {
 pub enum ContractValue {
     /// A cleartext token: the amount is public. A devnet genesis allocation
     /// is one. `is_native` says whether `flavor` is [`native_flavor`].
-    /// `memo` is the note [`decode_contract`] was given, which for a clear
-    /// output is its memo as plain bytes; empty without one.
     Clear {
         qty: u64,
         flavor: Vec<u8>,
         is_native: bool,
-        memo: Vec<u8>,
     },
     /// A confidential token: the amount is readable only with its opening.
     Confidential,
@@ -49,13 +46,8 @@ pub(crate) fn is_native(flavor: Scalar) -> bool {
 }
 
 /// Decodes a contract from its published bytes.
-///
-/// `note` is the entry the indexer served after it, as for
-/// [`crate::Wallet::open_note`]. A clear output's is its memo, in the
-/// clear, and comes back in [`ContractValue::Clear`]; a confidential
-/// output's is ignored here and opened with `open_note`.
-#[uniffi::export(default(note = None))]
-pub fn decode_contract(bytes: Vec<u8>, note: Option<Vec<u8>>) -> Result<ContractInfo, FlameError> {
+#[uniffi::export]
+pub fn decode_contract(bytes: Vec<u8>) -> Result<ContractInfo, FlameError> {
     let contract = decode(&bytes)?;
     let value = match contract.payload() {
         Value::ClearToken(token) => match token.qty().to_u64() {
@@ -63,7 +55,6 @@ pub fn decode_contract(bytes: Vec<u8>, note: Option<Vec<u8>>) -> Result<Contract
                 qty,
                 flavor: token.flv().to_bytes().to_vec(),
                 is_native: is_native(token.flv()),
-                memo: note.unwrap_or_default(),
             },
             None => ContractValue::Other,
         },

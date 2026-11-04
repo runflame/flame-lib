@@ -18,7 +18,8 @@ use super::{header, limits, native_output, output_to, outputs, publish, receive,
 use crate::builder::{build_transfer, sign, BuilderError, InputSpec, OutputSpec};
 use crate::keys::SpendAccount;
 use crate::note::{
-    open_note, outputs_with_notes, seal, seal_plaintext, NoteError, MEMO_MAX, NOTE_VERSION,
+    open_clear_note, open_note, outputs_with_notes, seal, seal_plaintext, NoteError, MEMO_MAX,
+    NOTE_VERSION,
 };
 
 const SEED: [u8; 64] = [0x5e; 64];
@@ -468,6 +469,40 @@ fn a_clear_token_is_not_confidential() {
         assert_eq!(
             open_note(&clear, note, &paid.address, &paid.v).unwrap_err(),
             NoteError::NotConfidential
+        );
+    }
+}
+
+/// A clear output's note is its memo, checked: only after a `ClearToken`,
+/// only if present, and no longer than any memo a sender writes.
+#[test]
+fn a_clear_note_is_its_memo() {
+    let paid = paid(37);
+    let account = account();
+    let clear = Contract::new(
+        account.predicate_at(util::RECEIVING, 1).expect("predicate"),
+        Anchor([0x07; 32]),
+        Value::ClearToken(ClearToken::new(Scalar::from(ALLOCATION), FLAME_FLAVOR)),
+    )
+    .expect("a clear token is portable");
+
+    assert_eq!(
+        open_clear_note(&clear, Some(b"audit")),
+        Ok(b"audit".to_vec())
+    );
+    assert_eq!(open_clear_note(&clear, Some(&[])), Ok(Vec::new()));
+    let longest = vec![0xab; MEMO_MAX];
+    assert_eq!(open_clear_note(&clear, Some(&longest)), Ok(longest));
+    assert_eq!(
+        open_clear_note(&clear, Some(&vec![0xab; MEMO_MAX + 1])),
+        Err(NoteError::Malformed)
+    );
+    assert_eq!(open_clear_note(&clear, None), Err(NoteError::Missing));
+    // A confidential output's note is no clear memo, whatever it holds.
+    for note in [None, Some(paid.note.as_slice())] {
+        assert_eq!(
+            open_clear_note(&paid.contract, note),
+            Err(NoteError::NotClear)
         );
     }
 }

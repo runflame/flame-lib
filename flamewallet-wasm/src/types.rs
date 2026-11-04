@@ -50,8 +50,6 @@ pub enum ContractValue {
         #[serde(with = "serde_bytes")]
         flavor: Vec<u8>,
         is_native: bool,
-        #[serde(with = "serde_bytes")]
-        memo: Vec<u8>,
     },
     Confidential,
     Other,
@@ -189,12 +187,10 @@ impl From<ffi::ContractInfo> for ContractInfo {
                     qty,
                     flavor,
                     is_native,
-                    memo,
                 } => ContractValue::Clear {
                     qty,
                     flavor,
                     is_native,
-                    memo,
                 },
                 ffi::ContractValue::Confidential => ContractValue::Confidential,
                 ffi::ContractValue::Other => ContractValue::Other,

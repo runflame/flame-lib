@@ -272,7 +272,10 @@ A wallet processes each `Output` of a transaction's log as follows:
    skip the output. Otherwise note which `(branch, n)` it is.
 2. If the payload is a `ClearToken`, the output is owned and open; it needs
    no note. Its memo is the entry immediately following the `Output` if
-   that entry is `Data`, read as plain bytes, and empty otherwise. If the
+   that entry is `Data` of at most 4006 bytes, read as plain bytes, and
+   empty otherwise: whoever pays a `ClearToken` chooses that entry, and
+   nothing longer is a memo a sender writes. Neither case affects the
+   amount. If the
    payload is a `Token`, continue. Any other payload is outside this
    document.
 3. Take the entry immediately following the `Output`. If there is none, or

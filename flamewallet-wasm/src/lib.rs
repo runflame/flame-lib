@@ -128,12 +128,22 @@ pub fn native_flavor() -> Vec<u8> {
     flamewallet_ffi::native_flavor()
 }
 
-/// Id, predicate, and a cleartext amount if the contract has one. With the
-/// note a scan served after it, a clear output's memo too.
+/// Id, predicate, and a cleartext amount if the contract has one.
 #[wasm_bindgen(js_name = decodeContract)]
-pub fn decode_contract(bytes: Vec<u8>, note: Option<Vec<u8>>) -> Result<JsContractInfo, JsValue> {
-    let info = flamewallet_ffi::decode_contract(bytes, note).map_err(error)?;
+pub fn decode_contract(bytes: Vec<u8>) -> Result<JsContractInfo, JsValue> {
+    let info = flamewallet_ffi::decode_contract(bytes).map_err(error)?;
     Ok(to_js(&ContractInfo::from(info))?.into())
+}
+
+/// The memo of a clear `contract`, from the note a scan served after it
+/// (`undefined` if none): `Wallet.openNote`'s counterpart for a cleartext
+/// token. Needs no key, as the memo is public. Throws `invalidBytes` if
+/// `contract` does not decode, and a `note` failure: `notClear` for any
+/// other contract, `missing` without a note, and `malformed` for one longer
+/// than `memoMaxBytes()`.
+#[wasm_bindgen(js_name = openClearNote)]
+pub fn open_clear_note(contract: Vec<u8>, note: Option<Vec<u8>>) -> Result<Vec<u8>, JsValue> {
+    flamewallet_ffi::open_clear_note(contract, note).map_err(error)
 }
 
 /// Whether `opening` opens the confidential contract in `contract`.
@@ -155,10 +165,7 @@ pub fn replace_proofs(
     let proofs: Vec<serde_bytes::ByteBuf> = from_js(proofs.into())?;
     flamewallet_ffi::replace_proofs(
         block_tx,
-        proofs
-            .into_iter()
-            .map(serde_bytes::ByteBuf::into_vec)
-            .collect(),
+        proofs.into_iter().map(serde_bytes::ByteBuf::into_vec).collect(),
     )
     .map_err(error)
 }
@@ -369,6 +376,7 @@ fn note_failure(failure: flamewallet_ffi::NoteFailure) -> &'static str {
         F::Undecryptable => "undecryptable",
         F::OpeningMismatch => "openingMismatch",
         F::NotConfidential => "notConfidential",
+        F::NotClear => "notClear",
     }
 }
 

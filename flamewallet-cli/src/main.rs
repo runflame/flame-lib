@@ -329,20 +329,24 @@ async fn run(cli: Cli) -> Result<(), Error> {
                     .iter()
                     .map(|coin| {
                         let what = match &coin.value {
-                            flamewallet_cli::CoinValue::Clear { qty, flavor, memo } => {
+                            flamewallet_cli::CoinValue::Clear {
+                                qty,
+                                flavor,
+                                memo,
+                                memo_rejected,
+                            } => {
                                 let mut what =
                                     format!("{} {flavor} clear", format_qty(*qty as i128, *flavor));
-                                if !memo.is_empty() {
-                                    what += &format!("  memo {memo:?}");
+                                with_memo(&mut what, memo);
+                                if let Some(reason) = memo_rejected {
+                                    what += &format!("  memo rejected: {reason}");
                                 }
                                 what
                             }
                             flamewallet_cli::CoinValue::Confidential { qty, flavor, memo } => {
                                 let mut what =
                                     format!("{} {flavor}", format_qty(*qty as i128, *flavor));
-                                if !memo.is_empty() {
-                                    what += &format!("  memo {memo:?}");
-                                }
+                                with_memo(&mut what, memo);
                                 what
                             }
                             flamewallet_cli::CoinValue::Unreadable { reason } => {
@@ -559,6 +563,13 @@ fn session(cli: &Cli) -> Result<Session, Error> {
     let file = WalletFile::load(&cli.wallet)?;
     let node = cli.node.clone().unwrap_or_else(|| file.node.clone());
     Session::open(&file, &node)
+}
+
+/// Appends a coin's memo, if it has one.
+fn with_memo(what: &mut String, memo: &str) {
+    if !memo.is_empty() {
+        *what += &format!("  memo {memo:?}");
+    }
 }
 
 fn parse_txid(text: &str) -> Result<TxId, Error> {

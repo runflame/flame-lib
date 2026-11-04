@@ -134,7 +134,13 @@ test('a transfer from served bytes to signed bytes', () => {
     assert.equal(typeof allocation.value.qty, 'bigint');
     assert.deepEqual(allocation.value.flavor, wasm.nativeFlavor());
     assert.equal(allocation.value.isNative, true);
-    assert.deepEqual(allocation.value.memo, new Uint8Array());
+    const allocationBytes = bytes(clear.request.inputs[0].contract);
+    const memo = new TextEncoder().encode('audit');
+    assert.deepEqual(wasm.openClearNote(allocationBytes, memo), memo);
+    assert.throws(() => wasm.openClearNote(allocationBytes, undefined),
+        flameError('note', { failure: 'missing' }));
+    assert.throws(() => wasm.openClearNote(allocationBytes, new Uint8Array(wasm.memoMaxBytes() + 1)),
+        flameError('note', { failure: 'malformed' }));
     assert.deepEqual(alice.owns(allocation.predicate, 0), { branch: 0, index: 0 });
 
     const transfer = alice.buildTransfer(request(clear.request));
@@ -168,6 +174,8 @@ test('a transfer from served bytes to signed bytes', () => {
         flameError('note', { failure: 'missing' }));
     assert.throws(() => bob.openNote(toBob.contract, toChange.note, bobPath),
         flameError('note', { failure: 'undecryptable' }));
+    assert.throws(() => wasm.openClearNote(toBob.contract, toBob.note),
+        flameError('note', { failure: 'notClear' }));
 
     // Bob from his view key alone opens the same note and cannot spend;
     // from his receiving key alone he finds it and can neither open nor spend.

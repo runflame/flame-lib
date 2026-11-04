@@ -171,7 +171,8 @@ pub struct OutputSpec {
     pub memo: Vec<u8>,
     /// Publish a `ClearToken` instead: its amount and flavor in the clear,
     /// and no note. The `Data` entry after it holds `memo` as plain bytes,
-    /// which anyone reads and its recipient's wallet ignores.
+    /// which anyone reads and its recipient's wallet reads with
+    /// [`crate::open_clear_note`].
     pub clear: bool,
 }
 

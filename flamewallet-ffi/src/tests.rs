@@ -27,7 +27,7 @@ fn wallet_on(seed: &[u8; 64], network: Network) -> std::sync::Arc<Wallet> {
 /// so one is found by what it pays, never by its position.
 fn paying<'a>(transfer: &'a Transfer, predicate: &[u8]) -> &'a CreatedOutput {
     let mut found = transfer.outputs.iter().filter(|output| {
-        decode_contract(output.contract.clone(), None)
+        decode_contract(output.contract.clone())
             .expect("decode")
             .predicate
             == predicate
@@ -287,19 +287,68 @@ fn a_clear_output_reads_its_memo_from_its_note() {
         .expect("build the payment");
 
     let to_bob = paying(&transfer, &bob_address.predicate);
-    let info = decode_contract(to_bob.contract.clone(), Some(to_bob.note.clone())).expect("decode");
+    let to_change = paying(&transfer, &change.predicate);
     assert_eq!(
-        info.value,
+        decode_contract(to_bob.contract.clone())
+            .expect("decode")
+            .value,
         ContractValue::Clear {
             qty: payment,
             flavor: native_flavor(),
             is_native: true,
-            memo: b"mint reward".to_vec(),
         }
     );
-    // Without the note there is no memo to read, and nothing else changes.
-    let bare = decode_contract(to_bob.contract.clone(), None).expect("decode");
-    assert!(matches!(bare.value, ContractValue::Clear { memo, .. } if memo.is_empty()));
+    assert_eq!(
+        open_clear_note(to_bob.contract.clone(), Some(to_bob.note.clone())).expect("memo"),
+        b"mint reward".to_vec()
+    );
+
+    let failure = |result: Result<Vec<u8>, FlameError>| match result {
+        Err(FlameError::Note { failure, .. }) => failure,
+        other => panic!("expected a note failure, got {other:?}"),
+    };
+    // No entry followed it.
+    assert_eq!(
+        failure(open_clear_note(to_bob.contract.clone(), None)),
+        NoteFailure::Missing
+    );
+    // An entry longer than any memo is not one.
+    assert_eq!(
+        failure(open_clear_note(
+            to_bob.contract.clone(),
+            Some(vec![b'x'; memo_max_bytes() as usize + 1])
+        )),
+        NoteFailure::Malformed
+    );
+    // The longest memo still is.
+    let longest = vec![b'x'; memo_max_bytes() as usize];
+    assert_eq!(
+        open_clear_note(to_bob.contract.clone(), Some(longest.clone())).expect("memo"),
+        longest
+    );
+    // A confidential output's note is not a clear memo, and the reverse.
+    assert_eq!(
+        failure(open_clear_note(
+            to_change.contract.clone(),
+            Some(to_change.note.clone())
+        )),
+        NoteFailure::NotClear
+    );
+    assert!(matches!(
+        bob.open_note(
+            to_bob.contract.clone(),
+            Some(to_bob.note.clone()),
+            receiving(0)
+        ),
+        Err(FlameError::Note {
+            failure: NoteFailure::NotConfidential,
+            ..
+        })
+    ));
+    assert!(matches!(
+        open_clear_note(vec![1, 2, 3], None),
+        Err(FlameError::InvalidBytes { .. })
+    ));
 }
 
 #[test]
@@ -327,7 +376,7 @@ fn two_wallets_spend_across_two_blocks() {
             .expect("devnet genesis");
     let allocation_proof = served_proof(&chain, &genesis, allocation.id(), Proof::Transient);
 
-    let info = decode_contract(allocation_bytes.clone(), None).expect("decode");
+    let info = decode_contract(allocation_bytes.clone()).expect("decode");
     assert_eq!(info.id, allocation.id().to_vec());
     assert_eq!(
         info.value,
@@ -335,7 +384,6 @@ fn two_wallets_spend_across_two_blocks() {
             qty: ALLOCATION,
             flavor: native_flavor(),
             is_native: true,
-            memo: Vec::new(),
         }
     );
     assert_eq!(
@@ -409,7 +457,7 @@ fn two_wallets_spend_across_two_blocks() {
     // other's.
     let to_bob = paying(&transfer, &bob_address.predicate);
     let to_change = paying(&transfer, &change.predicate);
-    let info = decode_contract(to_bob.contract.clone(), None).expect("decode");
+    let info = decode_contract(to_bob.contract.clone()).expect("decode");
     assert_eq!(info.value, ContractValue::Confidential);
     assert_eq!(
         bob.owns(info.predicate, 20).expect("owns"),
@@ -755,10 +803,7 @@ fn malformed_bytes_are_named() {
         FlameError::InvalidBytes { what: named, .. } => assert_eq!(named, what),
         other => panic!("expected InvalidBytes({what}), got {other:?}"),
     };
-    bad(
-        "contract",
-        decode_contract(vec![1, 2, 3], None).unwrap_err(),
-    );
+    bad("contract", decode_contract(vec![1, 2, 3]).unwrap_err());
     bad("predicate", alice.owns(vec![0; 31], 1).unwrap_err());
     assert!(matches!(
         Wallet::new(vec![0; 63], Network::Testnet, 0),

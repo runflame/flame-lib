@@ -39,8 +39,6 @@ export type ContractValue =
       flavor: Uint8Array;
       /** Whether `flavor` is `nativeFlavor()`, flames. */
       isNative: boolean;
-      /** Its memo, in the clear: the note passed to `decodeContract`; empty without one. */
-      memo: Uint8Array;
     }
   | { kind: "confidential" }
   | { kind: "other" };
@@ -118,7 +116,8 @@ export type NoteFailure =
   | "unknownVersion"
   | "undecryptable"
   | "openingMismatch"
-  | "notConfidential";
+  | "notConfidential"
+  | "notClear";
 
 /** What every call throws. Fields beyond `kind` depend on it. */
 export interface FlameError extends Error {
