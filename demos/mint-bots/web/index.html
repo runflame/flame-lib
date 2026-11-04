@@ -25,7 +25,7 @@
   <template id="strategy-clock">
     <section class="bot">
       <h2><span class="name"></span> <span class="role">clock</span> <span class="state"></span></h2>
-      <p class="about">Mints a minimal Independent contribution whenever no one else is minting, so no block's reward is lost.</p>
+      <p class="about">Keeps a minimal Independent contribution running all the time, whoever else is minting.</p>
       <dl class="stats"></dl>
       <div class="charts"></div>
       <form>
@@ -63,7 +63,7 @@
   <template id="strategy-farmer">
     <section class="bot">
       <h2><span class="name"></span> <span class="role">commission farmer</span> <span class="state"></span></h2>
-      <p class="about">A service at a low commission, living on what its delegators pay it. It opens once enough players mint Independent below its break-even burn, so they would gain by delegating, and then keeps a minimal Service contribution running; it closes when they have been gone a while, leaving empty blocks to the clock bot. Open or closed, it covers every delegation to it in advance, to the delegation's end. Its commission applies to every delegation to it, past ones included.</p>
+      <p class="about">A service at a low commission, living on what its delegators pay it. It opens once enough players mint Independent below its break-even burn, so they would gain by delegating, and then keeps a minimal Service contribution running; it closes when they have been gone a while. Open or closed, it covers every delegation to it in advance, to the delegation's end. Its commission applies to every delegation to it, past ones included.</p>
       <dl class="stats"></dl>
       <div class="charts"></div>
       <form>

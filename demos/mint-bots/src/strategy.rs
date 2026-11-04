@@ -16,8 +16,8 @@ const BLOCK_REWARD_FLM: f64 = 50.0;
 /// The smallest contribution that pays its fees and burns a sat a block.
 pub const MIN_BUDGET: i64 = MIN_DURATION * (FEE_PER_BLOCK + 1);
 
-/// The clock and farmer bots start this many blocks before the gap they
-/// see: the playground counts a delay from its height when it accepts the
+/// The clock and farmer bots start this many blocks before their own
+/// minting ends: the playground counts a delay from its height when it accepts the
 /// submission, a block or two after the snapshot the delay came from.
 const SLACK: i64 = 3;
 
@@ -87,25 +87,33 @@ pub struct Plan {
     pub reason: serde_json::Value,
 }
 
-/// A minimal contribution if the next idle block is within `lookahead`
-/// blocks of `height`, the playground's last committed block.
+/// A minimal contribution for the clock bot `me` once its own minting ends
+/// within `lookahead` blocks of `height`, the playground's last committed
+/// block, chained onto that end. Others minting does not matter: it keeps
+/// minting all the time.
 pub fn clock_in(
     schedules: &[Schedule],
+    me: i64,
     height: i64,
     burn_per_block: i64,
     duration: i64,
     lookahead: i64,
 ) -> Option<Plan> {
     let next = height + 1;
-    let idle = first_idle_block(schedules, next);
-    if idle - next > lookahead {
+    let mine: Vec<Schedule> = schedules
+        .iter()
+        .filter(|schedule| schedule.user_id == me && !delegating(schedule))
+        .cloned()
+        .collect();
+    let until = first_idle_block(&mine, next);
+    if until - next > lookahead {
         return None;
     }
     Some(Plan {
         budget_sats: (burn_per_block + FEE_PER_BLOCK) * duration,
         duration,
-        delay_blocks: (idle - next - SLACK).max(0),
-        reason: serde_json::json!({ "idle_from_block": idle }),
+        delay_blocks: (until - next - SLACK).max(0),
+        reason: serde_json::json!({ "minting_until_block": until }),
     })
 }
 
@@ -501,16 +509,22 @@ mod tests {
     }
 
     #[test]
-    fn clock_waits_until_the_gap_is_near_and_starts_just_before_it() {
-        let schedules = [schedule(1, 11, 144, 5, "independent")];
-        // Idle from 155: 145 blocks away from 10, beyond a 30-block lookahead.
-        assert_eq!(clock_in(&schedules, 10, 1, 144, 30), None);
-        let plan = clock_in(&schedules, 130, 1, 144, 30).unwrap();
+    fn clock_mints_all_the_time_whoever_else_mints() {
+        // Someone else minting does not hold it back.
+        let others = [schedule(1, 0, 1_000, 5, "independent")];
+        assert_eq!(
+            clock_in(&others, 9, 10, 1, 144, 30).unwrap().delay_blocks,
+            0
+        );
+        // Its own minting until 155: chained on once that end is near.
+        let mine = [schedule(9, 11, 144, 1, "independent")];
+        assert_eq!(clock_in(&mine, 9, 10, 1, 144, 30), None);
+        let plan = clock_in(&mine, 9, 130, 1, 144, 30).unwrap();
         assert_eq!(plan.delay_blocks, 155 - 131 - SLACK);
         assert_eq!(plan.budget_sats, 1_001 * 144);
         assert_eq!(plan.duration, 144);
-        // Already idle: start now.
-        assert_eq!(clock_in(&[], 10, 1, 144, 30).unwrap().delay_blocks, 0);
+        // Not minting yet: start now.
+        assert_eq!(clock_in(&[], 9, 10, 1, 144, 30).unwrap().delay_blocks, 0);
     }
 
     #[test]

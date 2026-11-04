@@ -12,10 +12,13 @@ const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 /// append new bots, never reorder or remove one, or a bot would take
 /// another's address. Its ID keys the journal; its name is only the default
 /// display name, which the control page can change.
-pub const ROSTER: [(&str, &str, Kind); 3] = [
+pub const ROSTER: [(&str, &str, Kind); 6] = [
     ("alice", "Alice", Kind::Clock),
     ("bob", "Bob", Kind::Minimax),
     ("charlie", "Charlie", Kind::Farmer),
+    ("dave", "Dave", Kind::Minimax),
+    ("erin", "Erin", Kind::Minimax),
+    ("frank", "Frank", Kind::Farmer),
 ];
 
 pub fn ids() -> impl Iterator<Item = &'static str> {
@@ -43,7 +46,7 @@ pub enum Settings {
     Farmer(Farmer),
 }
 
-/// Fills blocks nobody else mints in, so their reward is not lost.
+/// Keeps a minimal Independent contribution running all the time.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Clock {
@@ -51,7 +54,7 @@ pub struct Clock {
     pub name: String,
     pub burn_per_block: i64,
     pub duration: i64,
-    /// Contributes once the next idle block is this close.
+    /// Contributes once its own minting ends this close.
     pub lookahead_blocks: i64,
 }
 
@@ -196,7 +199,7 @@ impl Settings {
                         "{name}: burn must be 1 to 1,000,000,000 sat a block and duration {MIN_DURATION} to 100,000 blocks."
                     ));
                 }
-                // Over the lookahead, a gap could open and close unseen between two polls.
+                // Under it, its minting could lapse between two polls.
                 if !(10..=10_000).contains(&clock.lookahead_blocks) {
                     return Err(format!("{name}: lookahead must be 10 to 10,000 blocks."));
                 }
@@ -355,7 +358,7 @@ mod tests {
         // A saved roster without Charlie, and with a bot since removed.
         let mut old = json;
         old.as_object_mut().unwrap().remove("charlie");
-        old["dave"] = old["alice"].clone();
+        old["mallory"] = old["alice"].clone();
         old["bob"]["name"] = "Robert".into();
         let adopted = serde_json::from_value::<Config>(old).unwrap().adopt(0);
         assert_eq!(adopted.validate(), Ok(()));
