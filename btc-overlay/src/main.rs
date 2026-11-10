@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
-use btc_overlay::{Overlay, blockbook::Blockbook, rpc, state::State};
+use btc_overlay::{Overlay, blockbook::Blockbook, lag, rpc, state::State};
 use clap::Parser;
 
 /// A fake Bitcoin Core for Flame nodes: real mainnet headers, simulated transactions.
@@ -21,6 +21,9 @@ struct Args {
     /// Seconds between header polls.
     #[arg(long, default_value_t = 5)]
     poll_secs: u64,
+    /// JSON object of client lags by RPC username: {"node2": 30, "node3": "10..120"}.
+    #[arg(long)]
+    lag_config: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -31,6 +34,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         State::open(&args.log)?,
         args.start_height,
     ));
+    if let Some(path) = &args.lag_config {
+        for (client, lag) in lag::load(path)? {
+            eprintln!("client {client} lags {lag}s");
+            overlay.set_lag(&client, Some(lag));
+        }
+    }
     // Serve only once there is a chain.
     overlay.sync().await?;
 

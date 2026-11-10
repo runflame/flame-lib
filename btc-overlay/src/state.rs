@@ -359,6 +359,22 @@ impl State {
         self.chain.get(usize::try_from(index).ok()?).copied()
     }
 
+    /// The hash at `height` on the branch ending at `tip`, which may have been reorged away.
+    pub fn hash_on_branch(&self, tip: &BlockHash, height: u64) -> Option<BlockHash> {
+        let mut block = self.blocks.get(tip)?;
+        if height > block.header.height {
+            return None;
+        }
+        while block.header.height > height && !self.is_canonical(&block.header) {
+            block = self.blocks.get(&block.header.header.prev_blockhash)?;
+        }
+        if self.is_canonical(&block.header) {
+            self.hash_at(height)
+        } else {
+            Some(block.hash())
+        }
+    }
+
     pub fn is_canonical(&self, header: &Header) -> bool {
         self.hash_at(header.height) == Some(header.hash())
     }

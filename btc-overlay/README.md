@@ -27,11 +27,26 @@ cargo run -p btc-overlay -- --blockbook http://127.0.0.1:8080/indexer/mainnet --
   coins and a watched script has fewer than 20 confirmed unspent ones, the overlay mints made-up 0.001 BTC coins,
   counted as confirmed since the start block and logged like everything else. Fees are 1 sat/vB, and change under
   330 sats goes to the fee.
-- **Not served:** wallets with private keys, other descriptors, `getblock` verbosity 1 and 2. Credentials are accepted
-  and not checked.
+- **Client lag:** the RPC username names the client (the password is not checked). A client can be given a lag, and
+  then sees every tip change only once it is that old: tip, heights, confirmations, `waitfornewblock`, and blocks it
+  has not seen yet are not found. Through a reorg it keeps the old branch until the reorg is old enough. Contents are
+  the same for everyone; transactions are never delayed. A lag is seconds (`30`) or a range (`"10..120"`), where each
+  tip change gets its own delay picked from the client name and the block hash. Changes are seen in order, so a long
+  delay holds back the next block too. At most 24 hours.
+- **Not served:** wallets with private keys, other descriptors, `getblock` verbosity 1 and 2.
 
-`getoverlayinfo` returns the start height, tip and queue length; `btc-integration` uses it to refuse the overlay on a
-node configured for `mainnet`.
+Lags come from `--lag-config lags.json`, a JSON object by username:
+
+```json
+{ "node2": 30, "node3": "10..120" }
+```
+
+and can be changed while running, until the next restart: `setclientlag node2 300`, or `setclientlag node2 null` for
+none. Clients without a lag, and requests without credentials, see the live chain. Blocks served before the overlay
+started (or restarted) are history every client sees at once.
+
+`getoverlayinfo` returns the start height, live tip and queue length, and the caller's name, lag and tip;
+`btc-integration` uses it to refuse the overlay on a node configured for `mainnet`.
 
 Tests run against an in-memory header chain. The Blockbook client has two live tests:
 `BLOCKBOOK_URL=http://127.0.0.1:8080/indexer/mainnet cargo test -p btc-overlay -- --ignored`.

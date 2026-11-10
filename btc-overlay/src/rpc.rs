@@ -3,12 +3,20 @@
 //! Responses are built from the `corepc-types` structs the client parses, so the wire
 //! format matches by construction. The wallet calls are the watch-only subset a minter
 //! uses (see [`wallet`]).
+//!
+//! The RPC username names the client; a client with a lag gets every chain answer from its
+//! delayed view (see [`crate::lag`]). The password is not checked.
 
 mod wallet;
 
 use std::{sync::Arc, time::Duration};
 
-use axum::{Json, Router, extract::State as Extract, http::Uri};
+use axum::{
+    Json, Router,
+    extract::State as Extract,
+    http::{HeaderMap, Uri, header::AUTHORIZATION},
+};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use corepc_client::{
     bitcoin::{
         Address, Amount, Block, BlockHash, Network, Script, Transaction, consensus::encode,
@@ -24,9 +32,11 @@ use corepc_client::{
         },
     },
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
+    lag::{Lag, View},
     overlay::{Overlay, Tip},
     state::{self, Entry},
 };
@@ -48,8 +58,11 @@ type RpcResult = Result<Value, RpcError>;
 async fn handle(
     Extract(overlay): Extract<Arc<Overlay>>,
     uri: Uri,
+    headers: HeaderMap,
     Json(request): Json<Value>,
 ) -> Json<Value> {
+    let client = client(&headers);
+    let client = client.as_deref();
     // Wallet calls go to `/wallet/<name>`, as in Bitcoin Core.
     let wallet = uri
         .path()
@@ -62,14 +75,15 @@ async fn handle(
         _ => Vec::new(),
     };
     let result = match method {
-        "getblockchaininfo" => blockchain_info(&overlay),
-        "getoverlayinfo" => overlay_info(&overlay),
-        "getblockcount" => tip(&overlay).map(|tip| json!(tip.height)),
-        "getbestblockhash" => tip(&overlay).map(|tip| json!(tip.hash)),
-        "getblockhash" => block_hash(&overlay, &params),
-        "getblockheader" => block_header(&overlay, &params),
-        "getblock" => block(&overlay, &params),
-        "waitfornewblock" => wait_for_new_block(&overlay, &params).await,
+        "getblockchaininfo" => blockchain_info(&overlay, &overlay.view(client)),
+        "getoverlayinfo" => overlay_info(&overlay, client),
+        "setclientlag" => set_client_lag(&overlay, &params),
+        "getblockcount" => tip(&overlay.view(client)).map(|tip| json!(tip.height)),
+        "getbestblockhash" => tip(&overlay.view(client)).map(|tip| json!(tip.hash)),
+        "getblockhash" => block_hash(&overlay, &overlay.view(client), &params),
+        "getblockheader" => block_header(&overlay, &overlay.view(client), &params),
+        "getblock" => block(&overlay, &overlay.view(client), &params),
+        "waitfornewblock" => wait_for_new_block(&overlay, client, &params).await,
         "sendrawtransaction" => send_raw_transaction(&overlay, &params),
         "createwallet" => wallet::create(&overlay, &params),
         "loadwallet" => wallet::load(&overlay, &params),
@@ -92,6 +106,18 @@ async fn handle(
     })
 }
 
+/// The username of a Basic `Authorization` header.
+fn client(headers: &HeaderMap) -> Option<String> {
+    let encoded = headers
+        .get(AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Basic ")?;
+    let decoded = String::from_utf8(BASE64.decode(encoded.trim()).ok()?).ok()?;
+    let (user, _password) = decoded.split_once(':')?;
+    Some(user.to_owned())
+}
+
 fn to_value<T: serde::Serialize>(value: T) -> RpcResult {
     Ok(serde_json::to_value(value).expect("RPC results serialize"))
 }
@@ -107,18 +133,16 @@ fn hash_param(params: &[Value], index: usize) -> Result<BlockHash, RpcError> {
         .ok_or_else(|| RpcError(INVALID_PARAMETER, "invalid block hash".into()))
 }
 
-fn tip(overlay: &Overlay) -> Result<Tip, RpcError> {
-    overlay
-        .subscribe()
-        .borrow()
+fn tip(view: &View) -> Result<Tip, RpcError> {
+    view.tip
         .ok_or_else(|| RpcError(IN_WARMUP, "Loading the first headers".into()))
 }
 
-fn blockchain_info(overlay: &Overlay) -> RpcResult {
+fn blockchain_info(overlay: &Overlay, view: &View) -> RpcResult {
     let state = overlay.state();
     let tip = state
-        .tip()
-        .ok_or_else(|| RpcError(IN_WARMUP, "Loading the first headers".into()))?;
+        .block(&tip(view)?.hash)
+        .expect("a viewed tip is connected");
     let header = tip.header.header;
     to_value(GetBlockchainInfo {
         chain: "main".into(),
@@ -143,48 +167,70 @@ fn blockchain_info(overlay: &Overlay) -> RpcResult {
     })
 }
 
-fn overlay_info(overlay: &Overlay) -> RpcResult {
+/// The live tip, and the caller's view and lag.
+fn overlay_info(overlay: &Overlay, client: Option<&str>) -> RpcResult {
+    let lag = client.and_then(|client| overlay.lag(client));
+    let view = overlay.view(client);
     let state = overlay.state();
     Ok(json!({
         "start_height": state.start_height(),
         "tip": state.tip().map(|block| block.hash()),
         "queued": state.queued(),
+        "client": client,
+        "lag": lag.map(|lag| lag.to_string()),
+        "client_tip": view.tip.map(|tip| tip.hash),
     }))
 }
 
-fn block_hash(overlay: &Overlay, params: &[Value]) -> RpcResult {
+/// `setclientlag <client> <lag>`: seconds like 30, a range like "10..120", or null for none.
+/// It lasts until the overlay restarts, which goes back to the lag config.
+fn set_client_lag(overlay: &Overlay, params: &[Value]) -> RpcResult {
+    let client = param(params, 0)
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError(INVALID_PARAMETER, "invalid client name".into()))?;
+    let lag = param(params, 1)
+        .map(|lag| Lag::deserialize(lag).map_err(|e| RpcError(INVALID_PARAMETER, e.to_string())))
+        .transpose()?;
+    overlay.set_lag(client, lag);
+    Ok(Value::Null)
+}
+
+fn block_hash(overlay: &Overlay, view: &View, params: &[Value]) -> RpcResult {
     let height = param(params, 0)
         .and_then(Value::as_u64)
         .ok_or_else(|| RpcError(INVALID_PARAMETER, "invalid height".into()))?;
     overlay
         .state()
-        .hash_at(height)
+        .hash_on_branch(&tip(view)?.hash, height)
         .map(|hash| json!(hash))
         .ok_or_else(|| RpcError(INVALID_PARAMETER, "Block height out of range".into()))
 }
 
-/// The block, its confirmations (-1 off the active chain) and the next block's hash.
+/// The block, its confirmations (-1 off the viewed chain) and the next block's hash.
 fn lookup(
     overlay: &Overlay,
+    view: &View,
     hash: BlockHash,
 ) -> Result<(state::Block, i64, Option<BlockHash>), RpcError> {
+    let not_found = || RpcError(INVALID_ADDRESS_OR_KEY, "Block not found".into());
+    if !view.shows(&hash) {
+        return Err(not_found());
+    }
+    let tip = tip(view)?;
     let state = overlay.state();
-    let block = state
-        .block(&hash)
-        .cloned()
-        .ok_or_else(|| RpcError(INVALID_ADDRESS_OR_KEY, "Block not found".into()))?;
-    let tip_height = state.tip().map_or(0, |tip| tip.header.height);
-    let (confirmations, next) = if state.is_canonical(&block.header) {
-        let confirmations = (tip_height - block.header.height + 1) as i64;
-        (confirmations, state.hash_at(block.header.height + 1))
+    let block = state.block(&hash).cloned().ok_or_else(not_found)?;
+    let height = block.header.height;
+    let (confirmations, next) = if state.hash_on_branch(&tip.hash, height) == Some(hash) {
+        let confirmations = (tip.height - height + 1) as i64;
+        (confirmations, state.hash_on_branch(&tip.hash, height + 1))
     } else {
         (-1, None)
     };
     Ok((block, confirmations, next))
 }
 
-fn block_header(overlay: &Overlay, params: &[Value]) -> RpcResult {
-    let (block, confirmations, next) = lookup(overlay, hash_param(params, 0)?)?;
+fn block_header(overlay: &Overlay, view: &View, params: &[Value]) -> RpcResult {
+    let (block, confirmations, next) = lookup(overlay, view, hash_param(params, 0)?)?;
     let header = block.header.header;
     if param(params, 1).and_then(Value::as_bool) == Some(false) {
         return Ok(json!(encode::serialize_hex(&header)));
@@ -209,8 +255,8 @@ fn block_header(overlay: &Overlay, params: &[Value]) -> RpcResult {
     })
 }
 
-fn block(overlay: &Overlay, params: &[Value]) -> RpcResult {
-    let (block, confirmations, next) = lookup(overlay, hash_param(params, 0)?)?;
+fn block(overlay: &Overlay, view: &View, params: &[Value]) -> RpcResult {
+    let (block, confirmations, next) = lookup(overlay, view, hash_param(params, 0)?)?;
     let entries = block.entries();
     let full = Block {
         header: block.header.header,
@@ -376,23 +422,36 @@ fn bits_hex(header: &corepc_client::bitcoin::block::Header) -> String {
     format!("{:08x}", header.bits.to_consensus())
 }
 
-async fn wait_for_new_block(overlay: &Overlay, params: &[Value]) -> RpcResult {
+async fn wait_for_new_block(
+    overlay: &Overlay,
+    client: Option<&str>,
+    params: &[Value],
+) -> RpcResult {
     let timeout_ms = param(params, 0).and_then(Value::as_u64).unwrap_or(0);
     let mut tips = overlay.subscribe();
     let known = match param(params, 1) {
         Some(_) => Some(hash_param(params, 1)?),
-        None => tips.borrow().map(|tip| tip.hash),
+        None => overlay.view(client).tip.map(|tip| tip.hash),
     };
+    // Wakes on a tip change, or when a delayed one becomes visible to the client.
     let changed = async {
         loop {
-            if tips
-                .borrow_and_update()
-                .is_some_and(|tip| Some(tip.hash) != known)
-            {
+            tips.borrow_and_update();
+            let view = overlay.view(client);
+            if view.tip.is_some_and(|tip| Some(tip.hash) != known) {
                 return;
             }
-            if tips.changed().await.is_err() {
-                std::future::pending::<()>().await;
+            let visible = async {
+                match view.next {
+                    Some(at) => tokio::time::sleep_until(at.into()).await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                changed = tips.changed() => if changed.is_err() {
+                    std::future::pending::<()>().await;
+                },
+                () = visible => {}
             }
         }
     };
@@ -401,7 +460,7 @@ async fn wait_for_new_block(overlay: &Overlay, params: &[Value]) -> RpcResult {
     } else {
         let _ = tokio::time::timeout(Duration::from_millis(timeout_ms), changed).await;
     }
-    let tip = tip(overlay)?;
+    let tip = tip(&overlay.view(client))?;
     to_value(WaitForNewBlock {
         hash: tip.hash.to_string(),
         height: tip.height as i64,

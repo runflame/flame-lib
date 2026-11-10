@@ -1,12 +1,17 @@
 //! Follows the header source and keeps the overlay chain on its best branch.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard},
+    time::Instant,
+};
 
 use corepc_client::bitcoin::BlockHash;
 use tokio::sync::watch;
 
 use crate::{
     headers::{HeaderError, HeaderSource},
+    lag::{Lag, Timeline, View},
     state::{State, StateError},
 };
 
@@ -39,6 +44,8 @@ pub struct Overlay {
     start_height: Option<u64>,
     tip: watch::Sender<Option<Tip>>,
     syncing: tokio::sync::Mutex<()>,
+    timeline: Mutex<Timeline>,
+    lags: Mutex<HashMap<String, Lag>>,
 }
 
 impl Overlay {
@@ -55,6 +62,8 @@ impl Overlay {
             start_height,
             tip: watch::Sender::new(tip),
             syncing: tokio::sync::Mutex::new(()),
+            timeline: Mutex::new(Timeline::new(tip)),
+            lags: Mutex::new(HashMap::new()),
         }
     }
 
@@ -62,8 +71,32 @@ impl Overlay {
         self.state.lock().unwrap()
     }
 
+    /// Notified on every tip change, whether or not a lagging client sees it yet.
     pub fn subscribe(&self) -> watch::Receiver<Option<Tip>> {
         self.tip.subscribe()
+    }
+
+    pub fn lag(&self, client: &str) -> Option<Lag> {
+        self.lags.lock().unwrap().get(client).copied()
+    }
+
+    /// Sets the lag of `client`, or removes it with `None`.
+    pub fn set_lag(&self, client: &str, lag: Option<Lag>) {
+        let mut lags = self.lags.lock().unwrap();
+        match lag {
+            Some(lag) => lags.insert(client.into(), lag),
+            None => lags.remove(client),
+        };
+    }
+
+    /// The chain as `client` sees it now; without a name or a lag, the live chain.
+    pub fn view(&self, client: Option<&str>) -> View {
+        let client = client.unwrap_or_default();
+        let lag = self.lag(client);
+        self.timeline
+            .lock()
+            .unwrap()
+            .view(client, lag.as_ref(), Instant::now())
     }
 
     /// Moves to the header source's tip. Returns whether the tip changed.
@@ -121,13 +154,23 @@ impl Overlay {
         while state.tip().is_some_and(|tip| tip.header.height >= lowest) {
             state.disconnect_tip()?;
         }
+        let new_blocks = branch
+            .iter()
+            .map(|header| header.hash())
+            .filter(|hash| state.block(hash).is_none())
+            .collect();
         for header in branch.iter().rev() {
             state.connect(*header)?;
         }
-        self.tip.send_replace(Some(Tip {
+        let tip = Tip {
             hash: remote.hash(),
             height: remote.height,
-        }));
+        };
+        self.timeline
+            .lock()
+            .unwrap()
+            .record(Instant::now(), tip, new_blocks);
+        self.tip.send_replace(Some(tip));
         Ok(true)
     }
 }

@@ -272,3 +272,74 @@ async fn a_minter_endorses_through_an_always_funded_wallet() {
     assert_eq!(update.get_indexed_blocks()[0].endorsements.len(), 1);
     indexer.shutdown().await.unwrap();
 }
+
+fn rpc_as(url: &str, client: &str) -> Core31RpcApi {
+    Core31RpcApi::new(url, BitcoinRpcAuth::UserPass(client.into(), "any".into())).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lagging_client_sees_new_blocks_and_reorgs_late() {
+    use btc_overlay::lag::Lag;
+    use std::time::{Duration, Instant};
+
+    let served = serve().await;
+    served.overlay.set_lag("slow", Some(Lag::fixed(1).unwrap()));
+    let fast = rpc_as(&served.url, "fast");
+    let slow = rpc_as(&served.url, "slow");
+    let start = slow.best_block_tip().await.unwrap();
+    assert_eq!(fast.best_block_tip().await.unwrap(), start);
+
+    served.headers.mine(0);
+    served.overlay.sync().await.unwrap();
+    let mined = Instant::now();
+    let first = fast.best_block_tip().await.unwrap();
+    assert_eq!(first.height, start.height + 1);
+    assert_eq!(slow.best_block_tip().await.unwrap(), start);
+    assert!(slow.block_hash_at_height(first.height).await.is_err());
+    assert!(
+        slow.block_header_info(first.hash).await.is_err(),
+        "not seen yet"
+    );
+
+    assert_eq!(slow.wait_for_new_block(start.hash, 0).await.unwrap(), first);
+    assert!(mined.elapsed() >= Duration::from_millis(900));
+    assert_eq!(
+        slow.block_hash_at_height(first.height).await.unwrap(),
+        first.hash
+    );
+
+    // A reorg replaces the block; the slow client keeps the old branch for a second.
+    served.headers.mine(1);
+    served.headers.mine(0);
+    served.overlay.sync().await.unwrap();
+    let reorged = fast.best_block_tip().await.unwrap();
+    assert_eq!(reorged.height, first.height + 1);
+    assert_ne!(
+        fast.block_hash_at_height(first.height).await.unwrap(),
+        first.hash
+    );
+    assert_eq!(slow.best_block_tip().await.unwrap(), first);
+    assert_eq!(
+        slow.block_hash_at_height(first.height).await.unwrap(),
+        first.hash
+    );
+    assert_eq!(slow.block_header_info(first.hash).await.unwrap().tip, first);
+
+    assert_eq!(
+        slow.wait_for_new_block(first.hash, 0).await.unwrap(),
+        reorged
+    );
+    assert_ne!(
+        slow.block_hash_at_height(first.height).await.unwrap(),
+        first.hash
+    );
+
+    // Without a lag the client is live again.
+    served.overlay.set_lag("slow", None);
+    served.headers.mine(0);
+    served.overlay.sync().await.unwrap();
+    assert_eq!(
+        slow.best_block_tip().await.unwrap(),
+        fast.best_block_tip().await.unwrap()
+    );
+}
