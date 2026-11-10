@@ -1,0 +1,21 @@
+[package]
+name = "btc-overlay"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+corepc-client = "0.16.0"
+async-trait = "0.1.91"
+axum = "0.8"
+bitreq = "0.3.7"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+
+[dev-dependencies]
+btc-integration = { path = "../btc-integration" }
+flamevm = { path = "../flamevm" }
+tempfile = "3"
