@@ -21,7 +21,14 @@ cargo run -p btc-overlay -- --blockbook http://127.0.0.1:8080/indexer/mainnet --
   script. Made-up values are zero.
 - **History:** on a fresh log the overlay starts 20 blocks below the tip (`--start-height` to choose); the indexer
   reads up to 10 blocks back from the tip.
-- **Not served:** wallet calls, `getblock` verbosity 1 and 2. Credentials are accepted and not checked.
+- **Minter wallets:** the watch-only wallet calls a minter makes (`createwallet`, `importdescriptors` with a `raw()`
+  descriptor, `listunspent`, `fundrawtransaction` with preselected inputs), so `BitcoinConnection::endorsements` works
+  unchanged with `network: overlay`. Signing stays with the minter. A wallet never runs dry: whenever it lists its
+  coins and a watched script has fewer than 20 confirmed unspent ones, the overlay mints made-up 0.001 BTC coins,
+  counted as confirmed since the start block and logged like everything else. Fees are 1 sat/vB, and change under
+  330 sats goes to the fee.
+- **Not served:** wallets with private keys, other descriptors, `getblock` verbosity 1 and 2. Credentials are accepted
+  and not checked.
 
 `getoverlayinfo` returns the start height, tip and queue length; `btc-integration` uses it to refuse the overlay on a
 node configured for `mainnet`.

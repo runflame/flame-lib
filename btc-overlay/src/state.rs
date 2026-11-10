@@ -4,8 +4,12 @@
 //! rebuilt by replaying the log. A block's contents are written into its `Connect` record
 //! once, so later code changes or restarts cannot rewrite what clients have already read.
 
+mod wallet;
+
+pub use wallet::{Coin, FundError, Funded};
+
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::Path,
@@ -123,6 +127,20 @@ enum Record {
     Disconnect {
         hash: BlockHash,
     },
+    /// A watch-only wallet, created empty.
+    CreateWallet {
+        name: String,
+    },
+    /// A script the wallet watches.
+    Watch {
+        wallet: String,
+        script: String,
+    },
+    /// A made-up confirmed coin paying `script`, so a watching wallet never runs dry.
+    Mint {
+        script: String,
+        sats: u64,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -144,8 +162,12 @@ pub struct State {
     /// Every block ever connected, on any branch.
     blocks: HashMap<BlockHash, Block>,
     queue: Vec<Transaction>,
-    /// Outputs of every injected transaction ever connected, for prevouts.
+    /// Outputs of every injected transaction ever connected and of minted coins, for prevouts.
     outputs: HashMap<OutPoint, TxOut>,
+    /// Watched scripts per wallet name.
+    wallets: BTreeMap<String, Vec<ScriptBuf>>,
+    /// Minted coins, in order; the index makes each outpoint unique.
+    minted: Vec<OutPoint>,
     log: Option<File>,
 }
 
@@ -157,6 +179,8 @@ impl State {
             blocks: HashMap::new(),
             queue: Vec::new(),
             outputs: HashMap::new(),
+            wallets: BTreeMap::new(),
+            minted: Vec::new(),
             log: None,
         }
     }
@@ -249,6 +273,33 @@ impl State {
                     self.drop_conflicts(transaction);
                 }
                 self.queue.splice(0..0, returned);
+            }
+            Record::CreateWallet { name } => {
+                if self.wallets.insert(name.clone(), Vec::new()).is_some() {
+                    return Err(format!("wallet {name} created twice"));
+                }
+            }
+            Record::Watch { wallet, script } => {
+                let script = ScriptBuf::from_hex(&script).map_err(|e| e.to_string())?;
+                let watched = self
+                    .wallets
+                    .get_mut(&wallet)
+                    .ok_or(format!("unknown wallet {wallet}"))?;
+                if !watched.contains(&script) {
+                    watched.push(script);
+                }
+            }
+            Record::Mint { script, sats } => {
+                let script_pubkey = ScriptBuf::from_hex(&script).map_err(|e| e.to_string())?;
+                let outpoint = wallet::minted_outpoint(self.minted.len());
+                self.outputs.insert(
+                    outpoint,
+                    TxOut {
+                        value: Amount::from_sat(sats),
+                        script_pubkey,
+                    },
+                );
+                self.minted.push(outpoint);
             }
         }
         Ok(())

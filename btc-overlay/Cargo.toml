@@ -17,5 +17,6 @@ tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "s
 
 [dev-dependencies]
 btc-integration = { path = "../btc-integration" }
+ed25519-dalek = "2"
 flamevm = { path = "../flamevm" }
 tempfile = "3"

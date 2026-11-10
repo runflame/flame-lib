@@ -6,6 +6,7 @@
 //! `sendrawtransaction` go into the next new block.
 
 pub mod blockbook;
+mod descriptor;
 pub mod headers;
 pub mod overlay;
 pub mod rpc;

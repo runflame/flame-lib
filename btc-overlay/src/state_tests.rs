@@ -184,3 +184,54 @@ fn replaying_the_log_restores_the_same_chain() {
     assert_eq!(injected(&state, &a), vec![spend(1, 0, 0).compute_txid()]);
     assert_eq!(state.queued(), 1);
 }
+
+#[test]
+fn wallets_and_minted_coins_survive_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("overlay.log");
+    let headers = MemoryHeaders::new(1);
+    let script = ScriptBuf::new_p2wsh(&WScriptHash::hash(&[0x51]));
+    let coins;
+    {
+        let mut state = State::open(&path).unwrap();
+        let tip = tip_of(&headers);
+        state.start(tip.height).unwrap();
+        state.connect(tip).unwrap();
+        state.create_wallet("minter").unwrap();
+        state.watch("minter", &script).unwrap();
+        coins = state.unspent("minter").unwrap();
+        assert_eq!(coins.len(), wallet::COIN_FLOOR);
+    }
+    let mut state = State::open(&path).unwrap();
+    assert_eq!(
+        state.unspent("minter").unwrap(),
+        coins,
+        "no new coins minted"
+    );
+}
+
+#[test]
+fn spent_coins_are_replaced_and_change_is_funded() {
+    let headers = MemoryHeaders::new(1);
+    let mut state = started(&headers);
+    let script = ScriptBuf::new_p2wsh(&WScriptHash::hash(&[0x51]));
+    state.create_wallet("minter").unwrap();
+    state.watch("minter", &script).unwrap();
+    let coin = state.unspent("minter").unwrap()[0].clone();
+
+    let mut endorsement = spend(0, 0, 0);
+    endorsement.input[0].previous_output = coin.outpoint;
+    let weights = HashMap::from([(coin.outpoint, 400)]);
+    let funded = state.fund(endorsement, script.clone(), &weights).unwrap();
+    assert_eq!(funded.change_position, Some(1));
+    let change = &funded.transaction.output[1];
+    assert_eq!(change.script_pubkey, script);
+    assert_eq!(change.value + funded.fee, coin.output.value);
+    assert!(funded.fee.to_sat() < 300, "{}", funded.fee);
+
+    // Spent while queued: the wallet still has its floor of confirmed coins.
+    state.submit(funded.transaction, Amount::ZERO).unwrap();
+    let coins = state.unspent("minter").unwrap();
+    assert_eq!(coins.len(), wallet::COIN_FLOOR);
+    assert!(!coins.iter().any(|c| c.outpoint == coin.outpoint));
+}

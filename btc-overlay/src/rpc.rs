@@ -1,12 +1,14 @@
 //! The Bitcoin Core JSON-RPC subset `btc-integration` uses, plus `getoverlayinfo`.
 //!
 //! Responses are built from the `corepc-types` structs the client parses, so the wire
-//! format matches by construction. Wallet calls are unknown methods: the overlay has no
-//! wallet, burns arrive as signed transactions.
+//! format matches by construction. The wallet calls are the watch-only subset a minter
+//! uses (see [`wallet`]).
+
+mod wallet;
 
 use std::{sync::Arc, time::Duration};
 
-use axum::{Json, Router, extract::State as Extract};
+use axum::{Json, Router, extract::State as Extract, http::Uri};
 use corepc_client::{
     bitcoin::{
         Address, Amount, Block, BlockHash, Network, Script, Transaction, consensus::encode,
@@ -45,8 +47,14 @@ type RpcResult = Result<Value, RpcError>;
 
 async fn handle(
     Extract(overlay): Extract<Arc<Overlay>>,
+    uri: Uri,
     Json(request): Json<Value>,
 ) -> Json<Value> {
+    // Wallet calls go to `/wallet/<name>`, as in Bitcoin Core.
+    let wallet = uri
+        .path()
+        .strip_prefix("/wallet/")
+        .map(|name| name.trim_end_matches('/'));
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     let params = match request.get("params") {
@@ -63,6 +71,15 @@ async fn handle(
         "getblock" => block(&overlay, &params),
         "waitfornewblock" => wait_for_new_block(&overlay, &params).await,
         "sendrawtransaction" => send_raw_transaction(&overlay, &params),
+        "createwallet" => wallet::create(&overlay, &params),
+        "loadwallet" => wallet::load(&overlay, &params),
+        "listwallets" => wallet::list(&overlay),
+        "listwalletdir" => wallet::list_dir(&overlay),
+        "getdescriptorinfo" => wallet::descriptor_info(&params),
+        "getwalletinfo" => wallet::info(&overlay, wallet),
+        "importdescriptors" => wallet::import_descriptors(&overlay, wallet, &params),
+        "listunspent" => wallet::list_unspent(&overlay, wallet),
+        "fundrawtransaction" => wallet::fund(&overlay, wallet, &params),
         _ => Err(RpcError(METHOD_NOT_FOUND, "Method not found".into())),
     };
     Json(match result {

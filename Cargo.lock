@@ -484,6 +484,7 @@ dependencies = [
  "btc-integration",
  "clap 4.6.7",
  "corepc-client",
+ "ed25519-dalek",
  "flamevm",
  "serde",
  "serde_json",

@@ -210,3 +210,65 @@ async fn history(
         .await
         .expect("the indexer reaches the overlay tip")
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_minter_endorses_through_an_always_funded_wallet() {
+    use btc_integration::{
+        BitcoinConnection, BlockHash, IdentityConfig, IdentityManager,
+        identity::storage::InMemorySecretStorage,
+    };
+
+    let served = serve().await;
+    let storage = Arc::new(InMemorySecretStorage::default());
+    let identity = IdentityManager::new(
+        storage.clone(),
+        IdentityConfig {
+            flame_predicate: Predicate::opaque(Predicate::unspendable_key()),
+            access_predicate: Predicate::opaque(Predicate::unspendable_key()),
+            validator_pubkey: ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]).verifying_key(),
+        },
+    )
+    .startup()
+    .await
+    .unwrap()
+    .clone();
+    // The same call a minter makes against regtest; only the URL and network differ.
+    let connection = BitcoinConnection::endorsements(
+        config(&served.url, BitcoinNetwork::Overlay),
+        identity.clone(),
+        storage,
+    )
+    .await
+    .unwrap();
+    let sender = connection.get_sender();
+    let indexer = connection.create_indexer();
+    indexer.startup().await.unwrap();
+    let cursor = rpc(&served.url).best_block_tip().await.unwrap();
+
+    // More endorsements within one Bitcoin block than the wallet's floor of coins.
+    for height in 0..25 {
+        sender
+            .send_endorsement(height, BlockHash::from([height as u8; 32]))
+            .await
+            .unwrap();
+    }
+    served.headers.mine(0);
+    served.overlay.sync().await.unwrap();
+    let update = history(&indexer, cursor).await;
+    let block = &update.get_indexed_blocks()[0];
+    assert_eq!(block.endorsements.len(), 25);
+    for endorsement in &block.endorsements {
+        assert_eq!(endorsement.auth().minter(), &identity);
+    }
+
+    // Later endorsements spend change and minted coins alike.
+    sender
+        .send_endorsement(25, BlockHash::from([25; 32]))
+        .await
+        .unwrap();
+    served.headers.mine(0);
+    served.overlay.sync().await.unwrap();
+    let update = history(&indexer, update.next_cursor).await;
+    assert_eq!(update.get_indexed_blocks()[0].endorsements.len(), 1);
+    indexer.shutdown().await.unwrap();
+}
