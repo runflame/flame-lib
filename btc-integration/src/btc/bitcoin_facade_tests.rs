@@ -17,10 +17,7 @@ struct StubRpc {
 }
 
 #[async_trait]
-impl RpcApi for StubRpc {
-    async fn send_raw_transaction(&self, _: &Transaction, _: Option<Amount>) -> Result<Txid> {
-        panic!("funding and signing must not publish")
-    }
+impl ChainSource for StubRpc {
     async fn wait_for_new_block(
         &self,
         current_tip: BlockHash,
@@ -28,6 +25,13 @@ impl RpcApi for StubRpc {
     ) -> Result<BtcBlockTip> {
         self.waits.lock().unwrap().push((current_tip, timeout_ms));
         Ok(self.tips.lock().unwrap().pop_front().expect("queued tip"))
+    }
+}
+
+#[async_trait]
+impl SenderRpc for StubRpc {
+    async fn send_raw_transaction(&self, _: &Transaction, _: Option<Amount>) -> Result<Txid> {
+        panic!("funding and signing must not publish")
     }
     async fn list_unspent(&self) -> Result<Vec<BtcUnspentOutput>> {
         Ok(self.utxos.clone())

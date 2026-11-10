@@ -1,5 +1,5 @@
 use crate::btc::rpc::{
-    BtcFundOptions, BtcFundedTransaction, BtcFundingInput, BtcUnspentOutput, RpcApi,
+    BtcFundOptions, BtcFundedTransaction, BtcFundingInput, BtcUnspentOutput, SenderRpc,
 };
 use corepc_client::{
     bitcoin::{OutPoint, ScriptBuf, Sequence, Transaction, TxIn, Witness},
@@ -21,7 +21,7 @@ impl<R: ?Sized> BitcoinTransactionBuilder<R> {
     }
 }
 
-impl<R: RpcApi + ?Sized> BitcoinTransactionBuilder<R> {
+impl<R: SenderRpc + ?Sized> BitcoinTransactionBuilder<R> {
     pub async fn fund_and_sign_with_wallet(
         &self,
         transaction: &Transaction,

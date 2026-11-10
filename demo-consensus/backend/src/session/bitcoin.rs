@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use btc_integration::{
-    BitcoinConfig, BitcoinFacade, BitcoinRpcAuth, BtcBlockTip, MinterIdentity,
+    BitcoinConfig, BitcoinNetwork, BitcoinFacade, BitcoinRpcAuth, BtcBlockTip, MinterIdentity,
     btc::rpc::Core31RpcApi,
 };
 use corepc_client::bitcoin::{Address, Amount, Network, Transaction};
@@ -45,6 +45,7 @@ impl BitcoinRegtest {
         BitcoinConfig {
             node_rpc_url: self.node.rpc_url(),
             auth: BitcoinRpcAuth::CookieFile(self.node.params.cookie_file.clone()),
+            network: BitcoinNetwork::Regtest,
         }
     }
 

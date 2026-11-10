@@ -6,7 +6,8 @@ use btc_integration::{
     protocol::validate_transaction_endorsements,
 };
 use btc_integration::{
-    BitcoinConfig, BitcoinFacade, BitcoinRpcAuth, BtcBlockTip, MintingEndorsementData,
+    BitcoinConfig, BitcoinFacade, BitcoinNetwork, BitcoinRpcAuth, BtcBlockTip,
+    MintingEndorsementData,
 };
 use corepc_client::bitcoin::Txid;
 use tokio::time::{sleep, timeout};
@@ -33,6 +34,7 @@ impl BitcoinRegtest {
         BitcoinConfig {
             node_rpc_url: self.node.rpc_url(),
             auth: BitcoinRpcAuth::CookieFile(self.node.params.cookie_file.clone()),
+            network: BitcoinNetwork::Regtest,
         }
     }
 

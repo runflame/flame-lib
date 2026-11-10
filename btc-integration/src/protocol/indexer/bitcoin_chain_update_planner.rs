@@ -2,7 +2,7 @@ use super::error::{HistoryError, history_rpc_error};
 use crate::btc::rpc::BtcBlockHeaderInfo;
 use crate::btc::{
     bitcoin_facade::BitcoinFacade,
-    rpc::{BtcBlockTip, RpcApi, rpc_error_code},
+    rpc::{BtcBlockTip, ChainSource, rpc_error_code},
 };
 use corepc_client::bitcoin::BlockHash;
 use corepc_client::client_sync::Error as RpcError;
@@ -18,7 +18,7 @@ pub(super) struct BitcoinChainUpdatePlanner<R> {
     rpc: Arc<BitcoinFacade<R>>,
 }
 
-impl<R: RpcApi> BitcoinChainUpdatePlanner<R> {
+impl<R: ChainSource> BitcoinChainUpdatePlanner<R> {
     pub fn new(rpc: Arc<BitcoinFacade<R>>) -> Self {
         Self { rpc }
     }

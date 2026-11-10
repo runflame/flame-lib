@@ -67,10 +67,14 @@ pub struct BtcSignedTransaction {
     pub errors: Vec<String>,
 }
 
+/// Read-only view of the Bitcoin chain: everything the indexer needs.
+///
 /// Each method performs one Bitcoin Core RPC call and converts its arguments/result.
-/// Coin selection, retries and operations combining calls belong to BitcoinFacade.
+/// Operations combining calls belong to BitcoinFacade. A backend serving only these
+/// calls (for example the overlay, which follows mainnet headers and serves injected
+/// burns) is a complete chain source.
 #[async_trait]
-pub trait RpcApi: Send + Sync {
+pub trait ChainSource: Send + Sync {
     async fn best_block_tip(&self) -> Result<BtcBlockTip> {
         unimplemented!()
     }
@@ -102,7 +106,14 @@ pub trait RpcApi: Send + Sync {
     ) -> Result<BtcBlockTip> {
         unimplemented!()
     }
+}
 
+/// Publishing and wallet calls: the sender side.
+///
+/// Each method performs one Bitcoin Core RPC call and converts its arguments/result.
+/// Coin selection, retries and operations combining calls belong to BitcoinFacade.
+#[async_trait]
+pub trait SenderRpc: Send + Sync {
     async fn send_raw_transaction(
         &self,
         _transaction: &Transaction,
@@ -152,7 +163,23 @@ impl Core31RpcApi {
         })
         .await
     }
+
+    /// Whether the endpoint is the overlay service rather than a real bitcoind.
+    /// The overlay answers `getoverlayinfo`; Bitcoin Core reports an unknown method.
+    pub(crate) async fn is_overlay(&self) -> Result<bool> {
+        let client = Arc::clone(&self.client);
+        spawn_core_call(
+            move || match client.call::<serde_json::Value>("getoverlayinfo", &[]) {
+                Ok(_) => Ok(true),
+                Err(error) if rpc_error_code(&error) == Some(METHOD_NOT_FOUND) => Ok(false),
+                Err(error) => Err(error),
+            },
+        )
+        .await
+    }
 }
+
+const METHOD_NOT_FOUND: i32 = -32601;
 
 async fn spawn_core_call<T, F>(call: F) -> Result<T>
 where
@@ -165,7 +192,7 @@ where
 }
 
 #[async_trait]
-impl RpcApi for Core31RpcApi {
+impl ChainSource for Core31RpcApi {
     async fn best_block_tip(&self) -> Result<BtcBlockTip> {
         let client = Arc::clone(&self.client);
         spawn_core_call(move || {
@@ -270,7 +297,10 @@ impl RpcApi for Core31RpcApi {
         })
         .await
     }
+}
 
+#[async_trait]
+impl SenderRpc for Core31RpcApi {
     async fn send_raw_transaction(
         &self,
         transaction: &Transaction,

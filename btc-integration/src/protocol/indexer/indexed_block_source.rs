@@ -11,7 +11,7 @@ use super::{
 use crate::{
     btc::{
         bitcoin_facade::BitcoinFacade,
-        rpc::{BtcBlockTip, BtcTransactionWithPrevouts, RpcApi},
+        rpc::{BtcBlockTip, BtcTransactionWithPrevouts, ChainSource},
     },
     protocol::{Acquisition, validate_transaction_endorsements},
 };
@@ -24,7 +24,7 @@ pub(super) struct IndexedBlockSource<R> {
     loads: Semaphore,
 }
 
-impl<R: RpcApi> IndexedBlockSource<R> {
+impl<R: ChainSource> IndexedBlockSource<R> {
     pub fn new(bitcoin: Arc<BitcoinFacade<R>>) -> Self {
         Self {
             bitcoin,

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt, str::FromStr, sync::Arc};
 
 use corepc_client::{
     bitcoin::Network,
@@ -14,10 +14,48 @@ use crate::{
     },
 };
 
+/// The Bitcoin a node follows. Every endpoint is checked against it on connect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BitcoinNetwork {
+    /// A regtest bitcoind; the only network where test acquisitions are sent.
+    Regtest,
+    /// The overlay service: real mainnet headers with simulated burns. It reports
+    /// the mainnet chain and also answers `getoverlayinfo`.
+    Overlay,
+    /// A real mainnet bitcoind.
+    Mainnet,
+}
+
+impl fmt::Display for BitcoinNetwork {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Regtest => "regtest",
+            Self::Overlay => "overlay",
+            Self::Mainnet => "mainnet",
+        })
+    }
+}
+
+impl FromStr for BitcoinNetwork {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "regtest" => Ok(Self::Regtest),
+            "overlay" => Ok(Self::Overlay),
+            "mainnet" => Ok(Self::Mainnet),
+            _ => Err(format!(
+                "unknown Bitcoin network {value:?}, expected regtest, overlay or mainnet"
+            )),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct BitcoinConfig {
     pub node_rpc_url: String,
     pub auth: Auth,
+    pub network: BitcoinNetwork,
 }
 
 pub struct TestAcquisitionConfig {
@@ -37,10 +75,13 @@ impl<S: SecretStorage> BitcoinConnection<EndorsementSigner<Core31RpcApi, S>> {
         secret_storage: S,
     ) -> Result<Self, BitcoinConnectionError> {
         validate_identity(&identity)?;
-        let bitcoin = Arc::new(BitcoinFacade::new(Arc::new(Core31RpcApi::new(
+        let bitcoin = connect_endpoint(
             &config.node_rpc_url,
             config.auth.clone(),
-        )?)));
+            config.network,
+            "node",
+        )
+        .await?;
         let wallet = prepare_wallet(&config, &identity).await?;
         let signer = Arc::new(EndorsementSigner::new(secret_storage, wallet));
         let sender = Arc::new(Sender::new(Arc::clone(&bitcoin), signer, identity));
@@ -57,11 +98,22 @@ impl<S: SecretStorage> BitcoinConnection<TestSigner<Core31RpcApi, S>> {
         acquisition: TestAcquisitionConfig,
     ) -> Result<Self, BitcoinConnectionError> {
         validate_identity(&identity)?;
-        let bitcoin =
-            connect_regtest_endpoint(&config.node_rpc_url, config.auth.clone(), "node").await?;
-        let acquisition_wallet = connect_regtest_endpoint(
+        if config.network != BitcoinNetwork::Regtest {
+            return Err(BitcoinConnectionError::TestAcquisitionsOutsideRegtest(
+                config.network,
+            ));
+        }
+        let bitcoin = connect_endpoint(
+            &config.node_rpc_url,
+            config.auth.clone(),
+            config.network,
+            "node",
+        )
+        .await?;
+        let acquisition_wallet = connect_endpoint(
             &acquisition.wallet_rpc_url,
             config.auth.clone(),
+            config.network,
             "acquisition wallet",
         )
         .await?;
@@ -102,18 +154,40 @@ fn validate_identity(identity: &MinterIdentity) -> Result<(), BitcoinConnectionE
     Ok(())
 }
 
-async fn connect_regtest_endpoint(
+/// Connects a read-only protocol indexer: no wallet, no sender.
+pub async fn connect_indexer(
+    config: &BitcoinConfig,
+) -> Result<ProtocolIndexer<Core31RpcApi>, BitcoinConnectionError> {
+    let bitcoin = connect_endpoint(
+        &config.node_rpc_url,
+        config.auth.clone(),
+        config.network,
+        "node",
+    )
+    .await?;
+    Ok(ProtocolIndexer::new(bitcoin))
+}
+
+async fn connect_endpoint(
     url: &str,
     auth: Auth,
+    expected: BitcoinNetwork,
     endpoint: &'static str,
 ) -> Result<Arc<BitcoinFacade<Core31RpcApi>>, BitcoinConnectionError> {
     let rpc = Arc::new(Core31RpcApi::new(url, auth)?);
-    let actual = rpc.network().await?;
-    if actual != Network::Regtest {
+    let chain = rpc.network().await?;
+    let actual = match chain {
+        Network::Regtest => Some(BitcoinNetwork::Regtest),
+        // A mainnet node configured as Mainnet must never be the overlay's fake burns.
+        Network::Bitcoin if rpc.is_overlay().await? => Some(BitcoinNetwork::Overlay),
+        Network::Bitcoin => Some(BitcoinNetwork::Mainnet),
+        _ => None,
+    };
+    if actual != Some(expected) {
         return Err(BitcoinConnectionError::UnexpectedNetwork {
             endpoint,
-            actual,
-            expected: vec![Network::Regtest],
+            expected,
+            actual: actual.map_or_else(|| chain.to_string(), |network| network.to_string()),
         });
     }
     Ok(Arc::new(BitcoinFacade::new(rpc)))
@@ -123,12 +197,14 @@ async fn connect_regtest_endpoint(
 pub enum BitcoinConnectionError {
     #[error("Bitcoin Core RPC error: {0}")]
     Rpc(#[from] RpcError),
-    #[error("{endpoint} uses {actual}, expected one of {expected:?}")]
+    #[error("{endpoint} is {actual}, expected {expected}")]
     UnexpectedNetwork {
         endpoint: &'static str,
-        actual: Network,
-        expected: Vec<Network>,
+        expected: BitcoinNetwork,
+        actual: String,
     },
+    #[error("test acquisitions are sent only on regtest, not on {0}")]
+    TestAcquisitionsOutsideRegtest(BitcoinNetwork),
     #[error("the built-in signers require <compressed-pubkey> OP_CHECKSIG authorization")]
     UnsupportedAuthorization,
 }

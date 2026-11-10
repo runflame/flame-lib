@@ -9,7 +9,8 @@ pub use prelude::*;
 
 pub mod prelude {
     pub use crate::bitcoin_connection::{
-        BitcoinConfig, BitcoinConnection, BitcoinConnectionError, TestAcquisitionConfig,
+        BitcoinConfig, BitcoinConnection, BitcoinConnectionError, BitcoinNetwork,
+        TestAcquisitionConfig, connect_indexer,
     };
     pub use crate::btc::bitcoin_facade::BitcoinFacade;
     pub use crate::btc::rpc::{

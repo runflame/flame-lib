@@ -9,7 +9,7 @@ use flamechain::BlockHash;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::btc::rpc::RpcApi;
+use crate::btc::rpc::SenderRpc;
 use crate::protocol::{
     endorsement::{MintingEndorsementAuth, MintingEndorsementData, MintingEndorsementOutput},
     minter_identity::MinterIdentity,
@@ -43,7 +43,7 @@ impl<R: ?Sized, S: ?Sized> Sender<R, S> {
 
 impl<R, S> Sender<R, S>
 where
-    R: RpcApi + ?Sized,
+    R: SenderRpc + ?Sized,
     S: TransactionSigner + ?Sized,
 {
     /// Sends endorsement to the bitcoin network
@@ -85,7 +85,7 @@ pub type EndorsementSender<R, S> = Sender<R, EndorsementSigner<R, S>>;
 /// A regtest sender supporting both `send_endorsement` and `send_acquisition`.
 pub type TestSender<R, S> = Sender<R, TestSigner<R, S>>;
 
-impl<R: RpcApi + ?Sized, S: SecretStorage> Sender<R, TestSigner<R, S>> {
+impl<R: SenderRpc + ?Sized, S: SecretStorage> Sender<R, TestSigner<R, S>> {
     pub async fn send_acquisition(
         &self,
         amount: Amount,
@@ -257,7 +257,7 @@ mod tests {
     use super::{MintingSendError, Sender, SignerContractViolation};
     use crate::btc::bitcoin_facade::BitcoinFacade;
     use crate::{
-        btc::rpc::RpcApi,
+        btc::rpc::SenderRpc,
         protocol::{
             MinterIdentity, MintingEndorsementData, RequiredInput, SignTransactionRequest,
             TransactionSigner, minter_witness_script,
@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl RpcApi for RecordingRpc {
+    impl SenderRpc for RecordingRpc {
         async fn send_raw_transaction(
             &self,
             transaction: &Transaction,

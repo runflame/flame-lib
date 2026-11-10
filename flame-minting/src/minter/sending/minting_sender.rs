@@ -93,7 +93,7 @@ impl EndorsementSender for MintingSender {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use btc_integration::{BitcoinRpcAuth, IdentityConfig};
+    use btc_integration::{BitcoinNetwork, BitcoinRpcAuth, IdentityConfig};
     use flamevm::Predicate;
 
     #[tokio::test]
@@ -111,6 +111,7 @@ mod tests {
             BitcoinConfig {
                 node_rpc_url: "http://127.0.0.1:1".into(),
                 auth: BitcoinRpcAuth::None,
+                network: BitcoinNetwork::Regtest,
             },
             identity.clone(),
         );

@@ -2,7 +2,7 @@ use std::convert::Infallible;
 
 use async_trait::async_trait;
 use btc_integration::{
-    BitcoinConfig, BitcoinConnection, TestAcquisitionConfig,
+    BitcoinConfig, BitcoinConnection, BitcoinNetwork, TestAcquisitionConfig,
     btc::rpc::Core31RpcApi,
     protocol::{
         MinterIdentity, MintingEndorsementAuth, SecretStorage, TestSigner, minter_witness_script,
@@ -69,6 +69,7 @@ pub async fn create_connection(
         BitcoinConfig {
             node_rpc_url: ctx.node.rpc_url(),
             auth: Auth::CookieFile(ctx.cookie_file.clone()),
+            network: BitcoinNetwork::Regtest,
         },
         identity,
         RegtestSecretStorage { secret_key_bytes },

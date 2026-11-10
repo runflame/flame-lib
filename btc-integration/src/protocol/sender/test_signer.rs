@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use corepc_client::{bitcoin::Transaction, client_sync::Error as RpcError};
 use flamevm::Predicate;
 
-use crate::btc::{bitcoin_facade::BitcoinFacade, rpc::RpcApi};
+use crate::btc::{bitcoin_facade::BitcoinFacade, rpc::SenderRpc};
 use crate::protocol::{AcquisitionData, MinterIdentity};
 
 use super::{
@@ -38,7 +38,7 @@ impl<R: ?Sized, S> TestSigner<R, S> {
 }
 
 #[async_trait]
-impl<R: RpcApi + ?Sized, S: SecretStorage> TransactionSigner for TestSigner<R, S> {
+impl<R: SenderRpc + ?Sized, S: SecretStorage> TransactionSigner for TestSigner<R, S> {
     type Error = TestSignerError<S::Error>;
 
     async fn fund_and_sign(

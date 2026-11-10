@@ -4,8 +4,9 @@ use std::convert::Infallible;
 
 use async_trait::async_trait;
 use btc_integration::{
-    BitcoinConfig, BitcoinConnection, BitcoinConnectionError, BitcoinRpcAuth, MinterIdentity,
-    SecretStorage, TestAcquisitionConfig, TestSigner, btc::rpc::Core31RpcApi,
+    BitcoinConfig, BitcoinConnection, BitcoinConnectionError, BitcoinNetwork, BitcoinRpcAuth,
+    MinterIdentity, SecretStorage, TestAcquisitionConfig, TestSigner, btc::rpc::Core31RpcApi,
+    connect_indexer,
 };
 use corepc_client::bitcoin::{
     Address, Amount, Network, Script,
@@ -39,6 +40,7 @@ async fn unsupported_authorization_is_rejected_before_connecting() {
         BitcoinConfig {
             node_rpc_url: "not a URL".into(),
             auth: BitcoinRpcAuth::None,
+            network: BitcoinNetwork::Regtest,
         },
         identity,
         UnreadStorage,
@@ -52,6 +54,85 @@ async fn unsupported_authorization_is_rejected_before_connecting() {
         result,
         Err(BitcoinConnectionError::UnsupportedAuthorization)
     ));
+}
+
+#[test]
+fn network_names_round_trip() {
+    for network in [
+        BitcoinNetwork::Regtest,
+        BitcoinNetwork::Overlay,
+        BitcoinNetwork::Mainnet,
+    ] {
+        assert_eq!(network.to_string().parse(), Ok(network));
+    }
+    assert!("testnet".parse::<BitcoinNetwork>().is_err());
+}
+
+#[tokio::test]
+async fn test_acquisitions_are_rejected_outside_regtest_before_connecting() {
+    let result = BitcoinConnection::regtest(
+        BitcoinConfig {
+            node_rpc_url: "not a URL".into(),
+            auth: BitcoinRpcAuth::None,
+            network: BitcoinNetwork::Overlay,
+        },
+        identity(),
+        UnreadStorage,
+        TestAcquisitionConfig {
+            wallet_rpc_url: "not a URL".into(),
+            access_predicate: Predicate::opaque(Predicate::unspendable_key()),
+        },
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(BitcoinConnectionError::TestAcquisitionsOutsideRegtest(
+            BitcoinNetwork::Overlay
+        ))
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn indexer_connects_only_to_the_configured_network() -> bitcoind::anyhow::Result<()> {
+    let ctx = common::setup()?;
+    let config = |network| BitcoinConfig {
+        node_rpc_url: ctx.node.rpc_url(),
+        auth: BitcoinRpcAuth::CookieFile(ctx.cookie_file.clone()),
+        network,
+    };
+
+    for network in [BitcoinNetwork::Overlay, BitcoinNetwork::Mainnet] {
+        let error = connect_indexer(&config(network))
+            .await
+            .err()
+            .expect("a regtest node is not this network");
+        assert!(
+            matches!(
+                &error,
+                BitcoinConnectionError::UnexpectedNetwork { expected, actual, .. }
+                    if *expected == network && actual == "regtest"
+            ),
+            "{error}"
+        );
+    }
+    let indexer = connect_indexer(&config(BitcoinNetwork::Regtest)).await?;
+    indexer.startup().await?;
+    indexer.shutdown().await?;
+
+    // The overlay probe relies on Bitcoin Core rejecting the method as unknown.
+    let error = ctx
+        .node
+        .client
+        .call::<Value>("getoverlayinfo", &[])
+        .expect_err("Bitcoin Core has no getoverlayinfo");
+    assert!(
+        matches!(
+            &error,
+            corepc_client::client_sync::Error::JsonRpc(jsonrpc::Error::Rpc(rpc)) if rpc.code == -32601
+        ),
+        "{error:?}"
+    );
+    Ok(())
 }
 
 fn identity() -> MinterIdentity {
@@ -73,6 +154,7 @@ async fn connect(
         BitcoinConfig {
             node_rpc_url: format!("{}/", ctx.node.rpc_url()),
             auth: BitcoinRpcAuth::CookieFile(ctx.cookie_file.clone()),
+            network: BitcoinNetwork::Regtest,
         },
         identity,
         UnreadStorage,

@@ -21,7 +21,7 @@ use flamevm::Predicate;
 use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, watch};
 
 use crate::{
-    btc::rpc::{BtcBlockHeaderInfo, BtcBlockTip, BtcTransactionWithPrevouts, RpcApi},
+    btc::rpc::{BtcBlockHeaderInfo, BtcBlockTip, BtcTransactionWithPrevouts, ChainSource},
     protocol::{AcquisitionData, MinterP2wsh, MintingEndorsementData, minter_witness_script},
 };
 
@@ -108,7 +108,7 @@ impl FakeRpc {
 }
 
 #[async_trait]
-impl RpcApi for FakeRpc {
+impl ChainSource for FakeRpc {
     async fn best_block_tip(&self) -> Result<BtcBlockTip> {
         Ok(*self.best_tip.read().await)
     }

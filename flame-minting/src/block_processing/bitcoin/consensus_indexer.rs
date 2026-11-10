@@ -1,6 +1,6 @@
 use btc_integration::{
     BtcBlockTip, HistoryError, HistoryUpdate, ProtocolIndexer, ShutdownError, StartupError,
-    btc::rpc::RpcApi,
+    btc::rpc::ChainSource,
 };
 use std::{future::Future, num::NonZeroUsize};
 use tokio::sync::watch;
@@ -27,7 +27,7 @@ pub trait ConsensusIndexer: Send + Sync + 'static {
     }
 }
 
-impl<R: RpcApi + 'static> ConsensusIndexer for ProtocolIndexer<R> {
+impl<R: ChainSource + 'static> ConsensusIndexer for ProtocolIndexer<R> {
     async fn startup(&self) -> Result<(), StartupError> {
         self.startup().await
     }
