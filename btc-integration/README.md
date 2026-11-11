@@ -1,8 +1,18 @@
 # Bitcoin integration
 
-## Regtest
+## Networks
 
-Only regtest is supported.
+`BitcoinConfig::network` names the Bitcoin a node follows, and every endpoint is checked against it on connect:
+
+- `regtest`: a regtest bitcoind. The only network where test acquisitions are sent.
+- `overlay`: the overlay service, which serves real mainnet headers with simulated burns. It reports the mainnet chain
+  and also answers `getoverlayinfo`; a node configured as `mainnet` refuses it.
+- `mainnet`: a real mainnet bitcoind.
+
+The RPC is split into two traits: `ChainSource`, the read-only calls the indexer uses, and `SenderRpc`, publishing and
+wallet calls. `connect_indexer(&config)` connects an indexer alone, with no wallet and no sender.
+
+## Regtest
 
 ```no_run
 use btc_integration::{BitcoinConfig, BitcoinConnection, MinterIdentity,

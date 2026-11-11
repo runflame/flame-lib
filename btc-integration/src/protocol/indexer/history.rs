@@ -8,7 +8,7 @@ use super::{
 };
 use crate::btc::{
     bitcoin_facade::BitcoinFacade,
-    rpc::{BtcBlockTip, RpcApi},
+    rpc::{BtcBlockTip, ChainSource},
 };
 
 pub(super) struct HistoryReader<R> {
@@ -17,7 +17,7 @@ pub(super) struct HistoryReader<R> {
     blocks: Arc<IndexedBlockSource<R>>,
 }
 
-impl<R: RpcApi> HistoryReader<R> {
+impl<R: ChainSource> HistoryReader<R> {
     pub fn new(bitcoin: Arc<BitcoinFacade<R>>, blocks: Arc<IndexedBlockSource<R>>) -> Self {
         Self {
             planner: BitcoinChainUpdatePlanner::new(Arc::clone(&bitcoin)),

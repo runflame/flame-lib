@@ -1,4 +1,4 @@
-use btc_integration::{MintingSendError, Sender, TransactionSigner, btc::rpc::RpcApi};
+use btc_integration::{MintingSendError, Sender, TransactionSigner, btc::rpc::SenderRpc};
 use corepc_client::bitcoin::Txid;
 use flamechain::BlockHash;
 use std::future::Future;
@@ -18,7 +18,7 @@ pub trait EndorsementSender: Send + Sync + 'static {
 
 impl<R, S> EndorsementSender for Sender<R, S>
 where
-    R: RpcApi + ?Sized + 'static,
+    R: SenderRpc + ?Sized + 'static,
     S: TransactionSigner + ?Sized + 'static,
 {
     type Error = MintingSendError<S::Error>;

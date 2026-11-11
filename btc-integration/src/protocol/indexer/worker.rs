@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use super::{error::HistoryError, indexed_block_source::IndexedBlockSource};
 use crate::btc::{
     bitcoin_facade::BitcoinFacade,
-    rpc::{BtcBlockTip, RpcApi},
+    rpc::{BtcBlockTip, ChainSource},
 };
 
 pub(super) struct IndexerWorker<R> {
@@ -19,7 +19,7 @@ pub(super) struct IndexerWorker<R> {
     cancellation: CancellationToken,
 }
 
-impl<R: RpcApi> IndexerWorker<R> {
+impl<R: ChainSource> IndexerWorker<R> {
     pub fn new(
         rpc: Arc<BitcoinFacade<R>>,
         blocks: Arc<IndexedBlockSource<R>>,

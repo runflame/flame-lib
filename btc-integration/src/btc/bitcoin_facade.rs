@@ -1,8 +1,8 @@
 //! Bitcoin workflows
 
 use crate::btc::rpc::{
-    BtcBlockHeaderInfo, BtcBlockTip, BtcFundedTransaction, BtcTransactionWithPrevouts, RpcApi,
-    rpc_error_code,
+    BtcBlockHeaderInfo, BtcBlockTip, BtcFundedTransaction, BtcTransactionWithPrevouts, ChainSource,
+    SenderRpc, rpc_error_code,
 };
 use crate::btc::transaction_builder::BitcoinTransactionBuilder;
 use corepc_client::{
@@ -29,7 +29,7 @@ impl<R: ?Sized> BitcoinFacade<R> {
     }
 }
 
-impl<R: RpcApi + ?Sized> BitcoinFacade<R> {
+impl<R: ChainSource + ?Sized> BitcoinFacade<R> {
     pub async fn best_block_tip(&self) -> Result<BtcBlockTip> {
         self.rpc.best_block_tip().await
     }
@@ -117,7 +117,9 @@ impl<R: RpcApi + ?Sized> BitcoinFacade<R> {
             }
         }
     }
+}
 
+impl<R: SenderRpc + ?Sized> BitcoinFacade<R> {
     pub async fn publish_transaction(&self, transaction: &Transaction) -> Result<Txid> {
         self.rpc.send_raw_transaction(transaction, None).await
     }

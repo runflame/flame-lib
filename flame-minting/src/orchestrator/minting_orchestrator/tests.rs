@@ -3,7 +3,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use btc_integration::{ShutdownError, StartupError};
+use btc_integration::{BitcoinNetwork, ShutdownError, StartupError};
 use corepc_client::{bitcoin::hashes::Hash, client_sync::Auth};
 use flamevm::Predicate;
 
@@ -86,6 +86,7 @@ async fn check_startup(fail_sender: bool) {
         BitcoinConfig {
             node_rpc_url: "http://127.0.0.1:1".into(),
             auth: Auth::UserPass("test".into(), "test".into()),
+            network: BitcoinNetwork::Regtest,
         },
         BtcBlockTip {
             hash: corepc_client::bitcoin::BlockHash::all_zeros(),

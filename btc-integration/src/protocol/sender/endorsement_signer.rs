@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use super::signer::{RequiredInput, SignTransactionRequest, TransactionSigner};
 use crate::{
-    btc::rpc::{BtcFundedTransaction, RpcApi},
+    btc::rpc::{BtcFundedTransaction, SenderRpc},
     protocol::{endorsement::MintingEndorsementOutput, minter_witness_script},
 };
 
@@ -82,7 +82,7 @@ impl<R: ?Sized, S: SecretStorage> EndorsementSigner<R, S> {
 #[async_trait]
 impl<R, S> TransactionSigner for EndorsementSigner<R, S>
 where
-    R: RpcApi + ?Sized,
+    R: SenderRpc + ?Sized,
     S: SecretStorage,
 {
     type Error = EndorsementSignerError<S::Error>;

@@ -10,7 +10,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::btc::rpc::{BtcBlockTip, RpcApi};
+use crate::btc::rpc::{BtcBlockTip, ChainSource};
 
 use super::{
     error::HistoryError, history::HistoryReader, indexed_block_source::IndexedBlockSource,
@@ -46,7 +46,7 @@ pub struct ProtocolIndexer<R> {
 
 impl<R> ProtocolIndexer<R>
 where
-    R: RpcApi,
+    R: ChainSource,
 {
     pub fn new(rpc: Arc<BitcoinFacade<R>>) -> Self {
         let (subscribers, _) = watch::channel(None);

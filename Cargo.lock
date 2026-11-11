@@ -475,6 +475,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "btc-overlay"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bitreq",
+ "btc-integration",
+ "clap 4.6.7",
+ "corepc-client",
+ "ed25519-dalek",
+ "flamevm",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "bulletproofs"
 version = "2.0.0"
 source = "git+https://github.com/runflame/bulletproofs?branch=develop#a2f52a0d1a502128f0064b7dace607c83ff7ff73"

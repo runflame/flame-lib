@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use bitcoind::anyhow::Context;
 use btc_integration::{
-    BitcoinConfig, BitcoinConnection, BitcoinRpcAuth, IdentityConfig, IdentityManager,
-    MintingEndorsementData, SecretStorage, identity::storage::InMemorySecretStorage,
-    protocol::validate_transaction_endorsements,
+    BitcoinConfig, BitcoinConnection, BitcoinNetwork, BitcoinRpcAuth, IdentityConfig,
+    IdentityManager, MintingEndorsementData, SecretStorage,
+    identity::storage::InMemorySecretStorage, protocol::validate_transaction_endorsements,
 };
 use corepc_client::bitcoin::{Address, Amount, Network};
 use flamechain::BlockHash;
@@ -31,6 +31,7 @@ async fn generated_identity_signs_endorsements_and_reconnects_with_shared_storag
     let config = BitcoinConfig {
         node_rpc_url: ctx.node.rpc_url(),
         auth: BitcoinRpcAuth::CookieFile(ctx.cookie_file.clone()),
+        network: BitcoinNetwork::Regtest,
     };
     let connection =
         BitcoinConnection::endorsements(config.clone(), identity.clone(), storage.clone()).await?;

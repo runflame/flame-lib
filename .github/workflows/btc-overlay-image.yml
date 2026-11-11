@@ -1,0 +1,108 @@
+name: btc-overlay image
+
+# Builds btc-overlay/Dockerfile, starts it against a stub Blockbook and checks
+# that it serves the stub's block over Bitcoin Core RPC, then, from main only,
+# pushes it to GHCR as ghcr.io/runflame/btc-overlay:<full commit hash> and
+# moves `:main` to it. A pull request into main runs the same build and check
+# and pushes nothing. Nothing deploys it: the infrastructure playbook runs the
+# commit pinned there (infrastructure repo, dev README → btc-overlay).
+#
+# The paths are what the image is built from: the overlay crate, the
+# workspace lock and the toolchain. Its tests run in check-crates.yml.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'btc-overlay/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/btc-overlay-image.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'btc-overlay/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/btc-overlay-image.yml'
+  workflow_dispatch:
+
+# A newer push supersedes a build still running; its commit gets no image.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/runflame/btc-overlay
+      # The full commit, the same in the tag and in the revision label: the
+      # dev playbook deploys by this tag and checks it against the label.
+      TAG: ${{ github.sha }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Build
+      run: |
+        set -euo pipefail
+        docker build -f btc-overlay/Dockerfile \
+          --label "org.opencontainers.image.revision=$TAG" \
+          -t "$IMAGE:$TAG" .
+
+    # A stub Blockbook with one real block, mainnet 840000, which the overlay
+    # starts at: it fetches no other header. The overlay checks the header
+    # fields against the hash, so the block must be real.
+    - name: Smoke test
+      run: |
+        set -euo pipefail
+        stub="$RUNNER_TEMP/blockbook"
+        mkdir -p "$stub/api/v2/block"
+        echo '{"blockbook":{"bestHeight":840000}}' > "$stub/api/index.html"
+        block='{"hash":"0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5","previousBlockHash":"0000000000000000000172014ba58d66455762add0512355ad651207918494ab","height":840000,"version":710926336,"merkleRoot":"031b417c3a1828ddf3d6527fc210daafcc9218e81f98257f88d4d43bd7a5894f","time":1713571767,"nonce":"3932395645","bits":"17034219","difficulty":"86388558925171.02","txCount":3050}'
+        echo "$block" > "$stub/api/v2/block/840000"
+        echo "$block" > "$stub/api/v2/block/0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5"
+        docker run -d --name blockbook --network host -v "$stub:/www:ro" \
+          docker.io/library/busybox:1.37 httpd -f -p 127.0.0.1:18080 -h /www
+        echo '{"slow": 30, "jittery": "10..120"}' > "$RUNNER_TEMP/lags.json"
+        docker run -d --name overlay --network host \
+          -v "$RUNNER_TEMP/lags.json:/etc/btc-overlay/lags.json:ro" \
+          "$IMAGE:$TAG" --blockbook http://127.0.0.1:18080 \
+          --start-height 840000 --lag-config /etc/btc-overlay/lags.json
+        trap 'docker logs overlay; docker rm -f overlay blockbook >/dev/null' EXIT
+        rpc() {
+          curl -sf -u "$1:any" -H 'Content-Type: application/json' \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":[]}" \
+            http://127.0.0.1:18443/
+        }
+        for _ in $(seq 30); do rpc fast getblockcount >/dev/null && break; sleep 1; done
+        rpc fast getblockcount | tee /dev/stderr | jq -e '.result == 840000' >/dev/null
+        rpc fast getblockchaininfo | jq -e '.result.chain == "main"' >/dev/null
+        rpc slow getoverlayinfo | tee /dev/stderr | jq -e '.result.lag == "30"' >/dev/null
+
+    # Only from main: a pull request or a manual run elsewhere pushes nothing.
+    - name: Push
+      if: github.ref == 'refs/heads/main'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -euo pipefail
+        echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+        docker push "$IMAGE:$TAG"
+        docker tag "$IMAGE:$TAG" "$IMAGE:main"
+        docker push "$IMAGE:main"
+        docker logout ghcr.io
+        {
+          echo "Pushed \`$IMAGE:$TAG\` and moved \`:main\` to it. Nothing is deployed."
+          echo
+          echo "To deploy this build, pin it as btc_overlay_commit in dev/playground/btc_overlay/vars_service.yml (infrastructure repo) and run: \`ansible-playbook site.yml --ask-vault-pass --tags btc_overlay\`"
+        } >> "$GITHUB_STEP_SUMMARY"
