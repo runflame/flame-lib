@@ -5,6 +5,7 @@ use clap::Parser;
 
 /// A fake Bitcoin Core for Flame nodes: real mainnet headers, simulated transactions.
 #[derive(Parser)]
+#[command(version)]
 struct Args {
     /// Blockbook root URL, e.g. http://127.0.0.1:8080/indexer/mainnet
     #[arg(long)]
@@ -61,10 +62,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     eprintln!("btc-overlay listening on {}", args.listen);
-    axum::serve(listener, rpc::router(overlay))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    // Every record is on disk before it is applied, so a stop can exit at once rather than
+    // wait out open `waitfornewblock` long polls.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        served = axum::serve(listener, rpc::router(overlay)) => served?,
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+    }
+    eprintln!("btc-overlay stopped");
     Ok(())
 }
