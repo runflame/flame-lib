@@ -1,95 +1,197 @@
 mod common;
 
+use bitcoin::hashes::Hash;
+use bitcoin::secp256k1::SecretKey;
+use bitcoin::{Address, Amount, Network, ScriptBuf, TxOut};
 use bitcoind::anyhow::Context;
-use btc_integration::btc::rpc::BtcBlockTip;
-use btc_integration::protocol::Acquisition;
-use common::{create_connection, setup};
-use corepc_client::bitcoin::Amount;
-use std::sync::Arc;
+use btc_integration::identity::impls::LocalKey;
+use btc_integration::protocol::{BitcoinRecords, BurnData, MinterP2wsh, MintingEndorsementData};
+use btc_integration::wallet::impls::{RpcWallet, RpcWatchOnlyWallet};
+use btc_integration::watcher::{BlockId, ChainSource};
+use btc_integration::{
+    BitcoinConfig, BitcoinRpcAuth, BtcWallet, IdentityConfig, MinterWallet, WalletError,
+};
+use common::{TestContext, setup};
+use flamechain::BlockHash;
+use flamevm::Predicate;
+
+/// The wallet of a minter whose script has a confirmed output of `funding`.
+async fn minter_wallet(
+    ctx: &TestContext,
+    funding: Amount,
+) -> bitcoind::anyhow::Result<MinterWallet<RpcWatchOnlyWallet, LocalKey>> {
+    let key = LocalKey::new(SecretKey::from_slice(&[0x41; 32])?);
+    let nobody = Predicate::opaque(Predicate::unspendable_key());
+    let minter = IdentityConfig {
+        flame_predicate: nobody.clone(),
+        access_predicate: nobody,
+        validator_pubkey: ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]).verifying_key(),
+    }
+    .identity(&key);
+    let script = minter.witness_script();
+
+    let watch_only = RpcWatchOnlyWallet::open(&ctx.bitcoin_config(), script).await?;
+    ctx.pay(Address::p2wsh(script, Network::Regtest), funding)
+        .await?;
+    Ok(MinterWallet::new(watch_only, key, minter)?)
+}
 
 #[tokio::test(flavor = "multi_thread")]
-async fn core31_rpc_api_works_with_regtest_blocks_and_transactions() -> bitcoind::anyhow::Result<()>
-{
+async fn rpc_source_and_wallet_work_with_regtest_blocks_and_transactions()
+-> bitcoind::anyhow::Result<()> {
     let ctx = setup()?;
-    let rpc = Arc::clone(&ctx.rpc);
 
-    let (block_hash, transactions_at_height) = rpc.transactions_at_height(1).await?;
-    let transactions_by_hash = rpc.transactions_in_block(block_hash).await?;
-    assert_eq!(transactions_at_height, transactions_by_hash);
-    assert_eq!(transactions_at_height.len(), 1);
+    let first = ctx.source.block_at(1).await?.context("block 1")?;
+    let (block, prevouts) = ctx.block(first.hash).await?;
+    assert_eq!(block.block_hash(), first.hash);
+    assert_eq!(block.txdata.len(), 1);
+    // The input of a coinbase spends nothing.
+    assert_eq!(prevouts.as_slice(), [vec![None]]);
 
-    let (previous_tip_hash, _) = rpc.transactions_at_height(101).await?;
-    let previous_tip = BtcBlockTip {
-        hash: previous_tip_hash,
-        height: 101,
-    };
+    let previous_tip = ctx
+        .source
+        .wait_for_new_block(bitcoin::BlockHash::all_zeros())
+        .await?;
+    assert_eq!(previous_tip.height, 101);
+    // The best chain ends here.
+    assert_eq!(ctx.source.block_at(102).await?, None);
 
-    let waiter = ctx.wait_for_next_block(previous_tip);
-    let next_hash = ctx.generate_next_block()?;
-
-    let next_tip = waiter.await.expect("wait for next block");
-
-    assert_eq!(next_tip.height, 102);
-    assert_eq!(next_tip.hash, next_hash);
+    let source = &ctx.source;
+    let waiter = source.wait_for_new_block(previous_tip.hash);
+    let (next_tip, next_hash) = tokio::join!(waiter, async { ctx.generate_next_block() });
+    let next_hash = next_hash?;
+    assert_eq!(
+        next_tip?,
+        BlockId {
+            height: 102,
+            hash: next_hash
+        }
+    );
 
     let recipient = ctx.node.client.new_address()?;
     let amount = Amount::from_btc(1.0).expect("valid BTC amount");
-    let signed_transaction = ctx.send_simple_transaction(recipient, amount)?;
-
-    assert!(signed_transaction.complete);
-
-    let expected_txid = signed_transaction.tx.compute_txid();
-    let published_txid = rpc.publish_transaction(&signed_transaction.tx).await?;
-    assert_eq!(published_txid, expected_txid);
+    let payment = TxOut {
+        value: amount,
+        script_pubkey: recipient.script_pubkey(),
+    };
+    let expected_txid = ctx.wallet.send(payment).await?;
 
     let confirmation_block = ctx.generate_next_block()?;
-    let confirmed = rpc
-        .transactions_with_prevouts_in_block(confirmation_block)
-        .await?
-        .into_iter()
-        .find(|entry| entry.transaction.compute_txid() == expected_txid)
+    let (block, prevouts) = ctx.block(confirmation_block).await?;
+    let (transaction, prevouts) = block
+        .txdata
+        .iter()
+        .zip(prevouts.as_slice())
+        .find(|(transaction, _)| transaction.compute_txid() == expected_txid)
         .context("published transaction was not included in the next block")?;
-    assert_eq!(confirmed.prevouts.len(), confirmed.transaction.input.len());
-    assert!(confirmed.prevouts.iter().all(Option::is_some));
+    assert_eq!(prevouts.len(), transaction.input.len());
+    assert!(prevouts.iter().all(Option::is_some));
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn acquisition_sender_works_with_core31_rpc_api() -> bitcoind::anyhow::Result<()> {
+async fn a_wallet_of_bitcoin_core_sends_a_burn() -> bitcoind::anyhow::Result<()> {
     let ctx = setup()?;
-    let connection = create_connection(&ctx).await?;
-    let sender = connection.get_sender();
+    let nobody = Predicate::opaque(Predicate::unspendable_key());
+    let burn = BurnData::new(MinterP2wsh::new([0x42; 32]), nobody);
     let sent_amount = Amount::from_sat(25_000);
 
-    assert!(matches!(
-        sender.send_acquisition(Amount::ZERO).await,
-        Err(btc_integration::MintingSendError::ZeroAcquisitionAmount)
-    ));
-
-    let txid = sender.send_acquisition(sent_amount).await?;
+    let txid = ctx.wallet.send(burn.to_output(sent_amount)).await?;
     let confirmation_block = ctx.generate_next_block()?;
-    let confirmed_transactions = ctx.rpc.transactions_in_block(confirmation_block).await?;
-    let confirmed_transaction = confirmed_transactions
+    let (block, prevouts) = ctx.block(confirmation_block).await?;
+    let burns = BitcoinRecords::from_block(&block, &prevouts)?.burns;
+
+    assert_eq!(burns.len(), 1);
+    assert_eq!(burns[0].txid(), txid);
+    assert_eq!(burns[0].amount(), sent_amount);
+    assert_eq!(burns[0].data(), &burn);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_endorsement_spends_two_outputs_when_one_does_not_pay_the_fee()
+-> bitcoind::anyhow::Result<()> {
+    let ctx = setup()?;
+    // At the fee rate of this node one output of this size does not pay for
+    // an endorsement.
+    let small = Amount::from_sat(1_400);
+    let wallet = minter_wallet(&ctx, small).await?;
+    let endorsement = MintingEndorsementData::V1 {
+        flame_block_height: 1,
+        flame_block_hash: BlockHash::from([0x42; 32]),
+    };
+    let unpaid = wallet.send(endorsement.to_output()).await;
+    assert!(matches!(unpaid, Err(WalletError::Refused(_))));
+
+    // With a second output the same endorsement goes out and spends both.
+    let minter = wallet.minter().witness_script().to_p2wsh();
+    let address = Address::from_script(&minter, Network::Regtest)?;
+    ctx.pay(address, small).await?;
+    let txid = wallet.send(endorsement.to_output()).await?;
+
+    let confirmation_block = ctx.generate_next_block()?;
+    let (block, prevouts) = ctx.block(confirmation_block).await?;
+    let (_, spent) = block
+        .txdata
         .iter()
-        .find(|transaction| transaction.compute_txid() == txid)
-        .context("Acquisition transaction was not included in the next block")?;
-    let acquisitions = Acquisition::from_tx(confirmed_transaction);
+        .zip(prevouts.as_slice())
+        .find(|(transaction, _)| transaction.compute_txid() == txid)
+        .context("the endorsement was not included in the next block")?;
+    let paid = TxOut {
+        value: small,
+        script_pubkey: minter,
+    };
+    assert_eq!(spent, &[Some(paid.clone()), Some(paid)]);
 
-    assert_eq!(acquisitions.len(), 1);
-    assert_eq!(acquisitions[0].txid(), txid);
-    assert_eq!(acquisitions[0].amount(), sent_amount);
-    assert_eq!(acquisitions[0].data().minter_p2wsh, sender.minter().p2wsh());
-    assert_eq!(
-        acquisitions[0].data().access_predicate.to_point(),
-        flamevm::Predicate::unspendable_key(),
-    );
-    assert_eq!(
-        confirmed_transaction.output[acquisitions[0].output_index()]
-            .script_pubkey
-            .len(),
-        71,
-    );
+    Ok(())
+}
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wallet_pays_again_before_a_block_confirms_its_change() -> bitcoind::anyhow::Result<()> {
+    let ctx = setup()?;
+    // The wallet has one coin: the reward of block 1.
+    let recipient = ctx.node.client.new_address()?.script_pubkey();
+    let pay = |sat| TxOut {
+        value: Amount::from_sat(sat),
+        script_pubkey: recipient.clone(),
+    };
+
+    let first = ctx.wallet.send(pay(10_000)).await?;
+    // The coin is spent, and its change waits for a block: Bitcoin Core pays
+    // the second transaction with that change.
+    let second = ctx.wallet.send(pay(20_000)).await?;
+
+    let (block, _) = ctx.block(ctx.generate_next_block()?).await?;
+    let mined = |txid| block.txdata.iter().find(|tx| tx.compute_txid() == txid);
+    assert!(mined(first).is_some());
+    let second = mined(second).context("the second payment is in the block")?;
+    assert!(
+        second
+            .input
+            .iter()
+            .all(|input| input.previous_output.txid == first)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_node_that_does_not_answer_is_told_apart_from_a_refusal() -> bitcoind::anyhow::Result<()>
+{
+    // Nothing listens on this port.
+    let nowhere = BitcoinConfig {
+        node_rpc_url: "http://127.0.0.1:1".to_owned(),
+        auth: BitcoinRpcAuth::None,
+    };
+    let wallet = RpcWallet::new(&nowhere, "coins")?;
+    let output = TxOut {
+        value: Amount::from_sat(1_000),
+        script_pubkey: ScriptBuf::new(),
+    };
+
+    let sent = wallet.send(output).await;
+
+    assert!(matches!(sent, Err(WalletError::Unreachable(_))));
     Ok(())
 }

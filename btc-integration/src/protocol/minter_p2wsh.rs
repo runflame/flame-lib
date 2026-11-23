@@ -1,6 +1,4 @@
-use corepc_client::bitcoin::hashes::{Hash, sha256};
-use curve25519_dalek::ristretto::CompressedRistretto;
-use flamevm::Predicate;
+use bitcoin::hashes::{Hash, sha256};
 
 /// SHA-256 hash of the complete P2WSH witness script used by a Minter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -33,10 +31,4 @@ impl From<MinterP2wsh> for [u8; 32] {
     fn from(hash: MinterP2wsh) -> Self {
         hash.into_bytes()
     }
-}
-
-pub fn parse_predicate(bytes: &[u8]) -> Option<Predicate> {
-    let compressed = CompressedRistretto(bytes.try_into().ok()?);
-    compressed.decompress()?;
-    Some(Predicate::opaque(compressed))
 }

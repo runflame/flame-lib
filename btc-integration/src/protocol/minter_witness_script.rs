@@ -1,25 +1,24 @@
 //! Encoding and validation of Minter witness scripts.
 //!
-//! All scripts start with `<FLMV || predicate || validator_pubkey> OP_DROP`. EndorsementSigner supports
-//! the canonical authorization suffix `<compressed-public-key> OP_CHECKSIG`.
+//! All scripts start with `<FLMV || predicate || validator_pubkey> OP_DROP`. The canonical
+//! authorization suffix is `<compressed-public-key> OP_CHECKSIG`: a single key.
 
-use corepc_client::bitcoin::{Script, ScriptBuf, secp256k1::PublicKey};
+use bitcoin::opcodes::all::{OP_CHECKSIG, OP_DROP, OP_PUSHBYTES_33, OP_PUSHBYTES_68};
+use bitcoin::script::Builder;
+use bitcoin::{Script, ScriptBuf, secp256k1::PublicKey};
 use ed25519_dalek::VerifyingKey;
 use flamevm::Predicate;
 use readerwriter::{ReadError, Reader};
 use thiserror::Error;
 
-use super::minter_p2wsh::parse_predicate;
+use super::{push_bytes, read_predicate};
 
 const MINTER_AUTH_MAGIC: [u8; 4] = *b"FLMV";
-const OP_DROP: u8 = 0x75;
-const OP_PUSHBYTES_68: u8 = 0x44;
-const OP_PUSHBYTES_33: u8 = 0x21;
-const OP_CHECKSIG: u8 = 0xac;
 const AUTH_PREFIX_LEN: usize = 1 + MINTER_AUTH_MAGIC.len() + 32 + 32 + 1;
 const CANONICAL_SCRIPT_LEN: usize = AUTH_PREFIX_LEN + 1 + 33 + 1;
 // 41 non-witness bytes and a two-item witness: signature (including sighash) and script.
 pub const INPUT_WEIGHT: u64 = 41 * 4 + 1 + (1 + 73) + (1 + CANONICAL_SCRIPT_LEN as u64);
+const _: () = assert!(INPUT_WEIGHT == 345);
 
 #[derive(Clone, Debug)]
 pub struct ParsedMinterWitnessScript<'a> {
@@ -40,14 +39,11 @@ pub fn build(
     validator_pubkey: &VerifyingKey,
     public_key: &PublicKey,
 ) -> ScriptBuf {
-    let mut authorization = vec![OP_PUSHBYTES_33];
-    authorization.extend_from_slice(&public_key.serialize());
-    authorization.push(OP_CHECKSIG);
-    build_with_authorization(
-        predicate,
-        validator_pubkey,
-        Script::from_bytes(&authorization),
-    )
+    let authorization = Builder::new()
+        .push_slice(public_key.serialize())
+        .push_opcode(OP_CHECKSIG)
+        .into_script();
+    build_with_authorization(predicate, validator_pubkey, &authorization)
 }
 
 pub fn build_with_authorization(
@@ -55,11 +51,14 @@ pub fn build_with_authorization(
     validator_pubkey: &VerifyingKey,
     authorization: &Script,
 ) -> ScriptBuf {
-    let mut script = vec![OP_PUSHBYTES_68];
-    script.extend_from_slice(&MINTER_AUTH_MAGIC);
-    script.extend_from_slice(predicate.to_point().as_bytes());
-    script.extend_from_slice(validator_pubkey.as_bytes());
-    script.push(OP_DROP);
+    let mut data = Vec::new();
+    data.extend_from_slice(&MINTER_AUTH_MAGIC);
+    data.extend_from_slice(predicate.to_point().as_bytes());
+    data.extend_from_slice(validator_pubkey.as_bytes());
+    let mut script = Builder::new()
+        .push_slice(push_bytes(data))
+        .push_opcode(OP_DROP)
+        .into_bytes();
     script.extend_from_slice(authorization.as_bytes());
     ScriptBuf::from_bytes(script)
 }
@@ -76,28 +75,25 @@ pub fn parse(script: &Script) -> Result<ParsedMinterWitnessScript<'_>, MinterWit
     })
 }
 
-pub fn parse_authentication_prefix(script: &Script) -> Result<Predicate, MinterWitnessScriptError> {
-    Ok(parse(script)?.flame_predicate)
-}
-
 pub fn single_key_public_key(authorization: &Script) -> Option<PublicKey> {
     let bytes = authorization.as_bytes();
-    if bytes.len() != 35 || bytes[0] != OP_PUSHBYTES_33 || bytes[34] != OP_CHECKSIG {
+    if bytes.len() != 35 || bytes[0] != OP_PUSHBYTES_33.to_u8() || bytes[34] != OP_CHECKSIG.to_u8()
+    {
         return None;
     }
     PublicKey::from_slice(&bytes[1..34]).ok()
 }
 
 fn read_prefix(reader: &mut impl Reader) -> Result<(Predicate, VerifyingKey), ReadError> {
-    if reader.read_u8()? != OP_PUSHBYTES_68
+    if reader.read_u8()? != OP_PUSHBYTES_68.to_u8()
         || reader.read_bytes(MINTER_AUTH_MAGIC.len())? != MINTER_AUTH_MAGIC
     {
         return Err(ReadError::InvalidFormat);
     }
-    let predicate = parse_predicate(&reader.read_u8x32()?).ok_or(ReadError::InvalidFormat)?;
+    let predicate = read_predicate(reader)?;
     let validator_pubkey =
         VerifyingKey::from_bytes(&reader.read_u8x32()?).map_err(|_| ReadError::InvalidFormat)?;
-    if reader.read_u8()? != OP_DROP {
+    if reader.read_u8()? != OP_DROP.to_u8() {
         return Err(ReadError::InvalidFormat);
     }
     Ok((predicate, validator_pubkey))
@@ -106,7 +102,7 @@ fn read_prefix(reader: &mut impl Reader) -> Result<(Predicate, VerifyingKey), Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use corepc_client::bitcoin::secp256k1::{Secp256k1, SecretKey};
+    use bitcoin::secp256k1::{Secp256k1, SecretKey};
 
     fn validator_pubkey() -> VerifyingKey {
         ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]).verifying_key()
@@ -143,8 +139,6 @@ mod tests {
             script
         );
         assert_eq!(parsed.validator_pubkey, validator_pubkey());
-        assert_eq!(script.len(), 105);
-        assert_eq!(INPUT_WEIGHT, 345);
         let mut expected = vec![0x44];
         expected.extend_from_slice(b"FLMV");
         expected.extend_from_slice(Predicate::unspendable_key().as_bytes());
@@ -181,32 +175,6 @@ mod tests {
         let mut bytes = script.into_bytes();
         bytes.push(0x51);
         assert!(parse(Script::from_bytes(&bytes)).is_ok());
-    }
-
-    #[test]
-    fn prefix_parser_accepts_arbitrary_authorization() {
-        let predicate = Predicate::opaque(Predicate::unspendable_key());
-        for suffix in [&[][..], &[0x51][..], &[0x52][..], &[0x4c, 0xff][..]] {
-            let script = build_with_authorization(
-                &predicate,
-                &validator_pubkey(),
-                Script::from_bytes(suffix),
-            );
-            assert_eq!(
-                parse_authentication_prefix(&script).unwrap().to_point(),
-                predicate.to_point()
-            );
-            let parsed = parse(&script).unwrap();
-            assert_eq!(parsed.authorization.as_bytes(), suffix);
-            assert_eq!(
-                build_with_authorization(
-                    &parsed.flame_predicate,
-                    &parsed.validator_pubkey,
-                    parsed.authorization,
-                ),
-                script
-            );
-        }
     }
 
     #[test]

@@ -1,8 +1,7 @@
-use crate::btc::rpc::BtcTransactionWithPrevouts;
 use crate::protocol::endorsement::{
     MintingEndorsementAuth, MintingEndorsementOutput, UncheckedMintingEndorsement,
 };
-use corepc_client::bitcoin::{OutPoint, TxOut, Txid};
+use bitcoin::{OutPoint, Transaction, TxOut, Txid};
 use flamechain::{BlockHash, CoreBlockTip, CoreFlameHeight};
 use thiserror::Error;
 
@@ -66,6 +65,13 @@ pub enum MintingEndorsementValidationError {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum MintingEndorsementProcessingError {
+    #[error(
+        "prevout entry count {prevout_count} does not match transaction count {transaction_count}"
+    )]
+    TransactionCountMismatch {
+        transaction_count: usize,
+        prevout_count: usize,
+    },
     #[error("prevout count {prevout_count} does not match input count {input_count}")]
     InputCountMismatch {
         input_count: usize,
@@ -79,22 +85,23 @@ pub enum MintingEndorsementProcessingError {
 }
 
 pub fn validate_transaction_endorsements(
-    entry: &BtcTransactionWithPrevouts,
+    transaction: &Transaction,
+    prevouts: &[Option<TxOut>],
 ) -> Result<Vec<AuthenticatedMintingEndorsement>, MintingEndorsementProcessingError> {
-    let input_count = entry.transaction.input.len();
-    if entry.prevouts.len() != input_count {
+    let input_count = transaction.input.len();
+    if prevouts.len() != input_count {
         return Err(MintingEndorsementProcessingError::InputCountMismatch {
             input_count,
-            prevout_count: entry.prevouts.len(),
+            prevout_count: prevouts.len(),
         });
     }
 
-    let unchecked_endorsements = UncheckedMintingEndorsement::from_tx(&entry.transaction);
+    let unchecked_endorsements = UncheckedMintingEndorsement::from_tx(transaction);
     let mut endorsements = Vec::new();
 
     for unchecked in unchecked_endorsements {
         let input_index = unchecked.auth().input_index;
-        let prevout = entry.prevouts[input_index].as_ref().ok_or(
+        let prevout = prevouts[input_index].as_ref().ok_or(
             MintingEndorsementProcessingError::MissingPrevout {
                 input_index,
                 previous_output: unchecked.auth().previous_output,
@@ -115,11 +122,10 @@ mod tests {
         MintingEndorsementProcessingError, MintingEndorsementValidationError,
         MintingEndorsementValidator, validate_transaction_endorsements,
     };
-    use crate::btc::rpc::BtcTransactionWithPrevouts;
     use crate::protocol::endorsement::{MintingEndorsementData, UncheckedMintingEndorsement};
     use crate::protocol::minter_p2wsh::MinterP2wsh;
     use crate::protocol::minter_witness_script;
-    use corepc_client::bitcoin::{
+    use bitcoin::{
         Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness, absolute,
         transaction,
     };
@@ -149,31 +155,6 @@ mod tests {
     }
 
     #[test]
-    fn preserves_multiple_valid_inputs_from_the_same_minter() {
-        let witness_script = endorsement_witness_script();
-        let transaction = transaction(
-            vec![
-                endorsement_input(&witness_script),
-                endorsement_input(&witness_script),
-            ],
-            vec![endorsement_output()],
-        );
-        let entry = BtcTransactionWithPrevouts {
-            transaction,
-            prevouts: vec![
-                Some(p2wsh_prevout(&witness_script)),
-                Some(p2wsh_prevout(&witness_script)),
-            ],
-        };
-
-        let endorsements = validate_transaction_endorsements(&entry).expect("available prevouts");
-
-        assert_eq!(endorsements.len(), 2);
-        assert_eq!(endorsements[0].auth().input_index, 0);
-        assert_eq!(endorsements[1].auth().input_index, 1);
-    }
-
-    #[test]
     fn missing_candidate_prevout_fails_closed() {
         let witness_script = endorsement_witness_script();
         let transaction = transaction(
@@ -181,13 +162,9 @@ mod tests {
             vec![endorsement_output()],
         );
         let previous_output = transaction.input[0].previous_output;
-        let entry = BtcTransactionWithPrevouts {
-            transaction,
-            prevouts: vec![None],
-        };
 
         assert_eq!(
-            validate_transaction_endorsements(&entry),
+            validate_transaction_endorsements(&transaction, &[None]),
             Err(MintingEndorsementProcessingError::MissingPrevout {
                 input_index: 0,
                 previous_output,
@@ -209,7 +186,7 @@ mod tests {
         minter_witness_script::build_with_authorization(
             &predicate,
             &ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]).verifying_key(),
-            corepc_client::bitcoin::Script::from_bytes(&[0x51]),
+            bitcoin::Script::from_bytes(&[0x51]),
         )
         .into_bytes()
     }

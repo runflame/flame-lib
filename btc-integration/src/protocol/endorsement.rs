@@ -1,8 +1,8 @@
-use crate::protocol::consts::{
-    MINTING_MAGIC, MINTING_PAYLOAD_LEN, OP_PUSHBYTES_41, OP_RETURN, VERSION_V1,
-};
+use crate::protocol::consts::{MINTING_MAGIC, MINTING_PAYLOAD_LEN, VERSION_V1};
 use crate::protocol::minter_identity::MinterIdentity;
-use corepc_client::bitcoin::{OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid};
+use crate::protocol::push_bytes;
+use bitcoin::opcodes::all::{OP_PUSHBYTES_41, OP_RETURN};
+use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid};
 use flamechain::{BlockHash, CoreFlameHeight};
 use readerwriter::{ReadError, Reader};
 
@@ -132,18 +132,25 @@ impl MintingEndorsementData {
         }
     }
 
-    pub(crate) fn to_script(&self) -> ScriptBuf {
+    pub fn to_script(&self) -> ScriptBuf {
         let Self::V1 {
             flame_block_height,
             flame_block_hash,
         } = self;
-        let mut script = Vec::with_capacity(2 + MINTING_PAYLOAD_LEN);
-        script.extend_from_slice(&[OP_RETURN, OP_PUSHBYTES_41]);
-        script.extend_from_slice(&MINTING_MAGIC);
-        script.push(VERSION_V1);
-        script.extend_from_slice(&flame_block_height.to_le_bytes());
-        script.extend_from_slice(flame_block_hash.as_bytes());
-        ScriptBuf::from_bytes(script)
+        let mut payload = Vec::with_capacity(MINTING_PAYLOAD_LEN);
+        payload.extend_from_slice(&MINTING_MAGIC);
+        payload.push(VERSION_V1);
+        payload.extend_from_slice(&flame_block_height.to_le_bytes());
+        payload.extend_from_slice(flame_block_hash.as_bytes());
+        ScriptBuf::new_op_return(push_bytes(payload))
+    }
+
+    /// The output that carries the endorsement. It holds no value.
+    pub fn to_output(&self) -> TxOut {
+        TxOut {
+            value: Amount::ZERO,
+            script_pubkey: self.to_script(),
+        }
     }
 
     pub(crate) fn from_output(output: &TxOut) -> Option<Self> {
@@ -152,8 +159,8 @@ impl MintingEndorsementData {
     }
 
     fn read(reader: &mut impl Reader) -> Result<Self, ReadError> {
-        let valid = reader.read_u8()? == OP_RETURN
-            && reader.read_u8()? == OP_PUSHBYTES_41
+        let valid = reader.read_u8()? == OP_RETURN.to_u8()
+            && reader.read_u8()? == OP_PUSHBYTES_41.to_u8()
             && reader.read_bytes(MINTING_MAGIC.len())? == MINTING_MAGIC
             && reader.read_u8()? == VERSION_V1;
 
@@ -172,7 +179,7 @@ impl MintingEndorsementData {
 mod tests {
     use super::{MintingEndorsementData, UncheckedMintingEndorsement};
     use crate::protocol::{consts::VERSION_V1, minter_witness_script};
-    use corepc_client::bitcoin::{
+    use bitcoin::{
         Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness, absolute,
         transaction,
     };
@@ -257,7 +264,7 @@ mod tests {
         let witness_script = minter_witness_script::build_with_authorization(
             &flame_predicate,
             &ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]).verifying_key(),
-            corepc_client::bitcoin::Script::from_bytes(&[0x51]),
+            bitcoin::Script::from_bytes(&[0x51]),
         )
         .into_bytes();
 
