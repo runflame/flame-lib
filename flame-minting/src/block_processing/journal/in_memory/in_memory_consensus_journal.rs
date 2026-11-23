@@ -6,7 +6,7 @@ use super::{
 };
 use crate::block_processing::journal::{ConsensusJournal, ConsensusJournalEntry};
 use InMemoryConsensusJournalError as Error;
-use btc_integration::BtcBlockTip;
+use btc_integration::watcher::BlockId;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -16,7 +16,7 @@ pub struct InMemoryConsensusJournal {
 }
 
 impl InMemoryConsensusJournal {
-    pub fn new(initial_btc_tip: BtcBlockTip) -> Self {
+    pub fn new(initial_btc_tip: BlockId) -> Self {
         Self {
             state: Arc::new(RwLock::new(ConsensusJournalState {
                 next_id: 0,
@@ -63,7 +63,7 @@ impl ConsensusJournal for InMemoryConsensusJournal {
     }
 }
 
-pub(super) fn check_tip(expected: BtcBlockTip, actual: BtcBlockTip) -> Result<(), Error> {
+pub(super) fn check_tip(expected: BlockId, actual: BlockId) -> Result<(), Error> {
     if expected != actual {
         return Err(Error::BlockTipMismatch { expected, actual });
     }

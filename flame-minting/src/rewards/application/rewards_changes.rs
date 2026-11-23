@@ -3,7 +3,7 @@ use crate::{
     consensus::ConsensusStorage,
     rewards::{RewardsEngine, RewardsEngineError, RewardsStorage, RewardsUndo, RewardsUndoManager},
 };
-use btc_integration::BtcBlockTip;
+use btc_integration::watcher::BlockId;
 use flame_storage::ChainStorage;
 use flamechain::BlockHeader;
 
@@ -11,7 +11,7 @@ pub(crate) async fn prepare<T: ChainStorage, C: ConsensusStorage, R: RewardsStor
     engine: &RewardsEngine<T, C>,
     storage: &R,
     headers: &[BlockHeader],
-    btc_tip: BtcBlockTip,
+    btc_tip: BlockId,
 ) -> Result<RewardsChanges, PrepareRewardsError<T::Error, C::Error, R::Error>> {
     let mut outcomes = Vec::new();
     for header in headers {
@@ -54,7 +54,7 @@ pub(crate) async fn prepare_replacement<T: ChainStorage, C: ConsensusStorage, R:
     storage: &R,
     headers: &[BlockHeader],
     targets: &std::collections::BTreeSet<flamechain::CoreFlameHeight>,
-    btc_tip: BtcBlockTip,
+    btc_tip: BlockId,
 ) -> Result<RewardsChanges, PrepareRewardsError<T::Error, C::Error, R::Error>> {
     let mut outcomes: std::collections::BTreeMap<_, _> = targets
         .iter()

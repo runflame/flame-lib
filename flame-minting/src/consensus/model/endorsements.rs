@@ -1,10 +1,10 @@
-use btc_integration::{AuthenticatedMintingEndorsement, BtcBlockTip, MinterP2wsh};
-use corepc_client::bitcoin::Txid;
+use bitcoin::Txid;
+use btc_integration::{AuthenticatedMintingEndorsement, MinterP2wsh, watcher::BlockId};
 use flamechain::{BlockHash, CoreFlameHeight};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IncludedEndorsement {
-    pub btc_block: BtcBlockTip,
+    pub btc_block: BlockId,
     pub endorsement: AuthenticatedMintingEndorsement,
 }
 

@@ -1,5 +1,7 @@
-use btc_integration::{MintingSendError, Sender, TransactionSigner, btc::rpc::RpcApi};
-use corepc_client::bitcoin::Txid;
+use bitcoin::Txid;
+use btc_integration::{
+    BtcWallet, IdentityKey, MinterWallet, MintingEndorsementData, WalletError, WatchOnlyWallet,
+};
 use flamechain::BlockHash;
 use std::future::Future;
 
@@ -16,15 +18,19 @@ pub trait EndorsementSender: Send + Sync + 'static {
     }
 }
 
-impl<R, S> EndorsementSender for Sender<R, S>
+impl<W, K> EndorsementSender for MinterWallet<W, K>
 where
-    R: RpcApi + ?Sized + 'static,
-    S: TransactionSigner + ?Sized + 'static,
+    W: WatchOnlyWallet + 'static,
+    K: IdentityKey + 'static,
 {
-    type Error = MintingSendError<S::Error>;
+    type Error = WalletError;
     type TransactionId = Txid;
 
-    async fn send_endorsement(&self, height: u32, hash: BlockHash) -> Result<Txid, Self::Error> {
-        self.send_endorsement(height, hash).await
+    async fn send_endorsement(&self, height: u32, hash: BlockHash) -> Result<Txid, WalletError> {
+        let endorsement = MintingEndorsementData::V1 {
+            flame_block_height: height,
+            flame_block_hash: hash,
+        };
+        self.send(endorsement.to_output()).await
     }
 }

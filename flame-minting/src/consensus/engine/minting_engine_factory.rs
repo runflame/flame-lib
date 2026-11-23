@@ -1,9 +1,9 @@
 use super::consensus_engine::ConsensusEngine;
+use crate::block_processing::BtcBlockRecords;
 use crate::consensus::{
     ConsensusOutcome, ConsensusStorage, IncludedEndorsement, MintingEngine, MintingEngineError,
     MintingOutcome, MintingProtocolParams, engine::consensus_evaluator::ConsensusEvaluator,
 };
-use btc_integration::IndexedBlock;
 use flame_storage::{CanonicalStorage, ChainStorage};
 use std::sync::Arc;
 
@@ -52,7 +52,7 @@ where
 
     async fn get_minting_outcome(
         &self,
-        block: IndexedBlock,
+        block: BtcBlockRecords,
     ) -> Result<MintingOutcome, Self::Error> {
         MintingEngine::new(
             Arc::new(block),

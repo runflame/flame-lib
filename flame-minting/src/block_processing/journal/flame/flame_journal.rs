@@ -3,7 +3,7 @@ use crate::block_processing::journal::{
     FlameJournalEntry, FlameTransition, OperationId, RewardsChanges,
 };
 use crate::consensus::{ConsensusOutcome, ConsensusUndo};
-use btc_integration::BtcBlockTip;
+use btc_integration::watcher::BlockId;
 use flamechain::BlockTip;
 use std::future::Future;
 
@@ -13,7 +13,7 @@ pub trait FlameJournal: Send + Sync + 'static {
     fn begin_apply(
         &self,
         tip: BlockTip,
-        btc_tip: BtcBlockTip,
+        btc_tip: BlockId,
         outcome: &ConsensusOutcome,
         undo: &ConsensusUndo,
     ) -> impl Future<Output = Result<OperationId, Self::Error>> + Send;

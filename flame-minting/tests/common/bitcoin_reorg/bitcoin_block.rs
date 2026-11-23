@@ -1,9 +1,14 @@
 use super::*;
 
-pub fn bitcoin_block(height: u64, branch: u8, minter: u8, endorsed: &[Arc<Block>]) -> IndexedBlock {
-    IndexedBlock {
-        btc_block_tip: btc_tip(height, branch),
-        acquisitions: vec![],
+pub fn bitcoin_block(
+    height: u64,
+    branch: u8,
+    minter: u8,
+    endorsed: &[Arc<Block>],
+) -> BtcBlockRecords {
+    BtcBlockRecords {
+        id: btc_tip(height, branch),
+        burns: vec![],
         endorsements: endorsed
             .iter()
             .map(|block| endorsement(minter, core_tip(block)))
@@ -18,10 +23,10 @@ fn core_tip(block: &Block) -> CoreBlockTip {
     }
 }
 
-pub(super) fn btc_tip(height: u64, branch: u8) -> BtcBlockTip {
+pub(super) fn btc_tip(height: u64, branch: u8) -> BlockId {
     let mut bytes = [branch; 32];
     bytes[..8].copy_from_slice(&height.to_le_bytes());
-    BtcBlockTip {
+    BlockId {
         hash: BitcoinBlockHash::from_byte_array(bytes),
         height,
     }
@@ -35,11 +40,11 @@ fn witness_script(minter: u8) -> ScriptBuf {
     )
 }
 
-pub(super) fn acquisition(minter: u8, amount: u64) -> Acquisition {
+pub(super) fn acquisition(minter: u8, amount: u64) -> Burn {
     let point = Predicate::unspendable_key().decompress().unwrap();
     let access =
         Predicate::opaque((point * flamevm::Scalar::from(u64::from(minter)).to_dalek()).compress());
-    let data = AcquisitionData::new(
+    let data = BurnData::new(
         witness_script(minter).wscript_hash().to_byte_array().into(),
         access,
     );
@@ -52,7 +57,7 @@ pub(super) fn acquisition(minter: u8, amount: u64) -> Acquisition {
             script_pubkey: data.to_script(),
         }],
     };
-    Acquisition::from_tx(&tx).pop().unwrap()
+    Burn::from_tx(&tx).pop().unwrap()
 }
 
 fn endorsement(minter: u8, tip: CoreBlockTip) -> AuthenticatedMintingEndorsement {
@@ -71,7 +76,7 @@ fn endorsement(minter: u8, tip: CoreBlockTip) -> AuthenticatedMintingEndorsement
         output: vec![TxOut {
             value: Amount::ZERO,
             script_pubkey: ScriptBuf::new_op_return(
-                <&corepc_client::bitcoin::script::PushBytes>::try_from(payload.as_slice()).unwrap(),
+                <&bitcoin::script::PushBytes>::try_from(payload.as_slice()).unwrap(),
             ),
         }],
     };

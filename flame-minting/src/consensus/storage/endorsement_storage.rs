@@ -3,7 +3,7 @@ use super::in_memory_consensus_storage::insert_unique;
 use crate::consensus::{
     EndorsementIndex, IncludedEndorsement, PendingEndorsements, WeightedEndorsement,
 };
-use btc_integration::{BtcBlockTip, MinterP2wsh};
+use btc_integration::{MinterP2wsh, watcher::BlockId};
 use flamechain::{CoreBlockTip, CoreFlameHeight};
 use std::collections::{BTreeMap, btree_map::Entry};
 
@@ -61,7 +61,7 @@ impl EndorsementStorage {
 
     pub(super) fn store_endorsement(
         &mut self,
-        btc_block: BtcBlockTip,
+        btc_block: BlockId,
         endorsement: &WeightedEndorsement,
     ) -> Result<(), InMemoryConsensusStorageError> {
         if btc_block != endorsement.original.btc_block {

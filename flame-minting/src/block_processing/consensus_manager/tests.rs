@@ -6,8 +6,8 @@ use std::{
     time::Duration,
 };
 
-use btc_integration::IndexedBlock;
-use corepc_client::bitcoin::{BlockHash, hashes::Hash};
+use crate::block_processing::BtcBlockRecords;
+use bitcoin::{BlockHash, hashes::Hash};
 use flamechain::{BlockHash as FlameHash, BlockTip};
 use tokio::sync::Semaphore;
 
@@ -19,13 +19,13 @@ use crate::block_processing::journal::{
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Call {
-    Bitcoin(BtcBlockTip),
+    Bitcoin(BlockId),
     Flame(BlockTip),
-    Rollback(BtcBlockTip),
+    Rollback(BlockId),
 }
 
 struct State {
-    cursor: StdMutex<BtcBlockTip>,
+    cursor: StdMutex<BlockId>,
     calls: StdMutex<Vec<Call>>,
     started: Semaphore,
     gate: Semaphore,
@@ -71,12 +71,12 @@ struct Flame(Arc<State>);
 
 impl BlockProcessor for Bitcoin {
     type Error = &'static str;
-    async fn apply(&self, block: IndexedBlock) -> Result<BtcBlockTip, Self::Error> {
-        self.0.operation(Call::Bitcoin(block.btc_block_tip)).await?;
-        *self.0.cursor.lock().unwrap() = block.btc_block_tip;
-        Ok(block.btc_block_tip)
+    async fn apply(&self, block: BtcBlockRecords) -> Result<BlockId, Self::Error> {
+        self.0.operation(Call::Bitcoin(block.id)).await?;
+        *self.0.cursor.lock().unwrap() = block.id;
+        Ok(block.id)
     }
-    async fn resume(&self) -> Result<BtcBlockTip, Self::Error> {
+    async fn resume(&self) -> Result<BlockId, Self::Error> {
         self.0.bitcoin_resumes.fetch_add(1, Ordering::SeqCst);
         self.0.recovery_started.add_permits(1);
         if self.0.block_recovery.load(Ordering::SeqCst) {
@@ -87,7 +87,7 @@ impl BlockProcessor for Bitcoin {
         }
         Ok(*self.0.cursor.lock().unwrap())
     }
-    async fn rollback(&self, removed: BtcBlockTip) -> Result<BtcBlockTip, Self::Error> {
+    async fn rollback(&self, removed: BlockId) -> Result<BlockId, Self::Error> {
         self.0.operation(Call::Rollback(removed)).await?;
         let previous = tip(removed.height - 1, 1);
         *self.0.cursor.lock().unwrap() = previous;
@@ -108,7 +108,7 @@ impl FlameProcessor for Flame {
 
 type Manager = Arc<ConsensusManager<Bitcoin, Flame, InMemoryConsensusJournal>>;
 
-fn fixture(initial: BtcBlockTip) -> (Manager, Arc<State>) {
+fn fixture(initial: BlockId) -> (Manager, Arc<State>) {
     let state = Arc::new(State {
         cursor: StdMutex::new(initial),
         calls: StdMutex::new(Vec::new()),
@@ -134,8 +134,8 @@ fn fixture(initial: BtcBlockTip) -> (Manager, Arc<State>) {
     )
 }
 
-fn tip(height: u64, branch: u8) -> BtcBlockTip {
-    BtcBlockTip {
+fn tip(height: u64, branch: u8) -> BlockId {
+    BlockId {
         height,
         hash: BlockHash::from_byte_array([branch; 32]),
     }
@@ -146,10 +146,10 @@ fn flame_tip() -> BlockTip {
         height: 1.into(),
     }
 }
-fn block(tip: BtcBlockTip) -> IndexedBlock {
-    IndexedBlock {
-        btc_block_tip: tip,
-        acquisitions: vec![],
+fn block(tip: BlockId) -> BtcBlockRecords {
+    BtcBlockRecords {
+        id: tip,
+        burns: vec![],
         endorsements: vec![],
     }
 }

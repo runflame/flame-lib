@@ -42,7 +42,7 @@ async fn rejects_invalid_block_order_before_calculation() {
     let fixture = Fixture::new().await;
     let p = &fixture.processor;
     let mut block = fixture.block();
-    block.btc_block_tip = btc_tip(102);
+    block.id = btc_tip(102);
     assert!(matches!(
         p.apply(block).await,
         Err(BlockProcessingError::InvalidSuccessor { .. })

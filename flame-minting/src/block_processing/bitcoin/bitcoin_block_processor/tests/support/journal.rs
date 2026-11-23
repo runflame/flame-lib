@@ -16,8 +16,8 @@ impl BitcoinJournal for Journal {
 
     async fn begin_apply(
         &self,
-        previous: BtcBlockTip,
-        block: &IndexedBlock,
+        previous: BlockId,
+        block: &BtcBlockRecords,
         outcome: &MintingOutcome,
         undo: &ConsensusUndo,
     ) -> Result<OperationId, Self::Error> {
@@ -72,7 +72,7 @@ impl BitcoinJournal for Journal {
 
     async fn begin_rollback(
         &self,
-        tip: BtcBlockTip,
+        tip: BlockId,
         plan: &BitcoinRollbackPlan,
     ) -> Result<OperationId, Self::Error> {
         self.check(Point::BeginRollback, false)?;
@@ -105,10 +105,7 @@ impl BitcoinJournal for Journal {
             .map_err(|_| "history failed")
     }
 
-    async fn get_entry(
-        &self,
-        tip: BtcBlockTip,
-    ) -> Result<Option<BitcoinJournalEntry>, Self::Error> {
+    async fn get_entry(&self, tip: BlockId) -> Result<Option<BitcoinJournalEntry>, Self::Error> {
         self.inner.get_entry(tip).await.map_err(|_| "entry failed")
     }
 

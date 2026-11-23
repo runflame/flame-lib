@@ -2,7 +2,7 @@ use super::{
     EndorsementPolicy, MinterJournal, endorser::Endorser, minter_worker::MinterWorker,
     sending::endorsement_sender::EndorsementSender,
 };
-use btc_integration::BtcBlockTip;
+use btc_integration::watcher::BlockId;
 use flame_chain_service::CoreBlockSource;
 use std::{fmt::Debug, sync::Arc};
 use tokio::{
@@ -64,7 +64,7 @@ where
 
     pub async fn startup(
         &self,
-        subscription: watch::Receiver<Option<BtcBlockTip>>,
+        subscription: watch::Receiver<Option<BlockId>>,
     ) -> Result<(), StartupError> {
         if self.endorsement_policy == EndorsementPolicy::Manual {
             return Ok(());

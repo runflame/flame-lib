@@ -12,7 +12,7 @@ use crate::{
     consensus::{MintingEngineFactory, MintingProtocolParams, storage::InMemoryConsensusStorage},
     rewards::{RewardsEngine, storage::InMemoryRewardsStorage},
 };
-use btc_integration::BtcBlockTip;
+use btc_integration::watcher::BlockId;
 use flame_chain_service::ChainAccess;
 use flame_storage::{chain::InMemoryChainStorage, state::canonical::InMemoryCanonicalStorage};
 use std::{num::NonZeroU16, sync::Arc};
@@ -46,7 +46,7 @@ pub type DefaultConsensusLoop<H> = ConsensusLoop<
 
 pub(in crate::orchestrator) fn consensus_loop<H>(
     chain: H,
-    initial_cursor: BtcBlockTip,
+    initial_cursor: BlockId,
 ) -> DefaultConsensusLoop<H>
 where
     H: ChainAccess + Clone + Send + Sync + 'static,
@@ -102,9 +102,8 @@ where
         },
         journal.flame_journal(),
     );
-    ConsensusLoop::new(ConsensusManager::new(
-        bitcoin_processor,
-        flame_processor,
-        journal,
-    ))
+    ConsensusLoop::new(
+        ConsensusManager::new(bitcoin_processor, flame_processor, journal),
+        initial_cursor,
+    )
 }

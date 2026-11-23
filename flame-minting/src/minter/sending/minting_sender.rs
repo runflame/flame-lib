@@ -1,51 +1,47 @@
 use crate::minter::sending::endorsement_sender::EndorsementSender;
+use bitcoin::Txid;
 use btc_integration::{
-    BitcoinConfig, BitcoinConnection, BitcoinConnectionError,
-    EndorsementSender as BitcoinEndorsementSender, EndorsementSignerError, IdentityManager,
-    MintingSendError,
-    btc::rpc::Core31RpcApi,
-    identity::storage::{InMemorySecretStorage, MissingSecret},
+    BitcoinConfig, MinterIdentity, MinterWallet, WalletError, identity::impls::LocalKey,
+    wallet::impls::RpcWatchOnlyWallet,
 };
-use corepc_client::bitcoin::Txid;
 use flamechain::BlockHash;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-type InitializedSender = BitcoinEndorsementSender<Core31RpcApi, Arc<InMemorySecretStorage>>;
-
+/// Sends the endorsements of the minter through its watch-only wallet in
+/// Bitcoin Core. The wallet is opened by [`MintingSender::startup`].
 pub struct MintingSender {
     bitcoin_config: BitcoinConfig,
-    identity_manager: Arc<IdentityManager>,
-    sender: OnceCell<Arc<InitializedSender>>,
+    identity: MinterIdentity,
+    key: Arc<LocalKey>,
+    wallet: OnceCell<MinterWallet<RpcWatchOnlyWallet, Arc<LocalKey>>>,
 }
 
 impl MintingSender {
-    pub fn new(bitcoin_config: BitcoinConfig, identity_manager: Arc<IdentityManager>) -> Self {
+    /// `key` is the key `identity` was made with.
+    pub fn new(
+        bitcoin_config: BitcoinConfig,
+        identity: MinterIdentity,
+        key: Arc<LocalKey>,
+    ) -> Self {
         Self {
             bitcoin_config,
-            identity_manager,
-            sender: OnceCell::new(),
+            identity,
+            key,
+            wallet: OnceCell::new(),
         }
     }
 
-    pub fn identity_manager(&self) -> &IdentityManager {
-        &self.identity_manager
+    pub fn identity(&self) -> &MinterIdentity {
+        &self.identity
     }
 
     pub async fn startup(&self) -> Result<(), SenderStartupError> {
-        self.sender
+        self.wallet
             .get_or_try_init(|| async {
-                let identity = self
-                    .identity_manager
-                    .identity()
-                    .ok_or(SenderStartupError::IdentityNotInitialized)?;
-                let connection = BitcoinConnection::endorsements(
-                    self.bitcoin_config.clone(),
-                    identity.clone(),
-                    self.identity_manager.secret_storage().clone(),
-                )
-                .await?;
-                Ok::<_, SenderStartupError>(connection.get_sender())
+                let script = self.identity.witness_script();
+                let watch_only = RpcWatchOnlyWallet::open(&self.bitcoin_config, script).await?;
+                MinterWallet::new(watch_only, self.key.clone(), self.identity.clone())
             })
             .await?;
         Ok(())
@@ -56,29 +52,22 @@ impl MintingSender {
         height: u32,
         hash: BlockHash,
     ) -> Result<Txid, SenderError> {
-        self.sender
-            .get()
-            .ok_or(SenderError::NotStarted)?
-            .send_endorsement(height, hash)
-            .await
-            .map_err(SenderError::Send)
+        let wallet = self.wallet.get().ok_or(SenderError::NotStarted)?;
+        Ok(wallet.send_endorsement(height, hash).await?)
     }
 }
 
+/// The wallet of the minter could not be opened.
 #[derive(Debug, thiserror::Error)]
-pub enum SenderStartupError {
-    #[error("minting identity has not been initialized")]
-    IdentityNotInitialized,
-    #[error(transparent)]
-    Connection(#[from] BitcoinConnectionError),
-}
+#[error(transparent)]
+pub struct SenderStartupError(#[from] pub WalletError);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SenderError {
     #[error("minting sender has not been started")]
     NotStarted,
     #[error(transparent)]
-    Send(MintingSendError<EndorsementSignerError<MissingSecret>>),
+    Send(#[from] WalletError),
 }
 
 impl EndorsementSender for MintingSender {
@@ -98,37 +87,27 @@ mod tests {
 
     #[tokio::test]
     async fn startup_errors_leave_sender_uninitialized_and_retryable() {
-        let identity = Arc::new(IdentityManager::new(
-            Arc::new(InMemorySecretStorage::default()),
-            IdentityConfig {
-                flame_predicate: Predicate::opaque(Predicate::unspendable_key()),
-                access_predicate: Predicate::opaque(Predicate::unspendable_key()),
-                validator_pubkey: ed25519_dalek::SigningKey::from_bytes(&[0x22; 32])
-                    .verifying_key(),
-            },
-        ));
+        let key = LocalKey::generate();
+        let identity = IdentityConfig {
+            flame_predicate: Predicate::opaque(Predicate::unspendable_key()),
+            access_predicate: Predicate::opaque(Predicate::unspendable_key()),
+            validator_pubkey: ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]).verifying_key(),
+        }
+        .identity(&key);
         let sender = MintingSender::new(
             BitcoinConfig {
                 node_rpc_url: "http://127.0.0.1:1".into(),
                 auth: BitcoinRpcAuth::None,
             },
-            identity.clone(),
+            identity,
+            Arc::new(key),
         );
-        assert!(matches!(
-            sender.send_endorsement(1, BlockHash::from([1; 32])).await,
-            Err(SenderError::NotStarted)
-        ));
-        assert!(matches!(
-            sender.startup().await,
-            Err(SenderStartupError::IdentityNotInitialized)
-        ));
-        identity.startup().await.unwrap();
         for _ in 0..2 {
             assert!(matches!(
                 sender.startup().await,
-                Err(SenderStartupError::Connection(_))
+                Err(SenderStartupError(WalletError::Unreachable(_)))
             ));
-            assert!(sender.sender.get().is_none());
+            assert!(sender.wallet.get().is_none());
             assert!(matches!(
                 sender.send_endorsement(1, BlockHash::from([1; 32])).await,
                 Err(SenderError::NotStarted)

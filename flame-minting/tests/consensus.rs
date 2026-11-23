@@ -1,8 +1,8 @@
 mod common;
 
-use bitcoind::anyhow::{Context, Result};
+use bitcoin::Amount;
+use bitcoind::anyhow::{self, Context, Result};
 use btc_integration::MintingEndorsementData;
-use corepc_client::bitcoin::Amount;
 use flame_minting::consensus::ConsensusStorage;
 use flame_storage::CanonicalStorage;
 use flamechain::{BlockTip, CoreBlockHeader, CoreBlockTip};
@@ -63,7 +63,7 @@ async fn public_handle_and_indexer_share_state_across_arrivals_restart_and_bitco
             {
                 sleep(Duration::from_millis(20)).await;
             }
-            Ok::<_, bitcoind::anyhow::Error>(())
+            Ok::<_, anyhow::Error>(())
         })
         .await
         .context("timed out applying the Flame arrival through the public handle")??;
@@ -83,7 +83,7 @@ async fn public_handle_and_indexer_share_state_across_arrivals_restart_and_bitco
         ctx.orchestrator
             .shutdown()
             .await
-            .map_err(|error| bitcoind::anyhow::anyhow!("shutdown: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("shutdown: {error:?}"))?;
         assert_eq!(
             handle
                 .on_flame_block_arrival(block.header.block_tip())
@@ -97,7 +97,7 @@ async fn public_handle_and_indexer_share_state_across_arrivals_restart_and_bitco
             .call("invalidateblock", &[confirmation.hash.to_string().into()])?;
         let address = ctx.bitcoin.node.client.new_address()?;
         ctx.bitcoin.node.client.generate_to_address(1, &address)?;
-        let replacement = ctx.bitcoin.rpc.best_block_tip().await?;
+        let replacement = ctx.bitcoin.best().await?;
         assert_ne!(replacement.hash, confirmation.hash);
         let target = ctx.bitcoin.mine_block().await?;
         ctx.start().await?;

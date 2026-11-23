@@ -1,9 +1,10 @@
 use super::journal_status::{ApplyStage, JournalStatus};
+use crate::block_processing::BtcBlockRecords;
 use crate::block_processing::canonical_chain::FlameTransition;
 use crate::block_processing::journal::operation::JournalEntry;
 use crate::consensus::{BitcoinRollbackPlan, ConsensusUndo, MintingOutcome};
 use crate::rewards::application::rewards_changes::RewardsChanges;
-use btc_integration::{BtcBlockTip, IndexedBlock};
+use btc_integration::watcher::BlockId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BitcoinOperationKind {
@@ -14,15 +15,15 @@ pub enum BitcoinOperationKind {
 #[derive(Clone, Debug)]
 pub struct BitcoinJournalOperation {
     pub kind: BitcoinOperationKind,
-    pub block: IndexedBlock,
+    pub block: BtcBlockRecords,
     pub entry: BitcoinBlockJournalEntry,
     pub rollback_plan: Option<BitcoinRollbackPlan>,
 }
 
 #[derive(Clone, Debug)]
 pub struct BitcoinBlockJournalEntry {
-    pub btc_tip: BtcBlockTip,
-    pub previous_btc_tip: BtcBlockTip,
+    pub btc_tip: BlockId,
+    pub previous_btc_tip: BlockId,
     pub minting_outcome: MintingOutcome,
     pub consensus_undo: ConsensusUndo,
     pub flame_transition: Option<FlameTransition>,
@@ -32,7 +33,7 @@ pub struct BitcoinBlockJournalEntry {
 
 impl BitcoinBlockJournalEntry {
     pub fn new(
-        previous_btc_tip: BtcBlockTip,
+        previous_btc_tip: BlockId,
         minting_outcome: MintingOutcome,
         consensus_undo: ConsensusUndo,
     ) -> Self {

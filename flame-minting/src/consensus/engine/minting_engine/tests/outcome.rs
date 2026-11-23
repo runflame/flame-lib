@@ -6,13 +6,13 @@ use std::collections::BTreeMap;
 fn outcome_engine(
     storage: Storage,
     endorsements: Vec<AuthenticatedMintingEndorsement>,
-    acquisitions: Vec<Acquisition>,
+    acquisitions: Vec<Burn>,
 ) -> MintingEngine<Storage, Storage, Storage> {
     let storage = Arc::new(storage);
     MintingEngine::new(
-        Arc::new(IndexedBlock {
-            btc_block_tip: btc_tip(100),
-            acquisitions,
+        Arc::new(BtcBlockRecords {
+            id: btc_tip(100),
+            burns: acquisitions,
             endorsements,
         }),
         Arc::new(params()),
@@ -104,7 +104,7 @@ async fn double_sign_removes_the_stored_endorsement_and_decreases_descendant_wei
     };
     storage.endorsements.push(stored.clone());
     let mut engine = outcome_engine(storage, vec![included(1, &fork, 101).endorsement], vec![]);
-    Arc::make_mut(&mut engine.new_block).btc_block_tip = btc_tip(101);
+    Arc::make_mut(&mut engine.new_block).id = btc_tip(101);
     let outcome = engine.get_minting_outcome().await.unwrap();
     assert!(outcome.consensus.accepted_endorsements.is_empty());
     assert_eq!(outcome.consensus.removed_endorsements, vec![stored.clone()]);

@@ -20,18 +20,18 @@ pub struct TestNode {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Snapshot {
-    pub btc_tip: BtcBlockTip,
+    pub btc_tip: BlockId,
     pub flame_tip: BlockTip,
     state: StateCommitment,
 }
 
 impl TestNode {
-    pub async fn apply(&self, block: &IndexedBlock) {
+    pub async fn apply(&self, block: &BtcBlockRecords) {
         self.processor.apply(block.clone()).await.unwrap();
     }
 
-    pub async fn rollback(&self, block: &IndexedBlock) {
-        self.processor.rollback(block.btc_block_tip).await.unwrap();
+    pub async fn rollback(&self, block: &BtcBlockRecords) {
+        self.processor.rollback(block.id).await.unwrap();
     }
 
     pub async fn snapshot(&self) -> Snapshot {

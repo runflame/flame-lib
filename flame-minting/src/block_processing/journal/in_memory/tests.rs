@@ -1,9 +1,10 @@
 use super::InMemoryConsensusJournalError as Error;
+use crate::block_processing::BtcBlockRecords;
 use crate::block_processing::journal::*;
 use crate::consensus::{BitcoinRollbackPlan, ConsensusOutcome, ConsensusUndo, MintingOutcome};
-use btc_integration::{BtcBlockTip, IndexedBlock};
-use corepc_client::bitcoin::BlockHash;
-use corepc_client::bitcoin::hashes::Hash;
+use ::bitcoin::BlockHash;
+use ::bitcoin::hashes::Hash;
+use btc_integration::watcher::BlockId;
 use flame_chain_service::ChainPath;
 use flamechain::BlockTip;
 use flamechain::{BlockHash as FlameBlockHash, CoreBlockTip};
@@ -16,8 +17,8 @@ use crate::{
 
 use super::*;
 
-fn btc_tip(height: u64, hash: u8) -> BtcBlockTip {
-    BtcBlockTip {
+fn btc_tip(height: u64, hash: u8) -> BlockId {
+    BlockId {
         hash: BlockHash::from_byte_array([hash; 32]),
         height,
     }
@@ -30,10 +31,10 @@ fn flame_tip(hash: u8) -> BlockTip {
     }
 }
 
-fn block(tip: BtcBlockTip) -> IndexedBlock {
-    IndexedBlock {
-        btc_block_tip: tip,
-        acquisitions: Vec::new(),
+fn block(tip: BlockId) -> BtcBlockRecords {
+    BtcBlockRecords {
+        id: tip,
+        burns: Vec::new(),
         endorsements: vec![endorsement_for_tip(
             1,
             CoreBlockTip {
@@ -44,7 +45,7 @@ fn block(tip: BtcBlockTip) -> IndexedBlock {
     }
 }
 
-fn outcome(tip: BtcBlockTip) -> MintingOutcome {
+fn outcome(tip: BlockId) -> MintingOutcome {
     MintingOutcome {
         next_btc_cursor: tip,
         consensus: ConsensusOutcome::default(),

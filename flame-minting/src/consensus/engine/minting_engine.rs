@@ -1,15 +1,15 @@
 use super::MintingEngineError;
 use super::consensus_evaluator::ConsensusEvaluator;
+use crate::block_processing::BtcBlockRecords;
 use crate::consensus::{
     ConsensusStorage, IncludedAcquisition, IncludedEndorsement, MintingOutcome,
     MintingProtocolParams,
 };
-use btc_integration::IndexedBlock;
 use flame_storage::{CanonicalStorage, ChainStorage};
 use std::sync::Arc;
 
 pub struct MintingEngine<C: ConsensusStorage, H: ChainStorage, S: CanonicalStorage> {
-    pub new_block: Arc<IndexedBlock>,
+    pub new_block: Arc<BtcBlockRecords>,
     pub protocol_params: Arc<MintingProtocolParams>,
     pub consensus_storage: Arc<C>,
     pub chain_storage: Arc<H>,
@@ -18,7 +18,7 @@ pub struct MintingEngine<C: ConsensusStorage, H: ChainStorage, S: CanonicalStora
 
 impl<C: ConsensusStorage, H: ChainStorage, S: CanonicalStorage> MintingEngine<C, H, S> {
     pub fn new(
-        new_block: Arc<IndexedBlock>,
+        new_block: Arc<BtcBlockRecords>,
         protocol_params: Arc<MintingProtocolParams>,
         consensus_storage: Arc<C>,
         chain_storage: Arc<H>,
@@ -42,7 +42,7 @@ impl<C: ConsensusStorage, H: ChainStorage, S: CanonicalStorage> MintingEngine<C,
             .iter()
             .cloned()
             .map(|endorsement| IncludedEndorsement {
-                btc_block: self.new_block.btc_block_tip,
+                btc_block: self.new_block.id,
                 endorsement,
             })
             .collect();
@@ -55,13 +55,13 @@ impl<C: ConsensusStorage, H: ChainStorage, S: CanonicalStorage> MintingEngine<C,
         .await?;
         Ok(MintingOutcome {
             consensus,
-            next_btc_cursor: self.new_block.btc_block_tip,
+            next_btc_cursor: self.new_block.id,
         })
     }
 
     fn validate_acquisitions(&self) -> Vec<IncludedAcquisition> {
         self.new_block
-            .acquisitions
+            .burns
             .iter()
             .filter(|acquisition| {
                 let duration = acquisition
@@ -71,7 +71,7 @@ impl<C: ConsensusStorage, H: ChainStorage, S: CanonicalStorage> MintingEngine<C,
                 duration >= self.protocol_params.min_acquisition_duration.get()
             })
             .map(|acquisition| IncludedAcquisition {
-                btc_block: self.new_block.btc_block_tip,
+                btc_block: self.new_block.id,
                 acquisition: acquisition.clone(),
             })
             .collect()

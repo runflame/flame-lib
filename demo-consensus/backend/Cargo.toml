@@ -7,9 +7,9 @@ publish = false
 [dependencies]
 anyhow = "1"
 axum = "0.8"
-bitcoind = { version = "0.41", features = ["31_0", "download"] }
+bitcoin = "0.32"
+bitcoind = { version = "0.44", features = ["31_0", "download"] }
 btc-integration = { path = "../../btc-integration" }
-corepc-client = { version = "0.16.0", features = ["client-sync"] }
 ed25519-dalek = "2"
 flame-chain-service = { path = "../../flame-chain-service" }
 flame-minting = { path = "../../flame-minting" }

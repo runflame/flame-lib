@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use bitcoin::{BlockHash, Transaction, TxOut, Txid, hashes::Hash};
 use btc_integration::{
-    BitcoinConfig, BitcoinFacade, BitcoinRpcAuth, BtcBlockTip, MinterIdentity,
-    btc::rpc::Core31RpcApi,
+    BitcoinConfig, BitcoinRpcAuth, BtcWallet,
+    wallet::impls::RpcWallet,
+    watcher::{BlockId, ChainSource, impls::RpcSource},
 };
-use corepc_client::bitcoin::{Address, Amount, Network, Transaction};
 
 use crate::types::{BitcoinBlockHash, BitcoinBlockSnapshot, BitcoinChainSnapshot, BitcoinTxid};
 
@@ -13,7 +14,10 @@ use super::bitcoin_tip;
 
 pub(super) struct BitcoinRegtest {
     node: Arc<bitcoind::BitcoinD>,
-    rpc: BitcoinFacade<Core31RpcApi>,
+    source: RpcSource,
+    /// The wallet of the node that has coins: it pays for the burns and
+    /// for the first output of every minter.
+    payer: RpcWallet,
     start_height: u64,
     blocks: Vec<BitcoinBlockSnapshot>,
 }
@@ -28,17 +32,19 @@ impl BitcoinRegtest {
             Ok(Arc::new(node))
         })
         .await??;
-        let rpc = BitcoinFacade::new(Arc::new(Core31RpcApi::new(
-            &node.rpc_url(),
-            BitcoinRpcAuth::CookieFile(node.params.cookie_file.clone()),
-        )?));
-        let start_height = rpc.best_block_tip().await?.height;
-        Ok(Self {
+        let config = BitcoinConfig {
+            node_rpc_url: node.rpc_url(),
+            auth: BitcoinRpcAuth::CookieFile(node.params.cookie_file.clone()),
+        };
+        let mut bitcoin = Self {
+            source: RpcSource::new(&config)?,
+            payer: RpcWallet::new(&config, "default")?,
             node,
-            rpc,
-            start_height,
+            start_height: 0,
             blocks: Vec::new(),
-        })
+        };
+        bitcoin.start_height = bitcoin.tip().await?.height;
+        Ok(bitcoin)
     }
 
     pub fn config(&self) -> BitcoinConfig {
@@ -48,30 +54,24 @@ impl BitcoinRegtest {
         }
     }
 
-    pub fn wallet_rpc_url(&self) -> String {
-        self.node.rpc_url_with_wallet("default")
+    pub async fn tip(&self) -> Result<BlockId> {
+        // Any best block differs from the zero hash: the answer comes at once.
+        Ok(self
+            .source
+            .wait_for_new_block(BlockHash::all_zeros())
+            .await?)
     }
 
-    pub async fn tip(&self) -> Result<BtcBlockTip> {
-        Ok(self.rpc.best_block_tip().await?)
-    }
-
-    pub async fn mine_block(&self) -> Result<BtcBlockTip> {
+    pub async fn mine_block(&self) -> Result<BlockId> {
         let node = self.node.clone();
         tokio::task::spawn_blocking(move || node.client.generate_to_descriptor(1, "raw(51)"))
             .await??;
         self.tip().await
     }
 
-    pub async fn fund_minter(&self, identity: &MinterIdentity) -> Result<()> {
-        let node = self.node.clone();
-        let address = Address::p2wsh(identity.witness_script(), Network::Regtest);
-        tokio::task::spawn_blocking(move || {
-            node.client
-                .send_to_address(&address, Amount::from_sat(50_000))
-        })
-        .await??;
-        Ok(())
+    /// Pays `output` from the wallet that has coins.
+    pub async fn pay(&self, output: TxOut) -> Result<Txid> {
+        Ok(self.payer.send(output).await?)
     }
 
     pub async fn mempool(&self) -> Result<Vec<BitcoinTxid>> {
@@ -83,19 +83,20 @@ impl BitcoinRegtest {
 
     pub async fn snapshot(&mut self) -> Result<(BitcoinChainSnapshot, Vec<Transaction>)> {
         let tip = self.tip().await?;
-        let next_height = self
-            .blocks
-            .last()
-            .map_or(self.start_height, |block| block.tip.height + 1);
+        let next_height = self.start_height + self.blocks.len() as u64;
         for height in next_height..=tip.height {
-            let (hash, transactions) = self.rpc.transactions_at_height(height).await?;
-            let header = self.rpc.block_header_info(hash).await?;
+            let id = self.source.block_at(height).await?;
+            let id = id.context("the best chain became shorter")?;
+            let (block, _) = self
+                .source
+                .block(id.hash)
+                .await?
+                .context("the node does not have a block of its best chain")?;
             self.blocks.push(BitcoinBlockSnapshot {
-                tip: bitcoin_tip(header.tip),
-                parent_hash: header
-                    .previous_block_hash
-                    .map(|hash| BitcoinBlockHash(hash.to_string())),
-                transactions: transactions
+                tip: bitcoin_tip(id),
+                parent_hash: Some(BitcoinBlockHash(block.header.prev_blockhash.to_string())),
+                transactions: block
+                    .txdata
                     .iter()
                     .map(|tx| BitcoinTxid(tx.compute_txid().to_string()))
                     .collect(),

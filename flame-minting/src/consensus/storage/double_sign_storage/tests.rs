@@ -1,7 +1,7 @@
 use std::num::NonZeroU16;
 
-use btc_integration::{BtcBlockTip, MinterP2wsh};
-use corepc_client::bitcoin::{BlockHash as BtcBlockHash, hashes::Hash};
+use bitcoin::{BlockHash as BtcBlockHash, hashes::Hash};
+use btc_integration::{MinterP2wsh, watcher::BlockId};
 use flamechain::{BlockHash, CoreBlockTip};
 
 use crate::consensus::{
@@ -12,7 +12,7 @@ use crate::consensus::{
 
 fn endorsement(minter: u8, height: u32, hash: u8) -> IncludedEndorsement {
     IncludedEndorsement {
-        btc_block: BtcBlockTip {
+        btc_block: BlockId {
             hash: BtcBlockHash::from_byte_array([3; 32]),
             height: 100,
         },

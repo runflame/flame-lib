@@ -13,7 +13,7 @@ use crate::{
     consensus::{ConsensusEngine, ConsensusOutcome, ConsensusStorage, ConsensusUndoManager},
     rewards::{RewardsEngine, RewardsStorage},
 };
-use btc_integration::BtcBlockTip;
+use btc_integration::watcher::BlockId;
 use flame_chain_service::ChainAccess;
 use flame_storage::{CanonicalStorage, ChainStorage};
 use flamechain::{BlockTip, CoreBlockTip};
@@ -315,8 +315,8 @@ pub enum FlameBlockProcessingError<E, C, H, S, R, K, T, J> {
     Engine(E),
     Journal(J),
     CursorMismatch {
-        expected: BtcBlockTip,
-        actual: BtcBlockTip,
+        expected: BlockId,
+        actual: BlockId,
     },
     UnexpectedStatus(FlameJournalStatus),
     MissingTransition,

@@ -2,13 +2,13 @@ use super::*;
 
 impl CursorStorage for Cursor {
     type Error = &'static str;
-    async fn get_cursor(&self) -> Result<BtcBlockTip, Self::Error> {
+    async fn get_cursor(&self) -> Result<BlockId, Self::Error> {
         self.inner
             .get_cursor()
             .await
             .map_err(|_| "cursor read failed")
     }
-    async fn store_cursor(&self, tip: BtcBlockTip) -> Result<(), Self::Error> {
+    async fn store_cursor(&self, tip: BlockId) -> Result<(), Self::Error> {
         let entry = self
             .journal
             .pending_entry()

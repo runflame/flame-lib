@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 
-use corepc_client::bitcoin::Txid;
+use bitcoin::Txid;
 use flame_chain_service::InMemoryChain;
 
 use super::*;

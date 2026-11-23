@@ -3,7 +3,7 @@ use crate::minter::minter_manager::{
 };
 use crate::minter::sending::endorsement_sender::EndorsementSender;
 use crate::minter::{MinterJournal, MinterManager};
-use btc_integration::BtcBlockTip;
+use btc_integration::watcher::BlockId;
 use flame_chain_service::CoreBlockSource;
 use std::{fmt::Debug, future::Future};
 use tokio::sync::watch;
@@ -11,7 +11,7 @@ use tokio::sync::watch;
 pub trait MinterLifecycle {
     fn startup(
         &self,
-        _subscription: watch::Receiver<Option<BtcBlockTip>>,
+        _subscription: watch::Receiver<Option<BlockId>>,
     ) -> impl Future<Output = Result<(), MinterStartupError>> + Send {
         async { unimplemented!() }
     }
@@ -32,7 +32,7 @@ where
 {
     async fn startup(
         &self,
-        subscription: watch::Receiver<Option<BtcBlockTip>>,
+        subscription: watch::Receiver<Option<BlockId>>,
     ) -> Result<(), MinterStartupError> {
         self.startup(subscription).await
     }

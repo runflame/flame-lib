@@ -6,7 +6,7 @@ use crate::block_processing::journal::{
     FlameJournalStatus, FlameTransition, OperationId, RewardsChanges,
 };
 use crate::consensus::{ConsensusOutcome, ConsensusUndo};
-use btc_integration::BtcBlockTip;
+use btc_integration::watcher::BlockId;
 use flamechain::BlockTip;
 
 #[derive(Clone)]
@@ -20,7 +20,7 @@ impl FlameJournal for InMemoryFlameJournal {
     async fn begin_apply(
         &self,
         tip: BlockTip,
-        btc_tip: BtcBlockTip,
+        btc_tip: BlockId,
         outcome: &ConsensusOutcome,
         undo: &ConsensusUndo,
     ) -> Result<OperationId, Error> {

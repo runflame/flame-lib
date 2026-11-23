@@ -5,13 +5,13 @@ use crate::block_processing::journal::{
     OperationId,
 };
 
-use btc_integration::BtcBlockTip;
-use corepc_client::bitcoin::BlockHash;
+use bitcoin::BlockHash;
+use btc_integration::watcher::BlockId;
 use std::collections::BTreeMap;
 
 pub(super) struct ConsensusJournalState {
     pub(super) next_id: u64,
-    pub(super) applied_btc_tip: BtcBlockTip,
+    pub(super) applied_btc_tip: BlockId,
     pub(super) pending: Option<OperationId>,
     pub(super) entries: BTreeMap<OperationId, ConsensusJournalEntry>,
     pub(super) bitcoin_entries: BTreeMap<BlockHash, OperationId>,
@@ -101,7 +101,7 @@ impl ConsensusJournalState {
         }
     }
 
-    pub(super) fn bitcoin_id(&self, tip: BtcBlockTip) -> Result<Option<OperationId>, Error> {
+    pub(super) fn bitcoin_id(&self, tip: BlockId) -> Result<Option<OperationId>, Error> {
         let Some(&id) = self.bitcoin_entries.get(&tip.hash) else {
             return Ok(None);
         };

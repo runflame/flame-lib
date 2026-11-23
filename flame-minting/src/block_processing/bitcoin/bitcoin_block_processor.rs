@@ -1,4 +1,5 @@
 use super::block_processor::BlockProcessor;
+use crate::block_processing::BtcBlockRecords;
 use crate::block_processing::journal::{FlameTransition, RewardsChanges};
 use crate::block_processing::{
     canonical_chain::{self as flame, FlameOperations},
@@ -15,7 +16,7 @@ use crate::{
     consensus::{ConsensusEngine, ConsensusStorage, ConsensusUndoManager},
     rewards::{RewardsEngine, RewardsStorage},
 };
-use btc_integration::{BtcBlockTip, IndexedBlock};
+use btc_integration::watcher::BlockId;
 use flame_chain_service::ChainAccess;
 use flame_storage::{CanonicalStorage, ChainStorage};
 use flamechain::{BlockHeader, BlockTip, CoreFlameHeight};
@@ -72,9 +73,9 @@ where
         }
     }
 
-    pub async fn apply(&self, block: IndexedBlock) -> ProcessingResult<Self, BtcBlockTip> {
+    pub async fn apply(&self, block: BtcBlockRecords) -> ProcessingResult<Self, BlockId> {
         let previous = self.drive().await?;
-        let requested = block.btc_block_tip;
+        let requested = block.id;
         if previous == requested {
             return Ok(previous);
         }
@@ -119,14 +120,14 @@ where
         self.drive().await
     }
 
-    pub async fn resume(&self) -> ProcessingResult<Self, BtcBlockTip> {
+    pub async fn resume(&self) -> ProcessingResult<Self, BlockId> {
         self.drive().await
     }
 
     async fn rollback_required(
         &self,
-        tip: BtcBlockTip,
-        current: BtcBlockTip,
+        tip: BlockId,
+        current: BlockId,
     ) -> ProcessingResult<Self, bool> {
         let entry = self
             .journal
@@ -151,7 +152,7 @@ where
         Ok(true)
     }
 
-    pub async fn rollback(&self, tip: BtcBlockTip) -> ProcessingResult<Self, BtcBlockTip> {
+    pub async fn rollback(&self, tip: BlockId) -> ProcessingResult<Self, BlockId> {
         let current = self.drive().await?;
         if !self.rollback_required(tip, current).await? {
             return Ok(current);
@@ -170,7 +171,7 @@ where
         self.drive().await
     }
 
-    async fn drive(&self) -> ProcessingResult<Self, BtcBlockTip> {
+    async fn drive(&self) -> ProcessingResult<Self, BlockId> {
         while let Some(snapshot) = self
             .journal
             .pending_entry()
@@ -337,13 +338,13 @@ where
         K::Error,
         T::Error,
     >;
-    async fn apply(&self, block: IndexedBlock) -> Result<BtcBlockTip, Self::Error> {
+    async fn apply(&self, block: BtcBlockRecords) -> Result<BlockId, Self::Error> {
         self.apply(block).await
     }
-    async fn resume(&self) -> Result<BtcBlockTip, Self::Error> {
+    async fn resume(&self) -> Result<BlockId, Self::Error> {
         self.resume().await
     }
-    async fn rollback(&self, tip: BtcBlockTip) -> Result<BtcBlockTip, Self::Error> {
+    async fn rollback(&self, tip: BlockId) -> Result<BlockId, Self::Error> {
         self.rollback(tip).await
     }
 }
@@ -358,7 +359,7 @@ pub enum BlockProcessingError<E, C, H, J, S, R, K, T> {
     PrepareFlame(flame::PrepareFlameError<C, S, H>),
     Flame(flame::ChainPathApplierError<S, H>),
     PrepareRewards(rewards::PrepareRewardsError<T, C, R>),
-    MissingEntry(BtcBlockTip),
+    MissingEntry(BlockId),
     MissingRollbackPlan,
     Chain(H),
     MissingBlock(flamechain::BlockTip),
@@ -367,16 +368,16 @@ pub enum BlockProcessingError<E, C, H, J, S, R, K, T> {
     MissingRewardsChanges,
     UnexpectedPendingStatus(JournalStatus),
     InvalidSuccessor {
-        previous: BtcBlockTip,
-        requested: BtcBlockTip,
+        previous: BlockId,
+        requested: BlockId,
     },
     OutcomeBlockMismatch {
-        requested: BtcBlockTip,
-        actual: BtcBlockTip,
+        requested: BlockId,
+        actual: BlockId,
     },
     RollbackTipMismatch {
-        requested: BtcBlockTip,
-        current: BtcBlockTip,
+        requested: BlockId,
+        current: BlockId,
     },
 }
 
@@ -611,7 +612,7 @@ where
         &self,
         transition: &FlameTransition,
         plan: &BitcoinRollbackPlan,
-        btc_tip: BtcBlockTip,
+        btc_tip: BlockId,
     ) -> ProcessingResult<Self, RewardsChanges> {
         let mut targets = BTreeSet::new();
         let heights = plan

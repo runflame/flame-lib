@@ -3,10 +3,11 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use btc_integration::{Acquisition, AcquisitionData, BtcBlockTip, IndexedBlock};
-use corepc_client::bitcoin::{
+use crate::block_processing::BtcBlockRecords;
+use bitcoin::{
     Amount, BlockHash as BitcoinBlockHash, Transaction, TxOut, absolute, hashes::Hash, transaction,
 };
+use btc_integration::{Burn, BurnData, watcher::BlockId};
 use flame_chain_service::{ChainPath, InMemoryChain};
 use flame_storage::{chain::InMemoryChainStorage, state::canonical::InMemoryCanonicalStorage};
 use flamechain::{Block, BlockHash, Blockchain, ChainParams, CoreBlockHeader};
@@ -73,19 +74,19 @@ impl ConsensusEngine for RecordingEngine {
 
 #[derive(Clone)]
 struct Cursor {
-    tip: Arc<StdMutex<BtcBlockTip>>,
+    tip: Arc<StdMutex<BlockId>>,
     reads: Arc<AtomicUsize>,
     fail: bool,
 }
 
 impl CursorStorage for Cursor {
     type Error = &'static str;
-    async fn store_cursor(&self, tip: BtcBlockTip) -> Result<(), Self::Error> {
+    async fn store_cursor(&self, tip: BlockId) -> Result<(), Self::Error> {
         *self.tip.lock().unwrap() = tip;
         Ok(())
     }
 
-    async fn get_cursor(&self) -> Result<BtcBlockTip, Self::Error> {
+    async fn get_cursor(&self) -> Result<BlockId, Self::Error> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         if self.fail {
             return Err("cursor failed");
@@ -134,7 +135,7 @@ impl Fixture {
         Self::at_btc_tip(btc_tip(300)).await
     }
 
-    async fn at_btc_tip(initial_btc_tip: BtcBlockTip) -> Self {
+    async fn at_btc_tip(initial_btc_tip: BlockId) -> Self {
         let consensus = InMemoryConsensusStorage::new();
         let blocks = Arc::new(InMemoryChainStorage::new());
         let canonical = InMemoryCanonicalStorage::new();
@@ -218,7 +219,7 @@ impl Fixture {
 
     async fn add_acquisition(&self, minter: u8) {
         let endorsement = included(minter, &self.arriving, 100);
-        let data = AcquisitionData::new(
+        let data = BurnData::new(
             endorsement.endorsement.auth().minter().p2wsh(),
             Predicate::opaque(
                 (Predicate::unspendable_key().decompress().unwrap()
@@ -237,7 +238,7 @@ impl Fixture {
         };
         let acquisition = IncludedAcquisition {
             btc_block: btc_tip(98),
-            acquisition: Acquisition::from_tx(&transaction).pop().unwrap(),
+            acquisition: Burn::from_tx(&transaction).pop().unwrap(),
         };
         self.processor
             .consensus_storage
@@ -255,8 +256,8 @@ impl Fixture {
     }
 }
 
-fn btc_tip(height: u64) -> BtcBlockTip {
-    BtcBlockTip {
+fn btc_tip(height: u64) -> BlockId {
+    BlockId {
         hash: BitcoinBlockHash::from_byte_array([height as u8; 32]),
         height,
     }
@@ -702,13 +703,13 @@ struct UnusedBitcoinProcessor;
 impl BlockProcessor for UnusedBitcoinProcessor {
     type Error = std::convert::Infallible;
 
-    async fn apply(&self, _: IndexedBlock) -> Result<BtcBlockTip, Self::Error> {
+    async fn apply(&self, _: BtcBlockRecords) -> Result<BlockId, Self::Error> {
         panic!("unexpected Bitcoin block")
     }
-    async fn resume(&self) -> Result<BtcBlockTip, Self::Error> {
+    async fn resume(&self) -> Result<BlockId, Self::Error> {
         Ok(btc_tip(300))
     }
-    async fn rollback(&self, _: BtcBlockTip) -> Result<BtcBlockTip, Self::Error> {
+    async fn rollback(&self, _: BlockId) -> Result<BlockId, Self::Error> {
         panic!("unexpected rollback")
     }
 }
@@ -752,9 +753,9 @@ async fn calculates_rewards_for_core_blocks_attached_by_an_arrival() {
     let mut fixture = Fixture::at_btc_tip(btc_tip(299)).await;
     let bitcoin = recovery::bitcoin_processor(&fixture).await;
     bitcoin
-        .apply(IndexedBlock {
-            btc_block_tip: btc_tip(300),
-            acquisitions: vec![],
+        .apply(BtcBlockRecords {
+            id: btc_tip(300),
+            burns: vec![],
             endorsements: vec![],
         })
         .await

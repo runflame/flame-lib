@@ -1,6 +1,6 @@
 use crate::block_processing::journal::{FlameJournalStatus, JournalStatus, OperationId};
 
-use btc_integration::BtcBlockTip;
+use btc_integration::watcher::BlockId;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum InMemoryConsensusJournalError {
@@ -17,19 +17,13 @@ pub enum InMemoryConsensusJournalError {
     #[error("journal operation ID overflow")]
     IdOverflow,
     #[error("Bitcoin block tip mismatch: expected {expected:?}, got {actual:?}")]
-    BlockTipMismatch {
-        expected: BtcBlockTip,
-        actual: BtcBlockTip,
-    },
+    BlockTipMismatch { expected: BlockId, actual: BlockId },
     #[error("{next:?} is not a successor of {previous:?}")]
-    InvalidSuccessor {
-        previous: BtcBlockTip,
-        next: BtcBlockTip,
-    },
+    InvalidSuccessor { previous: BlockId, next: BlockId },
     #[error("Bitcoin journal entry not found for {0:?}")]
-    BitcoinEntryNotFound(BtcBlockTip),
+    BitcoinEntryNotFound(BlockId),
     #[error("Bitcoin journal entry already exists for {0:?}")]
-    BitcoinEntryAlreadyExists(BtcBlockTip),
+    BitcoinEntryAlreadyExists(BlockId),
     #[error("Bitcoin journal status mismatch: expected {expected:?}, got {actual:?}")]
     UnexpectedBitcoinStatus {
         expected: JournalStatus,

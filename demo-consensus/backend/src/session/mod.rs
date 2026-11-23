@@ -6,11 +6,9 @@ mod snapshot;
 
 use std::{sync::Arc, time::Duration};
 
+use ::bitcoin::Amount;
 use anyhow::{Context, Result, anyhow};
-use btc_integration::{
-    BtcBlockTip, IdentityConfig, IdentityManager, identity::storage::InMemorySecretStorage,
-};
-use corepc_client::bitcoin::Amount;
+use btc_integration::{IdentityConfig, identity::impls::LocalKey, watcher::BlockId};
 use flame_chain_service::InMemoryChain;
 use flame_minting::orchestrator::cursor_storage::CursorStorage;
 use flame_storage::CanonicalStorage;
@@ -35,6 +33,8 @@ use runtime::DemoRuntime;
 
 pub struct DemoSession {
     runtime: DemoRuntime,
+    /// What every minter of the session shares; each has a key of its own.
+    identity_config: IdentityConfig,
     flame: DemoFlameChain,
     minters: Vec<DemoMinter>,
     bitcoin: BitcoinRegtest,
@@ -51,23 +51,26 @@ impl DemoSession {
             access_predicate: Predicate::opaque(Predicate::unspendable_key()),
             validator_pubkey: ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]).verifying_key(),
         };
+        // The first minter is the one of the node: both sign with one key.
+        let identity_key = Arc::new(LocalKey::generate());
         let runtime = DemoRuntime::new(
             chain.clone(),
             bitcoin.config(),
             bitcoin.tip().await?,
-            identity_config,
+            &identity_config,
+            identity_key.clone(),
         )?;
         let minter = DemoMinter::create(
             MinterId(0),
             "Alice".into(),
-            &runtime.orchestrator.identity_manager,
+            &identity_config,
+            identity_key,
             &bitcoin,
         )
         .await?;
         bitcoin.mine_block().await?;
         minter
-            .sender
-            .send_acquisition(Amount::from_sat(20_000))
+            .send_acquisition(&bitcoin, Amount::from_sat(20_000))
             .await?;
         let acquisition_tip = bitcoin.mine_block().await?;
         let target_btc_height = acquisition_tip
@@ -84,6 +87,7 @@ impl DemoSession {
         .await?;
         let mut session = Self {
             runtime,
+            identity_config,
             flame,
             minters: vec![minter],
             bitcoin,
@@ -172,11 +176,9 @@ impl DemoSession {
             .into());
         }
         let id = MinterId(u32::try_from(self.minters.len()).context("too many minters")?);
-        let manager = IdentityManager::new(
-            Arc::new(InMemorySecretStorage::default()),
-            self.runtime.orchestrator.identity_manager.config().clone(),
-        );
-        let minter = DemoMinter::create(id, name.into(), &manager, &self.bitcoin).await?;
+        let key = Arc::new(LocalKey::generate());
+        let config = &self.identity_config;
+        let minter = DemoMinter::create(id, name.into(), config, key, &self.bitcoin).await?;
         self.minters.push(minter);
         self.minter(id)?.snapshot(&self.runtime.consensus).await
     }
@@ -185,11 +187,9 @@ impl DemoSession {
         &mut self,
         request: SendAcquisitionRequest,
     ) -> Result<SubmittedTransaction> {
-        let txid = self
-            .minter(request.minter_id)?
-            .sender
-            .send_acquisition(Amount::from_sat(request.amount_sats.get()))
-            .await?;
+        let amount = Amount::from_sat(request.amount_sats.get());
+        let minter = self.minter(request.minter_id)?;
+        let txid = minter.send_acquisition(&self.bitcoin, amount).await?;
         Ok(SubmittedTransaction {
             txid: BitcoinTxid(txid.to_string()),
         })
@@ -202,7 +202,6 @@ impl DemoSession {
         let hash = parse_flame_hash(&request.block_hash)?;
         let txid = self
             .minter(request.minter_id)?
-            .sender
             .send_endorsement(request.core_height, hash)
             .await?;
         Ok(SubmittedTransaction {
@@ -250,7 +249,7 @@ impl DemoSession {
             .ok_or_else(|| DemoError::NotFound(format!("unknown minter {}", id.0)).into())
     }
 
-    async fn wait_for_processing(&self, expected: BtcBlockTip) -> Result<()> {
+    async fn wait_for_processing(&self, expected: BlockId) -> Result<()> {
         timeout(Duration::from_secs(10), async {
             loop {
                 if self.runtime.cursor.get_cursor().await? == expected {
@@ -266,7 +265,7 @@ impl DemoSession {
     }
 }
 
-fn bitcoin_tip(tip: BtcBlockTip) -> BitcoinBlockTip {
+fn bitcoin_tip(tip: BlockId) -> BitcoinBlockTip {
     BitcoinBlockTip {
         hash: BitcoinBlockHash(tip.hash.to_string()),
         height: tip.height,
