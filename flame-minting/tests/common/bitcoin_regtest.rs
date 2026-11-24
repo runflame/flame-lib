@@ -3,7 +3,7 @@ use std::time::Duration;
 use bitcoin::{BlockHash, Txid, hashes::Hash};
 use bitcoind::anyhow::{Context, Result};
 use btc_integration::{
-    AuthenticatedMintingEndorsement, BitcoinConfig, BitcoinRecords, BitcoinRpcAuth,
+    AuthenticatedMintingEndorsement, BitcoinConfig, BitcoinRpcAuth, BtcBlockRecords,
     MintingEndorsementData, UncheckedMintingEndorsement,
     wallet::impls::RpcWallet,
     watcher::{BlockId, ChainSource, impls::RpcSource},
@@ -75,8 +75,8 @@ impl BitcoinRegtest {
         block: BlockId,
     ) -> Result<Vec<AuthenticatedMintingEndorsement>> {
         let found = self.source.block(block.hash).await?;
-        let (block, prevouts) = found.context("the node does not have the block")?;
-        Ok(BitcoinRecords::from_block(&block, &prevouts)?.endorsements)
+        let (stored, prevouts) = found.context("the node does not have the block")?;
+        Ok(BtcBlockRecords::from_block(block, &stored, &prevouts)?.endorsements)
     }
 }
 

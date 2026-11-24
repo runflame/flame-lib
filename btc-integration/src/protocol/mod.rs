@@ -6,6 +6,7 @@ mod minter_identity;
 mod minter_p2wsh;
 pub mod minter_witness_script;
 mod records;
+mod records_watcher;
 
 use bitcoin::script::PushBytesBuf;
 use curve25519_dalek::ristretto::CompressedRistretto;
@@ -24,7 +25,8 @@ pub use endorsement_validation::{
 };
 pub use minter_identity::{MinterIdentity, MinterIdentityError};
 pub use minter_p2wsh::MinterP2wsh;
-pub use records::{BitcoinRecords, RecordsError};
+pub use records::{BtcBlockRecords, BtcRecordsError, BtcRecordsEvent};
+pub use records_watcher::{BtcRecordsWatchError, BtcRecordsWatcher};
 
 /// The bytes a script pushes as one item.
 fn push_bytes(bytes: Vec<u8>) -> PushBytesBuf {

@@ -1,14 +1,12 @@
-use super::BtcBlockRecords;
 use crate::block_processing::{
     BlockProcessor, ConsensusManager, ConsensusManagerError, FlameProcessor,
     journal::consensus::ConsensusJournal,
 };
 use crate::{ConsensusHandle, ConsensusSendError};
 use btc_integration::{
-    RecordsError,
+    BtcRecordsError, BtcRecordsEvent, BtcRecordsWatchError, BtcRecordsWatcher,
     watcher::{
-        BlockId, BtcEvent, BtcStorage, BtcView, BtcWatcher, ChainSource, WatchError,
-        impls::RecentBlocks,
+        BlockId, BtcStorage, BtcView, BtcWatcher, ChainSource, WatchError, impls::RecentBlocks,
     },
 };
 use std::{sync::Arc, time::Duration};
@@ -40,10 +38,19 @@ pub enum ConsensusLoopError<E> {
     /// Bitcoin cannot be followed any more.
     Watch(WatchError),
     /// A block of an event could not be read from the storage of the watcher.
-    Records(RecordsError),
+    Records(BtcRecordsError),
     Process(E),
     Delivery(ConsensusSendError),
     WorkerJoin(tokio::task::JoinError),
+}
+
+impl<E> From<BtcRecordsWatchError> for ConsensusLoopError<E> {
+    fn from(error: BtcRecordsWatchError) -> Self {
+        match error {
+            BtcRecordsWatchError::Watch(error) => ConsensusLoopError::Watch(error),
+            BtcRecordsWatchError::Records(error) => ConsensusLoopError::Records(error),
+        }
+    }
 }
 
 struct BitcoinSyncWorker<E> {
@@ -105,11 +112,11 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
             .startup()
             .await
             .map_err(ConsensusLoopError::Process)?;
-        let watcher = BtcWatcher::resume(
+        let watcher = BtcRecordsWatcher::new(BtcWatcher::resume(
             source,
             RecentBlocks::default(),
             BtcView::restore(self.genesis_id, cursor),
-        );
+        ));
         self.best.send_replace(Some(cursor));
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
@@ -148,7 +155,7 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
     /// did not answer is asked again after a pause.
     async fn run<S: ChainSource, T: BtcStorage>(
         manager: &ConsensusManager<B, F, J>,
-        mut watcher: BtcWatcher<S, T>,
+        mut watcher: BtcRecordsWatcher<S, T>,
         best: &watch::Sender<Option<BlockId>>,
         cancellation: CancellationToken,
     ) -> LoopResult<ProcessingError<B, F, J>> {
@@ -166,9 +173,9 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
                     // The minter hears of the block at once: it endorses a
                     // core block before consensus is through with the event.
                     best.send_replace(Some(watcher.view().best()));
-                    Self::deliver(manager, watcher.storage(), event, &cancellation).await?;
+                    Self::deliver(manager, event, &cancellation)?;
                 }
-                Err(error) if error.is_fatal() => return Err(ConsensusLoopError::Watch(error)),
+                Err(error) if error.is_fatal() => return Err(error.into()),
                 Err(error) => {
                     log::warn!("bitcoin source failed, retry in {pause:?}: {error}");
                     tokio::select! {
@@ -183,24 +190,19 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
         }
     }
 
-    /// Queues one event of the watcher to consensus. The blocks of the event
-    /// are in `storage` by now.
-    async fn deliver<T: BtcStorage>(
+    /// Queues one event of the watcher to consensus.
+    fn deliver(
         manager: &ConsensusManager<B, F, J>,
-        storage: &T,
-        event: BtcEvent,
+        event: BtcRecordsEvent,
         cancellation: &CancellationToken,
     ) -> LoopResult<ProcessingError<B, F, J>> {
-        let mut new_blocks = Vec::with_capacity(event.blocks().len());
-        for &id in event.blocks() {
-            let block = BtcBlockRecords::from_storage(storage, id).await;
-            new_blocks.push(block.map_err(ConsensusLoopError::Records)?);
-        }
         let delivered = match event {
-            BtcEvent::NewBlocks { .. } => new_blocks
+            BtcRecordsEvent::NewBlocks { blocks } => blocks
                 .into_iter()
                 .try_for_each(|block| manager.new_bitcoin_block(block)),
-            BtcEvent::Reorg { removed, .. } => manager.bitcoin_reorg(removed, new_blocks),
+            BtcRecordsEvent::Reorg {
+                removed, blocks, ..
+            } => manager.bitcoin_reorg(removed, blocks),
         };
         match delivered {
             Err(ConsensusSendError::Stopped) if cancellation.is_cancelled() => Ok(()),

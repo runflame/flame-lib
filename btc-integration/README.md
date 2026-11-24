@@ -15,32 +15,32 @@ This crate has three parts:
 
 The watcher reports every change of the best chain. The blocks an event names
 are in the storage by then, with the outputs their inputs spend.
+`BtcRecordsWatcher` reads them and gives the burns and the endorsements of the
+new blocks with the event.
 
 ```no_run
 use btc_integration::watcher::impls::{RecentBlocks, RpcSource};
 use btc_integration::watcher::{BlockId, BtcWatcher};
-use btc_integration::{BitcoinConfig, BitcoinRecords};
+use btc_integration::{BitcoinConfig, BtcRecordsWatcher};
 
 # async fn follow(bitcoin: BitcoinConfig, genesis_id: BlockId)
 # -> Result<(), Box<dyn std::error::Error>> {
 let source = RpcSource::new(&bitcoin)?;
 // The storage keeps the latest 30 blocks, the rest stays in Bitcoin Core.
-let mut watcher = BtcWatcher::new(source, RecentBlocks::new(30), genesis_id);
+let watcher = BtcWatcher::new(source, RecentBlocks::new(30), genesis_id);
+let mut watcher = BtcRecordsWatcher::new(watcher);
 loop {
     // Waits until the best chain changes. A reorg also names the blocks
     // that left it: `event.removed()`.
     let event = watcher.next().await?;
-    for id in event.blocks() {
-        match BitcoinRecords::from_storage(watcher.storage(), *id).await {
-            // The consensus takes them from here.
-            Ok(records) => println!(
-                "{id}: {} burns, {} endorsements",
-                records.burns.len(),
-                records.endorsements.len(),
-            ),
-            // The source did not give an output that an endorsement spends.
-            Err(error) => eprintln!("{id}: {error}"),
-        }
+    for block in event.blocks() {
+        // The consensus takes them from here.
+        println!(
+            "{}: {} burns, {} endorsements",
+            block.id,
+            block.burns.len(),
+            block.endorsements.len(),
+        );
     }
 }
 # }

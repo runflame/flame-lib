@@ -7,21 +7,25 @@ use crate::protocol::{
 };
 use crate::watcher::{BlockId, BtcStorage, Prevouts, StorageError};
 
-/// The Flame transactions of one Bitcoin block, in block order.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BitcoinRecords {
+/// A Bitcoin block as Flame sees it: which block it is, and its burns and
+/// endorsements in block order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BtcBlockRecords {
+    pub id: BlockId,
     pub burns: Vec<Burn>,
     pub endorsements: Vec<AuthenticatedMintingEndorsement>,
 }
 
-impl BitcoinRecords {
-    /// Reads the burns and the endorsements of `block`.
+impl BtcBlockRecords {
+    /// Reads the burns and the endorsements of `block`, which is the block
+    /// `id`.
     ///
     /// `prevouts` are the outputs the inputs of the block spend. A burn does
     /// not need them. An endorsement counts only if its input spends an output
     /// of the minter it names, so an input that carries an endorsement and
     /// has no prevout is an error, not a skipped endorsement.
     pub fn from_block(
+        id: BlockId,
         block: &Block,
         prevouts: &Prevouts,
     ) -> Result<Self, MintingEndorsementProcessingError> {
@@ -34,7 +38,11 @@ impl BitcoinRecords {
                 },
             );
         }
-        let mut records = BitcoinRecords::default();
+        let mut records = BtcBlockRecords {
+            id,
+            burns: Vec::new(),
+            endorsements: Vec::new(),
+        };
         for (transaction, prevouts) in block.txdata.iter().zip(prevouts) {
             records.burns.extend(Burn::from_tx(transaction));
             records
@@ -50,20 +58,53 @@ impl BitcoinRecords {
     /// so this is how a consumer reads the new blocks an event names.
     pub async fn from_storage<B: BtcStorage>(
         storage: &B,
-        block: BlockId,
-    ) -> Result<Self, RecordsError> {
-        let stored = storage.block(block).await?;
-        let prevouts = storage.prevouts(block).await?;
+        id: BlockId,
+    ) -> Result<Self, BtcRecordsError> {
+        let stored = storage.block(id).await?;
+        let prevouts = storage.prevouts(id).await?;
         let (Some(stored), Some(prevouts)) = (stored, prevouts) else {
-            return Err(RecordsError::NotStored(block));
+            return Err(BtcRecordsError::NotStored(id));
         };
-        Ok(Self::from_block(&stored, &prevouts)?)
+        Ok(Self::from_block(id, &stored, &prevouts)?)
+    }
+}
+
+/// A change of the best chain of Bitcoin, like [`crate::watcher::BtcEvent`],
+/// with the Flame transactions of the new blocks read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BtcRecordsEvent {
+    /// New blocks on top of the best block, oldest first.
+    NewBlocks { blocks: Vec<BtcBlockRecords> },
+    /// The best chain switched to another branch: the blocks above `fork`
+    /// were removed, newest first, and `blocks` took their place, oldest
+    /// first.
+    Reorg {
+        fork: BlockId,
+        removed: Vec<BlockId>,
+        blocks: Vec<BtcBlockRecords>,
+    },
+}
+
+impl BtcRecordsEvent {
+    /// The new blocks, oldest first.
+    pub fn blocks(&self) -> &[BtcBlockRecords] {
+        match self {
+            BtcRecordsEvent::NewBlocks { blocks } | BtcRecordsEvent::Reorg { blocks, .. } => blocks,
+        }
+    }
+
+    /// The removed blocks, newest first. `NewBlocks` removes nothing.
+    pub fn removed(&self) -> &[BlockId] {
+        match self {
+            BtcRecordsEvent::NewBlocks { .. } => &[],
+            BtcRecordsEvent::Reorg { removed, .. } => removed,
+        }
     }
 }
 
 /// Why the Flame transactions of a stored block could not be read.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub enum RecordsError {
+pub enum BtcRecordsError {
     /// The storage did not answer.
     #[error("block storage: {0}")]
     Storage(#[from] StorageError),

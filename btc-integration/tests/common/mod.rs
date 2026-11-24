@@ -11,7 +11,7 @@ use bitcoin::{Address, Amount, Block, BlockHash, TxOut, Txid};
 use bitcoind::anyhow::Context;
 use btc_integration::wallet::impls::RpcWallet;
 use btc_integration::watcher::impls::RpcSource;
-use btc_integration::watcher::{ChainSource, Prevouts};
+use btc_integration::watcher::{BlockId, ChainSource, Prevouts};
 use btc_integration::{BitcoinConfig, BitcoinRpcAuth, BtcWallet};
 
 pub struct TestContext {
@@ -29,14 +29,15 @@ impl TestContext {
     }
 
     /// A block of the node with the outputs its inputs spend.
-    pub async fn block(&self, hash: BlockHash) -> bitcoind::anyhow::Result<(Block, Prevouts)> {
+    pub async fn block(&self, id: BlockId) -> bitcoind::anyhow::Result<(Block, Prevouts)> {
         self.source
-            .block(hash)
+            .block(id.hash)
             .await?
             .context("the node does not have the block")
     }
 
-    pub fn generate_next_block(&self) -> bitcoind::anyhow::Result<BlockHash> {
+    /// Mines one block and returns it.
+    pub fn generate_next_block(&self) -> bitcoind::anyhow::Result<BlockId> {
         let generated = self
             .node
             .client
@@ -44,8 +45,13 @@ impl TestContext {
             .expect("generate the next block");
 
         let hash = generated.0.into_iter().next().expect("one generated block");
+        // Nobody else mines on this node: the new block is its best one.
+        let height = self.node.client.get_block_count()?.0;
 
-        Ok(BlockHash::from_str(&hash)?)
+        Ok(BlockId {
+            height,
+            hash: BlockHash::from_str(&hash)?,
+        })
     }
 
     /// Pays `amount` to `recipient` from the wallet that has coins, and mines

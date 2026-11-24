@@ -11,7 +11,7 @@ use bitcoin::{
     Amount, Block, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, absolute, transaction,
 };
 use btc_integration::identity::impls::LocalKey;
-use btc_integration::protocol::{BitcoinRecords, BurnData, MintingEndorsementData};
+use btc_integration::protocol::{BtcBlockRecords, BurnData, MintingEndorsementData};
 use btc_integration::wallet::impls::MemoryWallet;
 use btc_integration::watcher::impls::{MemoryBtc, Rejected};
 use btc_integration::watcher::{BlockId, ChainSource, Prevouts};
@@ -302,8 +302,9 @@ fn a_burn_and_an_endorsement_go_through_bitcoin_in_memory() {
     // be sent.
     assert_eq!(endorse(2), Err(WalletError::NoConfirmedOutputs));
 
-    let (mined, prevouts) = block(&btc, btc.mine());
-    let records = BitcoinRecords::from_block(&mined, &prevouts).unwrap();
+    let id = btc.mine();
+    let (mined, prevouts) = block(&btc, id);
+    let records = BtcBlockRecords::from_block(id, &mined, &prevouts).unwrap();
     let [found] = records.burns.as_slice() else {
         panic!("one burn, got {:?}", records.burns);
     };

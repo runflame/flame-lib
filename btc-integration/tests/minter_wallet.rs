@@ -9,7 +9,7 @@ use bitcoind::anyhow::Context;
 use btc_integration::identity::impls::LocalKey;
 use btc_integration::wallet::impls::RpcWatchOnlyWallet;
 use btc_integration::{
-    BitcoinRecords, BtcWallet, IdentityConfig, MinterWallet, MintingEndorsementData,
+    BtcBlockRecords, BtcWallet, IdentityConfig, MinterWallet, MintingEndorsementData,
 };
 use flamechain::BlockHash;
 use flamevm::Predicate;
@@ -42,7 +42,7 @@ async fn a_new_key_endorses_and_a_second_wallet_with_the_same_key_goes_on()
     let txid = wallet.send(endorsement.to_output()).await?;
     let confirmation = ctx.generate_next_block()?;
     let (block, prevouts) = ctx.block(confirmation).await?;
-    let endorsements = BitcoinRecords::from_block(&block, &prevouts)?.endorsements;
+    let endorsements = BtcBlockRecords::from_block(confirmation, &block, &prevouts)?.endorsements;
     endorsements
         .iter()
         .find(|endorsement| endorsement.txid() == txid)

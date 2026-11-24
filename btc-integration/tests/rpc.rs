@@ -5,7 +5,7 @@ use bitcoin::secp256k1::SecretKey;
 use bitcoin::{Address, Amount, Network, ScriptBuf, TxOut};
 use bitcoind::anyhow::Context;
 use btc_integration::identity::impls::LocalKey;
-use btc_integration::protocol::{BitcoinRecords, BurnData, MinterP2wsh, MintingEndorsementData};
+use btc_integration::protocol::{BtcBlockRecords, BurnData, MinterP2wsh, MintingEndorsementData};
 use btc_integration::wallet::impls::{RpcWallet, RpcWatchOnlyWallet};
 use btc_integration::watcher::{BlockId, ChainSource};
 use btc_integration::{
@@ -42,7 +42,7 @@ async fn rpc_source_and_wallet_work_with_regtest_blocks_and_transactions()
     let ctx = setup()?;
 
     let first = ctx.source.block_at(1).await?.context("block 1")?;
-    let (block, prevouts) = ctx.block(first.hash).await?;
+    let (block, prevouts) = ctx.block(first).await?;
     assert_eq!(block.block_hash(), first.hash);
     assert_eq!(block.txdata.len(), 1);
     // The input of a coinbase spends nothing.
@@ -59,7 +59,7 @@ async fn rpc_source_and_wallet_work_with_regtest_blocks_and_transactions()
     let source = &ctx.source;
     let waiter = source.wait_for_new_block(previous_tip.hash);
     let (next_tip, next_hash) = tokio::join!(waiter, async { ctx.generate_next_block() });
-    let next_hash = next_hash?;
+    let next_hash = next_hash?.hash;
     assert_eq!(
         next_tip?,
         BlockId {
@@ -100,7 +100,7 @@ async fn a_wallet_of_bitcoin_core_sends_a_burn() -> bitcoind::anyhow::Result<()>
     let txid = ctx.wallet.send(burn.to_output(sent_amount)).await?;
     let confirmation_block = ctx.generate_next_block()?;
     let (block, prevouts) = ctx.block(confirmation_block).await?;
-    let burns = BitcoinRecords::from_block(&block, &prevouts)?.burns;
+    let burns = BtcBlockRecords::from_block(confirmation_block, &block, &prevouts)?.burns;
 
     assert_eq!(burns.len(), 1);
     assert_eq!(burns[0].txid(), txid);

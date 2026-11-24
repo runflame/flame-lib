@@ -8,8 +8,8 @@ use bitcoin::{
     Amount, OutPoint, Script, ScriptBuf, Transaction, TxIn, TxOut, Witness, absolute, transaction,
 };
 use btc_integration::protocol::{
-    BitcoinRecords, BurnData, MinterP2wsh, MintingEndorsementData,
-    MintingEndorsementProcessingError, RecordsError, minter_witness_script,
+    BtcBlockRecords, BtcRecordsError, BtcRecordsEvent, BtcRecordsWatcher, BurnData, MinterP2wsh,
+    MintingEndorsementData, MintingEndorsementProcessingError, minter_witness_script,
 };
 use btc_integration::watcher::impls::{MemoryBtc, MemorySource, MemoryStorage};
 use btc_integration::watcher::{BlockId, BtcStorage, BtcWatcher, Prevouts};
@@ -29,12 +29,12 @@ fn setup() -> (MemoryBtc, BtcWatcher<MemorySource, MemoryStorage>) {
 fn records(
     watcher: &mut BtcWatcher<MemorySource, MemoryStorage>,
     block: BlockId,
-) -> Result<BitcoinRecords, RecordsError> {
+) -> Result<BtcBlockRecords, BtcRecordsError> {
     // Every event that is ready: the blocks it names are in the storage.
     while let Some(event) = watcher.next().now_or_never() {
         event.expect("the source answered");
     }
-    let records = BitcoinRecords::from_storage(watcher.storage(), block).now_or_never();
+    let records = BtcBlockRecords::from_storage(watcher.storage(), block).now_or_never();
     records.expect("the storage in memory answers at once")
 }
 
@@ -138,16 +138,23 @@ fn a_block_gives_its_burns_and_its_endorsements() {
     assert_eq!(endorsed.output().data, endorsement(7));
     assert_eq!(endorsed.auth().minter().witness_script(), &minter);
 
+    assert_eq!(records.id, block);
+
     // The block that only pays to the minter has neither.
     let records = self::records(&mut watcher, funded).unwrap();
-    assert_eq!(records, BitcoinRecords::default());
+    let neither = BtcBlockRecords {
+        id: funded,
+        burns: Vec::new(),
+        endorsements: Vec::new(),
+    };
+    assert_eq!(records, neither);
 
     // The storage holds the blocks above the genesis block, not the genesis
     // block itself.
     let genesis_id = watcher.view().genesis_id();
     assert_eq!(
         self::records(&mut watcher, genesis_id),
-        Err(RecordsError::NotStored(genesis_id))
+        Err(BtcRecordsError::NotStored(genesis_id))
     );
 }
 
@@ -160,7 +167,7 @@ fn prevouts_of_another_block_are_an_error() {
     let stored = stored.unwrap().expect("the block of an event is stored");
 
     assert_eq!(
-        BitcoinRecords::from_block(&stored, &Prevouts::default()),
+        BtcBlockRecords::from_block(block, &stored, &Prevouts::default()),
         Err(
             MintingEndorsementProcessingError::TransactionCountMismatch {
                 transaction_count: 1,
@@ -168,4 +175,48 @@ fn prevouts_of_another_block_are_an_error() {
             }
         )
     );
+}
+
+#[test]
+fn the_records_watcher_gives_the_records_of_the_new_blocks_with_the_event() {
+    let (btc, watcher) = setup();
+    let genesis_id = btc.best();
+    let mut watcher = BtcRecordsWatcher::new(watcher);
+    let minter = witness_script();
+
+    let (burning, _) = burn(&minter, 25_000);
+    let first = btc.mine_with(vec![burning.clone()]);
+    let second = btc.mine();
+
+    let event = watcher.next().now_or_never().expect("the event is ready");
+    let Ok(BtcRecordsEvent::NewBlocks { blocks }) = event else {
+        panic!("new blocks, got {event:?}");
+    };
+    let [burned, empty] = blocks.as_slice() else {
+        panic!("two blocks, got {blocks:?}");
+    };
+    assert_eq!((burned.id, empty.id), (first, second));
+    assert_eq!(burned.burns[0].txid(), burning.compute_txid());
+    assert!(empty.burns.is_empty());
+    assert_eq!(watcher.view().best(), second);
+
+    // A reorg names the removed blocks and brings the records of the new
+    // ones. The new blocks are empty: the burn is gone with its block.
+    let new_best = btc.reorg(2, 3);
+    let event = watcher.next().now_or_never().expect("the event is ready");
+    let new_blocks = btc.best_chain()[1..]
+        .iter()
+        .map(|&id| BtcBlockRecords {
+            id,
+            burns: Vec::new(),
+            endorsements: Vec::new(),
+        })
+        .collect();
+    let reorg = BtcRecordsEvent::Reorg {
+        fork: genesis_id,
+        removed: vec![second, first],
+        blocks: new_blocks,
+    };
+    assert_eq!(event, Ok(reorg));
+    assert_eq!(watcher.view().best(), new_best);
 }

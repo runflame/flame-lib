@@ -7,6 +7,7 @@ use crate::block_processing::{
     journal::consensus::InMemoryConsensusJournal,
     tests::support::{ArrivalHandlerProcessor, wait_until},
 };
+use btc_integration::BtcBlockRecords;
 use btc_integration::watcher::impls::MemoryBtc;
 use std::sync::Mutex as StdMutex;
 
@@ -131,6 +132,7 @@ async fn a_cancelled_loop_does_not_submit_more_events() {
     let manager = manager(&[genesis], false);
     manager.startup().await.unwrap();
     let watcher = BtcWatcher::new(btc.source(), RecentBlocks::default(), genesis);
+    let watcher = BtcRecordsWatcher::new(watcher);
     let best = watch::channel(None).0;
     let cancellation = CancellationToken::new();
     cancellation.cancel();

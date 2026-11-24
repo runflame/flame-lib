@@ -12,10 +12,11 @@ pub mod prelude {
     pub use crate::bitcoin_config::BitcoinConfig;
     pub use crate::identity::{IdentityConfig, IdentityKey, IdentityKeyError};
     pub use crate::protocol::{
-        AuthenticatedMintingEndorsement, BitcoinRecords, Burn, BurnData, MinterIdentity,
+        AuthenticatedMintingEndorsement, BtcBlockRecords, BtcRecordsError, BtcRecordsEvent,
+        BtcRecordsWatchError, BtcRecordsWatcher, Burn, BurnData, MinterIdentity,
         MinterIdentityError, MinterP2wsh, MintingEndorsementAuth, MintingEndorsementData,
         MintingEndorsementOutput, MintingEndorsementProcessingError,
-        MintingEndorsementValidationError, MintingEndorsementValidator, RecordsError,
+        MintingEndorsementValidationError, MintingEndorsementValidator,
         UncheckedMintingEndorsement, validate_transaction_endorsements,
     };
     pub use crate::wallet::{
