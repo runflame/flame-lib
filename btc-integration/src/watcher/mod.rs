@@ -232,6 +232,26 @@ impl<S: ChainSource, B: BtcStorage> BtcWatcher<S, B> {
         &self.view
     }
 
+    /// Moves the view to `block`: the next event is the difference from it.
+    ///
+    /// This is for a consumer that could not apply the events it was given.
+    /// It goes back to the last block it has applied and receives the events
+    /// from there again. `block` does not have to be on the chain of the
+    /// view: from a block that a reorg removed, the next event is that reorg.
+    ///
+    /// Nothing is asked here. The next call takes the blocks the storage
+    /// still holds from it and the rest from the source. A block that neither
+    /// of them knows is [`WatchError::ViewBlockUnknown`] in that call.
+    ///
+    /// # Panics
+    ///
+    /// If `block` is neither the genesis block nor above it.
+    pub fn rewind_to(&mut self, block: BlockId) {
+        self.view = BtcView::restore(self.view.genesis_id(), block);
+        // The path was found from the best block the view had.
+        self.pending = None;
+    }
+
     pub fn source(&self) -> &S {
         &self.source
     }
@@ -290,27 +310,16 @@ impl<S: ChainSource, B: BtcStorage> BtcWatcher<S, B> {
             let blocks: Vec<BlockId> = branch.blocks.iter().take(most).copied().collect();
 
             // 3. Blocks reach the storage before the consumer hears of them.
-            //    The path is already known, block by block, so it does not
-            //    matter in which order they arrive: several are requested at
-            //    once. A failed call keeps what it has stored, and the next
-            //    one requests only the rest.
-            let stored: Vec<bool> = stream::iter(blocks.clone())
-                .map(|id| self.download(id))
-                .buffered(self.parallel_downloads)
-                .try_collect()
-                .await?;
-            if let Some(gone) = stored.iter().position(|stored| !stored) {
+            //    A failed call keeps what it has stored, and the next one
+            //    requests only the rest.
+            if let Some(gone) = self.download_all(&blocks).await? {
                 // The block left the best chain while the path was waiting,
                 // and the source dropped it. Forget the path: the next call
                 // finds a new one from the best block of the source. No event
                 // named the blocks stored for this path, so they go out too.
                 self.pending = None;
                 self.stale.extend(&blocks);
-                return Err(SourceError(format!(
-                    "the source no longer has block {}",
-                    blocks[gone]
-                ))
-                .into());
+                return Err(SourceError(format!("the source no longer has block {gone}")).into());
             }
 
             // 4. No awaits below: the event, the view and the rest of the path
@@ -405,6 +414,39 @@ impl<S: ChainSource, B: BtcStorage> BtcWatcher<S, B> {
             .into());
         }
         Ok(Some(header))
+    }
+
+    /// Makes sure every block of an event is in the storage. Returns a block
+    /// the source does not have, if there is one.
+    ///
+    /// The path is already known, block by block, so it does not matter in
+    /// which order the blocks arrive: several are requested at once.
+    async fn download_all(&self, blocks: &[BlockId]) -> Result<Option<BlockId>, WatchError> {
+        'download: loop {
+            let stored: Vec<bool> = stream::iter(blocks.iter().copied())
+                .map(|id| self.download(id))
+                .buffered(self.parallel_downloads)
+                .try_collect()
+                .await?;
+            if let Some(gone) = stored.iter().position(|stored| !stored) {
+                return Ok(Some(blocks[gone]));
+            }
+            if self.storage.capacity().is_none() {
+                return Ok(None);
+            }
+            // A bounded storage makes room for a new block by dropping the
+            // block it has held the longest. After `rewind_to`, or with a
+            // storage that survived a restart, that can be a block of this
+            // very event: it is requested again. A block stored in this call
+            // is not dropped by it: an event names no more blocks than the
+            // storage keeps. So every round leaves fewer blocks to request.
+            for &id in blocks {
+                if self.storage.header(id).await?.is_none() {
+                    continue 'download;
+                }
+            }
+            return Ok(None);
+        }
     }
 
     /// Makes sure the block is in the storage, fetching it from the source if

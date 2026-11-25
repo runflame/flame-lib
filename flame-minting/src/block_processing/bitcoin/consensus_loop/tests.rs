@@ -3,13 +3,15 @@
 use super::*;
 use crate::ConsensusStatus;
 use crate::block_processing::{
-    BlockProcessor, ConsensusManager, ConsensusManagerError,
+    BlockProcessor, ConsensusManager,
     journal::consensus::InMemoryConsensusJournal,
     tests::support::{ArrivalHandlerProcessor, wait_until},
 };
 use btc_integration::BtcBlockRecords;
+use btc_integration::watcher::WatchError;
 use btc_integration::watcher::impls::MemoryBtc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Bitcoin consensus that only remembers what it was asked to do.
 struct Processor {
@@ -17,7 +19,8 @@ struct Processor {
     chain: StdMutex<Vec<BlockId>>,
     /// The cursor after every apply and every rollback.
     cursors: StdMutex<Vec<BlockId>>,
-    fail: bool,
+    /// The next apply fails.
+    fail: AtomicBool,
 }
 
 impl Processor {
@@ -29,7 +32,7 @@ impl Processor {
 impl BlockProcessor for Processor {
     type Error = &'static str;
     async fn apply(&self, block: BtcBlockRecords) -> Result<BlockId, Self::Error> {
-        if self.fail {
+        if self.fail.swap(false, Ordering::Relaxed) {
             return Err("apply failed");
         }
         self.chain.lock().unwrap().push(block.id);
@@ -66,7 +69,7 @@ fn manager(chain: &[BlockId], fail: bool) -> TestManager {
     let processor = Processor {
         chain: StdMutex::new(chain.to_vec()),
         cursors: StdMutex::new(vec![]),
-        fail,
+        fail: AtomicBool::new(fail),
     };
     ConsensusManager::new(
         processor,
@@ -154,26 +157,22 @@ async fn a_cancelled_loop_does_not_submit_more_events() {
 }
 
 #[tokio::test]
-async fn a_failed_apply_stops_the_loop_and_does_not_move_the_cursor_of_consensus() {
+async fn consensus_that_failed_goes_on_from_the_block_it_has_applied() {
     let btc = MemoryBtc::new();
     let genesis = btc.best();
+    // The first apply fails.
     let consensus = consensus(&[genesis], true);
-    let best = consensus.subscribe();
+    let first = btc.mine();
+    let second = btc.mine();
     consensus.startup(btc.source()).await.unwrap();
 
-    let block = btc.mine();
-
-    // Nobody asks the loop to stop: it ends when consensus fails.
-    stopped(&consensus).await;
-    assert!(matches!(
-        consensus.shutdown().await,
-        Err(ConsensusLoopError::Process(ConsensusManagerError::Bitcoin(
-            "apply failed"
-        )))
-    ));
-    // The block was handed over, which does not mean it was applied.
-    assert_eq!(*best.borrow(), Some(block));
-    assert_eq!(consensus.manager().bitcoin_processor().cursor(), genesis);
+    // Nobody starts consensus again: the loop does. Both blocks were handed
+    // over, the first one failed and the second one was dropped with the
+    // queue: both come again.
+    wait_until(|| async { cursors(&consensus).len() == 2 }).await;
+    assert_eq!(consensus.manager().status(), ConsensusStatus::Running);
+    consensus.shutdown().await.unwrap();
+    assert_eq!(cursors(&consensus), vec![first, second]);
 }
 
 #[tokio::test]
@@ -202,9 +201,9 @@ async fn the_loop_ends_when_bitcoin_replaces_the_lowest_block_of_consensus() {
     stopped(&consensus).await;
     assert!(matches!(
         consensus.shutdown().await,
-        Err(ConsensusLoopError::Watch(
+        Err(ConsensusLoopError::Watch(BtcRecordsWatchError::Watch(
             WatchError::GenesisBlockReplaced { .. }
-        ))
+        )))
     ));
     assert!(cursors(&consensus).is_empty());
 }

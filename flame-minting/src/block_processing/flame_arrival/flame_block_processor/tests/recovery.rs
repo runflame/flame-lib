@@ -519,10 +519,14 @@ async fn consensus_continues_a_reorg_from_the_cursor_recovered_after_a_rollback_
     .await;
     chain_failure.store(true, Ordering::SeqCst);
     // Bitcoin replaces the blocks 100 and 101 with one block. The rollback
-    // of block 101 fails, and the loop ends by itself.
+    // of block 101 fails, and so does every attempt of the loop to start
+    // consensus again.
     let target = btc.reorg(2, 1);
-    wait_until(|| async { consensus.manager().status() == crate::ConsensusStatus::Stopped }).await;
-    assert!(consensus.shutdown().await.is_err());
+    wait_until(|| async {
+        let pending = journal.bitcoin_journal().pending_entry().await;
+        pending.unwrap().is_some()
+    })
+    .await;
     let interrupted = journal
         .bitcoin_journal()
         .pending_entry()
@@ -537,8 +541,9 @@ async fn consensus_continues_a_reorg_from_the_cursor_recovered_after_a_rollback_
     );
     assert!(interrupted.operation.rollback_plan.is_some());
     assert_eq!(cursor.get_cursor().await.unwrap(), second);
+    // Nobody starts consensus again: once the failure is gone, the loop
+    // does, and the watcher goes back to the block consensus is at.
     chain_failure.store(false, Ordering::SeqCst);
-    consensus.startup(btc.source()).await.unwrap();
     wait_until(|| async { cursor.get_cursor().await.unwrap() == target }).await;
     consensus.shutdown().await.unwrap();
     assert!(

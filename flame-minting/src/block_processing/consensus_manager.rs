@@ -247,7 +247,13 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusManager
             let event = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => return Ok(()),
-                event = receiver.recv() => event.ok_or(ConsensusManagerError::QueueClosed)?,
+                event = receiver.recv() => match event {
+                    Some(event) => event,
+                    // Whoever stops the worker cancels it and then closes its
+                    // queue, and both can happen within this one poll.
+                    None if cancellation.is_cancelled() => return Ok(()),
+                    None => return Err(ConsensusManagerError::QueueClosed),
+                },
             };
             if state.borrow().status != ConsensusStatus::Running {
                 return Ok(());
@@ -289,10 +295,12 @@ pub enum ConsensusManagerError<B, F, J> {
 fn stop_worker(state: &watch::Sender<ConsensusDeliveryState>) {
     state.send_modify(|state| {
         state.status = ConsensusStatus::Stopped;
-        state.sender = None;
+        // The worker is cancelled before its queue is closed: a worker that
+        // wakes up on a closed queue has to see that it was stopped.
         if let Some(cancellation) = state.cancellation.take() {
             cancellation.cancel();
         }
+        state.sender = None;
     });
 }
 

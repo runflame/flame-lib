@@ -25,6 +25,11 @@ use crate::watcher::types::{BlockId, Prevouts};
 /// is bounded ([`BtcStorage::capacity`]). The watcher does not ask the source
 /// for a block that is already here.
 ///
+/// After [`crate::watcher::BtcWatcher::rewind_to`] the storage also holds the
+/// blocks above the block the view went back to. The events name them again,
+/// unless Bitcoin has replaced them by then: such a block stays until a
+/// bounded storage drops it.
+///
 /// Many callers need only the header, so it has a method of its own,
 /// [`BlockIndex::header`]: a database can keep headers apart from
 /// transactions. The implementations are in [`crate::watcher::impls`], both in memory;

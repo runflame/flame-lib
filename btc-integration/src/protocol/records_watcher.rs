@@ -4,7 +4,7 @@
 use thiserror::Error;
 
 use crate::protocol::{BtcBlockRecords, BtcRecordsError, BtcRecordsEvent};
-use crate::watcher::{BtcEvent, BtcStorage, BtcView, BtcWatcher, ChainSource, WatchError};
+use crate::watcher::{BlockId, BtcEvent, BtcStorage, BtcView, BtcWatcher, ChainSource, WatchError};
 
 /// A [`BtcWatcher`] that gives out the Flame transactions of the new blocks
 /// with every event: [`BtcRecordsEvent`] in place of [`BtcEvent`].
@@ -26,12 +26,18 @@ impl<S: ChainSource, B: BtcStorage> BtcRecordsWatcher<S, B> {
         self.watcher.view()
     }
 
+    /// Moves the view to `block`: the next event is the difference from it.
+    /// See [`BtcWatcher::rewind_to`].
+    pub fn rewind_to(&mut self, block: BlockId) {
+        self.watcher.rewind_to(block);
+    }
+
     /// The next change of the view: [`BtcWatcher::next`], with the new blocks
     /// read from the storage.
     ///
     /// The view moves before the blocks are read. If they cannot be read, or
-    /// the future is dropped while they are, the event is lost: that error is
-    /// fatal.
+    /// the future is dropped while they are, the view is past the event: the
+    /// caller gets it again with [`BtcRecordsWatcher::rewind_to`].
     pub async fn next(&mut self) -> Result<BtcRecordsEvent, BtcRecordsWatchError> {
         let event = self.watcher.next().await?;
         let mut blocks = Vec::with_capacity(event.blocks().len());
@@ -63,12 +69,14 @@ pub enum BtcRecordsWatchError {
 impl BtcRecordsWatchError {
     /// Retrying after a fatal error is pointless: the node stops.
     ///
-    /// An event whose blocks were not read does not come again, so every
-    /// error of reading them is fatal.
+    /// A block that the storage did not give can be read after
+    /// [`BtcRecordsWatcher::rewind_to`]. Endorsements that cannot be checked
+    /// stay that way.
     pub fn is_fatal(&self) -> bool {
         match self {
             BtcRecordsWatchError::Watch(error) => error.is_fatal(),
-            BtcRecordsWatchError::Records(_) => true,
+            BtcRecordsWatchError::Records(BtcRecordsError::Endorsements(_)) => true,
+            BtcRecordsWatchError::Records(_) => false,
         }
     }
 }
