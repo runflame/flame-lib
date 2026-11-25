@@ -467,6 +467,7 @@ dependencies = [
  "flamevm",
  "futures",
  "jsonrpc",
+ "percent-encoding",
  "rand 0.8.8",
  "readerwriter",
  "serde",

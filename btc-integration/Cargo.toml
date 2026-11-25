@@ -35,6 +35,8 @@ corepc-client = "0.19.0"
 # The error type of the RPC client: it tells a refusal of Bitcoin Core from a
 # node that did not answer.
 jsonrpc = { version = "0.21", default-features = false }
+# The name of a wallet in the URL of its RPC.
+percent-encoding = "2"
 serde = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["time"] }

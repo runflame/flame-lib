@@ -176,6 +176,30 @@ async fn a_wallet_pays_again_before_a_block_confirms_its_change() -> bitcoind::a
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wallet_is_found_by_a_name_that_an_url_does_not_take_as_it_is()
+-> bitcoind::anyhow::Result<()> {
+    let ctx = setup()?;
+    let name = "coins #1";
+    ctx.node.client.create_wallet(name)?;
+    let output = TxOut {
+        value: Amount::from_sat(10_000),
+        script_pubkey: ctx.node.client.new_address()?.script_pubkey(),
+    };
+
+    let sent = RpcWallet::new(&ctx.bitcoin_config(), name)?
+        .send(output)
+        .await;
+
+    // The wallet is new and has no coins. Had it not been found, the refusal
+    // would say that there is no such wallet.
+    assert!(
+        matches!(&sent, Err(WalletError::Refused(why)) if why.contains("Insufficient funds")),
+        "{sent:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_node_that_does_not_answer_is_told_apart_from_a_refusal() -> bitcoind::anyhow::Result<()>
 {
