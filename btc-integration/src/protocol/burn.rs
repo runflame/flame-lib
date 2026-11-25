@@ -2,7 +2,7 @@ use crate::protocol::consts::{
     BURN_MAGIC, BURN_PAYLOAD_LEN, BURN_WITH_DURATION_PAYLOAD_LEN, VERSION_V1,
 };
 use crate::protocol::minter_p2wsh::MinterP2wsh;
-use crate::protocol::{push_bytes, read_predicate};
+use crate::protocol::read_predicate;
 use bitcoin::opcodes::all::OP_RETURN;
 use bitcoin::{Amount, ScriptBuf, Transaction, TxOut, Txid};
 use flamevm::Predicate;
@@ -79,15 +79,21 @@ impl BurnData {
     }
 
     pub fn to_script(&self) -> ScriptBuf {
-        let mut payload = Vec::with_capacity(BURN_WITH_DURATION_PAYLOAD_LEN);
-        payload.extend_from_slice(&BURN_MAGIC);
-        payload.push(self.version);
-        payload.extend_from_slice(self.minter_p2wsh.as_bytes());
-        payload.extend_from_slice(self.access_predicate.to_point().as_bytes());
+        let payload_len = if self.duration.is_some() {
+            BURN_WITH_DURATION_PAYLOAD_LEN
+        } else {
+            BURN_PAYLOAD_LEN
+        };
+        let mut script = Vec::with_capacity(2 + payload_len);
+        script.extend_from_slice(&[OP_RETURN.to_u8(), payload_len as u8]);
+        script.extend_from_slice(&BURN_MAGIC);
+        script.push(self.version);
+        script.extend_from_slice(self.minter_p2wsh.as_bytes());
+        script.extend_from_slice(self.access_predicate.to_point().as_bytes());
         if let Some(duration) = self.duration {
-            payload.extend_from_slice(&duration.to_le_bytes());
+            script.extend_from_slice(&duration.to_le_bytes());
         }
-        ScriptBuf::new_op_return(push_bytes(payload))
+        ScriptBuf::from_bytes(script)
     }
 
     /// The output that burns `amount`.

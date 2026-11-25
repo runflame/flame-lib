@@ -1,6 +1,5 @@
 use crate::protocol::consts::{MINTING_MAGIC, MINTING_PAYLOAD_LEN, VERSION_V1};
 use crate::protocol::minter_identity::MinterIdentity;
-use crate::protocol::push_bytes;
 use bitcoin::opcodes::all::{OP_PUSHBYTES_41, OP_RETURN};
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid};
 use flamechain::{BlockHash, CoreFlameHeight};
@@ -137,12 +136,13 @@ impl MintingEndorsementData {
             flame_block_height,
             flame_block_hash,
         } = self;
-        let mut payload = Vec::with_capacity(MINTING_PAYLOAD_LEN);
-        payload.extend_from_slice(&MINTING_MAGIC);
-        payload.push(VERSION_V1);
-        payload.extend_from_slice(&flame_block_height.to_le_bytes());
-        payload.extend_from_slice(flame_block_hash.as_bytes());
-        ScriptBuf::new_op_return(push_bytes(payload))
+        let mut script = Vec::with_capacity(2 + MINTING_PAYLOAD_LEN);
+        script.extend_from_slice(&[OP_RETURN.to_u8(), OP_PUSHBYTES_41.to_u8()]);
+        script.extend_from_slice(&MINTING_MAGIC);
+        script.push(VERSION_V1);
+        script.extend_from_slice(&flame_block_height.to_le_bytes());
+        script.extend_from_slice(flame_block_hash.as_bytes());
+        ScriptBuf::from_bytes(script)
     }
 
     /// The output that carries the endorsement. It holds no value.

@@ -4,14 +4,13 @@
 //! authorization suffix is `<compressed-public-key> OP_CHECKSIG`: a single key.
 
 use bitcoin::opcodes::all::{OP_CHECKSIG, OP_DROP, OP_PUSHBYTES_33, OP_PUSHBYTES_68};
-use bitcoin::script::Builder;
 use bitcoin::{Script, ScriptBuf, secp256k1::PublicKey};
 use ed25519_dalek::VerifyingKey;
 use flamevm::Predicate;
 use readerwriter::{ReadError, Reader};
 use thiserror::Error;
 
-use super::{push_bytes, read_predicate};
+use super::read_predicate;
 
 const MINTER_AUTH_MAGIC: [u8; 4] = *b"FLMV";
 const AUTH_PREFIX_LEN: usize = 1 + MINTER_AUTH_MAGIC.len() + 32 + 32 + 1;
@@ -39,11 +38,14 @@ pub fn build(
     validator_pubkey: &VerifyingKey,
     public_key: &PublicKey,
 ) -> ScriptBuf {
-    let authorization = Builder::new()
-        .push_slice(public_key.serialize())
-        .push_opcode(OP_CHECKSIG)
-        .into_script();
-    build_with_authorization(predicate, validator_pubkey, &authorization)
+    let mut authorization = vec![OP_PUSHBYTES_33.to_u8()];
+    authorization.extend_from_slice(&public_key.serialize());
+    authorization.push(OP_CHECKSIG.to_u8());
+    build_with_authorization(
+        predicate,
+        validator_pubkey,
+        Script::from_bytes(&authorization),
+    )
 }
 
 pub fn build_with_authorization(
@@ -51,14 +53,11 @@ pub fn build_with_authorization(
     validator_pubkey: &VerifyingKey,
     authorization: &Script,
 ) -> ScriptBuf {
-    let mut data = Vec::new();
-    data.extend_from_slice(&MINTER_AUTH_MAGIC);
-    data.extend_from_slice(predicate.to_point().as_bytes());
-    data.extend_from_slice(validator_pubkey.as_bytes());
-    let mut script = Builder::new()
-        .push_slice(push_bytes(data))
-        .push_opcode(OP_DROP)
-        .into_bytes();
+    let mut script = vec![OP_PUSHBYTES_68.to_u8()];
+    script.extend_from_slice(&MINTER_AUTH_MAGIC);
+    script.extend_from_slice(predicate.to_point().as_bytes());
+    script.extend_from_slice(validator_pubkey.as_bytes());
+    script.push(OP_DROP.to_u8());
     script.extend_from_slice(authorization.as_bytes());
     ScriptBuf::from_bytes(script)
 }
