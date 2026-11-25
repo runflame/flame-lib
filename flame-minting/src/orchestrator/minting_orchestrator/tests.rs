@@ -162,7 +162,8 @@ async fn starts_the_sender_then_consensus_then_the_minter() {
     orchestrator.startup().await.unwrap();
 
     let seen = *orchestrator.minter_manager.seen_at_startup.lock().unwrap();
-    assert_eq!(seen, Some((true, Some(btc.best()))));
+    // Bitcoin has no new block: the minter has not heard of one yet.
+    assert_eq!(seen, Some((true, None)));
     assert_eq!(
         consensus_status(&orchestrator),
         crate::ConsensusStatus::Running

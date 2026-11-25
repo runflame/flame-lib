@@ -101,7 +101,10 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
             RecentBlocks::default(),
             BtcView::restore(self.genesis_id, cursor),
         ));
-        self.best.send_replace(Some(cursor));
+        // The minter hears of a block with the first event. The block
+        // consensus stopped at is not told: Bitcoin may be past it, and the
+        // minter would endorse a core block that is late.
+        self.best.send_replace(None);
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
         let manager = self.manager.clone();
@@ -168,6 +171,13 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
                             // The minter hears of the blocks once they are in
                             // the queue, before consensus has applied them:
                             // it endorses a core block without waiting.
+                            //
+                            // TODO: when Bitcoin is more than one event ahead,
+                            // this is a block of the past. The minter should
+                            // endorse the core block of a past Bitcoin block
+                            // only while that block is a few blocks old
+                            // (`max_endorsement_delay` is 10), and skip the
+                            // older ones.
                             best.send_replace(Some(watcher.view().best()));
                         }
                         continue;

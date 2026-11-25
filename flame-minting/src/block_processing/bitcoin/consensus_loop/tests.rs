@@ -117,14 +117,35 @@ async fn the_loop_follows_bitcoin_from_the_block_consensus_recovered() {
     let chain = btc.best_chain();
     // Consensus stopped at block 2, and Bitcoin is at block 3.
     let consensus = consensus(&chain[..=2], false);
-    let best = consensus.subscribe();
+    let mut best = consensus.subscribe();
     consensus.startup(btc.source()).await.unwrap();
-    assert_eq!(*best.borrow(), Some(chain[2]));
+
+    // The first block the minter hears of is the best block of Bitcoin, not
+    // the block consensus stopped at.
+    let heard = *best.wait_for(Option::is_some).await.unwrap();
+    assert_eq!(heard, Some(chain[3]));
 
     wait_until(|| async { !cursors(&consensus).is_empty() }).await;
     consensus.shutdown().await.unwrap();
     assert_eq!(cursors(&consensus), vec![chain[3]]);
-    assert_eq!(*best.borrow(), Some(chain[3]));
+}
+
+#[tokio::test]
+async fn a_loop_started_again_forgets_the_best_block_of_the_last_run() {
+    let btc = MemoryBtc::new();
+    let consensus = consensus(&[btc.best()], false);
+    let best = consensus.subscribe();
+    consensus.startup(btc.source()).await.unwrap();
+    let old = btc.mine();
+    wait_until(|| async { !cursors(&consensus).is_empty() }).await;
+    consensus.shutdown().await.unwrap();
+    btc.mine();
+
+    consensus.startup(btc.source()).await.unwrap();
+
+    // Bitcoin went on while the loop was down.
+    assert_ne!(*best.borrow(), Some(old));
+    consensus.shutdown().await.unwrap();
 }
 
 #[tokio::test]
