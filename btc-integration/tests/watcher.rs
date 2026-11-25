@@ -210,10 +210,11 @@ fn a_failed_download_is_retried_without_a_new_search() {
     assert_eq!(*watcher.view(), before);
 
     // The retry keeps the path it has found and the block it has stored: it
-    // only downloads the two blocks that are missing.
+    // downloads the two blocks that are missing and checks that the best
+    // chain still has them.
     let calls = btc.calls();
     assert_eq!(heights(&event(&mut watcher)), [6, 7, 8]);
-    assert_eq!(btc.calls() - calls, 2);
+    assert_eq!(btc.calls() - calls, 3);
 }
 
 #[test]
@@ -479,14 +480,14 @@ fn a_restart_continues_from_the_saved_view() {
     let saved = BtcView::restore(genesis_id, best);
 
     // The storage survived the restart. The source is asked for the best
-    // block, three headers and three blocks. The header of the removed block
-    // comes from the storage.
+    // block, three headers and three blocks, and whether its best chain still
+    // has them. The header of the removed block comes from the storage.
     let before = btc.calls();
     let mut watcher = BtcWatcher::resume(btc.source(), storage, saved);
     let got = event(&mut watcher);
     assert_eq!(got.removed().len(), 1);
     assert_eq!(heights(&got), [5, 6, 7]);
-    assert_eq!(btc.calls() - before, 7);
+    assert_eq!(btc.calls() - before, 8);
 
     // The storage did not survive. The event is the same, and it costs one
     // more request: the header of the removed block comes from the source.
@@ -495,7 +496,7 @@ fn a_restart_continues_from_the_saved_view() {
     let got = event(&mut watcher);
     assert_eq!(got.removed().len(), 1);
     assert_eq!(heights(&got), [5, 6, 7]);
-    assert_eq!(btc.calls() - before, 8);
+    assert_eq!(btc.calls() - before, 9);
 }
 
 #[test]
@@ -511,8 +512,9 @@ fn blocks_already_in_the_storage_are_not_requested_again() {
     let before = btc.calls();
     let mut watcher = BtcWatcher::new(btc.source(), storage, genesis_id);
     assert_eq!(heights(&event(&mut watcher)), [3, 4, 5]);
-    // The only source call asks for the best block.
-    assert_eq!(btc.calls() - before, 1);
+    // The source is asked for the best block, and whether its best chain
+    // still has the blocks.
+    assert_eq!(btc.calls() - before, 2);
 }
 
 /// A watcher started from the best block of the source, ready now.
@@ -821,6 +823,32 @@ fn blocks_that_went_stale_while_waiting_do_not_block_the_watcher() {
     assert_eq!(watcher.view().best(), new_best);
 }
 
+#[test]
+fn blocks_that_went_stale_while_waiting_are_not_reported() {
+    let btc = MemoryBtc::new();
+    let genesis_id = btc.best();
+    btc.mine_n(3);
+    let mut watcher =
+        BtcWatcher::new(btc.source(), MemoryStorage::new(), genesis_id).max_blocks_per_event(1);
+    let storage = watcher.storage().clone();
+
+    // Block 1 is reported; blocks 2 and 3 are found and wait for their turn.
+    assert_eq!(heights(&event(&mut watcher)), [1]);
+
+    // While they waited a reorg replaced them. The source still has them.
+    let stale = [btc.block_at(2).unwrap(), btc.block_at(3).unwrap()];
+    let new_best = btc.reorg(2, 3);
+
+    // The watcher forgot the stale path and found a new one from the best
+    // block of the source.
+    while let Some(event) = watcher.next().now_or_never() {
+        assert!(matches!(event.unwrap(), BtcEvent::NewBlocks { .. }));
+    }
+    assert_eq!(watcher.view().best(), new_best);
+    // The block downloaded for the stale path left the storage.
+    assert!(stale.iter().all(|block| !storage.contains(*block)));
+}
+
 /// A source where Bitcoin grows by one block during the first download.
 struct Grows {
     inner: MemorySource,
@@ -868,6 +896,121 @@ fn a_block_that_appears_during_a_download_comes_in_the_next_event() {
 
     assert_eq!(heights(&event(&mut watcher)), [3]);
     assert!(waits(&mut watcher));
+}
+
+/// A source where Bitcoin changes right after the source has told its best
+/// block: the watcher follows a path to a block that is no longer the best.
+struct Changes {
+    inner: MemorySource,
+    change: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl BlockIndex for Changes {
+    type Error = SourceError;
+
+    async fn header(&self, id: BlockId) -> Result<Option<Header>, SourceError> {
+        self.inner.header(id).await
+    }
+}
+
+impl ChainSource for Changes {
+    async fn block(&self, hash: BlockHash) -> Result<Option<(Block, Prevouts)>, SourceError> {
+        self.inner.block(hash).await
+    }
+
+    async fn wait_for_new_block(&self, known: BlockHash) -> Result<BlockId, SourceError> {
+        let best = self.inner.wait_for_new_block(known).await?;
+        let change = self.change.lock().unwrap().take();
+        if let Some(change) = change {
+            change();
+        }
+        Ok(best)
+    }
+}
+
+#[test]
+fn blocks_replaced_during_a_call_are_not_reported() {
+    let btc = MemoryBtc::new();
+    let genesis_id = btc.best();
+    let replaced = btc.mine_n(2);
+    let reorg = {
+        let btc = btc.clone();
+        move || {
+            btc.reorg(1, 2);
+        }
+    };
+    let source = Changes {
+        inner: btc.source(),
+        change: Mutex::new(Some(Box::new(reorg))),
+    };
+    let mut watcher = BtcWatcher::new(source, MemoryStorage::new(), genesis_id);
+    let storage = watcher.storage().clone();
+
+    // The source tells block 2 as its best block, and a reorg replaces it. The
+    // watcher has found and stored the old blocks by then: it drops them and
+    // reports the new branch.
+    let got = event(&mut watcher);
+    assert!(matches!(got, BtcEvent::NewBlocks { .. }));
+    assert_eq!(heights(&got), [1, 2, 3]);
+    assert_eq!(watcher.view().best(), btc.best());
+    assert!(!storage.contains(replaced));
+}
+
+#[test]
+fn a_chain_that_got_shorter_during_a_call_is_not_reported() {
+    let btc = MemoryBtc::new();
+    let genesis_id = btc.best();
+    let removed = btc.mine();
+    let rollback = {
+        let btc = btc.clone();
+        move || btc.set_best(genesis_id)
+    };
+    let source = Changes {
+        inner: btc.source(),
+        change: Mutex::new(Some(Box::new(rollback))),
+    };
+    let mut watcher = BtcWatcher::new(source, MemoryStorage::new(), genesis_id);
+    let storage = watcher.storage().clone();
+
+    // The source tells block 1 as its best block and goes back to the genesis
+    // block. There is nothing to report.
+    assert!(waits(&mut watcher));
+    assert_eq!(watcher.view().best(), genesis_id);
+    assert!(!storage.contains(removed));
+}
+
+#[test]
+fn a_rollback_to_a_block_that_was_replaced_is_not_reported() {
+    let btc = MemoryBtc::new();
+    let genesis_id = btc.best();
+    btc.mine_n(3);
+    let source = Changes {
+        inner: btc.source(),
+        change: Mutex::new(None),
+    };
+    let mut watcher = BtcWatcher::new(source, MemoryStorage::new(), genesis_id);
+    assert_eq!(heights(&event(&mut watcher)), [1, 2, 3]);
+    let [first, second, third] = [1, 2, 3].map(|height| btc.block_at(height).unwrap());
+
+    // The source goes back to block 2, tells it as its best block, and a
+    // reorg replaces it with a branch from block 1.
+    btc.set_best(second);
+    let reorg = {
+        let btc = btc.clone();
+        move || {
+            btc.reorg(1, 2);
+        }
+    };
+    *watcher.source().change.lock().unwrap() = Some(Box::new(reorg));
+
+    // No rollback to block 2: the event is the reorg from block 1.
+    let got = event(&mut watcher);
+    assert!(matches!(
+        &got,
+        BtcEvent::Reorg { fork, removed, .. } if *fork == first && *removed == [third, second]
+    ));
+    assert_eq!(heights(&got), [2, 3]);
+    assert_eq!(watcher.view().best(), btc.best());
 }
 
 /// A storage whose next write or next removal fails, like a database that is
@@ -1114,9 +1257,9 @@ fn a_rewound_watcher_reports_the_blocks_above_again() {
     let blocks = vec![fourth, fifth];
     assert_eq!(event(&mut watcher), BtcEvent::NewBlocks { blocks });
     assert_eq!(watcher.view().best(), fifth);
-    // The blocks were still in the storage: the only source call asks for
-    // the best block.
-    assert_eq!(btc.calls() - before, 1);
+    // The blocks were still in the storage: the source is asked for the best
+    // block, and whether its best chain still has the blocks.
+    assert_eq!(btc.calls() - before, 2);
     assert!(waits(&mut watcher));
 }
 

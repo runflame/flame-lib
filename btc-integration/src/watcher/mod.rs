@@ -322,7 +322,18 @@ impl<S: ChainSource, B: BtcStorage> BtcWatcher<S, B> {
                 return Err(SourceError(format!("the source no longer has block {gone}")).into());
             }
 
-            // 4. No awaits below: the event, the view and the rest of the path
+            // 4. The best chain of the source may have moved since the path
+            //    was found. If the block the view is about to move to is no
+            //    longer on it, nothing is reported: forget the path, and the
+            //    blocks stored for it go out.
+            let last = blocks.last().copied().unwrap_or(branch.fork);
+            if self.source.block_at(last.height).await? != Some(last) {
+                self.pending = None;
+                self.stale.extend(&blocks);
+                continue;
+            }
+
+            // 5. No awaits below: the event, the view and the rest of the path
             //    change together.
             let branch = self.pending.as_mut().expect("a path is pending");
             let event = if branch.removed.is_empty() {
