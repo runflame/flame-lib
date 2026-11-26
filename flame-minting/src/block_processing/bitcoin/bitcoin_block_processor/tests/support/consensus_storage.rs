@@ -141,7 +141,7 @@ impl ConsensusStorage for Consensus {
 
     async fn store_endorsement(
         &self,
-        tip: BtcBlockTip,
+        tip: BlockId,
         endorsement: &WeightedEndorsement,
     ) -> Result<(), Self::Error> {
         self.before_write(ApplyStage::StoreEndorsements).await;
@@ -154,7 +154,7 @@ impl ConsensusStorage for Consensus {
 
     async fn store_acquisition(
         &self,
-        tip: BtcBlockTip,
+        tip: BlockId,
         acquisition: &IncludedAcquisition,
     ) -> Result<(), Self::Error> {
         self.before_write(ApplyStage::StoreAcquisitions).await;

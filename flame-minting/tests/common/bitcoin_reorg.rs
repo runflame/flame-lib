@@ -1,14 +1,15 @@
 use std::sync::Arc;
 
-use btc_integration::{
-    Acquisition, AcquisitionData, AuthenticatedMintingEndorsement, BtcBlockTip, IndexedBlock,
-    MintingEndorsementValidator, UncheckedMintingEndorsement, protocol::minter_witness_script,
-};
-use corepc_client::bitcoin::{
+use bitcoin::{
     Amount, BlockHash as BitcoinBlockHash, Script, ScriptBuf, Transaction, TxIn, TxOut, Witness,
     absolute, hashes::Hash, transaction,
 };
+use btc_integration::{
+    AuthenticatedMintingEndorsement, Burn, BurnData, MintingEndorsementValidator,
+    UncheckedMintingEndorsement, protocol::minter_witness_script, watcher::BlockId,
+};
 use flame_chain_service::{ChainAccess, InMemoryChain};
+use flame_minting::BtcBlockRecords;
 use flame_minting::{
     block_processing::{
         BitcoinBlockProcessor,

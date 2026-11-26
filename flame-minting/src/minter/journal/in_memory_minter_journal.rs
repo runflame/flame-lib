@@ -1,6 +1,6 @@
 use super::{EndorsementReservation, MinterJournal};
+use bitcoin::Txid;
 use btc_integration::{AuthenticatedMintingEndorsement, MintingEndorsementData};
-use corepc_client::bitcoin::Txid;
 use flamechain::{BlockHash, CoreFlameHeight};
 use std::{
     collections::{BTreeMap, btree_map::Entry},

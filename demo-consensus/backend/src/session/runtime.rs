@@ -2,10 +2,12 @@ use std::{convert::Infallible, num::NonZeroU16, sync::Arc};
 
 use anyhow::Result;
 use btc_integration::{
-    BitcoinConfig, BitcoinFacade, BtcBlockTip, IdentityConfig, IdentityManager, IndexedBlock,
-    ProtocolIndexerV31, btc::rpc::Core31RpcApi, identity::storage::InMemorySecretStorage,
+    BitcoinConfig, IdentityConfig,
+    identity::impls::LocalKey,
+    watcher::{BlockId, impls::RpcSource},
 };
 use flame_chain_service::InMemoryChain;
+use flame_minting::BtcBlockRecords;
 use flame_minting::{
     MintingOrchestrator,
     block_processing::{
@@ -57,7 +59,7 @@ type DemoLoop = ConsensusLoop<
 >;
 type Orchestrator = MintingOrchestrator<
     Arc<MintingSender>,
-    Arc<ProtocolIndexerV31>,
+    Arc<RpcSource>,
     DemoLoop,
     MinterManager<InMemoryChain, MintingSender, InMemoryMinterJournal>,
     InMemoryChain,
@@ -66,7 +68,7 @@ type Orchestrator = MintingOrchestrator<
 
 #[derive(Clone)]
 pub(super) struct RecordedBlock {
-    pub block: IndexedBlock,
+    pub block: BtcBlockRecords,
     pub outcome: MintingOutcome,
 }
 
@@ -94,7 +96,7 @@ impl ConsensusEngine for RecordingEngine {
 
     async fn get_minting_outcome(
         &self,
-        block: IndexedBlock,
+        block: BtcBlockRecords,
     ) -> Result<MintingOutcome, Self::Error> {
         let outcome = self.inner.get_minting_outcome(block.clone()).await?;
         self.history.lock().await.push(RecordedBlock {
@@ -129,8 +131,9 @@ impl DemoRuntime {
     pub fn new(
         chain: InMemoryChain,
         bitcoin: BitcoinConfig,
-        cursor: BtcBlockTip,
-        identity: IdentityConfig,
+        cursor: BlockId,
+        identity: &IdentityConfig,
+        identity_key: Arc<LocalKey>,
     ) -> Result<Self> {
         let parameters = Arc::new(MintingProtocolParams {
             acquisition_maturity: 1,
@@ -143,19 +146,12 @@ impl DemoRuntime {
         let canonical = InMemoryCanonicalStorage::new();
         let journal = InMemoryConsensusJournal::new(cursor);
         let rewards = InMemoryRewardsStorage::new();
+        let lowest_block = cursor;
         let cursor = InMemoryCursorStorage::new(cursor);
         let history = Arc::new(Mutex::new(Vec::new()));
-        let identity_manager = Arc::new(IdentityManager::new(
-            Arc::new(InMemorySecretStorage::default()),
-            identity,
-        ));
-        let btc_indexer = Arc::new(ProtocolIndexerV31::new(Arc::new(BitcoinFacade::new(
-            Arc::new(Core31RpcApi::new(
-                &bitcoin.node_rpc_url,
-                bitcoin.auth.clone(),
-            )?),
-        ))));
-        let btc_sender = Arc::new(MintingSender::new(bitcoin, identity_manager.clone()));
+        let identity = identity.identity(&identity_key);
+        let btc_source = Arc::new(RpcSource::new(&bitcoin)?);
+        let btc_sender = Arc::new(MintingSender::new(bitcoin, identity.clone(), identity_key));
         let bitcoin_processor = BitcoinBlockProcessor::new(
             RecordingEngine {
                 inner: Engine {
@@ -197,11 +193,10 @@ impl DemoRuntime {
             },
             journal.flame_journal(),
         );
-        let consensus_manager = ConsensusLoop::new(ConsensusManager::new(
-            bitcoin_processor,
-            flame_processor,
-            journal,
-        ));
+        let consensus_manager = ConsensusLoop::new(
+            ConsensusManager::new(bitcoin_processor, flame_processor, journal),
+            lowest_block,
+        );
         let minter_manager = MinterManager::new(
             Arc::new(chain.clone()),
             btc_sender.clone(),
@@ -209,9 +204,9 @@ impl DemoRuntime {
             EndorsementPolicy::Manual,
         );
         let orchestrator = MintingOrchestrator {
-            identity_manager,
+            identity,
             btc_sender,
-            btc_indexer,
+            btc_source,
             consensus_manager,
             minter_manager,
             chain_manager: chain,

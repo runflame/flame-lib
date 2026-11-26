@@ -1,9 +1,9 @@
-use btc_integration::{
-    MintingEndorsementValidator, UncheckedMintingEndorsement, protocol::minter_witness_script,
-};
-use corepc_client::bitcoin::{
+use bitcoin::{
     Amount, Script, ScriptBuf, Transaction, TxIn, TxOut, Witness, absolute, hashes::Hash,
     script::PushBytes, transaction,
+};
+use btc_integration::{
+    MintingEndorsementValidator, UncheckedMintingEndorsement, protocol::minter_witness_script,
 };
 use flamevm::Predicate;
 

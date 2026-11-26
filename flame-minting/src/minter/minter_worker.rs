@@ -1,5 +1,5 @@
 use super::{MinterJournal, endorser::Endorser, sending::endorsement_sender::EndorsementSender};
-use btc_integration::BtcBlockTip;
+use btc_integration::watcher::BlockId;
 use flame_chain_service::CoreBlockSource;
 use std::{fmt::Debug, sync::Arc};
 use tokio::sync::watch;
@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 pub(super) struct MinterWorker<C, S, J> {
     core_block_source: Arc<C>,
     endorser: Arc<Endorser<S, J>>,
-    subscription: watch::Receiver<Option<BtcBlockTip>>,
+    subscription: watch::Receiver<Option<BlockId>>,
     cancellation: CancellationToken,
 }
 
@@ -24,7 +24,7 @@ where
     pub fn new(
         core_block_source: Arc<C>,
         endorser: Arc<Endorser<S, J>>,
-        subscription: watch::Receiver<Option<BtcBlockTip>>,
+        subscription: watch::Receiver<Option<BlockId>>,
         cancellation: CancellationToken,
     ) -> Self {
         Self {
@@ -51,7 +51,7 @@ where
                 _ = self.cancellation.cancelled() => return,
                 result = self.subscription.changed() => {
                     if result.is_err() {
-                        log::warn!("minter BTC indexer subscription closed");
+                        log::warn!("minter BTC subscription closed");
                         return;
                     }
                 }
@@ -59,7 +59,7 @@ where
         }
     }
 
-    async fn process_tip(&self, tip: BtcBlockTip) {
+    async fn process_tip(&self, tip: BlockId) {
         let Some(target_height) = tip.height.checked_add(1) else {
             log::error!("minter target BTC height overflow");
             return;

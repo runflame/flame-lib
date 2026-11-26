@@ -1,7 +1,5 @@
-use btc_integration::{Acquisition, AcquisitionData, BtcBlockTip};
-use corepc_client::bitcoin::{
-    Amount, BlockHash, Transaction, TxOut, Txid, absolute, hashes::Hash, transaction,
-};
+use bitcoin::{Amount, BlockHash, Transaction, TxOut, Txid, absolute, hashes::Hash, transaction};
+use btc_integration::{Burn, BurnData, watcher::BlockId};
 use flamevm::Predicate;
 
 use crate::consensus::{
@@ -10,7 +8,7 @@ use crate::consensus::{
 };
 
 fn acquisitions() -> [IncludedAcquisition; 2] {
-    let data = AcquisitionData::new(
+    let data = BurnData::new(
         [1; 32].into(),
         Predicate::opaque(Predicate::unspendable_key()),
     );
@@ -26,10 +24,10 @@ fn acquisitions() -> [IncludedAcquisition; 2] {
             })
             .collect(),
     };
-    Acquisition::from_tx(&transaction)
+    Burn::from_tx(&transaction)
         .into_iter()
         .map(|acquisition| IncludedAcquisition {
-            btc_block: BtcBlockTip {
+            btc_block: BlockId {
                 hash: BlockHash::from_byte_array([3; 32]),
                 height: 100,
             },
@@ -112,7 +110,7 @@ async fn restores_previous_bitcoin_inclusion_and_height_queries() {
     let [previous, _] = acquisitions();
     let index = AcquisitionIndex::from(&previous.acquisition);
     let mut current = previous.clone();
-    current.btc_block = BtcBlockTip {
+    current.btc_block = BlockId {
         hash: BlockHash::from_byte_array([4; 32]),
         height: 101,
     };

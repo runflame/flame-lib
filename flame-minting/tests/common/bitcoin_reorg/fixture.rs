@@ -59,9 +59,9 @@ impl Fixture {
         };
         node.canonical.commit_state(&self.initial).await.unwrap();
         register_block(&self.root, &blocks, &mut chain, &consensus).await;
-        node.apply(&IndexedBlock {
-            btc_block_tip: btc_tip(1, 0),
-            acquisitions: vec![acquisition(1, 1_000_000), acquisition(2, 100_000_000)],
+        node.apply(&BtcBlockRecords {
+            id: btc_tip(1, 0),
+            burns: vec![acquisition(1, 1_000_000), acquisition(2, 100_000_000)],
             endorsements: vec![],
         })
         .await;

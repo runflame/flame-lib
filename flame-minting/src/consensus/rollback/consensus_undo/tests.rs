@@ -7,10 +7,10 @@ use std::{
     },
 };
 
-use btc_integration::{Acquisition, AcquisitionData, BtcBlockTip, MinterP2wsh};
-use corepc_client::bitcoin::{
+use bitcoin::{
     Amount, BlockHash as BtcBlockHash, Transaction, TxOut, absolute, hashes::Hash, transaction,
 };
+use btc_integration::{Burn, BurnData, MinterP2wsh, watcher::BlockId};
 use flamechain::{BlockHash, Blockchain, ChainParams, CoreBlockHeader};
 use flamevm::Predicate;
 
@@ -20,8 +20,8 @@ use crate::consensus::{
     storage::InMemoryConsensusStorage,
 };
 
-fn btc_tip() -> BtcBlockTip {
-    BtcBlockTip {
+fn btc_tip() -> BlockId {
+    BlockId {
         hash: BtcBlockHash::from_byte_array([1; 32]),
         height: 100,
     }
@@ -53,7 +53,7 @@ fn included(minter: u8, height: u32, hash: u8) -> IncludedEndorsement {
 }
 
 fn acquisition(amount: u64) -> IncludedAcquisition {
-    let data = AcquisitionData::new(
+    let data = BurnData::new(
         [1; 32].into(),
         Predicate::opaque(Predicate::unspendable_key()),
     );
@@ -68,7 +68,7 @@ fn acquisition(amount: u64) -> IncludedAcquisition {
     };
     IncludedAcquisition {
         btc_block: btc_tip(),
-        acquisition: Acquisition::from_tx(&transaction).pop().unwrap(),
+        acquisition: Burn::from_tx(&transaction).pop().unwrap(),
     }
 }
 
@@ -326,7 +326,7 @@ async fn restores_existing_records_and_removes_new_records() {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ReadKey {
-    Acquisition(AcquisitionIndex),
+    Burn(AcquisitionIndex),
     Endorsement(MinterP2wsh, CoreFlameHeight),
     Pending(CoreBlockTip, EndorsementIndex),
     Weight(BlockTip),
@@ -420,7 +420,7 @@ impl ConsensusStorage for ReadOnceStorage {
         &self,
         index: AcquisitionIndex,
     ) -> Result<Option<IncludedAcquisition>, Self::Error> {
-        self.read(ReadKey::Acquisition(index))
+        self.read(ReadKey::Burn(index))
     }
 
     async fn get_minter_endorsement_for_height(
@@ -504,7 +504,7 @@ async fn captures_each_key_once_including_removed_and_accepted_endorsements() {
     assert_eq!(
         *storage.reads.lock().unwrap(),
         BTreeSet::from([
-            ReadKey::Acquisition(AcquisitionIndex::from(&acquisition.acquisition)),
+            ReadKey::Burn(AcquisitionIndex::from(&acquisition.acquisition)),
             ReadKey::Endorsement(minter, 1.into()),
             ReadKey::Pending(
                 first.endorsement.block_tip(),

@@ -1,4 +1,4 @@
-use corepc_client::bitcoin::hashes::Hash;
+use bitcoin::hashes::Hash;
 use flame_chain_service::ChainPath;
 use flamechain::{BlockHash as FlameBlockHash, BlockTip};
 use flamevm::Predicate;
@@ -30,14 +30,14 @@ const ROLLBACK_STAGES: [RollbackStage; 11] = [
     RollbackStage::StoreCursor,
 ];
 
-fn tip(height: u64, hash: u8) -> BtcBlockTip {
-    BtcBlockTip {
+fn tip(height: u64, hash: u8) -> BlockId {
+    BlockId {
         hash: BlockHash::from_byte_array([hash; 32]),
         height,
     }
 }
 
-fn outcome(btc_tip: BtcBlockTip) -> MintingOutcome {
+fn outcome(btc_tip: BlockId) -> MintingOutcome {
     MintingOutcome {
         consensus: crate::consensus::ConsensusOutcome::default(),
         next_btc_cursor: btc_tip,
@@ -90,14 +90,14 @@ fn changes(amount: u64) -> RewardsChanges {
     }
 }
 
-async fn advance_to_flame(journal: &InMemoryBitcoinBlockJournal, btc_tip: BtcBlockTip) {
+async fn advance_to_flame(journal: &InMemoryBitcoinBlockJournal, btc_tip: BlockId) {
     for stage in CONSENSUS_STAGES {
         journal.complete_apply_stage(btc_tip, stage).await.unwrap();
         journal.complete_apply_stage(btc_tip, stage).await.unwrap();
     }
 }
 
-async fn advance_to_rewards(journal: &InMemoryBitcoinBlockJournal, btc_tip: BtcBlockTip) {
+async fn advance_to_rewards(journal: &InMemoryBitcoinBlockJournal, btc_tip: BlockId) {
     advance_to_flame(journal, btc_tip).await;
     journal
         .store_flame_transition(btc_tip, &transition(1))
@@ -113,7 +113,7 @@ async fn advance_to_rewards(journal: &InMemoryBitcoinBlockJournal, btc_tip: BtcB
         .unwrap();
 }
 
-async fn finish_apply(journal: &InMemoryBitcoinBlockJournal, btc_tip: BtcBlockTip) {
+async fn finish_apply(journal: &InMemoryBitcoinBlockJournal, btc_tip: BlockId) {
     advance_to_rewards(journal, btc_tip).await;
     journal
         .store_rewards_changes(btc_tip, &changes(10))
@@ -128,7 +128,7 @@ async fn finish_apply(journal: &InMemoryBitcoinBlockJournal, btc_tip: BtcBlockTi
     }
 }
 
-async fn finish_rollback(journal: &InMemoryBitcoinBlockJournal, btc_tip: BtcBlockTip) {
+async fn finish_rollback(journal: &InMemoryBitcoinBlockJournal, btc_tip: BlockId) {
     journal.begin_rollback(btc_tip).await.unwrap();
     for stage in ROLLBACK_STAGES {
         journal

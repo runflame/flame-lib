@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
+use bitcoin::{Transaction, Txid};
 use btc_integration::{
-    Acquisition, AuthenticatedMintingEndorsement, MinterP2wsh, UncheckedMintingEndorsement,
+    AuthenticatedMintingEndorsement, Burn, MinterP2wsh, UncheckedMintingEndorsement,
 };
-use corepc_client::bitcoin::{Transaction, Txid};
 use flame_minting::{
     consensus::{ConsensusStorage, MintingProtocolParams},
     orchestrator::cursor_storage::CursorStorage,
@@ -44,7 +44,7 @@ impl DemoSession {
         };
         for record in history
             .iter()
-            .filter(|record| record.block.btc_block_tip.height <= cursor.height)
+            .filter(|record| record.block.id.height <= cursor.height)
         {
             builder.add_confirmed(record);
         }
@@ -95,11 +95,11 @@ impl DemoSession {
 
 impl ProtocolSnapshotBuilder<'_> {
     fn add_confirmed(&mut self, record: &RecordedBlock) {
-        let block = bitcoin_tip(record.block.btc_block_tip);
+        let block = bitcoin_tip(record.block.id);
         let transaction_status = TransactionStatus::Confirmed {
             block: block.clone(),
         };
-        for acquisition in &record.block.acquisitions {
+        for acquisition in &record.block.burns {
             let accepted = record
                 .outcome
                 .consensus
@@ -176,7 +176,7 @@ impl ProtocolSnapshotBuilder<'_> {
     }
 
     fn add_pending(&mut self, transaction: &Transaction) {
-        for acquisition in Acquisition::from_tx(transaction) {
+        for acquisition in Burn::from_tx(transaction) {
             self.add_acquisition(
                 &acquisition,
                 TransactionStatus::Mempool,
@@ -196,7 +196,7 @@ impl ProtocolSnapshotBuilder<'_> {
 
     fn add_acquisition(
         &mut self,
-        acquisition: &Acquisition,
+        acquisition: &Burn,
         transaction_status: TransactionStatus,
         processing_status: AcquisitionProcessingStatus,
     ) {

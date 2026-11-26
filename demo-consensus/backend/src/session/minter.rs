@@ -1,50 +1,65 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use bitcoin::{Address, Amount, Network, TxOut, Txid};
 use btc_integration::{
-    BitcoinConnection, IdentityManager, MinterIdentity, TestAcquisitionConfig, TestSender,
-    btc::rpc::Core31RpcApi, identity::storage::InMemorySecretStorage,
+    BtcWallet, BurnData, IdentityConfig, MinterIdentity, MinterWallet, MintingEndorsementData,
+    identity::impls::LocalKey, wallet::impls::RpcWatchOnlyWallet,
 };
-use corepc_client::bitcoin::{Address, Network};
 use flame_minting::consensus::{ConsensusStorage, storage::InMemoryConsensusStorage};
+use flamechain::BlockHash;
 
 use crate::types::{MinterId, MinterSnapshot};
 
 use super::bitcoin::BitcoinRegtest;
 
+const MINTER_FUNDING: Amount = Amount::from_sat(50_000);
+
 pub(super) struct DemoMinter {
     pub id: MinterId,
     pub name: String,
     pub identity: MinterIdentity,
-    pub sender: Arc<TestSender<Core31RpcApi, Arc<InMemorySecretStorage>>>,
+    burn: BurnData,
+    wallet: MinterWallet<RpcWatchOnlyWallet, Arc<LocalKey>>,
 }
 
 impl DemoMinter {
     pub async fn create(
         id: MinterId,
         name: String,
-        manager: &IdentityManager,
+        config: &IdentityConfig,
+        key: Arc<LocalKey>,
         bitcoin: &BitcoinRegtest,
     ) -> Result<Self> {
-        let identity = manager.startup().await?.clone();
-        let config = manager.config();
-        let connection = BitcoinConnection::regtest(
-            bitcoin.config(),
-            identity.clone(),
-            manager.secret_storage().clone(),
-            TestAcquisitionConfig {
-                wallet_rpc_url: bitcoin.wallet_rpc_url(),
-                access_predicate: config.access_predicate.clone(),
-            },
-        )
-        .await?;
-        bitcoin.fund_minter(&identity).await?;
+        let identity = config.identity(&key);
+        let script = identity.witness_script();
+        // The wallet first: it watches the script from the moment it is
+        // opened.
+        let watch_only = RpcWatchOnlyWallet::open(&bitcoin.config(), script).await?;
+        let funding = TxOut {
+            value: MINTER_FUNDING,
+            script_pubkey: script.to_p2wsh(),
+        };
+        bitcoin.pay(funding).await?;
         Ok(Self {
             id,
             name,
+            burn: BurnData::new(identity.p2wsh(), config.access_predicate.clone()),
+            wallet: MinterWallet::new(watch_only, key, identity.clone())?,
             identity,
-            sender: connection.get_sender(),
         })
+    }
+
+    pub async fn send_acquisition(&self, bitcoin: &BitcoinRegtest, amount: Amount) -> Result<Txid> {
+        bitcoin.pay(self.burn.to_output(amount)).await
+    }
+
+    pub async fn send_endorsement(&self, core_height: u32, hash: BlockHash) -> Result<Txid> {
+        let endorsement = MintingEndorsementData::V1 {
+            flame_block_height: core_height,
+            flame_block_hash: hash,
+        };
+        Ok(self.wallet.send(endorsement.to_output()).await?)
     }
 
     pub async fn snapshot(&self, consensus: &InMemoryConsensusStorage) -> Result<MinterSnapshot> {

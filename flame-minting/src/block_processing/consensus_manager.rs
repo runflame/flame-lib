@@ -1,8 +1,9 @@
 use super::{BlockProcessor, FlameProcessor, journal::consensus::ConsensusJournal};
 use crate::ConsensusHandle;
+use crate::block_processing::BtcBlockRecords;
 use crate::block_processing::journal::bitcoin::bitcoin_operation::BitcoinOperationKind;
 use crate::block_processing::journal::operation::ConsensusOperation;
-use btc_integration::{BtcBlockTip, IndexedBlock};
+use btc_integration::watcher::BlockId;
 use flamechain::BlockTip;
 use std::sync::Arc;
 use tokio::{
@@ -18,11 +19,11 @@ pub const CONSENSUS_QUEUE_CAPACITY: usize = 1024;
 
 #[derive(Clone, Debug)]
 enum ConsensusEvent {
-    NewBitcoinBlock(IndexedBlock),
+    NewBitcoinBlock(BtcBlockRecords),
     NewFlameBlockArrival(BlockTip),
     BitcoinReorg {
-        removed_block_tips: Vec<BtcBlockTip>,
-        new_blocks: Vec<IndexedBlock>,
+        removed_block_tips: Vec<BlockId>,
+        new_blocks: Vec<BtcBlockRecords>,
     },
 }
 
@@ -95,7 +96,10 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusManager
         ConsensusHandle::new(self.clone())
     }
 
-    pub(crate) fn new_bitcoin_block(&self, block: IndexedBlock) -> Result<(), ConsensusSendError> {
+    pub(crate) fn new_bitcoin_block(
+        &self,
+        block: BtcBlockRecords,
+    ) -> Result<(), ConsensusSendError> {
         self.enqueue(ConsensusEvent::NewBitcoinBlock(block))
     }
 
@@ -105,8 +109,8 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusManager
 
     pub(crate) fn bitcoin_reorg(
         &self,
-        removed_block_tips: Vec<BtcBlockTip>,
-        new_blocks: Vec<IndexedBlock>,
+        removed_block_tips: Vec<BlockId>,
+        new_blocks: Vec<BtcBlockRecords>,
     ) -> Result<(), ConsensusSendError> {
         self.enqueue(ConsensusEvent::BitcoinReorg {
             removed_block_tips,
@@ -178,7 +182,7 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusManager
         &self.bitcoin_processor
     }
 
-    pub async fn startup(&self) -> Result<BtcBlockTip, ManagerError<B, F, J>> {
+    pub async fn startup(&self) -> Result<BlockId, ManagerError<B, F, J>> {
         let mut slot = self.worker.lock().await;
         if slot.is_some() {
             return Err(ConsensusManagerError::AlreadyRunning);
@@ -237,13 +241,19 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusManager
         state: watch::Sender<ConsensusDeliveryState>,
         mut receiver: mpsc::Receiver<ConsensusEvent>,
         cancellation: CancellationToken,
-        mut cursor: BtcBlockTip,
+        mut cursor: BlockId,
     ) -> Result<(), ManagerError<B, F, J>> {
         loop {
             let event = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => return Ok(()),
-                event = receiver.recv() => event.ok_or(ConsensusManagerError::QueueClosed)?,
+                event = receiver.recv() => match event {
+                    Some(event) => event,
+                    // Whoever stops the worker cancels it and then closes its
+                    // queue, and both can happen within this one poll.
+                    None if cancellation.is_cancelled() => return Ok(()),
+                    None => return Err(ConsensusManagerError::QueueClosed),
+                },
             };
             if state.borrow().status != ConsensusStatus::Running {
                 return Ok(());
@@ -285,10 +295,12 @@ pub enum ConsensusManagerError<B, F, J> {
 fn stop_worker(state: &watch::Sender<ConsensusDeliveryState>) {
     state.send_modify(|state| {
         state.status = ConsensusStatus::Stopped;
-        state.sender = None;
+        // The worker is cancelled before its queue is closed: a worker that
+        // wakes up on a closed queue has to see that it was stopped.
         if let Some(cancellation) = state.cancellation.take() {
             cancellation.cancel();
         }
+        state.sender = None;
     });
 }
 
@@ -310,7 +322,7 @@ fn queue_overflow() -> ! {
 }
 
 impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusManager<B, F, J> {
-    async fn recover(&self) -> Result<BtcBlockTip, ManagerError<B, F, J>> {
+    async fn recover(&self) -> Result<BlockId, ManagerError<B, F, J>> {
         let latest = self
             .journal
             .latest_entry()
@@ -352,7 +364,7 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusManager
         bitcoin_processor: &B,
         flame_processor: &F,
         event: ConsensusEvent,
-        cursor: &mut BtcBlockTip,
+        cursor: &mut BlockId,
     ) -> Result<(), ManagerError<B, F, J>> {
         match event {
             ConsensusEvent::NewBitcoinBlock(block) => {

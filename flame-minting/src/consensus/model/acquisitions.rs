@@ -1,11 +1,11 @@
 use crate::consensus::MintingProtocolParams;
-use btc_integration::{Acquisition, BtcBlockTip};
-use corepc_client::bitcoin::Txid;
+use bitcoin::Txid;
+use btc_integration::{Burn, watcher::BlockId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IncludedAcquisition {
-    pub btc_block: BtcBlockTip,
-    pub acquisition: Acquisition,
+    pub btc_block: BlockId,
+    pub acquisition: Burn,
 }
 
 impl IncludedAcquisition {
@@ -37,8 +37,8 @@ pub struct AcquisitionIndex {
     pub output_index: usize,
 }
 
-impl From<&Acquisition> for AcquisitionIndex {
-    fn from(acquisition: &Acquisition) -> Self {
+impl From<&Burn> for AcquisitionIndex {
+    fn from(acquisition: &Burn) -> Self {
         Self {
             txid: acquisition.txid(),
             output_index: acquisition.output_index(),

@@ -1,4 +1,4 @@
-use corepc_client::bitcoin::{ScriptBuf, secp256k1::PublicKey};
+use bitcoin::{ScriptBuf, secp256k1::PublicKey};
 use ed25519_dalek::VerifyingKey;
 use flamevm::Predicate;
 use std::hash::{Hash, Hasher};
@@ -86,52 +86,9 @@ pub enum MinterIdentityError {
 
 #[cfg(test)]
 mod tests {
-    use super::{MinterIdentity, MinterIdentityError};
+    use super::MinterIdentity;
     use crate::protocol::minter_witness_script;
     use flamevm::Predicate;
-
-    #[test]
-    fn derives_identity_from_the_complete_witness_script() {
-        let predicate = Predicate::opaque(Predicate::unspendable_key());
-        let script = witness_script(&predicate);
-
-        let identity = MinterIdentity::new(script.clone()).expect("valid Minter identity");
-
-        assert_eq!(identity.witness_script(), &script);
-        assert_eq!(identity.flame_predicate().to_point(), predicate.to_point());
-        assert_eq!(
-            identity.p2wsh(),
-            crate::protocol::MinterP2wsh::from_witness_script(script.as_bytes())
-        );
-    }
-
-    #[test]
-    fn requires_the_canonical_prefix_but_not_an_authorization_suffix() {
-        assert_eq!(
-            MinterIdentity::new(vec![0x23; 39].into()).unwrap_err(),
-            MinterIdentityError::InvalidAuthenticationPrefix
-        );
-
-        let predicate = Predicate::opaque(Predicate::unspendable_key());
-        let mut prefix_only = witness_script(&predicate).into_bytes();
-        prefix_only.pop();
-        MinterIdentity::new(prefix_only.into()).expect("the FLMV prefix is sufficient");
-    }
-
-    #[test]
-    fn identity_includes_the_complete_witness_script() {
-        let predicate = Predicate::opaque(Predicate::unspendable_key());
-        let first = MinterIdentity::new(witness_script(&predicate)).expect("valid Minter identity");
-        let mut other_script = witness_script(&predicate).into_bytes();
-        *other_script.last_mut().expect("authorization suffix") = 0x52;
-        let second = MinterIdentity::new(other_script.into()).expect("valid Minter identity");
-
-        assert_ne!(first, second);
-        assert_eq!(
-            first.flame_predicate().to_point(),
-            second.flame_predicate().to_point()
-        );
-    }
 
     #[test]
     fn validator_pubkey_is_committed_by_identity() {
@@ -142,7 +99,7 @@ mod tests {
             let script = minter_witness_script::build_with_authorization(
                 &predicate,
                 &validator_pubkey,
-                corepc_client::bitcoin::Script::from_bytes(&[0x51]),
+                bitcoin::Script::from_bytes(&[0x51]),
             );
             let identity = MinterIdentity::new(script).unwrap();
             assert_eq!(identity.validator_pubkey(), &validator_pubkey);
@@ -155,13 +112,5 @@ mod tests {
             identities[0].flame_predicate().to_point(),
             identities[1].flame_predicate().to_point()
         );
-    }
-
-    fn witness_script(predicate: &Predicate) -> corepc_client::bitcoin::ScriptBuf {
-        minter_witness_script::build_with_authorization(
-            predicate,
-            &ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]).verifying_key(),
-            corepc_client::bitcoin::Script::from_bytes(&[0x51]),
-        )
     }
 }

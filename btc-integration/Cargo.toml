@@ -4,32 +4,49 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 
+[features]
+# Bitcoin in memory: watcher::impls::{MemoryBtc, MemorySource} and
+# wallet::impls::MemoryWallet, for tests and for a devnet without bitcoind. It
+# checks scripts and signatures with the consensus library of Bitcoin Core,
+# which is C++ and is built from source.
+memory-btc = ["bitcoin/bitcoinconsensus"]
+
 [dependencies]
-# TODO: consider removing flamevm as dependency
-flamevm = { path = "../flamevm" }
+# Bitcoin's own types and the stream combinators of `futures`.
+bitcoin = { version = "0.32", features = ["rand"] }
+futures = "0.3"
+tracing = "0.1"
+
+# The Flame types that burns and endorsements refer to.
 flamechain = { path = "../flamechain" }
+flamevm = { path = "../flamevm" }
 readerwriter = { path = "../readerwriter" }
 
-# BTC dependencies
-corepc-client = { version = "0.16.0", features = ["client-sync"] }
-
-# crypto
+# Keys
 curve25519-dalek = "4"
 ed25519-dalek = "2"
 rand = "0.8"
-zeroize = "1"
 
-# async
-futures-util = "0.3"
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-tokio-util = { version = "0.7", features = ["rt"] }
-async-trait = "0.1.91"
-
-# utils
+# RPC to Bitcoin Core: watcher::impls::RpcSource and the wallets of
+# wallet::impls.
+# The watcher itself needs neither tokio nor a network: its tests run without
+# a runtime.
+corepc-client = "0.19.0"
+# The error type of the RPC client: it tells a refusal of Bitcoin Core from a
+# node that did not answer.
+jsonrpc = { version = "0.21", default-features = false }
+# The name of a wallet in the URL of its RPC.
+percent-encoding = "2"
+serde = "1"
 serde_json = "1"
-jsonrpc = "0.20"
-thiserror = "2.0.19"
-log = "0.4.33"
+tokio = { version = "1", features = ["sync", "time"] }
+
+thiserror = "2"
 
 [dev-dependencies]
-bitcoind = { version = "0.41", features = ["31_0", "download"] }
+# The tests run on Bitcoin in memory.
+btc-integration = { path = ".", features = ["memory-btc"] }
+# A regtest bitcoind of its own for every test; the binary is downloaded at
+# build time.
+bitcoind = { version = "0.44", features = ["31_0", "download"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

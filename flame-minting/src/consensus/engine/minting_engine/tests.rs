@@ -9,13 +9,13 @@ use crate::consensus::engine::{
 use crate::consensus::{
     DoubleSign, IncludedEndorsement, MinterAcquisitions, WeightedBlockHeader, WeightedEndorsement,
 };
-use btc_integration::{
-    Acquisition, AcquisitionData, AuthenticatedMintingEndorsement, BtcBlockTip, MinterP2wsh,
-    MintingEndorsementValidator, UncheckedMintingEndorsement, protocol::minter_witness_script,
-};
-use corepc_client::bitcoin::{
+use bitcoin::{
     Amount, Script, ScriptBuf, Transaction, TxIn, TxOut, Witness, absolute, hashes::Hash,
     transaction,
+};
+use btc_integration::{
+    AuthenticatedMintingEndorsement, Burn, BurnData, MinterP2wsh, MintingEndorsementValidator,
+    UncheckedMintingEndorsement, protocol::minter_witness_script, watcher::BlockId,
 };
 use flamechain::{
     Block, BlockHash, BlockHeader, BlockTip, Blockchain, ChainParams, CoreBlockHeader,
@@ -37,7 +37,7 @@ impl MintingEngine<Storage, Storage, Storage> {
             .iter()
             .cloned()
             .map(|endorsement| IncludedEndorsement {
-                btc_block: self.new_block.btc_block_tip,
+                btc_block: self.new_block.id,
                 endorsement,
             })
             .collect();
@@ -285,9 +285,9 @@ impl CanonicalStorage for Storage {
     type Error = &'static str;
 }
 
-fn btc_tip(height: u64) -> BtcBlockTip {
-    BtcBlockTip {
-        hash: corepc_client::bitcoin::BlockHash::from_byte_array([height as u8; 32]),
+fn btc_tip(height: u64) -> BlockId {
+    BlockId {
+        hash: bitcoin::BlockHash::from_byte_array([height as u8; 32]),
         height,
     }
 }
@@ -325,7 +325,7 @@ pub(crate) fn endorsement_for_tip(
         output: vec![TxOut {
             value: Amount::ZERO,
             script_pubkey: ScriptBuf::new_op_return(
-                <&corepc_client::bitcoin::script::PushBytes>::try_from(payload.as_slice()).unwrap(),
+                <&bitcoin::script::PushBytes>::try_from(payload.as_slice()).unwrap(),
             ),
         }],
     };
@@ -358,9 +358,9 @@ fn engine(
         })
         .collect();
     let mut engine = MintingEngine::new(
-        Arc::new(IndexedBlock {
-            btc_block_tip: btc_tip(100),
-            acquisitions: vec![],
+        Arc::new(BtcBlockRecords {
+            id: btc_tip(100),
+            burns: vec![],
             endorsements,
         }),
         Arc::new(MintingProtocolParams {
@@ -411,16 +411,16 @@ fn active_acquisitions(
         .collect()
 }
 
-fn acquisition(duration: Option<u16>) -> Acquisition {
+fn acquisition(duration: Option<u16>) -> Burn {
     acquisition_for_minter([0x11; 32].into(), duration)
 }
 
-fn acquisition_for_minter(minter: MinterP2wsh, duration: Option<u16>) -> Acquisition {
+fn acquisition_for_minter(minter: MinterP2wsh, duration: Option<u16>) -> Burn {
     acquisition_with_amount(minter, duration, 1)
 }
 
-fn acquisition_with_amount(minter: MinterP2wsh, duration: Option<u16>, amount: u64) -> Acquisition {
-    let mut data = AcquisitionData::new(minter, Predicate::opaque(Predicate::unspendable_key()));
+fn acquisition_with_amount(minter: MinterP2wsh, duration: Option<u16>, amount: u64) -> Burn {
+    let mut data = BurnData::new(minter, Predicate::opaque(Predicate::unspendable_key()));
     data.duration = duration;
     let transaction = Transaction {
         version: transaction::Version::TWO,
@@ -431,7 +431,7 @@ fn acquisition_with_amount(minter: MinterP2wsh, duration: Option<u16>, amount: u
             script_pubkey: data.to_script(),
         }],
     };
-    Acquisition::from_tx(&transaction).pop().unwrap()
+    Burn::from_tx(&transaction).pop().unwrap()
 }
 
 #[test]
@@ -442,7 +442,7 @@ fn validates_acquisition_duration_boundaries() {
         .into_iter()
         .map(|duration| acquisition(Some(duration)))
         .collect();
-    Arc::make_mut(&mut engine.new_block).acquisitions = acquisitions.clone();
+    Arc::make_mut(&mut engine.new_block).burns = acquisitions.clone();
 
     assert_eq!(
         engine.validate_acquisitions(),
@@ -465,7 +465,7 @@ fn validates_default_duration_when_acquisition_duration_is_omitted() {
         let params = Arc::make_mut(&mut engine.protocol_params);
         params.min_acquisition_duration = 10.try_into().unwrap();
         params.default_acquisition_duration = default_duration.try_into().unwrap();
-        Arc::make_mut(&mut engine.new_block).acquisitions = vec![acquisition.clone()];
+        Arc::make_mut(&mut engine.new_block).burns = vec![acquisition.clone()];
 
         let expected = if default_duration >= 10 {
             vec![IncludedAcquisition {
@@ -921,7 +921,7 @@ async fn validates_endorsement_inclusion_against_target_btc_height() {
     for inclusion_height in [99, 100, 101, 111, u64::from(u32::MAX) + 1] {
         let incoming = endorsement(0x51, 42, 1);
         let mut engine = engine(vec![incoming.clone()], Storage::default());
-        Arc::make_mut(&mut engine.new_block).btc_block_tip = btc_tip(inclusion_height);
+        Arc::make_mut(&mut engine.new_block).id = btc_tip(inclusion_height);
 
         let result = engine.validate_endorsements(&[]).await.unwrap();
         if inclusion_height < 100 {
@@ -1057,7 +1057,7 @@ async fn validates_acquisition_activity_at_the_endorsement_target_height() {
         params.acquisition_maturity = maturity;
         params.default_acquisition_duration = 7.try_into().unwrap();
         // At inclusion, the acquisition has expired in every case.
-        Arc::make_mut(&mut engine.new_block).btc_block_tip = btc_tip(110);
+        Arc::make_mut(&mut engine.new_block).id = btc_tip(110);
         Arc::get_mut(&mut engine.chain_storage)
             .unwrap()
             .blocks
@@ -1113,7 +1113,7 @@ async fn finds_an_active_acquisition_separately_for_each_endorsement_target() {
         vec![active_target.clone(), expired_target.clone()],
         Storage::default(),
     );
-    Arc::make_mut(&mut engine.new_block).btc_block_tip = btc_tip(110);
+    Arc::make_mut(&mut engine.new_block).id = btc_tip(110);
     Arc::get_mut(&mut engine.chain_storage)
         .unwrap()
         .blocks

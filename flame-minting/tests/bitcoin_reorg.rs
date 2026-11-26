@@ -31,7 +31,7 @@ async fn reorg_restores_chain_selection_and_allows_further_processing() {
     clean.apply(&replacement).await;
     let snapshot = reorganized.snapshot().await;
     assert_eq!(snapshot, clean.snapshot().await);
-    assert_eq!(snapshot.btc_tip, replacement.btc_block_tip);
+    assert_eq!(snapshot.btc_tip, replacement.id);
     assert_eq!(snapshot.flame_tip, fixture.new_flame[1].header.block_tip());
 
     let continuation = bitcoin_block(3, 2, 2, &fixture.old_flame);
@@ -39,7 +39,7 @@ async fn reorg_restores_chain_selection_and_allows_further_processing() {
     clean.apply(&continuation).await;
     let snapshot = reorganized.snapshot().await;
     assert_eq!(snapshot, clean.snapshot().await);
-    assert_eq!(snapshot.btc_tip, continuation.btc_block_tip);
+    assert_eq!(snapshot.btc_tip, continuation.id);
     assert_eq!(snapshot.flame_tip, fixture.old_flame[1].header.block_tip());
 }
 

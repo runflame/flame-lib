@@ -1,18 +1,20 @@
 use std::{future::Future, panic::resume_unwind, sync::Arc, time::Duration};
 
+use bitcoin::{Amount, TxOut, Txid};
 use bitcoind::anyhow::{Context, Result, anyhow};
 use btc_integration::{
-    BitcoinConnection, BtcBlockTip, IdentityConfig, IdentityManager, MinterIdentity,
-    ProtocolIndexerV31, TestAcquisitionConfig, TestSender, btc::rpc::Core31RpcApi,
-    identity::storage::InMemorySecretStorage,
+    BtcWallet, BurnData, IdentityConfig, MinterIdentity, MinterWallet, MintingEndorsementData,
+    identity::impls::LocalKey,
+    wallet::impls::RpcWatchOnlyWallet,
+    watcher::{BlockId, impls::RpcSource},
 };
-use corepc_client::bitcoin::{Address, Amount, Network, Txid};
 use flame_chain_service::InMemoryChain;
 use flame_minting::{
     MintingOrchestrator,
     minter::{EndorsementPolicy, MinterManager, journal::in_memory::InMemoryMinterJournal},
     orchestrator::{DefaultConsensusLoop, cursor_storage::CursorStorage, sender::MintingSender},
 };
+use flamechain::BlockHash;
 use flamevm::Predicate;
 use tokio::time::{sleep, timeout};
 
@@ -20,19 +22,65 @@ use super::{BitcoinRegtest, FlameChain, UnusedNotifier};
 
 type TestOrchestrator = MintingOrchestrator<
     Arc<MintingSender>,
-    Arc<ProtocolIndexerV31>,
+    Arc<RpcSource>,
     DefaultConsensusLoop<InMemoryChain>,
     MinterManager<InMemoryChain, MintingSender, InMemoryMinterJournal>,
     InMemoryChain,
     UnusedNotifier,
 >;
 
+/// What every minter of a test starts with at its witness script.
+const MINTER_FUNDING: Amount = Amount::from_sat(50_000);
+
 pub struct TestContext {
     pub bitcoin: Arc<BitcoinRegtest>,
     pub orchestrator: Arc<TestOrchestrator>,
     pub flame_chain: FlameChain,
     pub identity: MinterIdentity,
-    acquisition_sender: Arc<TestSender<Core31RpcApi, Arc<InMemorySecretStorage>>>,
+    identity_config: IdentityConfig,
+}
+
+/// A minter next to the one of the orchestrator: the test burns and endorses
+/// for it by hand.
+pub struct TestMinter {
+    bitcoin: Arc<BitcoinRegtest>,
+    burn: BurnData,
+    wallet: MinterWallet<RpcWatchOnlyWallet, LocalKey>,
+}
+
+impl TestMinter {
+    pub async fn send_acquisition(&self, amount: Amount) -> Result<Txid> {
+        Ok(self
+            .bitcoin
+            .wallet
+            .send(self.burn.to_output(amount))
+            .await?)
+    }
+
+    pub async fn send_endorsement(&self, height: u32, hash: BlockHash) -> Result<Txid> {
+        let endorsement = MintingEndorsementData::V1 {
+            flame_block_height: height,
+            flame_block_hash: hash,
+        };
+        Ok(self.wallet.send(endorsement.to_output()).await?)
+    }
+}
+
+/// Opens the watch-only wallet of the minter, then pays [`MINTER_FUNDING`] to
+/// its witness script. In this order: the wallet watches the script from the
+/// moment it is opened.
+async fn fund_minter(
+    bitcoin: &BitcoinRegtest,
+    identity: &MinterIdentity,
+) -> Result<RpcWatchOnlyWallet> {
+    let script = identity.witness_script();
+    let watch_only = RpcWatchOnlyWallet::open(&bitcoin.bitcoin_config(), script).await?;
+    let funding = TxOut {
+        value: MINTER_FUNDING,
+        script_pubkey: script.to_p2wsh(),
+    };
+    bitcoin.wallet.send(funding).await?;
+    Ok(watch_only)
 }
 
 impl TestContext {
@@ -49,27 +97,15 @@ impl TestContext {
             UnusedNotifier,
             chain.clone(),
             chain.clone(),
-            bitcoin.config(),
+            bitcoin.bitcoin_config(),
             initial_cursor,
             identity_config.clone(),
+            LocalKey::generate(),
             EndorsementPolicy::Auto,
         )?);
-        let identity = orchestrator.identity_manager.startup().await?.clone();
-        let connection = BitcoinConnection::regtest(
-            bitcoin.config(),
-            identity.clone(),
-            orchestrator.identity_manager.secret_storage().clone(),
-            TestAcquisitionConfig {
-                wallet_rpc_url: bitcoin.node.rpc_url_with_wallet("default"),
-                access_predicate: identity_config.access_predicate,
-            },
-        )
-        .await?;
-        let funding_address = Address::p2wsh(identity.witness_script(), Network::Regtest);
-        bitcoin
-            .node
-            .client
-            .send_to_address(&funding_address, Amount::from_sat(50_000))?;
+        let identity = orchestrator.identity.clone();
+        // The sender of the orchestrator opens the same wallet when it starts.
+        fund_minter(&bitcoin, &identity).await?;
         let flame_chain = FlameChain::new(
             chain,
             orchestrator.get_chain_storage().clone(),
@@ -82,7 +118,7 @@ impl TestContext {
             orchestrator,
             flame_chain,
             identity,
-            acquisition_sender: connection.get_sender(),
+            identity_config,
         })
     }
 
@@ -107,32 +143,27 @@ impl TestContext {
     }
 
     pub async fn send_acquisition(&self, amount: Amount) -> Result<Txid> {
-        Ok(self.acquisition_sender.send_acquisition(amount).await?)
+        let burn = self.burn_for(&self.identity);
+        Ok(self.bitcoin.wallet.send(burn.to_output(amount)).await?)
     }
 
-    pub async fn create_minter(
-        &self,
-    ) -> Result<Arc<TestSender<Core31RpcApi, Arc<InMemorySecretStorage>>>> {
-        let config = self.orchestrator.identity_manager.config().clone();
-        let manager =
-            IdentityManager::new(Arc::new(InMemorySecretStorage::default()), config.clone());
-        let identity = manager.startup().await?.clone();
-        let connection = BitcoinConnection::regtest(
-            self.bitcoin.config(),
-            identity.clone(),
-            manager.secret_storage().clone(),
-            TestAcquisitionConfig {
-                wallet_rpc_url: self.bitcoin.node.rpc_url_with_wallet("default"),
-                access_predicate: config.access_predicate,
-            },
+    fn burn_for(&self, identity: &MinterIdentity) -> BurnData {
+        BurnData::new(
+            identity.p2wsh(),
+            self.identity_config.access_predicate.clone(),
         )
-        .await?;
-        let address = Address::p2wsh(identity.witness_script(), Network::Regtest);
-        self.bitcoin
-            .node
-            .client
-            .send_to_address(&address, Amount::from_sat(50_000))?;
-        Ok(connection.get_sender())
+    }
+
+    /// One more minter with the same configuration and a key of its own.
+    pub async fn create_minter(&self) -> Result<TestMinter> {
+        let key = LocalKey::generate();
+        let identity = self.identity_config.identity(&key);
+        let watch_only = fund_minter(&self.bitcoin, &identity).await?;
+        Ok(TestMinter {
+            bitcoin: self.bitcoin.clone(),
+            burn: self.burn_for(&identity),
+            wallet: MinterWallet::new(watch_only, key, identity)?,
+        })
     }
 
     pub async fn start(&self) -> Result<()> {
@@ -142,7 +173,7 @@ impl TestContext {
             .map_err(|error| anyhow!("orchestrator startup: {error:?}"))
     }
 
-    pub async fn wait_for_processing(&self, expected: BtcBlockTip) -> Result<()> {
+    pub async fn wait_for_processing(&self, expected: BlockId) -> Result<()> {
         let mut last_cursor = None;
         timeout(Duration::from_secs(10), async {
             loop {

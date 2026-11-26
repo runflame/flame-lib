@@ -4,8 +4,8 @@ use crate::block_processing::journal::{
 };
 use crate::consensus::{ConsensusUndo, MintingOutcome};
 use InMemoryBitcoinBlockJournalError as Error;
-use btc_integration::BtcBlockTip;
-use corepc_client::bitcoin::BlockHash;
+use bitcoin::BlockHash;
+use btc_integration::watcher::BlockId;
 use std::{
     collections::BTreeMap,
     sync::{Arc, RwLock},
@@ -17,13 +17,13 @@ pub struct InMemoryBitcoinBlockJournal {
 }
 
 struct BitcoinBlockJournalState {
-    applied_tip: BtcBlockTip,
-    pending_tip: Option<BtcBlockTip>,
+    applied_tip: BlockId,
+    pending_tip: Option<BlockId>,
     entries: BTreeMap<BlockHash, BitcoinBlockJournalEntry>,
 }
 
 impl InMemoryBitcoinBlockJournal {
-    pub fn new(initial_btc_tip: BtcBlockTip) -> Self {
+    pub fn new(initial_btc_tip: BlockId) -> Self {
         Self {
             state: Arc::new(RwLock::new(BitcoinBlockJournalState {
                 applied_tip: initial_btc_tip,
@@ -33,7 +33,7 @@ impl InMemoryBitcoinBlockJournal {
         }
     }
 
-    fn complete_stage(&self, btc_tip: BtcBlockTip, expected: JournalStatus) -> Result<(), Error> {
+    fn complete_stage(&self, btc_tip: BlockId, expected: JournalStatus) -> Result<(), Error> {
         let mut state = self.state.write().map_err(|_| Error::LockPoisoned)?;
         let next = expected.next().expect("operation stages have a successor");
         let entry = state.entry(btc_tip)?;
@@ -79,7 +79,7 @@ impl BitcoinBlockJournalState {
         }
     }
 
-    fn entry(&self, btc_tip: BtcBlockTip) -> Result<&BitcoinBlockJournalEntry, Error> {
+    fn entry(&self, btc_tip: BlockId) -> Result<&BitcoinBlockJournalEntry, Error> {
         let entry = self
             .entries
             .get(&btc_tip.hash)
@@ -90,7 +90,7 @@ impl BitcoinBlockJournalState {
 
     fn pending_entry(
         &mut self,
-        btc_tip: BtcBlockTip,
+        btc_tip: BlockId,
         expected: JournalStatus,
     ) -> Result<&mut BitcoinBlockJournalEntry, Error> {
         check_tip(self.pending_tip.ok_or(Error::NoPendingOperation)?, btc_tip)?;
@@ -109,7 +109,7 @@ impl BitcoinBlockJournal for InMemoryBitcoinBlockJournal {
 
     async fn begin_apply(
         &self,
-        previous_btc_tip: BtcBlockTip,
+        previous_btc_tip: BlockId,
         outcome: &MintingOutcome,
         undo: &ConsensusUndo,
     ) -> Result<(), Self::Error> {
@@ -142,7 +142,7 @@ impl BitcoinBlockJournal for InMemoryBitcoinBlockJournal {
 
     async fn get_entry(
         &self,
-        btc_tip: BtcBlockTip,
+        btc_tip: BlockId,
     ) -> Result<Option<BitcoinBlockJournalEntry>, Self::Error> {
         let state = self.state.read().map_err(|_| Error::LockPoisoned)?;
         if !state.entries.contains_key(&btc_tip.hash) {
@@ -161,7 +161,7 @@ impl BitcoinBlockJournal for InMemoryBitcoinBlockJournal {
 
     async fn store_flame_transition(
         &self,
-        btc_tip: BtcBlockTip,
+        btc_tip: BlockId,
         transition: &FlameTransition,
     ) -> Result<(), Self::Error> {
         let mut state = self.state.write().map_err(|_| Error::LockPoisoned)?;
@@ -178,7 +178,7 @@ impl BitcoinBlockJournal for InMemoryBitcoinBlockJournal {
 
     async fn store_rewards_changes(
         &self,
-        btc_tip: BtcBlockTip,
+        btc_tip: BlockId,
         changes: &RewardsChanges,
     ) -> Result<(), Self::Error> {
         let mut state = self.state.write().map_err(|_| Error::LockPoisoned)?;
@@ -193,13 +193,13 @@ impl BitcoinBlockJournal for InMemoryBitcoinBlockJournal {
 
     async fn complete_apply_stage(
         &self,
-        btc_tip: BtcBlockTip,
+        btc_tip: BlockId,
         stage: ApplyStage,
     ) -> Result<(), Self::Error> {
         self.complete_stage(btc_tip, JournalStatus::Applying(stage))
     }
 
-    async fn begin_rollback(&self, btc_tip: BtcBlockTip) -> Result<(), Self::Error> {
+    async fn begin_rollback(&self, btc_tip: BlockId) -> Result<(), Self::Error> {
         let mut state = self.state.write().map_err(|_| Error::LockPoisoned)?;
         state.require_idle()?;
         check_tip(state.applied_tip, btc_tip)?;
@@ -216,14 +216,14 @@ impl BitcoinBlockJournal for InMemoryBitcoinBlockJournal {
 
     async fn complete_rollback_stage(
         &self,
-        btc_tip: BtcBlockTip,
+        btc_tip: BlockId,
         stage: RollbackStage,
     ) -> Result<(), Self::Error> {
         self.complete_stage(btc_tip, JournalStatus::RollingBack(stage))
     }
 }
 
-fn check_tip(expected: BtcBlockTip, actual: BtcBlockTip) -> Result<(), Error> {
+fn check_tip(expected: BlockId, actual: BlockId) -> Result<(), Error> {
     if expected != actual {
         return Err(Error::BlockTipMismatch { expected, actual });
     }
@@ -245,23 +245,17 @@ pub enum InMemoryBitcoinBlockJournalError {
     #[error("Bitcoin block journal lock poisoned")]
     LockPoisoned,
     #[error("a journal operation is already in progress for {0:?}")]
-    OperationInProgress(BtcBlockTip),
+    OperationInProgress(BlockId),
     #[error("no journal operation is in progress")]
     NoPendingOperation,
     #[error("journal entry not found for {0:?}")]
-    EntryNotFound(BtcBlockTip),
+    EntryNotFound(BlockId),
     #[error("journal entry already exists for {0:?}")]
-    EntryAlreadyExists(BtcBlockTip),
+    EntryAlreadyExists(BlockId),
     #[error("Bitcoin block tip mismatch: expected {expected:?}, got {actual:?}")]
-    BlockTipMismatch {
-        expected: BtcBlockTip,
-        actual: BtcBlockTip,
-    },
+    BlockTipMismatch { expected: BlockId, actual: BlockId },
     #[error("{next:?} is not a successor of {previous:?}")]
-    InvalidSuccessor {
-        previous: BtcBlockTip,
-        next: BtcBlockTip,
-    },
+    InvalidSuccessor { previous: BlockId, next: BlockId },
     #[error("journal status mismatch: expected {expected:?}, got {actual:?}")]
     UnexpectedStatus {
         expected: JournalStatus,

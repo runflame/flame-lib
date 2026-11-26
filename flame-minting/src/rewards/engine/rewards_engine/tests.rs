@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Mutex};
 
-use corepc_client::bitcoin::{BlockHash as BtcBlockHash, hashes::Hash};
+use bitcoin::{BlockHash as BtcBlockHash, hashes::Hash};
 use flamechain::{Block, Blockchain, ChainParams, CoreBlockHeader, CoreBlockTip};
 
 use super::*;
@@ -8,8 +8,8 @@ use crate::consensus::engine::tests::{Storage, endorsement_for_tip};
 use crate::consensus::{
     IncludedAcquisition, IncludedEndorsement, MinterAcquisitions, WeightedEndorsement,
 };
-use btc_integration::{Acquisition, AcquisitionData, MinterP2wsh};
-use corepc_client::bitcoin::{Amount, Transaction, TxOut, absolute, transaction};
+use bitcoin::{Amount, Transaction, TxOut, absolute, transaction};
+use btc_integration::{Burn, BurnData, MinterP2wsh};
 use flamevm::Predicate;
 
 pub(crate) fn protocol_params() -> Arc<MintingProtocolParams> {
@@ -79,8 +79,8 @@ impl ChainStorage for TestChainStorage {
     }
 }
 
-fn btc_tip() -> BtcBlockTip {
-    BtcBlockTip {
+fn btc_tip() -> BlockId {
+    BlockId {
         hash: BtcBlockHash::from_byte_array([1; 32]),
         height: 1000,
     }
@@ -209,7 +209,7 @@ fn reward_header() -> BlockHeader {
 fn included_endorsement(minter: u8, header: &BlockHeader, delay: u64) -> WeightedEndorsement {
     WeightedEndorsement {
         original: IncludedEndorsement {
-            btc_block: BtcBlockTip {
+            btc_block: BlockId {
                 height: u64::from(header.core_block.as_ref().unwrap().target_btc_height) + delay,
                 ..btc_tip()
             },
@@ -231,7 +231,7 @@ fn acquisition(
     amount: u64,
     duration: Option<u16>,
 ) -> IncludedAcquisition {
-    let mut data = AcquisitionData::new(minter, predicate(access));
+    let mut data = BurnData::new(minter, predicate(access));
     data.duration = duration;
     let transaction = Transaction {
         version: transaction::Version::TWO,
@@ -243,11 +243,11 @@ fn acquisition(
         }],
     };
     IncludedAcquisition {
-        btc_block: BtcBlockTip {
+        btc_block: BlockId {
             height: 90,
             ..btc_tip()
         },
-        acquisition: Acquisition::from_tx(&transaction).pop().unwrap(),
+        acquisition: Burn::from_tx(&transaction).pop().unwrap(),
     }
 }
 
@@ -262,7 +262,7 @@ fn test_engine(storage: Storage) -> TestEngine {
 fn calculator<'a>(
     engine: &'a TestEngine,
     header: &'a BlockHeader,
-    btc_tip: BtcBlockTip,
+    btc_tip: BlockId,
 ) -> BlockWeightCalculator<'a, Storage> {
     BlockWeightCalculator {
         header,
@@ -394,7 +394,7 @@ async fn excludes_inactive_disqualified_late_future_and_other_block_contribution
         .unwrap();
     assert_eq!(weights.len(), 1);
     assert_eq!(weights[&pair(1)].weight, 1.0 / 1024.0);
-    let earlier = BtcBlockTip {
+    let earlier = BlockId {
         height: 109,
         ..btc_tip()
     };

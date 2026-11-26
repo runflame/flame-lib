@@ -3,7 +3,7 @@ use super::in_memory_consensus_storage::insert_unique;
 use crate::consensus::{
     AcquisitionIndex, IncludedAcquisition, MinterAcquisitions, MintingProtocolParams,
 };
-use btc_integration::{BtcBlockTip, MinterP2wsh};
+use btc_integration::{MinterP2wsh, watcher::BlockId};
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Default)]
@@ -37,7 +37,7 @@ impl AcquisitionStorage {
 
     pub(super) fn store_acquisition(
         &mut self,
-        btc_block: BtcBlockTip,
+        btc_block: BlockId,
         acquisition: &IncludedAcquisition,
     ) -> Result<(), InMemoryConsensusStorageError> {
         if btc_block != acquisition.btc_block {

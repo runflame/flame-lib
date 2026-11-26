@@ -265,9 +265,9 @@ async fn bitcoin_and_endorsement_entry_points_produce_the_same_consensus_outcome
     let endorsement = included(1, &root, 101);
     let engine = factory(storage);
     let minting = engine
-        .get_minting_outcome(IndexedBlock {
-            btc_block_tip: endorsement.btc_block,
-            acquisitions: vec![],
+        .get_minting_outcome(BtcBlockRecords {
+            id: endorsement.btc_block,
+            burns: vec![],
             endorsements: vec![endorsement.endorsement.clone()],
         })
         .await

@@ -4,7 +4,7 @@ use super::block_weight_calculator::{
 };
 use crate::consensus::{ConsensusStorage, MintingProtocolParams};
 use crate::rewards::{PendingReward, RewardsOutcome};
-use btc_integration::BtcBlockTip;
+use btc_integration::watcher::BlockId;
 use flame_storage::ChainStorage;
 use flamechain::{BlockHeader, BlockTip, CoreFlameHeight};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
@@ -21,7 +21,7 @@ impl<H: ChainStorage, C: ConsensusStorage> RewardsEngine<H, C> {
     pub async fn calculate(
         &self,
         header: &BlockHeader,
-        btc_tip: BtcBlockTip,
+        btc_tip: BlockId,
     ) -> Result<Option<RewardsOutcome>, RewardsEngineError<H::Error, C::Error>> {
         let Some(core) = &header.core_block else {
             return Ok(None);
@@ -48,7 +48,7 @@ impl<H: ChainStorage, C: ConsensusStorage> RewardsEngine<H, C> {
     async fn calculate_cycle(
         &self,
         header: &BlockHeader,
-        btc_tip: BtcBlockTip,
+        btc_tip: BlockId,
         range: RangeInclusive<u32>,
     ) -> Result<Vec<PendingReward>, RewardsEngineError<H::Error, C::Error>> {
         let headers = self.load_cycle_headers(header, range).await?;
@@ -108,7 +108,7 @@ impl<H: ChainStorage, C: ConsensusStorage> RewardsEngine<H, C> {
     async fn calculate_block(
         &self,
         header: &BlockHeader,
-        btc_tip: BtcBlockTip,
+        btc_tip: BlockId,
         rewards: &mut CycleRewards,
     ) -> Result<(), RewardsEngineError<H::Error, C::Error>> {
         let core = header.core_block.as_ref().ok_or_else(|| {

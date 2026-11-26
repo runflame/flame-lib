@@ -2,13 +2,14 @@ use super::consensus_journal_state::ConsensusJournalState as State;
 use super::in_memory_consensus_journal::InMemoryConsensusJournal;
 use super::in_memory_consensus_journal::check_tip;
 use super::in_memory_consensus_journal_error::InMemoryConsensusJournalError as Error;
+use crate::block_processing::BtcBlockRecords;
 use crate::block_processing::journal::{
     ApplyStage, BitcoinBlockJournalEntry, BitcoinJournal, BitcoinJournalEntry,
     BitcoinJournalOperation, BitcoinOperationKind, ConsensusOperation, FlameTransition,
     JournalStatus, OperationId, RewardsChanges, RollbackStage,
 };
 use crate::consensus::{BitcoinRollbackPlan, ConsensusUndo, IncludedEndorsement, MintingOutcome};
-use btc_integration::{BtcBlockTip, IndexedBlock};
+use btc_integration::watcher::BlockId;
 
 #[derive(Clone)]
 pub struct InMemoryBitcoinJournal {
@@ -61,15 +62,15 @@ impl BitcoinJournal for InMemoryBitcoinJournal {
 
     async fn begin_apply(
         &self,
-        previous_btc_tip: BtcBlockTip,
-        block: &IndexedBlock,
+        previous_btc_tip: BlockId,
+        block: &BtcBlockRecords,
         outcome: &MintingOutcome,
         undo: &ConsensusUndo,
     ) -> Result<OperationId, Error> {
         let mut state = self.journal.write()?;
         state.require_idle()?;
         check_tip(state.applied_btc_tip, previous_btc_tip)?;
-        let tip = block.btc_block_tip;
+        let tip = block.id;
         check_tip(tip, outcome.next_btc_cursor)?;
         if previous_btc_tip.height.checked_add(1) != Some(tip.height)
             || previous_btc_tip.hash == tip.hash
@@ -94,7 +95,7 @@ impl BitcoinJournal for InMemoryBitcoinJournal {
         }))
     }
 
-    async fn get_entry(&self, tip: BtcBlockTip) -> Result<Option<BitcoinJournalEntry>, Error> {
+    async fn get_entry(&self, tip: BlockId) -> Result<Option<BitcoinJournalEntry>, Error> {
         let state = self.journal.read()?;
         state
             .bitcoin_id(tip)?
@@ -160,7 +161,7 @@ impl BitcoinJournal for InMemoryBitcoinJournal {
 
     async fn begin_rollback(
         &self,
-        tip: BtcBlockTip,
+        tip: BlockId,
         plan: &BitcoinRollbackPlan,
     ) -> Result<OperationId, Error> {
         let mut state = self.journal.write()?;
@@ -187,7 +188,7 @@ impl BitcoinJournal for InMemoryBitcoinJournal {
             if operation.entry.status == JournalStatus::Applied {
                 endorsements.extend(operation.block.endorsements.iter().cloned().map(
                     |endorsement| IncludedEndorsement {
-                        btc_block: operation.block.btc_block_tip,
+                        btc_block: operation.block.id,
                         endorsement,
                     },
                 ));

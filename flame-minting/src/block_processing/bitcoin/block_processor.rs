@@ -1,4 +1,5 @@
-use btc_integration::{BtcBlockTip, IndexedBlock};
+use crate::block_processing::BtcBlockRecords;
+use btc_integration::watcher::BlockId;
 use std::future::Future;
 
 pub trait BlockProcessor: Send + Sync + 'static {
@@ -6,11 +7,8 @@ pub trait BlockProcessor: Send + Sync + 'static {
 
     fn apply(
         &self,
-        block: IndexedBlock,
-    ) -> impl Future<Output = Result<BtcBlockTip, Self::Error>> + Send;
-    fn resume(&self) -> impl Future<Output = Result<BtcBlockTip, Self::Error>> + Send;
-    fn rollback(
-        &self,
-        tip: BtcBlockTip,
-    ) -> impl Future<Output = Result<BtcBlockTip, Self::Error>> + Send;
+        block: BtcBlockRecords,
+    ) -> impl Future<Output = Result<BlockId, Self::Error>> + Send;
+    fn resume(&self) -> impl Future<Output = Result<BlockId, Self::Error>> + Send;
+    fn rollback(&self, tip: BlockId) -> impl Future<Output = Result<BlockId, Self::Error>> + Send;
 }

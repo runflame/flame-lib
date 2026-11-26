@@ -1,5 +1,5 @@
 use super::CursorStorage;
-use btc_integration::BtcBlockTip;
+use btc_integration::watcher::BlockId;
 use std::{
     fmt,
     sync::{Arc, RwLock},
@@ -7,11 +7,11 @@ use std::{
 
 #[derive(Clone)]
 pub struct InMemoryCursorStorage {
-    cursor: Arc<RwLock<BtcBlockTip>>,
+    cursor: Arc<RwLock<BlockId>>,
 }
 
 impl InMemoryCursorStorage {
-    pub fn new(initial_cursor: BtcBlockTip) -> Self {
+    pub fn new(initial_cursor: BlockId) -> Self {
         Self {
             cursor: Arc::new(RwLock::new(initial_cursor)),
         }
@@ -21,12 +21,12 @@ impl InMemoryCursorStorage {
 impl CursorStorage for InMemoryCursorStorage {
     type Error = InMemoryCursorStorageError;
 
-    async fn get_cursor(&self) -> Result<BtcBlockTip, Self::Error> {
+    async fn get_cursor(&self) -> Result<BlockId, Self::Error> {
         let cursor = self.cursor.read().map_err(|_| Self::Error::LockPoisoned)?;
         Ok(*cursor)
     }
 
-    async fn store_cursor(&self, cursor: BtcBlockTip) -> Result<(), Self::Error> {
+    async fn store_cursor(&self, cursor: BlockId) -> Result<(), Self::Error> {
         let mut stored = self.cursor.write().map_err(|_| Self::Error::LockPoisoned)?;
         *stored = cursor;
         Ok(())

@@ -1,19 +1,21 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
+use bitcoin::{BlockHash, Txid, hashes::Hash};
 use bitcoind::anyhow::{Context, Result};
 use btc_integration::{
-    AuthenticatedMintingEndorsement, UncheckedMintingEndorsement, btc::rpc::Core31RpcApi,
-    protocol::validate_transaction_endorsements,
+    AuthenticatedMintingEndorsement, BitcoinConfig, BitcoinRpcAuth, BtcBlockRecords,
+    MintingEndorsementData, UncheckedMintingEndorsement,
+    wallet::impls::RpcWallet,
+    watcher::{BlockId, ChainSource, impls::RpcSource},
 };
-use btc_integration::{
-    BitcoinConfig, BitcoinFacade, BitcoinRpcAuth, BtcBlockTip, MintingEndorsementData,
-};
-use corepc_client::bitcoin::Txid;
 use tokio::time::{sleep, timeout};
 
+/// A regtest bitcoind of its own, with a wallet that has coins.
 pub struct BitcoinRegtest {
     pub node: bitcoind::BitcoinD,
-    pub rpc: BitcoinFacade<Core31RpcApi>,
+    /// The wallet of the node that has coins.
+    pub wallet: RpcWallet,
+    source: RpcSource,
 }
 
 impl BitcoinRegtest {
@@ -22,30 +24,37 @@ impl BitcoinRegtest {
         let address = node.client.new_address()?;
         node.client.generate_to_address(2, &address)?;
         node.client.generate_to_descriptor(99, "raw(51)")?;
-        let rpc = BitcoinFacade::new(Arc::new(Core31RpcApi::new(
-            &node.rpc_url(),
-            BitcoinRpcAuth::CookieFile(node.params.cookie_file.clone()),
-        )?));
-        Ok(Self { node, rpc })
+        let config = bitcoin_config(&node);
+        Ok(Self {
+            wallet: RpcWallet::new(&config, "default")?,
+            source: RpcSource::new(&config)?,
+            node,
+        })
     }
 
-    pub fn config(&self) -> BitcoinConfig {
-        BitcoinConfig {
-            node_rpc_url: self.node.rpc_url(),
-            auth: BitcoinRpcAuth::CookieFile(self.node.params.cookie_file.clone()),
-        }
+    pub fn bitcoin_config(&self) -> BitcoinConfig {
+        bitcoin_config(&self.node)
     }
 
-    pub async fn mine_block(&self) -> Result<BtcBlockTip> {
+    /// The best block of the node.
+    pub async fn best(&self) -> Result<BlockId> {
+        // Any best block differs from the zero hash: the answer comes at once.
+        Ok(self
+            .source
+            .wait_for_new_block(BlockHash::all_zeros())
+            .await?)
+    }
+
+    pub async fn mine_block(&self) -> Result<BlockId> {
         self.node.client.generate_to_descriptor(1, "raw(51)")?;
-        Ok(self.rpc.best_block_tip().await?)
+        self.best().await
     }
 
     pub async fn wait_for_endorsement(&self, expected: &MintingEndorsementData) -> Result<Txid> {
         timeout(Duration::from_secs(10), async {
             loop {
                 for txid in self.node.client.get_raw_mempool()?.0 {
-                    let txid = txid.parse()?;
+                    let txid: Txid = txid.parse()?;
                     let transaction = self.node.client.get_raw_transaction(txid)?.transaction()?;
                     if UncheckedMintingEndorsement::from_tx(&transaction)
                         .iter()
@@ -63,16 +72,17 @@ impl BitcoinRegtest {
 
     pub async fn endorsements_in_block(
         &self,
-        block: BtcBlockTip,
+        block: BlockId,
     ) -> Result<Vec<AuthenticatedMintingEndorsement>> {
-        let transactions = self
-            .rpc
-            .transactions_with_prevouts_in_block(block.hash)
-            .await?;
-        let mut endorsements = Vec::new();
-        for transaction in &transactions {
-            endorsements.extend(validate_transaction_endorsements(transaction)?);
-        }
-        Ok(endorsements)
+        let found = self.source.block(block.hash).await?;
+        let (stored, prevouts) = found.context("the node does not have the block")?;
+        Ok(BtcBlockRecords::from_block(block, &stored, &prevouts)?.endorsements)
+    }
+}
+
+fn bitcoin_config(node: &bitcoind::BitcoinD) -> BitcoinConfig {
+    BitcoinConfig {
+        node_rpc_url: node.rpc_url(),
+        auth: BitcoinRpcAuth::CookieFile(node.params.cookie_file.clone()),
     }
 }

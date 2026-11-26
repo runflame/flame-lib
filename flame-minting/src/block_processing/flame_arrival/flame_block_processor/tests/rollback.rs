@@ -38,10 +38,10 @@ fn bitcoin_processor(fixture: &Fixture) -> BitcoinProcessor {
     )
 }
 
-fn bitcoin_block(height: u64, endorsements: Vec<IncludedEndorsement>) -> IndexedBlock {
-    IndexedBlock {
-        btc_block_tip: btc_tip(height),
-        acquisitions: vec![],
+fn bitcoin_block(height: u64, endorsements: Vec<IncludedEndorsement>) -> BtcBlockRecords {
+    BtcBlockRecords {
+        id: btc_tip(height),
+        burns: vec![],
         endorsements: endorsements
             .into_iter()
             .map(|entry| entry.endorsement)
@@ -53,7 +53,7 @@ fn bitcoin_block(height: u64, endorsements: Vec<IncludedEndorsement>) -> Indexed
 async fn restores_acquisitions_separately_and_preserves_surviving_acquisitions() {
     let fixture = Fixture::at_btc_tip(btc_tip(99)).await;
     let bitcoin = bitcoin_processor(&fixture);
-    let data = AcquisitionData::new(
+    let data = BurnData::new(
         included(0x52, &fixture.arriving, 100)
             .endorsement
             .auth()
@@ -70,12 +70,12 @@ async fn restores_acquisitions_separately_and_preserves_surviving_acquisitions()
             script_pubkey: data.to_script(),
         }],
     };
-    let acquisition = Acquisition::from_tx(&transaction).pop().unwrap();
+    let acquisition = Burn::from_tx(&transaction).pop().unwrap();
     let index = AcquisitionIndex::from(&acquisition);
     let storage = &fixture.processor.consensus_storage;
     let before = storage.get_acquisitions_by_minters(100).await.unwrap();
     let mut block = bitcoin_block(100, vec![included(0x51, &fixture.arriving, 100)]);
-    block.acquisitions.push(acquisition);
+    block.burns.push(acquisition);
     bitcoin.apply(block).await.unwrap();
     assert!(storage.get_acquisition(index).await.unwrap().is_some());
     bitcoin.rollback(btc_tip(100)).await.unwrap();

@@ -5,8 +5,8 @@ pub mod orchestrator;
 pub mod rewards;
 
 pub use block_processing::{
-    CONSENSUS_QUEUE_CAPACITY, ConsensusHandle, ConsensusSendError, ConsensusStatus,
-    FlameBlockArrivalHandler,
+    BtcBlockRecords, CONSENSUS_QUEUE_CAPACITY, ConsensusHandle, ConsensusSendError,
+    ConsensusStatus, FlameBlockArrivalHandler,
 };
 pub use orchestrator::MintingOrchestrator;
 

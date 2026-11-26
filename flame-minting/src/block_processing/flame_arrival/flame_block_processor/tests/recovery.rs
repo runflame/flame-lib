@@ -1,5 +1,5 @@
 use super::*;
-use crate::orchestrator::{consensus::ConsensusLoop, ports::ConsensusIndexer};
+use crate::orchestrator::consensus::ConsensusLoop;
 use crate::{
     block_processing::{
         BitcoinBlockProcessor,
@@ -14,9 +14,7 @@ use crate::{
     },
     consensus::{ConsensusUndo, MintingOutcome},
 };
-use btc_integration::{HistoryChange, HistoryError, HistoryUpdate, ShutdownError, StartupError};
-use std::{collections::VecDeque, num::NonZeroUsize};
-use tokio::sync::watch;
+use btc_integration::watcher::impls::{MemoryBtc, RecentBlocks};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Event {
@@ -34,7 +32,7 @@ pub(super) struct FaultJournal {
 }
 
 impl FaultJournal {
-    pub(super) fn new(initial: BtcBlockTip) -> Self {
+    pub(super) fn new(initial: BlockId) -> Self {
         let owner = InMemoryConsensusJournal::new(initial);
         Self {
             inner: owner.flame_journal(),
@@ -63,7 +61,7 @@ impl FlameJournal for FaultJournal {
     async fn begin_apply(
         &self,
         tip: BlockTip,
-        btc_tip: BtcBlockTip,
+        btc_tip: BlockId,
         outcome: &ConsensusOutcome,
         undo: &ConsensusUndo,
     ) -> Result<OperationId, Self::Error> {
@@ -116,7 +114,7 @@ impl FlameJournal for FaultJournal {
 impl FaultJournal {
     pub(super) async fn latest_applied(
         &self,
-        tip: BtcBlockTip,
+        tip: BlockId,
     ) -> Result<Option<FlameJournalEntry>, &'static str> {
         Ok(self
             .owner
@@ -242,7 +240,7 @@ impl ConsensusEngine for PendingEngine {
 
     async fn get_minting_outcome(
         &self,
-        block: IndexedBlock,
+        block: BtcBlockRecords,
     ) -> Result<MintingOutcome, Self::Error> {
         let mut consensus = ConsensusOutcome::default();
         for endorsement in block.endorsements {
@@ -251,13 +249,13 @@ impl ConsensusEngine for PendingEngine {
                 .entry(endorsement.block_tip())
                 .or_default()
                 .push(IncludedEndorsement {
-                    btc_block: block.btc_block_tip,
+                    btc_block: block.id,
                     endorsement,
                 });
         }
         Ok(MintingOutcome {
             consensus,
-            next_btc_cursor: block.btc_block_tip,
+            next_btc_cursor: block.id,
         })
     }
 }
@@ -296,12 +294,12 @@ pub(super) async fn bitcoin_processor(fixture: &Fixture) -> BitcoinProcessor {
     )
 }
 
-async fn apply_pending(processor: &BitcoinProcessor, block: &Block, minter: u8, height: u64) {
+async fn apply_pending(processor: &BitcoinProcessor, block: &Block, minter: u8, id: BlockId) {
     processor
-        .apply(IndexedBlock {
-            btc_block_tip: btc_tip(height),
-            acquisitions: vec![],
-            endorsements: vec![included(minter, block, height).endorsement],
+        .apply(BtcBlockRecords {
+            id,
+            burns: vec![],
+            endorsements: vec![included(minter, block, id.height).endorsement],
         })
         .await
         .unwrap();
@@ -312,8 +310,8 @@ async fn btc_rollback_preserves_surviving_endorsements_without_replaying_arrival
     let fixture = Fixture::at_btc_tip(btc_tip(99)).await;
     fixture.add_acquisition(0x52).await;
     let bitcoin = bitcoin_processor(&fixture).await;
-    apply_pending(&bitcoin, &fixture.arriving, 0x51, 100).await;
-    apply_pending(&bitcoin, &fixture.arriving, 0x52, 101).await;
+    apply_pending(&bitcoin, &fixture.arriving, 0x51, btc_tip(100)).await;
+    apply_pending(&bitcoin, &fixture.arriving, 0x52, btc_tip(101)).await;
     let tip = fixture.arriving.header.block_tip();
     let core_tip = included(0x51, &fixture.arriving, 100)
         .endorsement
@@ -397,7 +395,7 @@ async fn btc_rollback_preserves_surviving_endorsements_without_replaying_arrival
 async fn invalid_btc_rollback_does_not_unwind_arrivals() {
     let fixture = Fixture::at_btc_tip(btc_tip(99)).await;
     let bitcoin = bitcoin_processor(&fixture).await;
-    apply_pending(&bitcoin, &fixture.arriving, 0x51, 100).await;
+    apply_pending(&bitcoin, &fixture.arriving, 0x51, btc_tip(100)).await;
     let tip = fixture.arriving.header.block_tip();
     let canonical = fixture.processor.canonical_storage.clone();
     let journal = fixture.processor.journal.clone();
@@ -433,7 +431,7 @@ async fn invalid_btc_rollback_does_not_unwind_arrivals() {
 async fn startup_resumes_an_arrival_before_accepting_the_next_bitcoin_block() {
     let fixture = Fixture::at_btc_tip(btc_tip(99)).await;
     let bitcoin = bitcoin_processor(&fixture).await;
-    apply_pending(&bitcoin, &fixture.arriving, 0x51, 100).await;
+    apply_pending(&bitcoin, &fixture.arriving, 0x51, btc_tip(100)).await;
     let tip = fixture.arriving.header.block_tip();
     let journal = fixture.processor.journal.clone();
     let calls = fixture.processor.engine.calls.clone();
@@ -456,9 +454,9 @@ async fn startup_resumes_an_arrival_before_accepting_the_next_bitcoin_block() {
     let arrival = journal.owner.latest_entry().await.unwrap().unwrap();
     assert!(!arrival.is_complete());
     assert!(matches!(arrival.operation, ConsensusOperation::Flame(_)));
-    let next = IndexedBlock {
-        btc_block_tip: btc_tip(101),
-        acquisitions: vec![],
+    let next = BtcBlockRecords {
+        id: btc_tip(101),
+        burns: vec![],
         endorsements: vec![],
     };
     assert_eq!(manager.startup().await.unwrap(), btc_tip(100));
@@ -485,41 +483,17 @@ async fn startup_resumes_an_arrival_before_accepting_the_next_bitcoin_block() {
     assert!(journal.pending_entry().await.unwrap().is_none());
 }
 
-struct ReorgIndexer {
-    tip: watch::Sender<Option<BtcBlockTip>>,
-    history: StdMutex<VecDeque<(BtcBlockTip, HistoryUpdate)>>,
-    stopped: tokio::sync::Notify,
-}
-
-impl ConsensusIndexer for ReorgIndexer {
-    async fn startup(&self) -> Result<(), StartupError> {
-        Ok(())
-    }
-    async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.stopped.notify_one();
-        Ok(())
-    }
-    fn subscribe(&self) -> watch::Receiver<Option<BtcBlockTip>> {
-        self.tip.subscribe()
-    }
-    async fn get_history(
-        &self,
-        cursor: BtcBlockTip,
-        _: NonZeroUsize,
-    ) -> Result<HistoryUpdate, HistoryError> {
-        let (expected, history) = self.history.lock().unwrap().pop_front().unwrap();
-        assert_eq!(cursor, expected);
-        Ok(history)
-    }
-}
-
 #[tokio::test]
-async fn indexer_continues_a_reorg_from_the_cursor_recovered_after_a_rollback_failure() {
-    let fixture = Fixture::at_btc_tip(btc_tip(99)).await;
+async fn consensus_continues_a_reorg_from_the_cursor_recovered_after_a_rollback_failure() {
+    // Consensus has applied the Bitcoin blocks 100 and 101 on top of 99.
+    let btc = MemoryBtc::new();
+    btc.mine_n(101);
+    let [lowest, first, second] = [99, 100, 101].map(|height| btc.block_at(height).unwrap());
+    let fixture = Fixture::at_btc_tip(lowest).await;
     fixture.add_acquisition(0x52).await;
     let bitcoin = bitcoin_processor(&fixture).await;
-    apply_pending(&bitcoin, &fixture.arriving, 0x51, 100).await;
-    apply_pending(&bitcoin, &fixture.arriving, 0x52, 101).await;
+    apply_pending(&bitcoin, &fixture.arriving, 0x51, first).await;
+    apply_pending(&bitcoin, &fixture.arriving, 0x52, second).await;
     let cursor = fixture.processor.cursor_storage.clone();
     let journal = fixture.processor.journal.owner.clone();
     let storage = fixture.processor.consensus_storage.clone();
@@ -530,37 +504,15 @@ async fn indexer_continues_a_reorg_from_the_cursor_recovered_after_a_rollback_fa
     let core_tip = included(0x51, &fixture.arriving, 100)
         .endorsement
         .block_tip();
-    let target = BtcBlockTip {
-        hash: BitcoinBlockHash::from_byte_array([0x99; 32]),
-        height: 100,
-    };
-    let update = |removed| HistoryUpdate {
-        target_tip: target,
-        next_cursor: target,
-        change: HistoryChange::Reorg {
-            removed_block_tips: removed,
-            new_blocks: vec![IndexedBlock {
-                btc_block_tip: target,
-                acquisitions: vec![],
-                endorsements: vec![],
-            }],
-        },
-    };
-    let indexer = Arc::new(ReorgIndexer {
-        tip: watch::channel(Some(btc_tip(101))).0,
-        history: StdMutex::new(VecDeque::from([
-            (btc_tip(101), update(vec![btc_tip(101), btc_tip(100)])),
-            (btc_tip(100), update(vec![btc_tip(100)])),
-        ])),
-        stopped: tokio::sync::Notify::new(),
-    });
-    let consensus = ConsensusLoop::new(ConsensusManager::new(
-        bitcoin,
-        fixture.processor,
-        journal.clone(),
-    ));
+    let consensus = ConsensusLoop::new(
+        ConsensusManager::new(bitcoin, fixture.processor, journal.clone()),
+        lowest,
+    );
     let handle = consensus.consensus_handle();
-    consensus.startup(indexer.clone()).await.unwrap();
+    consensus
+        .startup(btc.source(), RecentBlocks::default())
+        .await
+        .unwrap();
     handle.on_flame_block_arrival(tip).await.unwrap();
     wait_until(|| async {
         journal.latest_entry().await.unwrap().is_some_and(|entry| {
@@ -569,13 +521,10 @@ async fn indexer_continues_a_reorg_from_the_cursor_recovered_after_a_rollback_fa
     })
     .await;
     chain_failure.store(true, Ordering::SeqCst);
-    indexer.tip.send_replace(Some(target));
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        indexer.stopped.notified(),
-    )
-    .await
-    .unwrap();
+    // Bitcoin replaces the blocks 100 and 101 with one block. The rollback
+    // of block 101 fails, and the loop ends by itself.
+    let target = btc.reorg(2, 1);
+    wait_until(|| async { consensus.manager().status() == crate::ConsensusStatus::Stopped }).await;
     assert!(consensus.shutdown().await.is_err());
     let interrupted = journal
         .bitcoin_journal()
@@ -590,12 +539,14 @@ async fn indexer_continues_a_reorg_from_the_cursor_recovered_after_a_rollback_fa
         )
     );
     assert!(interrupted.operation.rollback_plan.is_some());
-    assert_eq!(cursor.get_cursor().await.unwrap(), btc_tip(101));
+    assert_eq!(cursor.get_cursor().await.unwrap(), second);
     chain_failure.store(false, Ordering::SeqCst);
-    consensus.startup(indexer.clone()).await.unwrap();
+    consensus
+        .startup(btc.source(), RecentBlocks::default())
+        .await
+        .unwrap();
     wait_until(|| async { cursor.get_cursor().await.unwrap() == target }).await;
     consensus.shutdown().await.unwrap();
-    assert!(indexer.history.lock().unwrap().is_empty());
     assert!(
         journal
             .bitcoin_journal()

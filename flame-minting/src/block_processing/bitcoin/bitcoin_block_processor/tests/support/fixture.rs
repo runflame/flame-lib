@@ -167,10 +167,10 @@ impl Fixture {
             states: vec![old, old_intermediate, ancestor, new_intermediate, new],
         }
     }
-    pub(in super::super) fn block(&self) -> IndexedBlock {
-        IndexedBlock {
-            btc_block_tip: btc_tip(101),
-            acquisitions: vec![],
+    pub(in super::super) fn block(&self) -> BtcBlockRecords {
+        BtcBlockRecords {
+            id: btc_tip(101),
+            burns: vec![],
             endorsements: vec![],
         }
     }

@@ -1,10 +1,10 @@
-use btc_integration::{
-    BtcBlockTip, MintingEndorsementValidator, UncheckedMintingEndorsement,
-    protocol::minter_witness_script,
-};
-use corepc_client::bitcoin::{
+use bitcoin::{
     Amount, BlockHash as BtcBlockHash, Script, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness,
     absolute, hashes::Hash, script::PushBytes, transaction,
+};
+use btc_integration::{
+    MintingEndorsementValidator, UncheckedMintingEndorsement, protocol::minter_witness_script,
+    watcher::BlockId,
 };
 use flamechain::{BlockHash, CoreBlockTip};
 use flamevm::Predicate;
@@ -46,7 +46,7 @@ fn endorsements(minter: u8, height: u32, hash: u8) -> [IncludedEndorsement; 2] {
             .try_into()
             .unwrap();
     unchecked.map(|endorsement| IncludedEndorsement {
-        btc_block: BtcBlockTip {
+        btc_block: BlockId {
             hash: BtcBlockHash::from_byte_array([3; 32]),
             height: 100,
         },
@@ -186,7 +186,7 @@ async fn restores_endorsement_over_replacement_and_preserves_other_keys() {
     let storage = InMemoryConsensusStorage::new();
     let original = weighted_endorsement(0x51, 1, 1);
     let mut replacement = weighted_endorsement(0x51, 1, 2);
-    replacement.original.btc_block = BtcBlockTip {
+    replacement.original.btc_block = BlockId {
         hash: BtcBlockHash::from_byte_array([4; 32]),
         height: 101,
     };
@@ -447,7 +447,7 @@ async fn restores_pending_endorsement_inclusion_without_duplicates() {
     let previous = storage.get_pending_endorsement(tip, index).await.unwrap();
     assert_eq!(previous, Some(original.clone()));
     let mut replacement = original.clone();
-    replacement.btc_block = BtcBlockTip {
+    replacement.btc_block = BlockId {
         hash: BtcBlockHash::from_byte_array([4; 32]),
         height: 101,
     };

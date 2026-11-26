@@ -2,7 +2,7 @@ use super::bitcoin::bitcoin_operation::BitcoinJournalOperation;
 use super::bitcoin::journal_status::JournalStatus;
 use super::flame::flame_journal_status::FlameJournalStatus;
 use super::flame::flame_operation::FlameJournalOperation;
-use btc_integration::BtcBlockTip;
+use btc_integration::watcher::BlockId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct OperationId(pub u64);
@@ -32,7 +32,7 @@ impl ConsensusJournalEntry {
         }
     }
 
-    pub fn btc_tip(&self) -> BtcBlockTip {
+    pub fn btc_tip(&self) -> BlockId {
         match &self.operation {
             ConsensusOperation::Bitcoin(operation) => operation.entry.btc_tip,
             ConsensusOperation::Flame(entry) => entry.btc_tip,

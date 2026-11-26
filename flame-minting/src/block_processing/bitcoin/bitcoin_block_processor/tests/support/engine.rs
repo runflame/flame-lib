@@ -23,11 +23,11 @@ impl ConsensusEngine for Engine {
 
     async fn get_minting_outcome(
         &self,
-        block: IndexedBlock,
+        block: BtcBlockRecords,
     ) -> Result<MintingOutcome, Self::Error> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         tokio::task::yield_now().await;
-        assert_eq!(block.btc_block_tip, self.outcome.next_btc_cursor);
+        assert_eq!(block.id, self.outcome.next_btc_cursor);
         Ok(self.outcome.clone())
     }
 }

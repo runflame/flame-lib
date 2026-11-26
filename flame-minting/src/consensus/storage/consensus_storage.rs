@@ -3,7 +3,7 @@ use crate::consensus::{
     MinterAcquisitions, MinterEndorsementState, MintingProtocolParams, PendingEndorsements,
     WeightedBlockHeader, WeightedEndorsement,
 };
-use btc_integration::{BtcBlockTip, MinterP2wsh};
+use btc_integration::{MinterP2wsh, watcher::BlockId};
 use flamechain::{BlockTip, CoreBlockTip, CoreFlameHeight};
 use std::collections::HashMap;
 use std::future::Future;
@@ -56,7 +56,7 @@ pub trait ConsensusStorage {
 
     fn store_acquisition(
         &self,
-        _btc_block: BtcBlockTip,
+        _btc_block: BlockId,
         _acquisition: &IncludedAcquisition,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
         async { unimplemented!() }
@@ -78,7 +78,7 @@ pub trait ConsensusStorage {
     }
 
     /// Returns acquisitions recorded through `btc_height`, including immature and expired ones.
-    /// Acquisition activity is evaluated by consensus at each endorsement's target Bitcoin height.
+    /// Burn activity is evaluated by consensus at each endorsement's target Bitcoin height.
     fn get_acquisitions_by_minters(
         &self,
         _btc_height: u64,
@@ -102,7 +102,7 @@ pub trait ConsensusStorage {
 
     fn store_endorsement(
         &self,
-        _btc_block: BtcBlockTip,
+        _btc_block: BlockId,
         _endorsement: &WeightedEndorsement,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send {
         async { unimplemented!() }

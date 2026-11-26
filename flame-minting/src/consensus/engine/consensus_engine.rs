@@ -1,8 +1,8 @@
+use crate::block_processing::BtcBlockRecords;
 use crate::consensus::{
     BitcoinRollbackInput, BitcoinRollbackPlan, ConsensusOutcome, IncludedEndorsement,
     MintingOutcome,
 };
-use btc_integration::IndexedBlock;
 use std::future::Future;
 
 pub trait ConsensusEngine: Send + Sync + 'static {
@@ -20,7 +20,7 @@ pub trait ConsensusEngine: Send + Sync + 'static {
 
     fn get_minting_outcome(
         &self,
-        _block: IndexedBlock,
+        _block: BtcBlockRecords,
     ) -> impl Future<Output = Result<MintingOutcome, Self::Error>> + Send {
         async { unimplemented!() }
     }

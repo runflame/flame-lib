@@ -1,14 +1,18 @@
-mod acquisition;
+mod burn;
 mod consts;
 mod endorsement;
 mod endorsement_validation;
-pub mod indexer;
 mod minter_identity;
 mod minter_p2wsh;
 pub mod minter_witness_script;
-pub mod sender;
+mod records;
+mod records_watcher;
 
-pub use acquisition::{Acquisition, AcquisitionData};
+use curve25519_dalek::ristretto::CompressedRistretto;
+use flamevm::Predicate;
+use readerwriter::{ReadError, Reader};
+
+pub use burn::{Burn, BurnData};
 pub use endorsement::{
     MintingEndorsementAuth, MintingEndorsementData, MintingEndorsementOutput,
     UncheckedMintingEndorsement,
@@ -18,14 +22,13 @@ pub use endorsement_validation::{
     MintingEndorsementValidationError, MintingEndorsementValidator,
     validate_transaction_endorsements,
 };
-pub use indexer::{
-    HistoryChange, HistoryError, HistoryUpdate, IndexedBlock, ProtocolIndexer, ShutdownError,
-    StartupError,
-};
 pub use minter_identity::{MinterIdentity, MinterIdentityError};
 pub use minter_p2wsh::MinterP2wsh;
-pub use sender::{
-    EndorsementSender, EndorsementSigner, EndorsementSignerError, MintingSendError, RequiredInput,
-    SecretStorage, Sender, SignTransactionRequest, SignerContractViolation, TestSender, TestSigner,
-    TestSignerError, TransactionSigner,
-};
+pub use records::{BtcBlockRecords, BtcRecordsError, BtcRecordsEvent};
+pub use records_watcher::{BtcRecordsWatchError, BtcRecordsWatcher};
+
+fn read_predicate(reader: &mut impl Reader) -> Result<Predicate, ReadError> {
+    let point = CompressedRistretto(reader.read_u8x32()?);
+    point.decompress().ok_or(ReadError::InvalidFormat)?;
+    Ok(Predicate::opaque(point))
+}

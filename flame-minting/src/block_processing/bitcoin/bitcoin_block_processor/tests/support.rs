@@ -6,10 +6,10 @@ use std::{
     },
 };
 
-use btc_integration::{Acquisition, AcquisitionData, MinterP2wsh};
-use corepc_client::bitcoin::{
+use bitcoin::{
     Amount, BlockHash as BtcBlockHash, Transaction, TxOut, absolute, hashes::Hash, transaction,
 };
+use btc_integration::{Burn, BurnData, MinterP2wsh};
 use flamechain::{
     BlockHash, BlockTip, Blockchain, ChainParams, CoreBlockHeader, CoreBlockTip, CoreFlameHeight,
 };
@@ -67,8 +67,8 @@ pub(super) type Processor = BitcoinBlockProcessor<
     TestChainStorage,
 >;
 
-pub(super) fn btc_tip(height: u64) -> BtcBlockTip {
-    BtcBlockTip {
+pub(super) fn btc_tip(height: u64) -> BlockId {
+    BlockId {
         hash: BtcBlockHash::from_byte_array([height as u8; 32]),
         height,
     }
@@ -88,7 +88,7 @@ pub(super) fn included(minter: u8, hash: u8) -> IncludedEndorsement {
 }
 
 pub(super) fn acquisition(amount: u64) -> IncludedAcquisition {
-    let data = AcquisitionData::new(
+    let data = BurnData::new(
         [1; 32].into(),
         Predicate::opaque(Predicate::unspendable_key()),
     );
@@ -103,7 +103,7 @@ pub(super) fn acquisition(amount: u64) -> IncludedAcquisition {
     };
     IncludedAcquisition {
         btc_block: btc_tip(101),
-        acquisition: Acquisition::from_tx(&transaction).pop().unwrap(),
+        acquisition: Burn::from_tx(&transaction).pop().unwrap(),
     }
 }
 

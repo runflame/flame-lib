@@ -11,7 +11,7 @@ use crate::consensus::{
     DoubleSign, IncludedAcquisition, IncludedEndorsement, MintingProtocolParams,
     PendingEndorsements, WeightedBlockHeader, WeightedEndorsement,
 };
-use btc_integration::{BtcBlockTip, MinterP2wsh};
+use btc_integration::{MinterP2wsh, watcher::BlockId};
 use flamechain::{BlockTip, CoreBlockTip, CoreFlameHeight};
 use std::{
     collections::{BTreeMap, HashMap, btree_map::Entry},
@@ -113,7 +113,7 @@ impl ConsensusStorage for InMemoryConsensusStorage {
 
     async fn store_acquisition(
         &self,
-        btc_block: BtcBlockTip,
+        btc_block: BlockId,
         acquisition: &IncludedAcquisition,
     ) -> Result<(), Self::Error> {
         self.write_state()?
@@ -149,7 +149,7 @@ impl ConsensusStorage for InMemoryConsensusStorage {
 
     async fn store_endorsement(
         &self,
-        btc_block: BtcBlockTip,
+        btc_block: BlockId,
         endorsement: &WeightedEndorsement,
     ) -> Result<(), Self::Error> {
         self.write_state()?

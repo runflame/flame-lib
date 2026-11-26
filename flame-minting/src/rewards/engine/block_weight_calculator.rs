@@ -1,5 +1,5 @@
 use crate::consensus::{ConsensusStorage, MintingProtocolParams};
-use btc_integration::BtcBlockTip;
+use btc_integration::watcher::BlockId;
 use flamechain::{BlockHeader, CoreBlockTip};
 use std::collections::BTreeMap;
 
@@ -11,7 +11,7 @@ pub type BlockWeights = BTreeMap<PredicatePair, RewardWeight>;
 
 pub struct BlockWeightCalculator<'a, C: ConsensusStorage> {
     pub header: &'a BlockHeader,
-    pub btc_tip: BtcBlockTip,
+    pub btc_tip: BlockId,
     pub consensus_storage: &'a C,
     pub protocol_params: &'a MintingProtocolParams,
 }
