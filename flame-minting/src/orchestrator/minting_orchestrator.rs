@@ -17,7 +17,10 @@ use crate::orchestrator::core_block_notifier::CoreBlockNotifier;
 use btc_integration::{
     BitcoinConfig, IdentityConfig, MinterIdentity,
     identity::impls::LocalKey,
-    watcher::{BlockId, ChainSource, SourceError, impls::RpcSource},
+    watcher::{
+        BlockId, ChainSource, SourceError,
+        impls::{RecentBlocks, RpcSource},
+    },
 };
 use flame_chain_service::{ChainAccess, CoreBlockSource};
 use flame_storage::{chain::InMemoryChainStorage, state::canonical::InMemoryCanonicalStorage};
@@ -153,7 +156,7 @@ where
             .await
             .map_err(OrchestratorError::SenderStartup)?;
         self.consensus_manager
-            .startup(self.btc_source.clone())
+            .startup(self.btc_source.clone(), RecentBlocks::default())
             .await
             .map_err(OrchestratorError::Consensus)?;
         if let Err(error) = self

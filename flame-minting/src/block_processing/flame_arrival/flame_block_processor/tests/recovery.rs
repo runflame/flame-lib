@@ -14,7 +14,7 @@ use crate::{
     },
     consensus::{ConsensusUndo, MintingOutcome},
 };
-use btc_integration::watcher::impls::MemoryBtc;
+use btc_integration::watcher::impls::{MemoryBtc, RecentBlocks};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Event {
@@ -509,7 +509,10 @@ async fn consensus_continues_a_reorg_from_the_cursor_recovered_after_a_rollback_
         lowest,
     );
     let handle = consensus.consensus_handle();
-    consensus.startup(btc.source()).await.unwrap();
+    consensus
+        .startup(btc.source(), RecentBlocks::default())
+        .await
+        .unwrap();
     handle.on_flame_block_arrival(tip).await.unwrap();
     wait_until(|| async {
         journal.latest_entry().await.unwrap().is_some_and(|entry| {

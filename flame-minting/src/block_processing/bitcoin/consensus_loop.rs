@@ -5,7 +5,7 @@ use crate::block_processing::{
 use crate::{ConsensusHandle, ConsensusSendError, ConsensusStatus};
 use btc_integration::{
     BtcRecordsEvent, BtcRecordsWatchError, BtcRecordsWatcher,
-    watcher::{BlockId, BtcStorage, BtcView, BtcWatcher, ChainSource, impls::RecentBlocks},
+    watcher::{BlockId, BtcStorage, BtcView, ChainSource},
 };
 use std::{sync::Arc, time::Duration};
 use tokio::{
@@ -75,9 +75,10 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
         self.best.subscribe()
     }
 
-    pub async fn startup<S: ChainSource + 'static>(
+    pub async fn startup<S: ChainSource + 'static, T: BtcStorage + 'static>(
         &self,
         source: S,
+        storage: T,
     ) -> LoopResult<ProcessingError<B, F, J>> {
         let mut worker = self.worker.lock().await;
         if worker.is_some() {
@@ -88,11 +89,8 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
             .startup()
             .await
             .map_err(ConsensusLoopError::Process)?;
-        let watcher = BtcRecordsWatcher::new(BtcWatcher::resume(
-            source,
-            RecentBlocks::default(),
-            BtcView::restore(self.genesis_id, cursor),
-        ));
+        let watcher =
+            BtcRecordsWatcher::resume(source, storage, BtcView::restore(self.genesis_id, cursor));
         // The minter hears of a block with the first event. The block
         // consensus stopped at is not told: Bitcoin may be past it, and the
         // minter would endorse a core block that is late.

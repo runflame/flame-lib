@@ -9,7 +9,7 @@ use crate::block_processing::{
 };
 use btc_integration::BtcBlockRecords;
 use btc_integration::watcher::WatchError;
-use btc_integration::watcher::impls::MemoryBtc;
+use btc_integration::watcher::impls::{MemoryBtc, RecentBlocks};
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -100,7 +100,10 @@ async fn reorg_rolls_back_old_blocks_before_applying_the_new_branch() {
     btc.mine_n(3);
     let old = btc.best_chain();
     let consensus = consensus(&old, false);
-    consensus.startup(btc.source()).await.unwrap();
+    consensus
+        .startup(btc.source(), RecentBlocks::default())
+        .await
+        .unwrap();
 
     btc.reorg(2, 2);
 
@@ -118,7 +121,10 @@ async fn the_loop_follows_bitcoin_from_the_block_consensus_recovered() {
     // Consensus stopped at block 2, and Bitcoin is at block 3.
     let consensus = consensus(&chain[..=2], false);
     let mut best = consensus.subscribe();
-    consensus.startup(btc.source()).await.unwrap();
+    consensus
+        .startup(btc.source(), RecentBlocks::default())
+        .await
+        .unwrap();
 
     // The first block the minter hears of is the best block of Bitcoin, not
     // the block consensus stopped at.
@@ -135,13 +141,19 @@ async fn a_loop_started_again_forgets_the_best_block_of_the_last_run() {
     let btc = MemoryBtc::new();
     let consensus = consensus(&[btc.best()], false);
     let best = consensus.subscribe();
-    consensus.startup(btc.source()).await.unwrap();
+    consensus
+        .startup(btc.source(), RecentBlocks::default())
+        .await
+        .unwrap();
     let old = btc.mine();
     wait_until(|| async { !cursors(&consensus).is_empty() }).await;
     consensus.shutdown().await.unwrap();
     btc.mine();
 
-    consensus.startup(btc.source()).await.unwrap();
+    consensus
+        .startup(btc.source(), RecentBlocks::default())
+        .await
+        .unwrap();
 
     // Bitcoin went on while the loop was down.
     assert_ne!(*best.borrow(), Some(old));
@@ -155,8 +167,8 @@ async fn a_cancelled_loop_does_not_submit_more_events() {
     btc.mine();
     let manager = manager(&[genesis], false);
     manager.startup().await.unwrap();
-    let watcher = BtcWatcher::new(btc.source(), RecentBlocks::default(), genesis);
-    let watcher = BtcRecordsWatcher::new(watcher);
+    let watcher =
+        BtcRecordsWatcher::resume(btc.source(), RecentBlocks::default(), BtcView::new(genesis));
     let best = watch::channel(None).0;
     let cancellation = CancellationToken::new();
     cancellation.cancel();
@@ -185,7 +197,10 @@ async fn consensus_that_failed_goes_on_from_the_block_it_has_applied() {
     let consensus = consensus(&[genesis], true);
     let first = btc.mine();
     let second = btc.mine();
-    consensus.startup(btc.source()).await.unwrap();
+    consensus
+        .startup(btc.source(), RecentBlocks::default())
+        .await
+        .unwrap();
 
     // Nobody starts consensus again: the loop does. Both blocks were handed
     // over, the first one failed and the second one was dropped with the
@@ -203,7 +218,10 @@ async fn a_source_that_did_not_answer_is_asked_again() {
     let consensus = consensus(&[genesis], false);
     let block = btc.mine();
     btc.fail_call(0);
-    consensus.startup(btc.source()).await.unwrap();
+    consensus
+        .startup(btc.source(), RecentBlocks::default())
+        .await
+        .unwrap();
 
     wait_until(|| async { !cursors(&consensus).is_empty() }).await;
     consensus.shutdown().await.unwrap();
@@ -215,7 +233,10 @@ async fn the_loop_ends_when_bitcoin_replaces_the_lowest_block_of_consensus() {
     let btc = MemoryBtc::new();
     let lowest = btc.mine();
     let consensus = consensus(&[lowest], false);
-    consensus.startup(btc.source()).await.unwrap();
+    consensus
+        .startup(btc.source(), RecentBlocks::default())
+        .await
+        .unwrap();
 
     btc.reorg(1, 2);
 

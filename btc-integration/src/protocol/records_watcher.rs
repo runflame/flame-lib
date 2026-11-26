@@ -12,6 +12,10 @@ impl<S: ChainSource, B: BtcStorage> BtcRecordsWatcher<S, B> {
         BtcRecordsWatcher { watcher }
     }
 
+    pub fn resume(source: S, storage: B, view: BtcView) -> Self {
+        Self::new(BtcWatcher::resume(source, storage, view))
+    }
+
     pub fn view(&self) -> &BtcView {
         self.watcher.view()
     }
