@@ -4,22 +4,15 @@
 //! The transactions here are put together by hand and carry no signatures:
 //! `MemoryBtc::mine_with` puts them into a block as they are.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
-use bitcoin::block::Header;
 use bitcoin::{
-    Amount, Block, OutPoint, Script, ScriptBuf, Transaction, TxIn, TxOut, Witness, absolute,
-    transaction,
+    Amount, OutPoint, Script, ScriptBuf, Transaction, TxIn, TxOut, Witness, absolute, transaction,
 };
 use btc_integration::protocol::{
-    BtcBlockRecords, BtcRecordsError, BtcRecordsEvent, BtcRecordsWatchError, BtcRecordsWatcher,
-    BurnData, MinterP2wsh, MintingEndorsementData, MintingEndorsementProcessingError,
-    minter_witness_script,
+    BtcBlockRecords, BtcRecordsError, BtcRecordsEvent, BtcRecordsWatcher, BurnData, MinterP2wsh,
+    MintingEndorsementData, MintingEndorsementProcessingError, minter_witness_script,
 };
 use btc_integration::watcher::impls::{MemoryBtc, MemorySource, MemoryStorage};
-use btc_integration::watcher::{
-    BlockId, BlockIndex, BtcStorage, BtcWatcher, Prevouts, StorageError,
-};
+use btc_integration::watcher::{BlockId, BtcStorage, BtcWatcher, Prevouts};
 use flamechain::BlockHash;
 use flamevm::Predicate;
 use futures::FutureExt;
@@ -226,87 +219,4 @@ fn the_records_watcher_gives_the_records_of_the_new_blocks_with_the_event() {
     };
     assert_eq!(event, Ok(reorg));
     assert_eq!(watcher.view().best(), new_best);
-}
-
-/// A storage that fails to give a block once.
-struct FailsToRead {
-    inner: MemoryStorage,
-    read_fails: AtomicBool,
-}
-
-impl BlockIndex for FailsToRead {
-    type Error = StorageError;
-
-    async fn header(&self, id: BlockId) -> Result<Option<Header>, StorageError> {
-        self.inner.header(id).await
-    }
-}
-
-impl BtcStorage for FailsToRead {
-    async fn block(&self, id: BlockId) -> Result<Option<Block>, StorageError> {
-        if self.read_fails.swap(false, Ordering::Relaxed) {
-            return Err(StorageError("the database is down".into()));
-        }
-        self.inner.block(id).await
-    }
-
-    async fn prevouts(&self, id: BlockId) -> Result<Option<Prevouts>, StorageError> {
-        self.inner.prevouts(id).await
-    }
-
-    async fn put(&self, id: BlockId, block: Block, prevouts: Prevouts) -> Result<(), StorageError> {
-        self.inner.put(id, block, prevouts).await
-    }
-
-    async fn remove_many(&self, ids: &[BlockId]) -> Result<(), StorageError> {
-        self.inner.remove_many(ids).await
-    }
-}
-
-#[test]
-fn an_event_whose_blocks_could_not_be_read_comes_again_after_a_rewind() {
-    let btc = MemoryBtc::new();
-    let genesis_id = btc.best();
-    let storage = FailsToRead {
-        inner: MemoryStorage::new(),
-        read_fails: AtomicBool::new(true),
-    };
-    let watcher = BtcWatcher::new(btc.source(), storage, genesis_id);
-    let mut watcher = BtcRecordsWatcher::new(watcher);
-    let block = btc.mine();
-
-    let event = watcher.next().now_or_never().expect("the error is ready");
-    let failure = event.unwrap_err();
-    assert!(matches!(
-        failure,
-        BtcRecordsWatchError::Records(BtcRecordsError::Storage(_))
-    ));
-    assert!(!failure.is_fatal());
-    // The view has moved past the block the consumer has not received.
-    assert_eq!(watcher.view().best(), block);
-
-    watcher.rewind_to(genesis_id);
-    let event = watcher.next().now_or_never().expect("the event is ready");
-    assert_eq!(event.unwrap().blocks()[0].id, block);
-    assert_eq!(watcher.view().best(), block);
-}
-
-#[test]
-fn a_rewound_records_watcher_gives_the_records_above_again() {
-    let (btc, watcher) = setup();
-    let mut watcher = BtcRecordsWatcher::new(watcher);
-    let first = btc.mine();
-    let (burning, _) = burn(&witness_script(), 25_000);
-    let second = btc.mine_with(vec![burning]);
-    let event = watcher.next().now_or_never().expect("the event is ready");
-    let event = event.unwrap();
-
-    // The consumer applied the first block and failed on the second.
-    watcher.rewind_to(first);
-    assert_eq!(watcher.view().best(), first);
-
-    let again = watcher.next().now_or_never().expect("the event is ready");
-    let blocks = vec![event.blocks()[1].clone()];
-    assert_eq!(again, Ok(BtcRecordsEvent::NewBlocks { blocks }));
-    assert_eq!(watcher.view().best(), second);
 }

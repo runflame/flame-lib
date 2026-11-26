@@ -46,9 +46,6 @@ loop {
 # }
 ```
 
-A consumer that could not apply an event goes back to the last block it has
-applied, `watcher.rewind_to(block)`, and gets the events from there again.
-
 ### 2. Pay for the minter
 
 A minter needs two payments, and any wallet can make them:

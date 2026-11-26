@@ -2,10 +2,10 @@ use crate::block_processing::{
     BlockProcessor, ConsensusManager, ConsensusManagerError, FlameProcessor,
     journal::consensus::ConsensusJournal,
 };
-use crate::{ConsensusHandle, ConsensusSendError, ConsensusStatus};
+use crate::{ConsensusHandle, ConsensusSendError};
 use btc_integration::{
-    BtcRecordsEvent, BtcRecordsWatchError, BtcRecordsWatcher,
-    watcher::{BlockId, BtcStorage, BtcView, ChainSource},
+    BtcRecordsError, BtcRecordsEvent, BtcRecordsWatchError, BtcRecordsWatcher,
+    watcher::{BlockId, BtcStorage, BtcView, ChainSource, WatchError},
 };
 use std::{sync::Arc, time::Duration};
 use tokio::{
@@ -25,14 +25,26 @@ type ProcessingError<B, F, J> = ConsensusManagerError<
 
 type LoopResult<E> = Result<(), ConsensusLoopError<E>>;
 
-const RETRY_PAUSE: Duration = Duration::from_secs(1);
+const FIRST_PAUSE: Duration = Duration::from_millis(50);
+const LONGEST_PAUSE: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub enum ConsensusLoopError<E> {
     AlreadyRunning,
-    Watch(BtcRecordsWatchError),
+    Watch(WatchError),
+    Records(BtcRecordsError),
     Process(E),
+    Delivery(ConsensusSendError),
     WorkerJoin(tokio::task::JoinError),
+}
+
+impl<E> From<BtcRecordsWatchError> for ConsensusLoopError<E> {
+    fn from(error: BtcRecordsWatchError) -> Self {
+        match error {
+            BtcRecordsWatchError::Watch(error) => ConsensusLoopError::Watch(error),
+            BtcRecordsWatchError::Records(error) => ConsensusLoopError::Records(error),
+        }
+    }
 }
 
 struct BitcoinSyncWorker<E> {
@@ -133,74 +145,39 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
         best: &watch::Sender<Option<BlockId>>,
         cancellation: CancellationToken,
     ) -> LoopResult<ProcessingError<B, F, J>> {
+        let mut pause = FIRST_PAUSE;
         loop {
-            let before = watcher.view().best();
-            tokio::select! {
+            let event = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => return Ok(()),
-                status = manager.stopped() => {
-                    if status == ConsensusStatus::Stopped {
-                        return manager.shutdown().await.map_err(ConsensusLoopError::Process);
-                    }
-                    Self::restart(manager, &mut watcher).await;
+                _ = manager.stopped() => return manager.shutdown().await.map_err(ConsensusLoopError::Process),
+                event = watcher.next() => event,
+            };
+            match event {
+                Ok(event) => {
+                    pause = FIRST_PAUSE;
+                    // The minter hears of the block at once: it endorses a
+                    // core block before consensus is through with the event.
+                    //
+                    // TODO: when Bitcoin is more than one event ahead, this
+                    // is a block of the past. The minter should endorse the
+                    // core block of a past Bitcoin block only while that
+                    // block is a few blocks old (`max_endorsement_delay` is
+                    // 10), and skip the older ones.
+                    best.send_replace(Some(watcher.view().best()));
+                    Self::deliver(manager, event, &cancellation)?;
                 }
-                event = watcher.next() => match event {
-                    Ok(event) => {
-                        // An event that did not get into the queue means that
-                        // consensus is not running: the next turn of the loop
-                        // sees why.
-                        if Self::deliver(manager, event).is_ok() {
-                            // The minter hears of the blocks once they are in
-                            // the queue, before consensus has applied them:
-                            // it endorses a core block without waiting.
-                            //
-                            // TODO: when Bitcoin is more than one event ahead,
-                            // this is a block of the past. The minter should
-                            // endorse the core block of a past Bitcoin block
-                            // only while that block is a few blocks old
-                            // (`max_endorsement_delay` is 10), and skip the
-                            // older ones.
-                            best.send_replace(Some(watcher.view().best()));
-                        }
-                        continue;
+                Err(error) if error.is_fatal() => return Err(error.into()),
+                Err(error) => {
+                    log::warn!("bitcoin source failed, retry in {pause:?}: {error}");
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => return Ok(()),
+                        _ = manager.stopped() => return manager.shutdown().await.map_err(ConsensusLoopError::Process),
+                        _ = tokio::time::sleep(pause) => {}
                     }
-                    Err(error) if error.is_fatal() => return Err(ConsensusLoopError::Watch(error)),
-                    Err(error) => {
-                        if let BtcRecordsWatchError::Records(_) = error {
-                            // The watcher has moved past an event whose blocks
-                            // it could not read: back, so that the event
-                            // comes again.
-                            watcher.rewind_to(before);
-                        }
-                        log::warn!("bitcoin watcher failed, retry in {RETRY_PAUSE:?}: {error}");
-                    }
-                },
-            }
-            tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => return Ok(()),
-                _ = tokio::time::sleep(RETRY_PAUSE) => {}
-            }
-        }
-    }
-
-    async fn restart<S: ChainSource, T: BtcStorage>(
-        manager: &ConsensusManager<B, F, J>,
-        watcher: &mut BtcRecordsWatcher<S, T>,
-    ) {
-        // The worker has ended: this only takes its error.
-        let _ = manager.shutdown().await;
-        match manager.startup().await {
-            Ok(cursor) => {
-                watcher.rewind_to(cursor);
-                log::error!(
-                    "consensus failed, it goes on from Bitcoin block {cursor} in {RETRY_PAUSE:?}"
-                );
-            }
-            // Consensus is not running: the next turn of the loop comes here
-            // again.
-            Err(_) => {
-                log::error!("consensus failed and did not start again, retry in {RETRY_PAUSE:?}")
+                    pause = (pause * 2).min(LONGEST_PAUSE);
+                }
             }
         }
     }
@@ -208,14 +185,19 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
     fn deliver(
         manager: &ConsensusManager<B, F, J>,
         event: BtcRecordsEvent,
-    ) -> Result<(), ConsensusSendError> {
-        match event {
+        cancellation: &CancellationToken,
+    ) -> LoopResult<ProcessingError<B, F, J>> {
+        let delivered = match event {
             BtcRecordsEvent::NewBlocks { blocks } => blocks
                 .into_iter()
                 .try_for_each(|block| manager.new_bitcoin_block(block)),
             BtcRecordsEvent::Reorg {
                 removed, blocks, ..
             } => manager.bitcoin_reorg(removed, blocks),
+        };
+        match delivered {
+            Err(ConsensusSendError::Stopped) if cancellation.is_cancelled() => Ok(()),
+            delivered => delivered.map_err(ConsensusLoopError::Delivery),
         }
     }
 }

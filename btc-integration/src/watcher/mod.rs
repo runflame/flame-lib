@@ -128,15 +128,6 @@ impl<S: ChainSource, B: BtcStorage> BtcWatcher<S, B> {
         &self.view
     }
 
-    /// # Panics
-    ///
-    /// If `block` is neither the genesis block nor above it.
-    pub fn rewind_to(&mut self, block: BlockId) {
-        self.view = BtcView::restore(self.view.genesis_id(), block);
-        // The path was found from the best block the view had.
-        self.pending = None;
-    }
-
     pub fn source(&self) -> &S {
         &self.source
     }
@@ -177,12 +168,21 @@ impl<S: ChainSource, B: BtcStorage> BtcWatcher<S, B> {
             let blocks: Vec<BlockId> = branch.blocks.iter().take(most).copied().collect();
 
             // Blocks reach the storage before the consumer hears of them.
-            if let Some(gone) = self.download_all(&blocks).await? {
+            let stored: Vec<bool> = stream::iter(blocks.clone())
+                .map(|id| self.download(id))
+                .buffered(self.parallel_downloads)
+                .try_collect()
+                .await?;
+            if let Some(gone) = stored.iter().position(|stored| !stored) {
                 // No event named the blocks stored for this path, so they go
                 // out too.
                 self.pending = None;
                 self.stale.extend(&blocks);
-                return Err(SourceError(format!("the source no longer has block {gone}")).into());
+                return Err(SourceError(format!(
+                    "the source no longer has block {}",
+                    blocks[gone]
+                ))
+                .into());
             }
 
             // The best chain of the source may have moved since the path was
@@ -272,32 +272,6 @@ impl<S: ChainSource, B: BtcStorage> BtcWatcher<S, B> {
             .into());
         }
         Ok(Some(header))
-    }
-
-    async fn download_all(&self, blocks: &[BlockId]) -> Result<Option<BlockId>, WatchError> {
-        'download: loop {
-            let stored: Vec<bool> = stream::iter(blocks.iter().copied())
-                .map(|id| self.download(id))
-                .buffered(self.parallel_downloads)
-                .try_collect()
-                .await?;
-            if let Some(gone) = stored.iter().position(|stored| !stored) {
-                return Ok(Some(blocks[gone]));
-            }
-            if self.storage.capacity().is_none() {
-                return Ok(None);
-            }
-            // A bounded storage may have dropped a block of this very event to
-            // make room for another: it is requested again. An event names no
-            // more blocks than the storage keeps, so every round leaves fewer
-            // blocks to request.
-            for &id in blocks {
-                if self.storage.header(id).await?.is_none() {
-                    continue 'download;
-                }
-            }
-            return Ok(None);
-        }
     }
 
     async fn download(&self, id: BlockId) -> Result<bool, WatchError> {
