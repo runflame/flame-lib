@@ -1,18 +1,17 @@
 use bitcoin::secp256k1::Message;
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::{ScriptBuf, Transaction, TxOut, Txid, Witness, absolute, ecdsa, transaction};
+use tokio::sync::Mutex;
 
 use crate::identity::IdentityKey;
 use crate::protocol::{MinterIdentity, minter_witness_script};
 use crate::wallet::{BtcFundedTransaction, BtcWallet, WalletError, WatchOnlyWallet};
 
-/// The calls of [`BtcWallet::send`] must not overlap. The watch-only wallet
-/// does not reserve the outputs it picked: two transactions built at the same
-/// time spend the same output, and Bitcoin takes one of them.
 pub struct MinterWallet<W, K> {
     watch_only: W,
     key: K,
     minter: MinterIdentity,
+    sending: Mutex<()>,
 }
 
 impl<W: WatchOnlyWallet, K: IdentityKey> MinterWallet<W, K> {
@@ -27,6 +26,7 @@ impl<W: WatchOnlyWallet, K: IdentityKey> MinterWallet<W, K> {
             watch_only,
             key,
             minter,
+            sending: Mutex::new(()),
         })
     }
 
@@ -57,6 +57,7 @@ impl<W: WatchOnlyWallet, K: IdentityKey> MinterWallet<W, K> {
 
 impl<W: WatchOnlyWallet, K: IdentityKey> BtcWallet for MinterWallet<W, K> {
     async fn send(&self, output: TxOut) -> Result<Txid, WalletError> {
+        let _sending = self.sending.lock().await;
         let script_pubkey = self.minter.witness_script().to_p2wsh();
         let unsigned = Transaction {
             version: transaction::Version::TWO,
@@ -120,12 +121,12 @@ fn check_funded(
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use bitcoin::hashes::Hash;
     use bitcoin::secp256k1::SecretKey;
     use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid};
     use flamevm::Predicate;
-    use futures::FutureExt;
 
     use super::MinterWallet;
     use crate::identity::IdentityConfig;
@@ -139,7 +140,18 @@ mod tests {
     /// gave it, whatever was asked, and writes down what it is asked.
     struct Recording {
         outputs: Vec<TxOut>,
-        calls: Mutex<Vec<&'static str>>,
+        events: Mutex<Vec<&'static str>>,
+        fail_next_publish: AtomicBool,
+    }
+
+    impl Recording {
+        fn new(outputs: Vec<TxOut>) -> Self {
+            Recording {
+                outputs,
+                events: Mutex::default(),
+                fail_next_publish: AtomicBool::new(false),
+            }
+        }
     }
 
     impl WatchOnlyWallet for &Recording {
@@ -149,7 +161,8 @@ mod tests {
             script_pubkey: &ScriptBuf,
             _input_weight: u64,
         ) -> Result<BtcFundedTransaction, WalletError> {
-            self.calls.lock().unwrap().push("fund");
+            self.events.lock().unwrap().push("fund");
+            tokio::task::yield_now().await;
             let spent = BtcFundingInput {
                 outpoint: OutPoint::new(Txid::all_zeros(), 0),
                 prevout: TxOut {
@@ -163,6 +176,7 @@ mod tests {
                 ..TxIn::default()
             });
             funded.output = self.outputs.clone();
+            self.events.lock().unwrap().push("funded");
             Ok(BtcFundedTransaction {
                 transaction: funded,
                 inputs: vec![spent],
@@ -170,7 +184,12 @@ mod tests {
         }
 
         async fn publish(&self, transaction: &Transaction) -> Result<Txid, WalletError> {
-            self.calls.lock().unwrap().push("publish");
+            self.events.lock().unwrap().push("publish");
+            tokio::task::yield_now().await;
+            if self.fail_next_publish.swap(false, Ordering::SeqCst) {
+                return Err(WalletError::Unreachable("test publish failed".into()));
+            }
+            self.events.lock().unwrap().push("published");
             Ok(transaction.compute_txid())
         }
     }
@@ -191,17 +210,16 @@ mod tests {
     /// Sends `asked` through the wallet of the minter, over a watch-only
     /// wallet that funds it with `outputs`. Returns what came of it and what
     /// the watch-only wallet was asked.
-    fn send(asked: &TxOut, outputs: Vec<TxOut>) -> (Result<Txid, WalletError>, Vec<&'static str>) {
-        let watch_only = Recording {
-            outputs,
-            calls: Mutex::default(),
-        };
+    async fn send(
+        asked: &TxOut,
+        outputs: Vec<TxOut>,
+    ) -> (Result<Txid, WalletError>, Vec<&'static str>) {
+        let watch_only = Recording::new(outputs);
         let (key, minter) = minter();
         let wallet = MinterWallet::new(&watch_only, key, minter).unwrap();
-        let sent = wallet.send(asked.clone()).now_or_never();
-        let sent = sent.expect("the wallet answers at once");
-        let calls = watch_only.calls.lock().unwrap().clone();
-        (sent, calls)
+        let sent = wallet.send(asked.clone()).await;
+        let events = watch_only.events.lock().unwrap().clone();
+        (sent, events)
     }
 
     fn data(byte: u8) -> TxOut {
@@ -211,21 +229,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_wallet_signs_only_the_transaction_it_asked_for() {
-        let asked = data(1);
-        let pays_to = |script_pubkey| TxOut {
+    fn pays_to(script_pubkey: ScriptBuf) -> TxOut {
+        TxOut {
             value: Amount::from_sat(9_000),
             script_pubkey,
-        };
-        let change = pays_to(minter().1.witness_script().to_p2wsh());
+        }
+    }
+
+    fn change() -> TxOut {
+        pays_to(minter().1.witness_script().to_p2wsh())
+    }
+
+    #[tokio::test]
+    async fn a_wallet_signs_only_the_transaction_it_asked_for() {
+        let asked = data(1);
+        let change = change();
         let stranger = pays_to(ScriptBuf::new_p2wsh(&ScriptBuf::new().wscript_hash()));
 
         // The output that was asked for and the change to the minter script:
         // the transaction is signed and sent.
-        let (sent, calls) = send(&asked, vec![asked.clone(), change.clone()]);
+        let (sent, events) = send(&asked, vec![asked.clone(), change.clone()]).await;
         assert!(sent.is_ok());
-        assert_eq!(calls, ["fund", "publish"]);
+        assert_eq!(events, ["fund", "funded", "publish", "published"]);
 
         let not_asked_for = [
             // One more data output: a second endorsement, say.
@@ -240,9 +265,80 @@ mod tests {
             vec![asked.clone(), stranger],
         ];
         for outputs in not_asked_for {
-            let (sent, calls) = send(&asked, outputs);
+            let (sent, events) = send(&asked, outputs).await;
             assert_eq!(sent, Err(WalletError::UnexpectedTransaction));
-            assert_eq!(calls, ["fund"]);
+            assert_eq!(events, ["fund", "funded"]);
         }
+    }
+
+    #[tokio::test]
+    async fn sends_are_serialized_through_publication() {
+        let asked = data(1);
+        let watch_only = Recording::new(vec![asked.clone(), change()]);
+        let (key, minter) = minter();
+        let wallet = MinterWallet::new(&watch_only, key, minter).unwrap();
+
+        let results = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(
+                wallet.send(asked.clone()),
+                wallet.send(asked.clone()),
+                wallet.send(asked.clone()),
+                wallet.send(asked.clone()),
+            )
+        })
+        .await
+        .expect("send queue must make progress");
+        results.0.unwrap();
+        results.1.unwrap();
+        results.2.unwrap();
+        results.3.unwrap();
+        assert_eq!(
+            *watch_only.events.lock().unwrap(),
+            ["fund", "funded", "publish", "published"].repeat(4),
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_error_releases_the_send_queue() {
+        let asked = data(1);
+        let watch_only = Recording {
+            fail_next_publish: AtomicBool::new(true),
+            ..Recording::new(vec![asked.clone(), change()])
+        };
+        let (key, minter) = minter();
+        let wallet = MinterWallet::new(&watch_only, key, minter).unwrap();
+
+        let (failed, next) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(
+                biased;
+                wallet.send(asked.clone()),
+                wallet.send(asked.clone()),
+            )
+        })
+        .await
+        .expect("publish error must release the queue");
+        assert!(matches!(failed, Err(WalletError::Unreachable(_))));
+        next.unwrap();
+        let events = watch_only.events.lock().unwrap();
+        let published = events.iter().filter(|event| **event == "published");
+        assert_eq!(published.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn validation_error_releases_the_send_queue() {
+        let asked = data(1);
+        let watch_only = Recording::new(vec![asked.clone(), data(2)]);
+        let (key, minter) = minter();
+        let wallet = MinterWallet::new(&watch_only, key, minter).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let failed = wallet.send(asked.clone()).await;
+            assert_eq!(failed, Err(WalletError::UnexpectedTransaction));
+            let next = wallet.send(asked.clone()).await;
+            assert_eq!(next, Err(WalletError::UnexpectedTransaction));
+        })
+        .await
+        .expect("validation error must release the queue");
+        assert!(!watch_only.events.lock().unwrap().contains(&"publish"));
     }
 }

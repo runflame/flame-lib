@@ -2,6 +2,7 @@ use bitcoin::consensus::encode;
 use bitcoin::{Amount, Transaction, TxOut, Txid, absolute, transaction};
 use corepc_client::types::v31::SignRawTransactionWithWallet;
 use serde_json::json;
+use tokio::sync::Mutex;
 
 use super::rpc_client::{BtcFundOptions, RpcClient, no_answer};
 use crate::BitcoinConfig;
@@ -9,12 +10,14 @@ use crate::wallet::{BtcWallet, WalletError};
 
 pub struct RpcWallet {
     client: RpcClient,
+    sending: Mutex<()>,
 }
 
 impl RpcWallet {
     pub fn new(config: &BitcoinConfig, wallet: &str) -> Result<Self, WalletError> {
         Ok(RpcWallet {
             client: RpcClient::new(&config.wallet_rpc_url(wallet), config.auth.clone())?,
+            sending: Mutex::new(()),
         })
     }
 
@@ -36,6 +39,7 @@ impl RpcWallet {
 
 impl BtcWallet for RpcWallet {
     async fn send(&self, output: TxOut) -> Result<Txid, WalletError> {
+        let _sending = self.sending.lock().await;
         // An output that cannot be spent is a burn. Bitcoin Core sends it
         // only when it is told how much may be burned.
         let max_burn = if output.script_pubkey.is_op_return() {
