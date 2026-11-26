@@ -1,6 +1,3 @@
-//! The identity of a minter: its public configuration and the Bitcoin key
-//! that signs its endorsements.
-
 use std::future::Future;
 use std::sync::Arc;
 
@@ -21,7 +18,6 @@ pub struct IdentityConfig {
 }
 
 impl IdentityConfig {
-    /// The identity of the minter that signs with `key`.
     pub fn identity(&self, key: &impl IdentityKey) -> MinterIdentity {
         MinterIdentity::single_key(
             &self.flame_predicate,
@@ -31,11 +27,6 @@ impl IdentityConfig {
     }
 }
 
-/// The Bitcoin key of a minter. Its public key is in the witness script of
-/// the minter, and it signs the inputs of the endorsements.
-///
-/// The secret stays inside the implementation, so a key in the memory of the
-/// process and a key on a hardware device look the same from here.
 pub trait IdentityKey: Send + Sync {
     fn public_key(&self) -> PublicKey;
 
@@ -56,7 +47,6 @@ impl<K: IdentityKey> IdentityKey for Arc<K> {
     }
 }
 
-/// The key could not sign.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[error("{0}")]
 pub struct IdentityKeyError(pub String);

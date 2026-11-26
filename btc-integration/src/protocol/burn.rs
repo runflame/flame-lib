@@ -96,7 +96,6 @@ impl BurnData {
         ScriptBuf::from_bytes(script)
     }
 
-    /// The output that burns `amount`.
     pub fn to_output(&self, amount: Amount) -> TxOut {
         TxOut {
             value: amount,

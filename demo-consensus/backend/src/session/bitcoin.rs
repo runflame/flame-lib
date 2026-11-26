@@ -15,8 +15,6 @@ use super::bitcoin_tip;
 pub(super) struct BitcoinRegtest {
     node: Arc<bitcoind::BitcoinD>,
     source: RpcSource,
-    /// The wallet of the node that has coins: it pays for the burns and
-    /// for the first output of every minter.
     payer: RpcWallet,
     start_height: u64,
     blocks: Vec<BitcoinBlockSnapshot>,
@@ -69,7 +67,6 @@ impl BitcoinRegtest {
         self.tip().await
     }
 
-    /// Pays `output` from the wallet that has coins.
     pub async fn pay(&self, output: TxOut) -> Result<Txid> {
         Ok(self.payer.send(output).await?)
     }

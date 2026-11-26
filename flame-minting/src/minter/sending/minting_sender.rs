@@ -8,8 +8,6 @@ use flamechain::BlockHash;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-/// Sends the endorsements of the minter through its watch-only wallet in
-/// Bitcoin Core. The wallet is opened by [`MintingSender::startup`].
 pub struct MintingSender {
     bitcoin_config: BitcoinConfig,
     identity: MinterIdentity,
@@ -18,7 +16,6 @@ pub struct MintingSender {
 }
 
 impl MintingSender {
-    /// `key` is the key `identity` was made with.
     pub fn new(
         bitcoin_config: BitcoinConfig,
         identity: MinterIdentity,
@@ -57,7 +54,6 @@ impl MintingSender {
     }
 }
 
-/// The wallet of the minter could not be opened.
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
 pub struct SenderStartupError(#[from] pub WalletError);

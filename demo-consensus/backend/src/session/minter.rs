@@ -13,8 +13,6 @@ use crate::types::{MinterId, MinterSnapshot};
 
 use super::bitcoin::BitcoinRegtest;
 
-/// What a minter starts with at its witness script: it pays the fees of the
-/// endorsements.
 const MINTER_FUNDING: Amount = Amount::from_sat(50_000);
 
 pub(super) struct DemoMinter {
@@ -26,8 +24,6 @@ pub(super) struct DemoMinter {
 }
 
 impl DemoMinter {
-    /// The minter of `config` that signs with `key`, with [`MINTER_FUNDING`]
-    /// on the way to its witness script.
     pub async fn create(
         id: MinterId,
         name: String,

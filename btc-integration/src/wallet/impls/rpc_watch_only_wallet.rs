@@ -10,16 +10,11 @@ use super::rpc_client::{BtcFundOptions, BtcUnspentOutput, RpcClient, unsigned_in
 use crate::BitcoinConfig;
 use crate::wallet::{BtcFundedTransaction, BtcFundingInput, WalletError, WatchOnlyWallet};
 
-/// [`WatchOnlyWallet`]: a wallet of Bitcoin Core that watches the P2WSH
-/// output of one witness script and holds no keys.
 pub struct RpcWatchOnlyWallet {
     client: RpcClient,
 }
 
 impl RpcWatchOnlyWallet {
-    /// The wallet of the node that watches the P2WSH output of
-    /// `witness_script`.
-    ///
     /// The first call creates the wallet in Bitcoin Core, the next ones load
     /// it. An existing wallet is taken to have its descriptor and its history
     /// already.
@@ -64,8 +59,6 @@ async fn load_or_create(node: &RpcClient, name: &str) -> Result<bool, WalletErro
     }
     let directory: ListWalletDir = node.call("listwalletdir", &[]).await?;
     let exists = directory.wallets.iter().any(|wallet| wallet.name == name);
-    // In both calls `load_on_startup` is set: Bitcoin Core loads the
-    // wallet again after a restart.
     let result = if exists {
         node.call::<LoadWallet>("loadwallet", &[json!(name), json!(true)])
             .await
@@ -125,7 +118,6 @@ impl WatchOnlyWallet for RpcWatchOnlyWallet {
                 .map(|utxo| utxo.outpoint)
                 .collect::<Vec<_>>();
             let candidate = add_inputs(transaction, &outpoints);
-            // The change returns to the script: every output has its address.
             let change_address = &selected[0].address;
             let options = script_funding_options(&outpoints, change_address, input_weight);
 
@@ -139,8 +131,6 @@ impl WatchOnlyWallet for RpcWatchOnlyWallet {
         Err(refusal)
     }
 
-    /// `sendrawtransaction`: the node sends it, whichever wallet the request
-    /// names.
     async fn publish(&self, transaction: &Transaction) -> Result<Txid, WalletError> {
         self.client
             .send_raw_transaction(transaction, Amount::ZERO)
@@ -148,7 +138,6 @@ impl WatchOnlyWallet for RpcWatchOnlyWallet {
     }
 }
 
-/// The confirmed safe outputs of the script, the largest first.
 fn confirmed_for_script(
     utxos: Vec<BtcUnspentOutput>,
     script_pubkey: &ScriptBuf,

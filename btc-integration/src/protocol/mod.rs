@@ -27,7 +27,6 @@ pub use minter_p2wsh::MinterP2wsh;
 pub use records::{BtcBlockRecords, BtcRecordsError, BtcRecordsEvent};
 pub use records_watcher::{BtcRecordsWatchError, BtcRecordsWatcher};
 
-/// Reads a predicate: 32 bytes that are a valid Ristretto point.
 fn read_predicate(reader: &mut impl Reader) -> Result<Predicate, ReadError> {
     let point = CompressedRistretto(reader.read_u8x32()?);
     point.decompress().ok_or(ReadError::InvalidFormat)?;

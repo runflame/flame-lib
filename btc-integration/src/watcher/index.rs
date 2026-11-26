@@ -1,5 +1,3 @@
-//! The block index: headers by block id.
-
 use std::future::Future;
 use std::sync::Arc;
 
@@ -7,32 +5,14 @@ use bitcoin::block::Header;
 
 use crate::watcher::types::BlockId;
 
-/// Anything that can give the header of a block: a storage or a source.
-///
-/// The name is Bitcoin Core's. There the tree of block headers is the block
-/// index, and `CBlockIndex::GetAncestor` is [`BlockIndex::ancestor`].
 pub trait BlockIndex: Send + Sync {
-    /// What a failed read returns.
     type Error;
 
-    /// The header of a block. `None` means the block is not known here.
     fn header(
         &self,
         id: BlockId,
     ) -> impl Future<Output = Result<Option<Header>, Self::Error>> + Send;
 
-    /// The ancestor of `block` at `height`.
-    ///
-    /// This is how a consumer gets to the block it wants to check, for example
-    /// the anchor block of a slot.
-    ///
-    /// `None` means `height` is above `block`, or a header on the way is
-    /// missing.
-    ///
-    /// The provided body walks from `block` down through `prev_blockhash`, one
-    /// header at a time, and works for any implementation. An implementation
-    /// that can do better overrides it: a database finds the ancestor in one
-    /// query.
     fn ancestor(
         &self,
         block: BlockId,
@@ -51,7 +31,6 @@ pub trait BlockIndex: Send + Sync {
     }
 }
 
-/// A shared index is an index: whoever holds it by `Arc` hands out clones.
 impl<I: BlockIndex> BlockIndex for Arc<I> {
     type Error = I::Error;
 

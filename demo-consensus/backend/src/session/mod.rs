@@ -33,7 +33,6 @@ use runtime::DemoRuntime;
 
 pub struct DemoSession {
     runtime: DemoRuntime,
-    /// What every minter of the session shares; each has a key of its own.
     identity_config: IdentityConfig,
     flame: DemoFlameChain,
     minters: Vec<DemoMinter>,

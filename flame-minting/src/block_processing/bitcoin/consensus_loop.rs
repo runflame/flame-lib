@@ -25,13 +25,11 @@ type ProcessingError<B, F, J> = ConsensusManagerError<
 
 type LoopResult<E> = Result<(), ConsensusLoopError<E>>;
 
-/// The pause before the next attempt after the watcher or consensus failed.
 const RETRY_PAUSE: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub enum ConsensusLoopError<E> {
     AlreadyRunning,
-    /// Bitcoin cannot be followed any more.
     Watch(BtcRecordsWatchError),
     Process(E),
     WorkerJoin(tokio::task::JoinError),
@@ -50,9 +48,7 @@ impl<E> Drop for BitcoinSyncWorker<E> {
 
 pub struct ConsensusLoop<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> {
     manager: Arc<ConsensusManager<B, F, J>>,
-    /// The lowest Bitcoin block consensus knows: a reorg never goes below it.
     genesis_id: BlockId,
-    /// The best Bitcoin block the loop has seen, for the minter.
     best: watch::Sender<Option<BlockId>>,
     worker: Mutex<Option<BitcoinSyncWorker<ProcessingError<B, F, J>>>>,
 }
@@ -75,14 +71,10 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
         self.manager.consensus_handle()
     }
 
-    /// The best Bitcoin block: published as soon as the blocks of an event are
-    /// in the queue of consensus, before consensus has applied them.
     pub fn subscribe(&self) -> watch::Receiver<Option<BlockId>> {
         self.best.subscribe()
     }
 
-    /// Recovers consensus, then follows `source` from the block consensus
-    /// stopped at.
     pub async fn startup<S: ChainSource + 'static>(
         &self,
         source: S,
@@ -137,13 +129,6 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
         }
     }
 
-    /// Hands the events of the watcher to consensus until it is cancelled,
-    /// consensus is stopped, or Bitcoin cannot be followed any more.
-    ///
-    /// A failure loses no event. The watcher that could not read an event
-    /// goes back to the block before it, consensus that failed is started
-    /// again from the last block it has applied, and after [`RETRY_PAUSE`]
-    /// the events above that block come again.
     async fn run<S: ChainSource, T: BtcStorage>(
         manager: &ConsensusManager<B, F, J>,
         mut watcher: BtcRecordsWatcher<S, T>,
@@ -151,7 +136,6 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
         cancellation: CancellationToken,
     ) -> LoopResult<ProcessingError<B, F, J>> {
         loop {
-            // Where the watcher is before it looks for the next event.
             let before = watcher.view().best();
             tokio::select! {
                 biased;
@@ -202,11 +186,6 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
         }
     }
 
-    /// Starts consensus again after its worker failed.
-    ///
-    /// Consensus goes on from the last block it has applied, and the watcher
-    /// goes back to that block: the events above it come again, the ones that
-    /// were waiting in the queue of consensus too.
     async fn restart<S: ChainSource, T: BtcStorage>(
         manager: &ConsensusManager<B, F, J>,
         watcher: &mut BtcRecordsWatcher<S, T>,
@@ -228,7 +207,6 @@ impl<B: BlockProcessor, F: FlameProcessor, J: ConsensusJournal> ConsensusLoop<B,
         }
     }
 
-    /// Queues one event of the watcher to consensus.
     fn deliver(
         manager: &ConsensusManager<B, F, J>,
         event: BtcRecordsEvent,

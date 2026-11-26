@@ -1,5 +1,3 @@
-//! A wallet over Bitcoin in memory.
-
 use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::{
@@ -12,20 +10,9 @@ use crate::wallet::{
 };
 use crate::watcher::impls::MemoryBtc;
 
-/// What the wallet pays for a transaction.
 // TODO: a fee by the weight of the transaction, as a real wallet pays.
 const FEE: Amount = Amount::from_sat(1_000);
 
-/// A wallet over [`MemoryBtc`], with one key.
-///
-/// As a [`BtcWallet`] it pays with its own coins: the outputs that pay to its
-/// key, [`MemoryWallet::script_pubkey`]. A new wallet has none; a test gives
-/// it some with [`MemoryBtc::mine_coins`]. As a [`WatchOnlyWallet`] it finds
-/// the outputs of any script and signs nothing.
-///
-/// It spends confirmed outputs only, and never one that a waiting
-/// transaction spends. That is stricter than a wallet of Bitcoin Core, which
-/// also spends its own change before a block confirms it.
 #[derive(Clone)]
 pub struct MemoryWallet {
     btc: MemoryBtc,
@@ -41,13 +28,10 @@ impl MemoryWallet {
         CompressedPublicKey(self.key.public_key(&Secp256k1::signing_only()))
     }
 
-    /// The script the coins of the wallet pay to: P2WPKH of its key.
     pub fn script_pubkey(&self) -> ScriptBuf {
         ScriptBuf::new_p2wpkh(&self.public_key().wpubkey_hash())
     }
 
-    /// Adds inputs that spend confirmed outputs of the script until they pay
-    /// for the outputs and the fee. The change goes back to the script.
     fn fund(
         &self,
         transaction: &Transaction,
@@ -91,8 +75,6 @@ impl MemoryWallet {
         ))
     }
 
-    /// A transaction with `output`, paid with the coins of the wallet and
-    /// signed with its key. It is not sent.
     pub fn payment(&self, output: TxOut) -> Result<Transaction, WalletError> {
         let unsigned = Transaction {
             version: transaction::Version::TWO,
@@ -116,7 +98,6 @@ impl MemoryWallet {
         Ok(signed)
     }
 
-    /// Hands the transaction to Bitcoin, which checks it.
     fn submit(&self, transaction: Transaction) -> Result<Txid, WalletError> {
         self.btc
             .submit(transaction)

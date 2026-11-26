@@ -1,21 +1,3 @@
-//! Bitcoin in memory: the source for tests and for a devnet without bitcoind.
-//!
-//! The test decides when a block appears, on which branch, with which
-//! transactions, and which node has already seen it. Blocks are real
-//! [`bitcoin::Block`]s with real hashes and merkle roots.
-//!
-//! A transaction gets into a block in one of two ways:
-//! - [`MemoryBtc::submit`] checks it the way a node does and lets it wait for
-//!   a block: its inputs are unspent, its scripts and signatures hold, it does
-//!   not pay more than it spends. [`MemoryBtc::mine`] takes every waiting
-//!   transaction, [`MemoryBtc::mine_only`] the ones the test names, so the
-//!   test decides how long a transaction waits.
-//! - [`MemoryBtc::mine_with`] puts transactions into a block as they are.
-//!   Here the test is the miner, and nothing is checked.
-//!
-//! Not checked at all: proof of work, fees, lock times, the maturity of
-//! outputs.
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -33,45 +15,29 @@ use crate::watcher::index::BlockIndex;
 use crate::watcher::source::{ChainSource, SourceError};
 use crate::watcher::types::{BlockId, Prevouts};
 
-/// Every block that ever appeared, and the best chain among them.
-///
 /// Blocks are never deleted: after a reorg the old branch stays available by
 /// hash, as in Bitcoin Core.
 struct World {
     blocks: HashMap<BlockHash, Mined>,
-    /// Every output of every transaction that was ever mined, on any branch.
-    /// The prevouts of a new block come from here.
     outputs: HashMap<OutPoint, TxOut>,
-    /// The best chain, by height: `chain[0]` is the genesis block, the last
-    /// one is the best block.
     chain: Vec<BlockId>,
     /// How many blocks were mined. A block gets this number as its nonce,
     /// which makes every header unique and tells which block is older.
     mined: u32,
-    /// Those waiting for the best block to change.
     wakers: Vec<Waker>,
-    /// How many times the sources were asked.
     calls: u32,
-    /// Which upcoming source call fails; 0 is the next one.
     fail_at: Option<u32>,
-    /// The unspent outputs of the best chain.
     unspent: HashMap<OutPoint, TxOut>,
-    /// The transactions that wait for a block, in the order they came. One
-    /// may spend an output of an earlier one.
     mempool: Vec<Transaction>,
 }
 
-/// A block as the world keeps it.
 struct Mined {
     height: u64,
     block: Block,
     prevouts: Prevouts,
-    /// The outputs this block took out of the unspent ones when it joined
-    /// the best chain. They come back when it leaves.
     spent: Vec<(OutPoint, TxOut)>,
 }
 
-/// Why [`MemoryBtc::submit`] did not take a transaction.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Rejected {
     #[error("the transaction has no inputs")]
@@ -88,8 +54,6 @@ pub enum Rejected {
     Script(String),
 }
 
-/// Checks a transaction against the outputs it may spend and, if it holds,
-/// spends them and adds its own.
 fn accept(
     spendable: &mut HashMap<OutPoint, TxOut>,
     transaction: &Transaction,
@@ -123,7 +87,6 @@ fn accept(
     Ok(())
 }
 
-/// The outputs of a transaction that can be spent.
 fn new_outputs(transaction: &Transaction) -> impl Iterator<Item = (OutPoint, TxOut)> {
     let txid = transaction.compute_txid();
     let outputs = transaction.output.iter().enumerate();
@@ -137,8 +100,6 @@ impl World {
         *self.chain.last().expect("the chain has the genesis block")
     }
 
-    /// Creates a block on top of `parent` with these transactions. Does not
-    /// change the best chain.
     fn add(&mut self, parent: Option<BlockId>, txdata: Vec<Transaction>) -> BlockId {
         let (height, prev_blockhash, time) = match parent {
             Some(parent) => {
@@ -176,9 +137,6 @@ impl World {
         BlockId { height, hash }
     }
 
-    /// The prevouts of the transactions of a new block, in block order. An
-    /// input that names an output no mined transaction has gets `None`. A
-    /// transaction can spend an output of an earlier one in the same block.
     fn spend(&mut self, txdata: &[Transaction]) -> Prevouts {
         let mut prevouts = Vec::with_capacity(txdata.len());
         for transaction in txdata {
@@ -197,7 +155,6 @@ impl World {
         Prevouts::new(prevouts)
     }
 
-    /// Makes `best` the best block: the best chain now ends at it.
     fn set_best(&mut self, best: BlockId) {
         assert!(
             self.blocks
@@ -205,8 +162,6 @@ impl World {
                 .is_some_and(|mined| mined.height == best.height),
             "unknown block {best}"
         );
-        // The blocks of the new branch, down to the block it shares with the
-        // chain we have.
         let mut branch = Vec::new();
         let mut block = best;
         while self.chain.get(block.height as usize) != Some(&block) {
@@ -233,8 +188,6 @@ impl World {
         self.wake();
     }
 
-    /// The block joins the best chain: its inputs are spent, its outputs can
-    /// be spent.
     fn connect(&mut self, id: BlockId) {
         let mined = self.blocks.get_mut(&id.hash).expect("a known block");
         mined.spent.clear();
@@ -249,8 +202,6 @@ impl World {
         }
     }
 
-    /// The block leaves the best chain: its outputs are gone, the outputs it
-    /// spent are back. Returns its transactions.
     fn disconnect(&mut self, id: BlockId) -> Vec<Transaction> {
         let mined = self.blocks.get_mut(&id.hash).expect("a known block");
         for transaction in &mined.block.txdata {
@@ -262,8 +213,6 @@ impl World {
         mined.block.txdata.clone()
     }
 
-    /// The outputs a new transaction may spend: the unspent outputs of the
-    /// best chain, after the transactions that wait.
     fn spendable(&self) -> HashMap<OutPoint, TxOut> {
         let mut spendable = self.unspent.clone();
         for transaction in &self.mempool {
@@ -272,7 +221,6 @@ impl World {
         spendable
     }
 
-    /// A new block on top of the best one, with these transactions.
     fn mine(&mut self, transactions: Vec<Transaction>) -> BlockId {
         let block = self.add(Some(self.best()), transactions);
         self.set_best(block);
@@ -285,7 +233,6 @@ impl World {
         }
     }
 
-    /// Counts a source call and decides whether it has to fail.
     fn take_failure(&mut self) -> Result<(), SourceError> {
         self.calls += 1;
         match self.fail_at {
@@ -302,7 +249,6 @@ impl World {
     }
 }
 
-/// A handle to Bitcoin in memory. Cheap to clone: all clones share one chain.
 #[derive(Clone)]
 pub struct MemoryBtc {
     world: Arc<Mutex<World>>,
@@ -315,7 +261,6 @@ impl Default for MemoryBtc {
 }
 
 impl MemoryBtc {
-    /// A chain of one block at height 0.
     pub fn new() -> Self {
         let mut world = World {
             blocks: HashMap::new(),
@@ -339,26 +284,18 @@ impl MemoryBtc {
         self.world.lock().expect("the world lock is not poisoned")
     }
 
-    /// The best block.
     pub fn best(&self) -> BlockId {
         self.lock().best()
     }
 
-    /// The best chain by height: the genesis block first, the best block last.
     pub fn best_chain(&self) -> Vec<BlockId> {
         self.lock().chain.clone()
     }
 
-    /// The block of the best chain at this height.
     pub fn block_at(&self, height: u64) -> Option<BlockId> {
         self.lock().chain.get(height as usize).copied()
     }
 
-    /// Checks a transaction the way a node does and lets it wait for a
-    /// block.
-    ///
-    /// Its inputs have to be unspent outputs of the best chain or of the
-    /// transactions that wait.
     pub fn submit(&self, transaction: Transaction) -> Result<Txid, Rejected> {
         let mut world = self.lock();
         let mut spendable = world.spendable();
@@ -373,7 +310,6 @@ impl MemoryBtc {
         Ok(txid)
     }
 
-    /// The transactions that wait for a block, in the order they came.
     pub fn mempool(&self) -> Vec<Txid> {
         let world = self.lock();
         world
@@ -383,9 +319,6 @@ impl MemoryBtc {
             .collect()
     }
 
-    /// The outputs of the best chain that pay to `script_pubkey` and that
-    /// nothing has spent, a waiting transaction included. In the order of
-    /// their outpoints.
     pub(crate) fn unspent(&self, script_pubkey: &Script) -> Vec<(OutPoint, TxOut)> {
         let world = self.lock();
         let spendable = world.spendable();
@@ -400,8 +333,6 @@ impl MemoryBtc {
         unspent
     }
 
-    /// A new block on top of the best one, with every transaction that
-    /// waits.
     pub fn mine(&self) -> BlockId {
         let mut world = self.lock();
         let waiting = world.mempool.clone();
@@ -431,18 +362,10 @@ impl MemoryBtc {
         world.mine(chosen)
     }
 
-    /// A new block on top of the best one, with these transactions as they
-    /// are: nothing checks them. The transactions that wait go on waiting,
-    /// unless the block makes them impossible.
-    ///
-    /// The source returns the block with its prevouts: for every input, the
-    /// output it names, if a transaction mined before has it.
     pub fn mine_with(&self, transactions: Vec<Transaction>) -> BlockId {
         self.lock().mine(transactions)
     }
 
-    /// A new block with one transaction that pays `amount` to `script_pubkey`
-    /// out of nothing, the way a block reward does. Returns the new output.
     pub fn mine_coins(&self, script_pubkey: ScriptBuf, amount: Amount) -> OutPoint {
         let mut world = self.lock();
         let payment = Transaction {
@@ -464,7 +387,6 @@ impl MemoryBtc {
         outpoint
     }
 
-    /// `count` blocks in a row; returns the last one.
     pub fn mine_n(&self, count: u64) -> BlockId {
         (0..count).fold(self.best(), |_, _| self.mine())
     }
@@ -480,15 +402,10 @@ impl MemoryBtc {
         block
     }
 
-    /// Makes any known block the best one: a branch of the same height, or an
-    /// ancestor (this is what `invalidateblock` does).
     pub fn set_best(&self, block: BlockId) {
         self.lock().set_best(block);
     }
 
-    /// A reorg in one line: steps `depth` blocks back from the best block,
-    /// builds a branch of `new_blocks` blocks there and makes it the best.
-    /// Returns the new best block.
     pub fn reorg(&self, depth: u64, new_blocks: u64) -> BlockId {
         let mut world = self.lock();
         let fork = world.best().height - depth;
@@ -506,14 +423,10 @@ impl MemoryBtc {
         self.lock().fail_at = Some(call);
     }
 
-    /// How many times the sources of this chain were asked: for a header, a
-    /// block, the best block or the block at a height. The difference tells a
-    /// test whether the watcher went to the source.
     pub fn calls(&self) -> u32 {
         self.lock().calls
     }
 
-    /// A source that sees every block at once.
     pub fn source(&self) -> MemorySource {
         MemorySource {
             world: self.world.clone(),
@@ -521,8 +434,6 @@ impl MemoryBtc {
         }
     }
 
-    /// The source of a lagging node: it sees only what was delivered to it
-    /// through [`Lag`]. The node starts in sync.
     pub fn lagging_source(&self) -> (MemorySource, Lag) {
         let seen = Arc::new(Mutex::new(Seen {
             best: self.lock().chain[0],
@@ -541,30 +452,21 @@ impl MemoryBtc {
     }
 }
 
-/// What has reached a lagging node.
 struct Seen {
-    /// The best block the node sees.
     best: BlockId,
-    /// The node knows every block mined up to this one, by the count in
-    /// `World::mined`.
     mined: u32,
 }
 
-/// Controls what a lagging node sees. This is how a test with several nodes
-/// says which node has received which Bitcoin block.
 pub struct Lag {
     world: Arc<Mutex<World>>,
     seen: Arc<Mutex<Seen>>,
 }
 
 impl Lag {
-    /// The best block the node sees.
     pub fn best(&self) -> BlockId {
         self.seen.lock().expect("not poisoned").best
     }
 
-    /// The node receives `block` and every block mined before it; `block`
-    /// becomes the best block it sees.
     pub fn deliver(&self, block: BlockId) {
         let mut world = self.world.lock().expect("not poisoned");
         let mut seen = self.seen.lock().expect("not poisoned");
@@ -574,7 +476,6 @@ impl Lag {
         world.wake();
     }
 
-    /// The node receives everything there is. Returns the best block.
     pub fn catch_up(&self) -> BlockId {
         let best = self.world.lock().expect("not poisoned").best();
         self.deliver(best);
@@ -582,10 +483,8 @@ impl Lag {
     }
 }
 
-/// [`ChainSource`] over [`MemoryBtc`].
 pub struct MemorySource {
     world: Arc<Mutex<World>>,
-    /// `None`: the source sees everything; otherwise only what was delivered.
     seen: Option<Arc<Mutex<Seen>>>,
 }
 
@@ -601,7 +500,6 @@ impl MemorySource {
         }
     }
 
-    /// A block the source knows, with its prevouts, after counting the call.
     fn find(&self, hash: BlockHash) -> Result<Option<(Block, Prevouts)>, SourceError> {
         let mut world = self.lock();
         world.take_failure()?;
@@ -654,7 +552,6 @@ impl ChainSource for MemorySource {
     }
 }
 
-/// Ready as soon as the visible best block is not `known`.
 struct WaitForNewBlock<'a> {
     source: &'a MemorySource,
     known: BlockHash,

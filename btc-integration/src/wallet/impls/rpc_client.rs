@@ -12,17 +12,10 @@ use serde_json::{Value, json};
 
 use crate::wallet::WalletError;
 
-/// A client of one RPC endpoint of Bitcoin Core: the node
-/// (`http://127.0.0.1:18443`) or one of its wallets
-/// (`http://127.0.0.1:18443/wallet/<name>`). Tested with version 31.0.
-///
-/// The client does its network I/O on tokio, so its futures need a tokio
-/// runtime.
 pub(super) struct RpcClient {
     client: Client,
 }
 
-/// An unspent output, as `listunspent` reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct BtcUnspentOutput {
     pub outpoint: OutPoint,
@@ -32,7 +25,6 @@ pub(super) struct BtcUnspentOutput {
     pub safe: bool,
 }
 
-/// The options of `fundrawtransaction`.
 #[derive(Clone, Debug, Default)]
 pub(super) struct BtcFundOptions {
     pub add_inputs: Option<bool>,
@@ -42,15 +34,12 @@ pub(super) struct BtcFundOptions {
 }
 
 impl RpcClient {
-    /// No connection is made here: an unreachable node shows up as an error of
-    /// the first call.
     pub(super) fn new(url: &str, auth: Auth) -> Result<Self, WalletError> {
         Ok(RpcClient {
             client: Client::new_with_auth(url, auth).map_err(no_answer)?,
         })
     }
 
-    /// One RPC call.
     pub(super) async fn call<T: DeserializeOwned>(
         &self,
         method: &str,
@@ -58,7 +47,6 @@ impl RpcClient {
     ) -> Result<T, WalletError> {
         let answer = self.client.call(method, args).await;
         answer.map_err(|failure| match failure {
-            // Bitcoin Core answered, and its answer is an error.
             Error::JsonRpc(jsonrpc::Error::Rpc(refusal)) => {
                 WalletError::Refused(format!("{method}: {}", refusal.message))
             }
@@ -66,7 +54,6 @@ impl RpcClient {
         })
     }
 
-    /// `listunspent`.
     pub(super) async fn list_unspent(&self) -> Result<Vec<BtcUnspentOutput>, WalletError> {
         let unspent: ListUnspent = self.call("listunspent", &[]).await?;
         let unspent = unspent.into_model().map_err(no_answer)?;
@@ -86,7 +73,6 @@ impl RpcClient {
             .collect())
     }
 
-    /// `fundrawtransaction` for a transaction that is not signed yet.
     pub(super) async fn fund_raw_transaction(
         &self,
         transaction: &Transaction,
@@ -142,7 +128,6 @@ fn unsigned_hex(transaction: &Transaction) -> String {
     bytes.to_lower_hex_string()
 }
 
-/// The node cannot be reached, or what it answered cannot be read.
 pub(super) fn no_answer(error: impl Display) -> WalletError {
     WalletError::Unreachable(error.to_string())
 }

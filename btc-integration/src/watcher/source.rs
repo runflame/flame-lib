@@ -1,5 +1,3 @@
-//! The port to Bitcoin.
-
 use std::future::Future;
 use std::sync::Arc;
 
@@ -10,24 +8,9 @@ use thiserror::Error;
 use crate::watcher::index::BlockIndex;
 use crate::watcher::types::{BlockId, Prevouts};
 
-/// Everything the watcher asks a Bitcoin node.
-///
-/// Implementations:
-/// - `watcher::impls::MemorySource`: Bitcoin in memory, for tests and for a
-///   devnet without bitcoind (the `memory-btc` feature);
-/// - [`crate::watcher::impls::RpcSource`]: RPC to bitcoind
-///   (`getblockheader`, `getblock <hash> 3`, `getblockhash`,
-///   `waitfornewblock`).
-///
-/// The methods return `impl Future + Send`, like the traits in flame-minting.
-/// Such a future runs under any executor: tokio, commonware, or a single poll
-/// in a test.
-///
 /// The watcher has no clock, so it cannot give up on a call. A source over a
 /// network sets its own timeout and answers with an error when it expires.
 pub trait ChainSource: BlockIndex<Error = SourceError> {
-    /// The whole block and the outputs its inputs spend. `None` means the
-    /// source does not have the block.
     fn block(
         &self,
         hash: BlockHash,
@@ -46,12 +29,6 @@ pub trait ChainSource: BlockIndex<Error = SourceError> {
         known: BlockHash,
     ) -> impl Future<Output = Result<BlockId, SourceError>> + Send;
 
-    /// The block of the best chain at `height`. `None` means the best chain
-    /// is shorter.
-    ///
-    /// The provided body asks for the best block and walks down from it, one
-    /// header at a time. A source that can do better overrides it: Bitcoin
-    /// Core answers in one request.
     fn block_at(
         &self,
         height: u64,
@@ -65,8 +42,6 @@ pub trait ChainSource: BlockIndex<Error = SourceError> {
     }
 }
 
-/// A shared source is a source: a watcher takes its source by value, and the
-/// owner of the source keeps it for the next watcher.
 impl<S: ChainSource> ChainSource for Arc<S> {
     fn block(
         &self,
@@ -90,9 +65,6 @@ impl<S: ChainSource> ChainSource for Arc<S> {
     }
 }
 
-/// The source did not answer or answered inconsistently. A retry may help.
-///
-/// "No such block" is not an error: it is `Ok(None)`.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[error("{0}")]
 pub struct SourceError(pub String);

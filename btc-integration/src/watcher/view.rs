@@ -1,41 +1,18 @@
-//! The Bitcoin view: plain data and pure functions over it.
-
 use thiserror::Error;
 
 use crate::watcher::types::{BlockId, BtcEvent};
 
-/// The Bitcoin view of a node: the canonical chain from the genesis block up
-/// to the best block, as this node sees it.
-///
-/// The view keeps only the two ends of that chain. The blocks between them are
-/// not in memory: each points to the previous one, and they live in
-/// [`crate::watcher::BtcStorage`].
-///
-/// There are two instances, built the same way:
-/// - inside [`crate::watcher::BtcWatcher`]: the watcher measures what changed at the
-///   source from this block;
-/// - at every consumer: it moves its own view with [`BtcView::apply`] and reads
-///   the height `N` from it. The view is all a consumer has to save in order to
-///   continue from the same place after a restart.
-///
-/// No network, no clock, no async here. The rules live in this file, so plain
-/// synchronous tests check them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BtcView {
     genesis_id: BlockId,
     best: BlockId,
 }
 
-/// The event does not start at the best block of this view: the consumer missed
-/// an event or applies someone else's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[error("the event does not start at the best block of the view")]
 pub struct OutOfSync;
 
 impl BtcView {
-    /// A view of the genesis block alone. The genesis block is a
-    /// deployment parameter: both the watcher and the consumer know it in
-    /// advance.
     pub fn new(genesis_id: BlockId) -> Self {
         BtcView {
             genesis_id,
@@ -43,7 +20,6 @@ impl BtcView {
         }
     }
 
-    /// A view saved before a restart.
     pub fn restore(genesis_id: BlockId, best: BlockId) -> Self {
         assert!(
             best.height > genesis_id.height || best == genesis_id,
@@ -52,28 +28,18 @@ impl BtcView {
         BtcView { genesis_id, best }
     }
 
-    /// The genesis block: the Bitcoin block the Flame genesis is built on. It
-    /// is the bottom of the view: no event removes it.
     pub fn genesis_id(&self) -> BlockId {
         self.genesis_id
     }
 
-    /// The best block of the view. While there are no blocks above the genesis
-    /// block, this is the genesis block itself.
     pub fn best(&self) -> BlockId {
         self.best
     }
 
-    /// The height of the best block.
     pub fn height(&self) -> u64 {
         self.best.height
     }
 
-    /// Applies an event: moves the best block to where the event leads.
-    ///
-    /// The event must start at the best block of the view, and it cannot remove
-    /// the genesis block. On an error the view does not change.
-    ///
     /// The view checks heights only. It holds no blocks, so it cannot check
     /// that the new blocks link to each other: the watcher has done that.
     pub fn apply(&mut self, event: &BtcEvent) -> Result<(), OutOfSync> {

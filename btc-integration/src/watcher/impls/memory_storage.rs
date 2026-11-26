@@ -1,5 +1,3 @@
-//! The storage of Bitcoin blocks in memory.
-
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -10,8 +8,6 @@ use crate::watcher::index::BlockIndex;
 use crate::watcher::storage::{BtcStorage, StorageError};
 use crate::watcher::types::{BlockId, Prevouts};
 
-/// Storage in memory. Cheap to clone: all clones share the same blocks, so one
-/// clone goes to the watcher and another stays with the consumer.
 #[derive(Clone, Default)]
 pub struct MemoryStorage {
     blocks: Arc<Mutex<BTreeMap<BlockId, (Block, Prevouts)>>>,
@@ -28,7 +24,6 @@ impl MemoryStorage {
             .expect("the storage lock is not poisoned")
     }
 
-    /// The number of stored blocks.
     pub fn len(&self) -> usize {
         self.lock().len()
     }

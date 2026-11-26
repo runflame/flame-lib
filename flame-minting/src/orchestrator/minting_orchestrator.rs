@@ -62,8 +62,6 @@ where
     H::Error: Send + 'static,
     N: CoreBlockNotifier,
 {
-    /// `identity_key` is the Bitcoin key of the minter: it signs the
-    /// endorsements, and its public key is in the witness script.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         core_block_notifier: N,

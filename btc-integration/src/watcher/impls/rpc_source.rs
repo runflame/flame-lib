@@ -1,5 +1,3 @@
-//! A block source over the RPC of Bitcoin Core.
-
 use std::fmt::Display;
 use std::future::Future;
 use std::time::Duration;
@@ -17,16 +15,10 @@ use crate::watcher::index::BlockIndex;
 use crate::watcher::source::{ChainSource, SourceError};
 use crate::watcher::types::{BlockId, Prevouts};
 
-/// How long Bitcoin Core has to answer a request. A call that takes longer
-/// ends with an error, and the request is abandoned.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long one `waitfornewblock` request waits for a new block. While nothing
-/// changes, this is the pace of the requests to Bitcoin Core.
 const LONG_POLL: Duration = Duration::from_secs(10);
 
-/// The RPC error code of `getblockhash` for a height above the best block:
-/// `RPC_INVALID_PARAMETER` in Bitcoin Core.
 const HEIGHT_OUT_OF_RANGE: i64 = -8;
 
 /// [`ChainSource`] to one Bitcoin Core node, version 30 or newer: an older
@@ -40,8 +32,6 @@ pub struct RpcSource {
 }
 
 impl RpcSource {
-    /// No connection is made here: an unreachable node shows up as an error
-    /// of the first call.
     pub fn new(config: &BitcoinConfig) -> Result<Self, SourceError> {
         let client = Client::new_with_auth(&config.node_rpc_url, config.auth.clone());
         Ok(RpcSource {
@@ -53,8 +43,6 @@ impl RpcSource {
 impl BlockIndex for RpcSource {
     type Error = SourceError;
 
-    /// `getblockheader`. Bitcoin Core also answers for blocks that left the
-    /// best chain.
     async fn header(&self, id: BlockId) -> Result<Option<Header>, SourceError> {
         match within(REQUEST_TIMEOUT, self.client.get_block_header(&id.hash)).await? {
             Ok(header) => Ok(Some(header)),
@@ -65,8 +53,6 @@ impl BlockIndex for RpcSource {
 }
 
 impl ChainSource for RpcSource {
-    /// `getblock <hash> 3`: the block as JSON, where every input comes with
-    /// the output it spends.
     async fn block(&self, hash: BlockHash) -> Result<Option<(Block, Prevouts)>, SourceError> {
         let args = [json!(hash.to_string()), json!(3)];
         let call = self.client.call::<GetBlockVerboseThree>("getblock", &args);
@@ -106,7 +92,6 @@ impl ChainSource for RpcSource {
         })
     }
 
-    /// `getblockhash`.
     async fn block_at(&self, height: u64) -> Result<Option<BlockId>, SourceError> {
         // Bitcoin Core counts heights in 32 bits: a height that does not fit
         // is above its chain.
@@ -122,7 +107,6 @@ impl ChainSource for RpcSource {
     }
 }
 
-/// Splits the answer of `getblock <hash> 3` into the block and its prevouts.
 fn block_with_prevouts(verbose: model::GetBlockVerboseThree) -> (Block, Prevouts) {
     let header = Header {
         version: verbose.version,
@@ -151,8 +135,6 @@ fn block_with_prevouts(verbose: model::GetBlockVerboseThree) -> (Block, Prevouts
     (Block { header, txdata }, Prevouts::new(prevouts))
 }
 
-/// Gives a call `limit` to finish. A call that is not finished by then is
-/// dropped, which abandons its request.
 async fn within<T>(limit: Duration, call: impl Future<Output = T>) -> Result<T, SourceError> {
     tokio::time::timeout(limit, call)
         .await

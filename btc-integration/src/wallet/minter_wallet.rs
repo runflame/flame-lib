@@ -1,5 +1,3 @@
-//! The wallet of a minter.
-
 use bitcoin::secp256k1::Message;
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::{ScriptBuf, Transaction, TxOut, Txid, Witness, absolute, ecdsa, transaction};
@@ -8,12 +6,6 @@ use crate::identity::IdentityKey;
 use crate::protocol::{MinterIdentity, minter_witness_script};
 use crate::wallet::{BtcFundedTransaction, BtcWallet, WalletError, WatchOnlyWallet};
 
-/// [`BtcWallet`] that pays from the outputs of the minter script.
-///
-/// `W` finds the outputs and builds the transaction, `K` signs it. The script
-/// of the minter has to be the one of a single key: `<key> OP_CHECKSIG` after
-/// the Flame prefix.
-///
 /// The calls of [`BtcWallet::send`] must not overlap. The watch-only wallet
 /// does not reserve the outputs it picked: two transactions built at the same
 /// time spend the same output, and Bitcoin takes one of them.
@@ -24,7 +16,6 @@ pub struct MinterWallet<W, K> {
 }
 
 impl<W: WatchOnlyWallet, K: IdentityKey> MinterWallet<W, K> {
-    /// `key` has to be the key in the witness script of `minter`.
     pub fn new(watch_only: W, key: K, minter: MinterIdentity) -> Result<Self, WalletError> {
         let in_script = minter_witness_script::parse(minter.witness_script())
             .ok()
@@ -43,8 +34,6 @@ impl<W: WatchOnlyWallet, K: IdentityKey> MinterWallet<W, K> {
         &self.minter
     }
 
-    /// Signs every input of `funded`: all of them spend outputs of the minter
-    /// script.
     async fn sign(&self, funded: BtcFundedTransaction) -> Result<Transaction, WalletError> {
         let witness_script = self.minter.witness_script();
         let mut signed = funded.transaction;

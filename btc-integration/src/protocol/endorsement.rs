@@ -145,7 +145,6 @@ impl MintingEndorsementData {
         ScriptBuf::from_bytes(script)
     }
 
-    /// The output that carries the endorsement. It holds no value.
     pub fn to_output(&self) -> TxOut {
         TxOut {
             value: Amount::ZERO,

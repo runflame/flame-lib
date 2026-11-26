@@ -1,14 +1,8 @@
-//! A key of a minter in the memory of the process.
-
 use bitcoin::secp256k1::{Message, PublicKey, Secp256k1, SecretKey, ecdsa};
 use rand::rngs::OsRng;
 
 use crate::identity::{IdentityKey, IdentityKeyError};
 
-/// [`IdentityKey`] whose secret this process holds.
-///
-/// The secret does not leave this type: it cannot be read back, copied or
-/// printed, and it is erased when the key is dropped.
 pub struct LocalKey {
     secret: SecretKey,
     public_key: PublicKey,
@@ -22,7 +16,6 @@ impl LocalKey {
         LocalKey { secret, public_key }
     }
 
-    /// A new key from the random source of the operating system.
     pub fn generate() -> Self {
         LocalKey::new(SecretKey::new(&mut OsRng))
     }

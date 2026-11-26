@@ -1,5 +1,3 @@
-//! An ordinary wallet of Bitcoin Core over RPC.
-
 use bitcoin::consensus::encode;
 use bitcoin::{Amount, Transaction, TxOut, Txid, absolute, transaction};
 use corepc_client::types::v31::SignRawTransactionWithWallet;
@@ -9,22 +7,17 @@ use super::rpc_client::{BtcFundOptions, RpcClient, no_answer};
 use crate::BitcoinConfig;
 use crate::wallet::{BtcWallet, WalletError};
 
-/// [`BtcWallet`]: a wallet of Bitcoin Core that holds its keys and its coins.
 pub struct RpcWallet {
     client: RpcClient,
 }
 
 impl RpcWallet {
-    /// The wallet `wallet` of the node. No connection is made here: an
-    /// unreachable node or a wallet it does not have shows up as an error of
-    /// the first call.
     pub fn new(config: &BitcoinConfig, wallet: &str) -> Result<Self, WalletError> {
         Ok(RpcWallet {
             client: RpcClient::new(&config.wallet_rpc_url(wallet), config.auth.clone())?,
         })
     }
 
-    /// `signrawtransactionwithwallet`.
     async fn sign(&self, transaction: &Transaction) -> Result<Transaction, WalletError> {
         let hex = encode::serialize_hex(transaction);
         let signed: SignRawTransactionWithWallet = self
@@ -50,7 +43,6 @@ impl BtcWallet for RpcWallet {
         } else {
             Amount::ZERO
         };
-        // Bitcoin Core picks the coins and adds the change.
         let transaction = Transaction {
             version: transaction::Version::TWO,
             lock_time: absolute::LockTime::ZERO,

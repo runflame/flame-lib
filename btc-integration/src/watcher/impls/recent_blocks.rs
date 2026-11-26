@@ -1,5 +1,3 @@
-//! A storage in memory that keeps only the latest Bitcoin blocks.
-
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -10,26 +8,14 @@ use crate::watcher::index::BlockIndex;
 use crate::watcher::storage::{BtcStorage, StorageError};
 use crate::watcher::types::{BlockId, Prevouts};
 
-/// How many blocks [`RecentBlocks`] keeps by default.
 pub const DEFAULT_RECENT_BLOCKS: usize = 30;
 
 #[derive(Default)]
 struct Recent {
     blocks: HashMap<BlockId, (Block, Prevouts)>,
-    /// The stored blocks in the order they were stored, the first one at the
-    /// front.
     order: VecDeque<BlockId>,
 }
 
-/// Storage in memory for the latest blocks only. When it is full, a new block
-/// pushes out the block that was stored first.
-///
-/// With the watcher as the writer these are the top blocks of the chain of the
-/// view. Older blocks are not kept twice: Bitcoin Core has them, and whoever
-/// needs one asks the source. The watcher does that itself when a reorg goes
-/// deeper than the storage.
-///
-/// Cheap to clone: all clones share the same blocks.
 #[derive(Clone)]
 pub struct RecentBlocks {
     recent: Arc<Mutex<Recent>>,
@@ -37,7 +23,6 @@ pub struct RecentBlocks {
 }
 
 impl RecentBlocks {
-    /// A storage that keeps `capacity` blocks.
     pub fn new(capacity: usize) -> Self {
         assert!(capacity > 0, "a storage has to keep at least one block");
         RecentBlocks {
@@ -52,7 +37,6 @@ impl RecentBlocks {
             .expect("the storage lock is not poisoned")
     }
 
-    /// The number of stored blocks.
     pub fn len(&self) -> usize {
         self.lock().blocks.len()
     }
@@ -67,7 +51,6 @@ impl RecentBlocks {
 }
 
 impl Default for RecentBlocks {
-    /// A storage that keeps [`DEFAULT_RECENT_BLOCKS`] blocks.
     fn default() -> Self {
         RecentBlocks::new(DEFAULT_RECENT_BLOCKS)
     }
@@ -95,7 +78,6 @@ impl BtcStorage for RecentBlocks {
     async fn put(&self, id: BlockId, block: Block, prevouts: Prevouts) -> Result<(), StorageError> {
         let mut recent = self.lock();
         if recent.blocks.insert(id, (block, prevouts)).is_some() {
-            // Stored before: its place in the order stays.
             return Ok(());
         }
         recent.order.push_back(id);
